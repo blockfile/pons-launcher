@@ -52,6 +52,10 @@ const config = {
     /\/?$/,
     '/'
   ),
+  // The pons worker allowlists Origin — a server-side fetch sends none and is
+  // refused with 403. We are pinning a logo for a token launched on their own
+  // launchpad, so we present their site's origin, as their form does.
+  ipfsUploadOrigin: process.env.PONS_IPFS_ORIGIN || 'https://www.ponsfamily.com',
 
   // Native ETH left in a bundle wallet when it buys with its "entire balance",
   // so it can still pay for the buy's own gas.

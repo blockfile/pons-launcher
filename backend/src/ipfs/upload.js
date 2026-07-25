@@ -50,7 +50,14 @@ async function uploadImage(buffer, mime) {
 
   let res;
   try {
-    res = await fetch(config.ipfsUploadUrl, { method: 'POST', body: form });
+    res = await fetch(config.ipfsUploadUrl, {
+      method: 'POST',
+      headers: {
+        origin: config.ipfsUploadOrigin,
+        referer: `${config.ipfsUploadOrigin}/launchpad/create`,
+      },
+      body: form,
+    });
   } catch (err) {
     throw new Error(`pons IPFS uploader unreachable: ${err.message}`);
   }

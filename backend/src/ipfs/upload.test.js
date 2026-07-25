@@ -5,6 +5,7 @@ const assert = require('node:assert');
 
 process.env.PONS_IPFS_UPLOAD_URL = 'https://worker.test/public/ipfs/image';
 process.env.IPFS_GATEWAY_URL = 'https://gateway.test/ipfs/';
+process.env.PONS_IPFS_ORIGIN = 'https://origin.test';
 
 const { assertUploadable, uploadImage } = require('./upload');
 
@@ -57,6 +58,13 @@ test('uploadImage posts the bytes as multipart "image" and returns uri + gateway
     const sent = calls[0].init.body.get('image');
     assert.equal(sent.type, 'image/png');
     assert.equal(sent.size, png.length);
+  });
+});
+
+test('uploadImage sends the configured origin, or the worker 403s it', async () => {
+  await withFetch(responds({ uri: 'ipfs://bafkreiabc123' }), async (calls) => {
+    await uploadImage(png, 'image/png');
+    assert.equal(calls[0].init.headers.origin, 'https://origin.test');
   });
 });
 
