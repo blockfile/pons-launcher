@@ -123,11 +123,11 @@ export default function LaunchForm({
       <div className="grid">
         <label>
           Name
-          <input value={f.name} onChange={set('name')} placeholder="Pons Cat" />
+          <input value={f.name} onChange={set('name')} placeholder="Token name" />
         </label>
         <label>
           Symbol
-          <input value={f.symbol} onChange={set('symbol')} placeholder="PONSCAT" />
+          <input value={f.symbol} onChange={set('symbol')} placeholder="Symbol" />
         </label>
         <label className="half">
           Website
