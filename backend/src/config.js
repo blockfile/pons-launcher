@@ -38,6 +38,9 @@ const config = {
   keystorePath:
     process.env.KEYSTORE_PATH || path.join(__dirname, '..', 'data', 'wallets.keystore.json'),
   historyPath: process.env.HISTORY_PATH || path.join(__dirname, '..', 'data', 'launches.json'),
+  // Beside the keystore: one users file for the whole deployment. Absent means
+  // single-tenant, which is what every existing install is.
+  usersPath: process.env.USERS_PATH || path.join(__dirname, '..', 'data', 'users.json'),
 
   apiKey: process.env.API_KEY || null,
 
@@ -72,7 +75,11 @@ const config = {
 function assertLiveReady() {
   const problems = [];
   if (!config.keystorePassphrase) problems.push('KEYSTORE_PASSPHRASE is required when DRY_RUN=false');
-  if (!config.apiKey) problems.push('API_KEY is required when DRY_RUN=false');
+  // Once users exist, each one carries their own key and API_KEY is unused —
+  // demanding it would force a live deployment to set a variable nothing reads.
+  if (!config.apiKey && !require('./users/users').enabled()) {
+    problems.push('API_KEY is required when DRY_RUN=false (or create users with `npm run user:add`)');
+  }
   if (problems.length) throw new Error(problems.join('; '));
 }
 

@@ -10,8 +10,12 @@ const { Wallet } = require('ethers');
 const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'pons-keystore-'));
 process.env.KEYSTORE_PATH = path.join(dir, 'wallets.keystore.json');
 process.env.KEYSTORE_PASSPHRASE = 'correct horse battery staple';
+// Needed for the adoptLegacy-moves-history test below — must be set before
+// config.js is first required (by keystore.js, next line), same as KEYSTORE_PATH.
+process.env.HISTORY_PATH = path.join(dir, 'launches.json');
 
 const keystore = require('./keystore');
+const history = require('../store/history');
 
 test('generates wallets and never exposes keys in list()', () => {
   const made = keystore.generate(3, { label: 'bundle', role: 'bundle' });
@@ -91,4 +95,59 @@ test('a wrong passphrase fails closed rather than returning garbage', () => {
 
   // Public metadata still reads fine — only key material is protected.
   assert.ok(reopened.list().some((x) => x.id === w.id));
+});
+
+test('two users cannot see each other wallets', () => {
+  const a = keystore.keystoreFor('alice');
+  const b = keystore.keystoreFor('bob');
+
+  const [aw] = a.generate(1, { role: 'dev' });
+  const [bw] = b.generate(1, { role: 'dev' });
+
+  assert.ok(a.list().some((w) => w.id === aw.id));
+  assert.ok(!a.list().some((w) => w.id === bw.id));
+  assert.ok(!b.list().some((w) => w.id === aw.id));
+
+  // The isolation is structural: a foreign id is simply not in this store.
+  assert.throws(() => a.signer(bw.id), /no wallet/);
+  assert.throws(() => a.exportKey(bw.id), /no wallet/);
+  assert.throws(() => a.remove(bw.id), /no wallet/);
+});
+
+test('each user gets their own dev wallet', () => {
+  // The "only one dev wallet" rule is per user, not per deployment.
+  const a = keystore.keystoreFor('alice');
+  assert.throws(() => a.generate(1, { role: 'dev' }), /already exists/);
+  assert.equal(keystore.keystoreFor('carol').generate(1, { role: 'dev' }).length, 1);
+});
+
+test('the default user reads the original path', () => {
+  const legacy = keystore.keystoreFor('default');
+  assert.deepEqual(
+    legacy.list().map((w) => w.id).sort(),
+    keystore.list().map((w) => w.id).sort()
+  );
+});
+
+// From here on, tests exercise adoptLegacy, which renames the default
+// keystore (and history) file. Kept last so no earlier test's assumptions
+// about the default keystore's on-disk location are disturbed.
+
+test('adoptLegacy refuses an id that is not a validated slug', () => {
+  // The only caller (scripts/user.js) only ever passes a slug validated by
+  // users.slug(), but this is the one call that renames a file full of
+  // private keys — it must not take the id on trust regardless.
+  assert.throws(() => keystore.adoptLegacy(undefined), /invalid user id/);
+  assert.throws(() => keystore.adoptLegacy(''), /invalid user id/);
+  assert.throws(() => keystore.adoptLegacy('../x'), /invalid user id/);
+});
+
+test('adoptLegacy moves the launch history alongside the wallets', () => {
+  // A legacy history file, written directly so this test does not depend on
+  // the launch route.
+  fs.writeFileSync(process.env.HISTORY_PATH, JSON.stringify([{ at: new Date().toISOString() }]));
+
+  assert.ok(keystore.adoptLegacy('dana'));
+  assert.ok(!fs.existsSync(process.env.HISTORY_PATH), 'legacy history file should have moved');
+  assert.ok(fs.existsSync(history.pathFor('dana')), 'dana should now have a history file');
 });

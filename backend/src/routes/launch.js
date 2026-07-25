@@ -5,7 +5,8 @@ const config = require('../config');
 const factory = require('../evm/factory');
 const { prepare } = require('../bundle/prepare');
 const { fire } = require('../bundle/fire');
-const history = require('../store/history');
+const { keystoreFor } = require('../wallets/keystore');
+const { historyFor } = require('../store/history');
 const { requireApiKey } = require('../middleware/auth');
 const { uploadImage, ACCEPTED, MAX_BYTES } = require('../ipfs/upload');
 
@@ -63,7 +64,7 @@ router.post(
 // address before any money moves.
 router.post('/preflight', requireApiKey, async (req, res, next) => {
   try {
-    res.json(publicPlan(await prepare(req.body || {})));
+    res.json(publicPlan(await prepare(req.body || {}, { keystore: keystoreFor(req.user.id) })));
   } catch (err) {
     next(err);
   }
@@ -73,9 +74,9 @@ router.post('/preflight', requireApiKey, async (req, res, next) => {
 // simulated results without touching the chain.
 router.post('/launch', requireApiKey, async (req, res, next) => {
   try {
-    const plan = await prepare(req.body || {});
+    const plan = await prepare(req.body || {}, { keystore: keystoreFor(req.user.id) });
     const result = await fire(plan);
-    const entry = history.record({ plan, result });
+    const entry = historyFor(req.user.id).record({ plan, result });
     res.json({ plan: publicPlan(plan), result, recorded: entry.at });
   } catch (err) {
     next(err);
@@ -84,7 +85,7 @@ router.post('/launch', requireApiKey, async (req, res, next) => {
 
 router.get('/launches', (req, res, next) => {
   try {
-    res.json(history.list(Number(req.query.limit) || 50));
+    res.json(historyFor(req.user.id).list(Number(req.query.limit) || 50));
   } catch (err) {
     next(err);
   }

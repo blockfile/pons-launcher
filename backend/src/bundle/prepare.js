@@ -45,7 +45,7 @@ function toSignable(tx, { nonce, gasLimit, fees, chainId }) {
  * @param {Array<{walletId:string, mode:'fixed'|'all', amountEth?:string|number}>} input.wallets
  * @returns {Promise<object>} the signed plan, ready for fire()
  */
-async function prepare(input) {
+async function prepare(input, { keystore: ks = keystore } = {}) {
   const {
     params,
     launchConfigId,
@@ -60,7 +60,19 @@ async function prepare(input) {
   // reject here rather than trust the form's own disabled-button check.
   if (!params.logo) throw new Error('logo is required');
 
-  const dev = keystore.devWallet();
+  const dev = ks.devWallet();
+
+  // Resolve every referenced bundle wallet through the caller's own keystore
+  // before any chain work starts. This is what makes a foreign wallet id (one
+  // that belongs to another user) fail as "no wallet" rather than being
+  // silently signed with, or reached only after wasted RPC calls. The buy loop
+  // below reads from this same Map rather than re-resolving against ks.list()
+  // — one source of truth, so the two can't drift apart.
+  const knownWallets = new Map(ks.list().map((k) => [k.id, k]));
+  for (const w of wallets) {
+    if (!knownWallets.has(w.walletId)) throw new Error(`no wallet ${w.walletId}`);
+  }
+
   const { launchFee, launchConfigs, dexConfigs } = await factory.getConfigs();
 
   const launchConfig = launchConfigs.find((c) => c.id === Number(launchConfigId));
@@ -105,7 +117,7 @@ async function prepare(input) {
     );
   }
 
-  const devSigner = keystore.signer(dev.id, provider);
+  const devSigner = ks.signer(dev.id, provider);
   const devNonce = await provider.getTransactionCount(dev.address, 'pending');
   const signedLaunch = {
     walletId: dev.id,
@@ -126,7 +138,7 @@ async function prepare(input) {
 
   const signedBuys = [];
   for (const w of wallets) {
-    const known = keystore.list().find((k) => k.id === w.walletId);
+    const known = knownWallets.get(w.walletId);
     if (!known) throw new Error(`no wallet ${w.walletId}`);
 
     const balance = await provider.getBalance(known.address);
@@ -175,7 +187,7 @@ async function prepare(input) {
       amountIn,
       deadline,
     });
-    const signer = keystore.signer(known.id, provider);
+    const signer = ks.signer(known.id, provider);
     const nonce = await provider.getTransactionCount(known.address, 'pending');
     signedBuys.push({
       walletId: known.id,

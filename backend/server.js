@@ -6,6 +6,8 @@ const express = require('express');
 
 const config = require('./src/config');
 const factory = require('./src/evm/factory');
+const users = require('./src/users/users');
+const { identify } = require('./src/middleware/auth');
 const walletRoutes = require('./src/routes/wallets');
 const launchRoutes = require('./src/routes/launch');
 
@@ -21,16 +23,20 @@ const hasBuild = fs.existsSync(path.join(dist, 'index.html'));
 if (hasBuild) app.use(express.static(dist));
 
 app.get('/api/health', (req, res) => {
+  const user = users.enabled() ? users.findByKey(req.get('x-api-key') || req.query.key) : null;
   res.json({
     name: 'pons-launcher',
     dryRun: config.dryRun,
     chainId: config.chainId,
     factory: config.factoryAddress,
     explorer: config.explorerUrl,
-    apiKeyRequired: Boolean(config.apiKey),
+    apiKeyRequired: users.enabled() || Boolean(config.apiKey),
+    multiUser: users.enabled(),
+    user: user ? user.name : null,
   });
 });
 
+app.use('/api', identify);
 app.use('/api', walletRoutes);
 app.use('/api', launchRoutes);
 
