@@ -16,8 +16,8 @@ const keystore = require('./keystore');
 const TRANSFER_GAS = 21000n;
 const TOKEN_TRANSFER_GAS = 120000n;
 
-async function balances() {
-  const wallets = keystore.list();
+async function balances({ keystore: ks = keystore } = {}) {
+  const wallets = ks.list();
   const out = [];
   for (const w of wallets) {
     const wei = await provider.getBalance(w.address);
@@ -30,14 +30,14 @@ async function balances() {
  * Send native ETH from the dev wallet to bundle wallets.
  * @param {Array<{walletId:string, amountEth:string|number}>} targets
  */
-async function disperse(targets) {
-  const dev = keystore.devWallet();
-  const signer = keystore.signer(dev.id, provider);
+async function disperse(targets, { keystore: ks = keystore } = {}) {
+  const dev = ks.devWallet();
+  const signer = ks.signer(dev.id, provider);
   const fees = await getFees(10);
 
   const planned = targets.map((t) => ({
     walletId: t.walletId,
-    address: keystore.list().find((w) => w.id === t.walletId)?.address,
+    address: ks.list().find((w) => w.id === t.walletId)?.address,
     value: parseEther(String(t.amountEth)),
   }));
 
@@ -89,9 +89,9 @@ async function disperse(targets) {
  * them.
  * @param {{includeTokens?:boolean, tokenAddress?:string}} opts
  */
-async function sweep({ includeTokens = false, tokenAddress = null } = {}) {
-  const dev = keystore.devWallet();
-  const wallets = keystore.bundleWallets();
+async function sweep({ includeTokens = false, tokenAddress = null } = {}, { keystore: ks = keystore } = {}) {
+  const dev = ks.devWallet();
+  const wallets = ks.bundleWallets();
   const fees = await getFees(0);
   const results = [];
 
@@ -104,7 +104,7 @@ async function sweep({ includeTokens = false, tokenAddress = null } = {}) {
           if (config.dryRun) {
             entry.tokens = { amount: bal.toString(), hash: null, simulated: true };
           } else {
-            const signer = keystore.signer(w.id, provider);
+            const signer = ks.signer(w.id, provider);
             const tx = await erc20(tokenAddress, signer).transfer(dev.address, bal, {
               gasLimit: TOKEN_TRANSFER_GAS,
               ...fees,
@@ -126,7 +126,7 @@ async function sweep({ includeTokens = false, tokenAddress = null } = {}) {
       if (config.dryRun) {
         entry.eth = { amountEth: formatEther(value), hash: null, simulated: true };
       } else {
-        const signer = keystore.signer(w.id, provider);
+        const signer = ks.signer(w.id, provider);
         const tx = await signer.sendTransaction({
           to: dev.address,
           value,
