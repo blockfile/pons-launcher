@@ -118,6 +118,9 @@ could never claim them.
 | `RPC_URL` / `CHAIN_ID` | RH mainnet / `4663` | |
 | `FACTORY_ADDRESS` | `0xA5aA…51feB` | The live factory, validated at boot |
 | `SWAP_ROUTER` | *(auto)* | Override only — normally read from the dex config |
+| `PONS_IPFS_UPLOAD_URL` | pons IPFS worker | Where token logos are pinned. Undocumented third-party endpoint |
+| `IPFS_GATEWAY_URL` | `https://gateway.pinata.cloud/ipfs/` | Read-side gateway, used only for the console preview |
+| `PONS_IPFS_ORIGIN` | `https://www.ponsfamily.com` | Origin header for IPFS worker requests; required by their server |
 | `KEYSTORE_PASSPHRASE` | *(none)* | Encrypts the keystore. **Lose it and the keys are gone** |
 | `API_KEY` | *(none)* | Required on every mutating route |
 | `GAS_BUFFER_ETH` | `0.0004` | Left behind when a wallet buys with its entire balance |
