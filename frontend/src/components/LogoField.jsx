@@ -36,6 +36,16 @@ export default function LogoField({ value, onChange, onUploading }) {
     onChange('');
   }
 
+  // A failed pick discards whatever logo was set: f.logo is already cleared, so
+  // the thumbnail must go with it, or the field shows an image that no longer
+  // backs the value the launch would use.
+  function fail(message) {
+    showPreview('');
+    setFileName('');
+    onChange('');
+    setError(message);
+  }
+
   async function pick(e) {
     const file = e.target.files?.[0];
     e.target.value = '';
@@ -43,8 +53,8 @@ export default function LogoField({ value, onChange, onUploading }) {
 
     setError('');
     onChange('');
-    if (!ACCEPT.includes(file.type)) return setError('Use a PNG, JPEG or WebP image.');
-    if (!file.size || file.size > MAX_BYTES) return setError('Images must be smaller than 5 MB.');
+    if (!ACCEPT.includes(file.type)) return fail('Use a PNG, JPEG or WebP image.');
+    if (!file.size || file.size > MAX_BYTES) return fail('Images must be smaller than 5 MB.');
 
     showPreview(URL.createObjectURL(file));
     setFileName(file.name);
@@ -55,9 +65,7 @@ export default function LogoField({ value, onChange, onUploading }) {
       onChange(uri);
       showPreview(gatewayUrl);
     } catch (err) {
-      showPreview('');
-      setFileName('');
-      setError(err.message);
+      fail(err.message);
     } finally {
       setBusy(false);
       onUploading(false);
