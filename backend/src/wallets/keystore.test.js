@@ -92,3 +92,35 @@ test('a wrong passphrase fails closed rather than returning garbage', () => {
   // Public metadata still reads fine — only key material is protected.
   assert.ok(reopened.list().some((x) => x.id === w.id));
 });
+
+test('two users cannot see each other wallets', () => {
+  const a = keystore.keystoreFor('alice');
+  const b = keystore.keystoreFor('bob');
+
+  const [aw] = a.generate(1, { role: 'dev' });
+  const [bw] = b.generate(1, { role: 'dev' });
+
+  assert.ok(a.list().some((w) => w.id === aw.id));
+  assert.ok(!a.list().some((w) => w.id === bw.id));
+  assert.ok(!b.list().some((w) => w.id === aw.id));
+
+  // The isolation is structural: a foreign id is simply not in this store.
+  assert.throws(() => a.signer(bw.id), /no wallet/);
+  assert.throws(() => a.exportKey(bw.id), /no wallet/);
+  assert.throws(() => a.remove(bw.id), /no wallet/);
+});
+
+test('each user gets their own dev wallet', () => {
+  // The "only one dev wallet" rule is per user, not per deployment.
+  const a = keystore.keystoreFor('alice');
+  assert.throws(() => a.generate(1, { role: 'dev' }), /already exists/);
+  assert.equal(keystore.keystoreFor('carol').generate(1, { role: 'dev' }).length, 1);
+});
+
+test('the default user reads the original path', () => {
+  const legacy = keystore.keystoreFor('default');
+  assert.deepEqual(
+    legacy.list().map((w) => w.id).sort(),
+    keystore.list().map((w) => w.id).sort()
+  );
+});
