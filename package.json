@@ -3,19 +3,22 @@
   "version": "0.1.0",
   "private": true,
   "description": "Launch a token through the ponsfamily.com launchpad with an atomic dev buy, then fire a bundle of pre-signed buys behind it (Robinhood Chain).",
-  "type": "commonjs",
-  "main": "server.js",
+  "workspaces": [
+    "backend",
+    "frontend"
+  ],
   "scripts": {
-    "start": "node server.js",
-    "dev": "node --watch server.js",
-    "test": "node --test"
+    "dev": "concurrently -n api,web -c blue,magenta \"npm:dev:api\" \"npm:dev:web\"",
+    "dev:api": "npm run dev --workspace backend",
+    "dev:web": "npm run dev --workspace frontend",
+    "build": "npm run build --workspace frontend",
+    "start": "npm start --workspace backend",
+    "test": "npm test --workspace backend"
   },
   "engines": {
     "node": ">=20"
   },
-  "dependencies": {
-    "dotenv": "^16.4.7",
-    "ethers": "^6.13.5",
-    "express": "^4.21.2"
+  "devDependencies": {
+    "concurrently": "^9.1.2"
   }
 }

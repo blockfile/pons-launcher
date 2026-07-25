@@ -100,23 +100,33 @@ Two deliberate departures from ponscat:
 - **No MongoDB.** State is an encrypted keystore file plus a launch-history
   JSON file. One less service on the server, and wallet keys should not sit in
   a database that gets backed up casually.
-- **No frontend build step.** Plain HTML/CSS/JS served by Express. This is an
-  operator console, not a public site; a bundler toolchain buys nothing.
+- **Split into `backend/` and `frontend/` npm workspaces.** The backend is
+  CommonJS Node; the console is React 19 + Vite. Vite proxies `/api` to the
+  backend in development, and the backend serves `frontend/dist` in production,
+  so it stays a single origin behind a single nginx block.
+
+  *(Revised after the first implementation. The original design called for
+  plain HTML/CSS/JS with no build step, on the grounds that an operator console
+  does not need a bundler. That shipped and worked; it was replaced at the
+  owner's request. The React rewrite did earn something real — panel state
+  moved into components, and per-wallet row state lifted into `App`, which is
+  what makes the Fund and Launch panels read the same amounts without the
+  manual DOM queries the first version needed.)*
 
 ### Modules
 
 | Module | Responsibility |
 |---|---|
-| `src/config.js` | Env parsing, `DRY_RUN` default true, factory address + validation |
-| `src/evm/provider.js` | Retrying JSON-RPC provider (ported from ponscat — the public RH RPC returns spurious `-32601`) |
-| `src/evm/factory.js` | Read `launchFee` and the launch/dex configs, `predictTokenAddress`, build the `launchToken` tx |
-| `src/evm/router.js` | Build native→token `exactInputSingle` swaps against the router **read from the selected dex config** |
-| `src/wallets/keystore.js` | Generate / import / list / delete wallets; the only module that touches plaintext keys |
-| `src/wallets/funding.js` | Disperse ETH from the dev wallet, sweep ETH and tokens back |
-| `src/bundle/prepare.js` | Predict token + pool address, resolve per-wallet amounts, pre-sign every transaction |
-| `src/bundle/fire.js` | Submit the launch, blast the pre-signed buys, collect per-wallet results |
-| `src/routes/` | JSON API (wallets, funding, configs, preflight, launch, history) |
-| `public/` | The console UI |
+| `backend/src/config.js` | Env parsing, `DRY_RUN` default true, factory address + validation |
+| `backend/src/evm/provider.js` | Retrying JSON-RPC provider (ported from ponscat — the public RH RPC returns spurious `-32601`) |
+| `backend/src/evm/factory.js` | Read `launchFee` and the launch/dex configs, `predictTokenAddress`, build the `launchToken` tx |
+| `backend/src/evm/router.js` | Build native→token `exactInputSingle` swaps against the router **read from the selected dex config** |
+| `backend/src/wallets/keystore.js` | Generate / import / list / delete wallets; the only module that touches plaintext keys |
+| `backend/src/wallets/funding.js` | Disperse ETH from the dev wallet, sweep ETH and tokens back |
+| `backend/src/bundle/prepare.js` | Predict token + pool address, resolve per-wallet amounts, pre-sign every transaction |
+| `backend/src/bundle/fire.js` | Submit the launch, blast the pre-signed buys, collect per-wallet results |
+| `backend/src/routes/` | JSON API (wallets, funding, configs, preflight, launch, history) |
+| `frontend/src/` | React console: `App` owns wallets/configs/history and the per-row amounts; `WalletsPanel`, `FundPanel`, `LaunchForm`, `HistoryPanel` render them |
 
 Each module is independently testable: `keystore` needs only a passphrase,
 `prepare` needs only config data and a wallet list, `fire` needs only a

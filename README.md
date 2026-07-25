@@ -53,14 +53,38 @@ Note how short the window is: **2 blocks**. After that it is unrestricted, so
 landing in block 0 or 1 is the whole game. That's why buys are pre-signed
 rather than built after the launch confirms.
 
+## Layout
+
+```
+backend/    Express API, EVM layer, encrypted keystore, bundle engine  (Node, CommonJS)
+frontend/   React 19 + Vite console                                    (ESM)
+deploy/     nginx
+docs/       design spec
+```
+
+npm workspaces, so one `npm install` at the root covers both.
+
+In **development** the Vite server on `:5173` serves the console and proxies
+`/api` to the backend on `:3100`. In **production** `npm run build` emits
+`frontend/dist` and the backend serves it — one origin, one nginx block, no
+CORS.
+
 ## Quick start
 
 ```bash
-npm install
-cp .env.example .env         # DRY_RUN=true by default — nothing is broadcast
+npm install                  # installs both workspaces
+cp backend/.env.example backend/.env
 # set KEYSTORE_PASSPHRASE (required to store any wallet) and API_KEY
-npm start                    # http://127.0.0.1:3100
-npm test
+
+npm run dev                  # API :3100 + Vite console :5173, together
+npm test                     # backend tests
+```
+
+Production build:
+
+```bash
+npm run build                # frontend/dist
+npm start                    # backend serves the built console on :3100
 ```
 
 Work through the console top to bottom: generate wallets → enter fund amounts →
@@ -134,8 +158,9 @@ The box is internet-reachable, so treat it that way:
 
 ```bash
 git clone https://github.com/blockfile/pons-launcher.git && cd pons-launcher
-npm install --omit=dev
-cp .env.example .env && $EDITOR .env      # DRY_RUN=false, passphrase, API key
+npm install                                        # both workspaces
+npm run build                                      # frontend/dist
+cp backend/.env.example backend/.env && $EDITOR backend/.env   # DRY_RUN=false, passphrase, API key
 pm2 start ecosystem.config.js && pm2 save
 sudo cp deploy/nginx.conf /etc/nginx/sites-available/pons-launcher
 sudo ln -s /etc/nginx/sites-available/pons-launcher /etc/nginx/sites-enabled/
