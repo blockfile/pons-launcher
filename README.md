@@ -126,6 +126,25 @@ could never claim them.
 | `GAS_BUFFER_ETH` | `0.0004` | Left behind when a wallet buys with its entire balance |
 | `BUY_GAS_LIMIT` | `400000` | Bundle buys are signed before the pool exists, so they can't be estimated |
 
+## Multiple operators
+
+By default the deployment is single-tenant: one keystore, one dev wallet,
+shared by anyone who can log in.
+
+Create users and each gets their own wallets, funding and history, invisible to
+the others:
+
+    npm run user:add -- alice          # prints the key once — save it
+    npm run user:add -- ivan --adopt   # …and takes over the existing wallets
+    npm run user:list
+    npm run user:remove -- alice
+
+The key IS the identity, so each user needs their own. Map each nginx login to
+their key (see `deploy/nginx-rhbond.conf`) and nobody has to type one.
+
+There is no admin: no account can read another's wallets or keys. Recovery of a
+lost key means shell access to the server, not a support request.
+
 ## API
 
 ```

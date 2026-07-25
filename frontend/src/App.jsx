@@ -58,9 +58,11 @@ export default function App() {
             <span>
               chain <b>{health.chainId}</b>
             </span>
-            <span>
-              factory <b>{health.factory?.slice(0, 10)}…</b>
-            </span>
+            {health.multiUser && (
+              <span>
+                signed in as <b>{health.user || 'nobody'}</b>
+              </span>
+            )}
           </div>
         )}
 
@@ -68,16 +70,18 @@ export default function App() {
           {!health ? 'connecting' : live ? 'live · spends real funds' : 'dry run · broadcasts nothing'}
         </div>
 
-        <input
-          type="password"
-          placeholder="API key"
-          autoComplete="off"
-          value={key}
-          onChange={(e) => {
-            setKey(e.target.value);
-            setApiKey(e.target.value);
-          }}
-        />
+        {health && health.apiKeyRequired && !health.user && (
+          <input
+            type="password"
+            placeholder="API key"
+            autoComplete="off"
+            value={key}
+            onChange={(e) => {
+              setKey(e.target.value);
+              setApiKey(e.target.value);
+            }}
+          />
+        )}
       </header>
 
       <main>
