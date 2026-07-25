@@ -11,6 +11,7 @@ const config = require('../config');
 const { provider } = require('../evm/provider');
 const { getFees, gasCost } = require('../evm/fees');
 const { erc20, readTokenBalance } = require('../evm/erc20');
+const { rpcMessage } = require('../evm/errors');
 const keystore = require('./keystore');
 
 const TRANSFER_GAS = 21000n;
@@ -76,7 +77,7 @@ async function disperse(targets, { keystore: ks = keystore } = {}) {
         });
         return { walletId: p.walletId, address: p.address, amountEth: formatEther(p.value), hash: tx.hash };
       } catch (err) {
-        return { walletId: p.walletId, address: p.address, error: err.shortMessage || err.message };
+        return { walletId: p.walletId, address: p.address, error: rpcMessage(err) };
       }
     })
   );
@@ -136,7 +137,7 @@ async function sweep({ includeTokens = false, tokenAddress = null } = {}, { keys
         entry.eth = { amountEth: formatEther(value), hash: tx.hash };
       }
     } catch (err) {
-      entry.error = err.shortMessage || err.message;
+      entry.error = rpcMessage(err);
     }
     results.push(entry);
   }

@@ -10,6 +10,7 @@ const users = require('./src/users/users');
 const { identify } = require('./src/middleware/auth');
 const walletRoutes = require('./src/routes/wallets');
 const launchRoutes = require('./src/routes/launch');
+const { rpcMessage } = require('./src/evm/errors');
 
 const app = express();
 
@@ -51,7 +52,7 @@ app.use((req, res) => {
 // eslint-disable-next-line no-unused-vars
 app.use((err, req, res, next) => {
   console.error('[pons-launcher] request error:', err.message);
-  res.status(400).json({ error: err.shortMessage || err.message });
+  res.status(400).json({ error: rpcMessage(err) });
 });
 
 let server;

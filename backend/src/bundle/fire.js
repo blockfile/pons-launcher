@@ -10,6 +10,7 @@
 
 const config = require('../config');
 const { provider, warmPool } = require('../evm/provider');
+const { rpcMessage } = require('../evm/errors');
 
 /**
  * @param {object} plan from prepare()
@@ -69,7 +70,7 @@ async function fire(plan, deps = {}) {
           amountEth: b.amountEth,
           hash: null,
           status: 'rejected',
-          error: r.reason?.shortMessage || r.reason?.message || String(r.reason),
+          error: rpcMessage(r.reason),
         };
   });
 
@@ -84,7 +85,7 @@ async function fire(plan, deps = {}) {
         b.block = receipt ? receipt.blockNumber : null;
       } catch (err) {
         b.status = 'unknown';
-        b.error = err.shortMessage || err.message;
+        b.error = rpcMessage(err);
       }
     })
   );
