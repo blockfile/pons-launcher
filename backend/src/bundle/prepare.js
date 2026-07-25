@@ -55,6 +55,9 @@ async function prepare(input) {
   } = input;
 
   if (!params || !params.name || !params.symbol) throw new Error('name and symbol are required');
+  // A logo that is empty at launch is baked into the CREATE2 preimage forever —
+  // reject here rather than trust the form's own disabled-button check.
+  if (!params.logo) throw new Error('logo is required');
 
   const dev = keystore.devWallet();
   const { launchFee, launchConfigs, dexConfigs } = await factory.getConfigs();

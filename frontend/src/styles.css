@@ -230,6 +230,59 @@ td input[type='number'] {
   font-family: var(--mono);
 }
 
+/* The field's wrapper is a div, not a label (see LogoField.jsx), so it needs
+   the same flex/typography the bare `label` selector above gives every other
+   field explicitly. */
+.logo {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  font-size: 12px;
+  color: var(--muted);
+}
+.logo .logoConfirm {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--muted);
+  font-size: 12px;
+}
+.logo .logoConfirm input {
+  width: auto;
+  padding: 0;
+}
+.logoBox {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 8px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: #0f151d;
+}
+.logoThumb {
+  width: 44px;
+  height: 44px;
+  border-radius: 6px;
+  object-fit: cover;
+  background: #1d2531;
+  flex: none;
+}
+.logoMeta {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  flex: 1;
+  min-width: 0;
+}
+.logoMeta .hint {
+  font-family: var(--mono);
+  overflow-wrap: anywhere;
+}
+.logoError {
+  color: var(--danger);
+}
+
 pre {
   background: #0b1016;
   border: 1px solid var(--line);
