@@ -1,0 +1,21 @@
+{
+  "name": "pons-launcher",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Launch a token through the ponsfamily.com launchpad with an atomic dev buy, then fire a bundle of pre-signed buys behind it (Robinhood Chain).",
+  "type": "commonjs",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js",
+    "dev": "node --watch server.js",
+    "test": "node --test"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "dependencies": {
+    "dotenv": "^16.4.7",
+    "ethers": "^6.13.5",
+    "express": "^4.21.2"
+  }
+}

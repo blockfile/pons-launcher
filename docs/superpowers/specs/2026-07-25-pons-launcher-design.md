@@ -203,11 +203,17 @@ The Ubuntu box is internet-reachable, so this is assumed hostile:
 
 `RPC_URL`, `CHAIN_ID`, `FACTORY_ADDRESS` (default `0xA5aA…51feB`, validated at
 boot by reading `launchFee` and the config list), `EXPLORER_URL`, `PORT`,
-`API_KEY`, `KEYSTORE_PASSPHRASE`, `DRY_RUN`, `GAS_BUFFER_ETH` (reserve left in
-each bundle wallet when buying "entire balance"), `SLIPPAGE_PCT`.
+`HOST`, `API_KEY`, `KEYSTORE_PASSPHRASE`, `DRY_RUN`, `GAS_BUFFER_ETH` (reserve
+left in each bundle wallet when buying "entire balance"), `BUY_GAS_LIMIT`.
 
 The swap router is read from the selected dex config rather than configured;
 `SWAP_ROUTER` exists only as an override.
+
+**`SLIPPAGE_PCT` was dropped during implementation.** A bundle buy is signed
+before the pool exists, so there is no price to quote a slippage bound
+against — the knob could not have done anything. `amountOutMinimum` is 0, which
+is also what the factory's own `_executeInitialBuy` passes. The per-address
+launch-window cap is what bounds exposure here, not slippage.
 
 ## Testing
 
@@ -223,6 +229,30 @@ loses money when wrong:
   broadcast **before** any buy, and that an early-reverting buy does not abort
   the rest of the bundle
 
+## Verified during implementation (2026-07-25)
+
+Read live from `0xA5aA…51feB` rather than assumed:
+
+| | |
+|---|---|
+| `launchFee` | `0.0005 ETH` |
+| launch configs / dex configs | 1 enabled each |
+| pair token | WETH `0x0bd7…ad73` |
+| pool | uniswap v3, fee `10000` (1%), tickSpacing 200 |
+| `swapRouter` | `0xcaf681a6…5cb2` — matches the router already used by the sibling pons projects |
+| supply | 1,000,000,000 |
+| `maxWalletBps` / `maxTxBps` | 500 (5%) / 550 (5.5%) |
+| **`restrictionBlocks`** | **2** |
+| `routerRequiresDeadline` | `false` → the Router02 shape is used |
+
+`predictTokenAddress` was confirmed live to be deterministic per salt and to
+change with the salt — the property the entire pre-signing design rests on.
+
+**The restriction window is only 2 blocks.** Protection lapses almost
+immediately, so landing in block 0 or 1 is the whole game. This vindicates
+pre-signing over building buys after the launch confirms, and it is the number
+to re-check if Pons ever changes the config.
+
 ## Open items
 
 1. **Whether ponsfamily.com lists tokens launched directly through the
@@ -233,8 +263,8 @@ loses money when wrong:
    Boot-time validation catches a dead address; the fallback is
    `0x966ffA39…F141`. Worth re-checking before any significant launch.
 3. **Whether the launch config caps the dev buy in practice.** The initial-buy
-   recipient is exempt on the launch block, so it should not — to be verified
-   against a real launch during implementation.
+   recipient is exempt on the launch block, so it should not — still unverified,
+   since confirming it requires a real launch.
 
 ## Out of scope
 
