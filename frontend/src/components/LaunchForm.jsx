@@ -168,13 +168,13 @@ export default function LaunchForm({ configs, wallets, rows, live, reload, reloa
       <div className="row">
         <Busy
           busy={busy === 'preflight'}
-          disabled={uploading}
+          disabled={uploading || !f.logo}
           className="ghost"
           onClick={() => act('preflight', () => api('/preflight', 'POST', body()))}
         >
           Preflight (signs, sends nothing)
         </Busy>
-        <Busy busy={busy === 'launch'} disabled={uploading} className="danger" onClick={launch}>
+        <Busy busy={busy === 'launch'} disabled={uploading || !f.logo} className="danger" onClick={launch}>
           LAUNCH + BUNDLE
         </Busy>
       </div>

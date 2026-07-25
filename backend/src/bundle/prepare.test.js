@@ -4,7 +4,7 @@ const test = require('node:test');
 const assert = require('node:assert');
 const { ZeroAddress } = require('ethers');
 
-const { randomSalt, toSignable } = require('./prepare');
+const { randomSalt, toSignable, prepare } = require('./prepare');
 const { toTokenParams } = require('../evm/factory');
 
 test('randomSalt is a distinct bytes32', () => {
@@ -56,4 +56,14 @@ test('token params checksum a supplied fee wallet', () => {
   const lower = '0xa5aab3f0c6eeadf30ef1d3eb997108e976351feb';
   const params = toTokenParams({ name: 'x', symbol: 'X', feeWallet: lower });
   assert.equal(params.feeWallet, '0xA5aAb3F0c6EeadF30Ef1D3Eb997108E976351feB');
+});
+
+// A blank logo would be baked into the CREATE2 preimage forever, so prepare
+// must reject it before any wallet or chain work — same guard style as the
+// name/symbol check just above it.
+test('prepare rejects a launch with no logo', async () => {
+  await assert.rejects(
+    () => prepare({ params: { name: 'x', symbol: 'X', logo: '' } }),
+    /logo is required/
+  );
 });
