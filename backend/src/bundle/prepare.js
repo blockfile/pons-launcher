@@ -65,10 +65,12 @@ async function prepare(input, { keystore: ks = keystore } = {}) {
   // Resolve every referenced bundle wallet through the caller's own keystore
   // before any chain work starts. This is what makes a foreign wallet id (one
   // that belongs to another user) fail as "no wallet" rather than being
-  // silently signed with, or reached only after wasted RPC calls.
-  const knownWallets = ks.list();
+  // silently signed with, or reached only after wasted RPC calls. The buy loop
+  // below reads from this same Map rather than re-resolving against ks.list()
+  // — one source of truth, so the two can't drift apart.
+  const knownWallets = new Map(ks.list().map((k) => [k.id, k]));
   for (const w of wallets) {
-    if (!knownWallets.some((k) => k.id === w.walletId)) throw new Error(`no wallet ${w.walletId}`);
+    if (!knownWallets.has(w.walletId)) throw new Error(`no wallet ${w.walletId}`);
   }
 
   const { launchFee, launchConfigs, dexConfigs } = await factory.getConfigs();
@@ -136,7 +138,7 @@ async function prepare(input, { keystore: ks = keystore } = {}) {
 
   const signedBuys = [];
   for (const w of wallets) {
-    const known = ks.list().find((k) => k.id === w.walletId);
+    const known = knownWallets.get(w.walletId);
     if (!known) throw new Error(`no wallet ${w.walletId}`);
 
     const balance = await provider.getBalance(known.address);
