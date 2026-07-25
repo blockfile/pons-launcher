@@ -1,3 +1,4 @@
+import { useEffect, useRef } from 'react';
 import Section from './Section.jsx';
 
 // A plan or a launch result, read at a glance before the raw JSON. Warnings are
@@ -8,11 +9,34 @@ export default function ResultPanel({ output }) {
   const plan = output && typeof output === 'object' ? output : null;
   const inner = plan?.plan || plan; // /launch nests the plan; /preflight does not
   const result = plan?.result;
-  const warnings = inner?.warnings || [];
-  const buys = inner?.buys || [];
+  const warnings = Array.isArray(inner?.warnings) ? inner.warnings : [];
+  const buys = Array.isArray(inner?.buys) ? inner.buys : [];
   const overCap = buys.filter((b) => b.capExceeded);
 
+  // Only a launch or a plan has something to summarise. Funding, sweeping,
+  // generating and importing return plain payloads — an array of transfers, a
+  // list of new wallets — and hiding those behind a closed disclosure made a
+  // successful action look like nothing had happened at all.
+  const summarised = Boolean(result || inner?.token);
+
+  // Every button that does something is far above this panel — a fund click at
+  // the top of the page put its answer a screen and a half below the fold, so
+  // a real error read as "nothing happened". Bring the answer to the operator.
+  const box = useRef(null);
+  const firstRender = useRef(true);
+  useEffect(() => {
+    if (firstRender.current) {
+      firstRender.current = false;
+      return;
+    }
+    box.current?.scrollIntoView({
+      behavior: window.matchMedia('(prefers-reduced-motion: reduce)').matches ? 'auto' : 'smooth',
+      block: 'nearest',
+    });
+  }, [output]);
+
   return (
+    <div ref={box}>
     <Section step="4" title="Result">
       {!plan && <pre>{String(output ?? '')}</pre>}
 
@@ -88,14 +112,15 @@ export default function ResultPanel({ output }) {
             </div>
           )}
 
-          <details style={{ marginTop: 12 }}>
+          <details style={{ marginTop: 12 }} open={!summarised}>
             <summary className="hint" style={{ cursor: 'pointer' }}>
-              full response
+              {summarised ? 'full response' : `response · ${Array.isArray(plan) ? `${plan.length} item${plan.length === 1 ? '' : 's'}` : 'details'}`}
             </summary>
             <pre style={{ marginTop: 8 }}>{JSON.stringify(plan, null, 2)}</pre>
           </details>
         </>
       )}
     </Section>
+    </div>
   );
 }
