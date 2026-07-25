@@ -9,7 +9,7 @@
 // funds — so firing optimistically is strictly better than waiting.
 
 const config = require('../config');
-const { provider } = require('../evm/provider');
+const { provider, warmPool } = require('../evm/provider');
 
 /**
  * @param {object} plan from prepare()
@@ -35,11 +35,26 @@ async function fire(plan, deps = {}) {
     };
   }
 
-  // 1. The launch. Awaiting the broadcast (not the receipt) guarantees the
+  // 1. Open one connection per buy first. A cold pool makes every buy pay its
+  //    own TLS handshake during the burst; warming costs a few milliseconds
+  //    here, before the launch, where nothing is racing yet. A launch cannot be
+  //    front-run — the pool does not exist until it lands — so spending time
+  //    ahead of it is free, and it buys a much tighter bundle behind it.
+  const warm = deps.warmPool || warmPool;
+  if (plan.buys.length) {
+    try {
+      await warm(plan.buys.length, rpc);
+    } catch (err) {
+      // A warm-up is an optimisation. Never let it stop a launch.
+      console.warn(`[pons-launcher] connection warm-up failed: ${err.message}`);
+    }
+  }
+
+  // 2. The launch. Awaiting the broadcast (not the receipt) guarantees the
   //    sequencer has it before any buy is offered.
   const launchResp = await rpc.broadcastTransaction(plan.launch.raw);
 
-  // 2. Every buy, immediately and concurrently.
+  // 3. Every buy, immediately and concurrently — now over warm sockets.
   const broadcasts = await Promise.allSettled(
     plan.buys.map((b) => rpc.broadcastTransaction(b.raw))
   );
@@ -58,7 +73,7 @@ async function fire(plan, deps = {}) {
         };
   });
 
-  // 3. Now that everything is in flight, collect outcomes.
+  // 4. Now that everything is in flight, collect outcomes.
   const launchReceipt = await launchResp.wait();
   await Promise.allSettled(
     buys.map(async (b) => {

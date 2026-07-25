@@ -34,6 +34,46 @@ const plan = {
   ],
 };
 
+test('warms the connection pool before anything is broadcast', async () => {
+  const rpc = fakeProvider();
+  let warmedWith = null;
+  await fire(plan, {
+    provider: rpc,
+    dryRun: false,
+    warmPool: async (n) => {
+      warmedWith = n;
+      rpc.order.push('WARM');
+    },
+  });
+
+  // One socket per buy, opened before the burst rather than during it: a cold
+  // pool costs a TLS handshake per transaction at the worst possible moment.
+  assert.equal(warmedWith, plan.buys.length);
+  assert.equal(rpc.order[0], 'WARM', 'the pool must be warm before the launch goes out');
+});
+
+test('a failed warm-up never blocks the launch', async () => {
+  const rpc = fakeProvider();
+  const res = await fire(plan, {
+    provider: rpc,
+    dryRun: false,
+    warmPool: async () => {
+      throw new Error('rpc refused the warm-up');
+    },
+  });
+
+  assert.equal(rpc.order[0], 'LAUNCH');
+  assert.equal(res.launch.status, 'confirmed');
+  assert.equal(res.buys.filter((b) => b.status === 'confirmed').length, 2);
+});
+
+test('a dry run does not open sockets it will never use', async () => {
+  const rpc = fakeProvider();
+  let warmed = false;
+  await fire(plan, { provider: rpc, dryRun: true, warmPool: async () => { warmed = true; } });
+  assert.equal(warmed, false);
+});
+
 test('broadcasts the launch before any buy', async () => {
   const rpc = fakeProvider();
   await fire(plan, { provider: rpc, dryRun: false });
