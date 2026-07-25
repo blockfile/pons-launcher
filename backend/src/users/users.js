@@ -20,7 +20,13 @@ const ID = /^[a-z0-9][a-z0-9-]{0,31}$/;
 // currently reachable through Task 3's `wallets.<id>.keystore.json` template
 // (the id is never the leading dot-segment), but the guarantee should not
 // depend on a template that lives in a different file.
-const RESERVED = /^(con|prn|aux|nul|com[1-9]|lpt[1-9])$/;
+//
+// 'default' is reserved too: it is the pre-multi-user single-tenant
+// namespace that keystoreFor/historyFor bind to config.keystorePath /
+// config.historyPath directly. A user named "default" would silently
+// inherit whatever wallets and history already exist there, with no
+// --adopt step and no way to adopt afterward (adoptLegacy refuses 'default').
+const RESERVED = /^(default|con|prn|aux|nul|com[1-9]|lpt[1-9])$/;
 
 let cache = null;
 

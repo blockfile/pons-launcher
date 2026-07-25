@@ -25,6 +25,10 @@ test('slug makes a filename-safe id and refuses anything else', () => {
   assert.throws(() => users.slug('!!!'), /invalid name/);
   // Windows reserves these regardless of extension.
   assert.throws(() => users.slug('CON'), /invalid name/);
+  // 'default' is the legacy single-tenant namespace, not just a nice name —
+  // a user with this id would silently inherit the pre-existing keystore.
+  assert.throws(() => users.slug('default'), /invalid name/);
+  assert.throws(() => users.slug('Default'), /invalid name/);
 });
 
 test('create returns a key once and stores only its hash', () => {

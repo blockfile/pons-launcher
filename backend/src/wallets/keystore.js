@@ -17,12 +17,19 @@ const fs = require('fs');
 const path = require('path');
 const { Wallet, HDNodeWallet, getAddress } = require('ethers');
 const config = require('../config');
+const history = require('../store/history');
 
 const SCRYPT = { N: 16384, r: 8, p: 1, keylen: 32 };
 const VERSION = 1;
 
 const DEFAULT_ID = 'default';
 const instances = new Map();
+// Same alphabet as users.slug() (backend/src/users/users.js). Duplicated
+// rather than imported: this module deliberately consumes nothing from the
+// users layer (a keystore is addressed by an id string, not a user record),
+// but adoptLegacy is destructive enough that it must not take that id on
+// trust — see the comment on adoptLegacy below.
+const ID = /^[a-z0-9][a-z0-9-]{0,31}$/;
 
 function passphrase() {
   if (!config.keystorePassphrase) {
@@ -231,13 +238,36 @@ function keystoreFor(userId = DEFAULT_ID) {
 /**
  * Hand the pre-multi-user keystore to a named user, so an existing deployment's
  * wallets are not stranded under 'default' the moment users are created.
+ *
+ * This is the one call in the module that moves a file full of private keys,
+ * so — however well validated the current caller's id is — it is not taken
+ * on trust here. An id that is not a validated slug (undefined, '', a path
+ * fragment like '../x') throws rather than being interpolated into a path
+ * and renamed onto.
  */
 function adoptLegacy(userId) {
+  if (typeof userId !== 'string' || !ID.test(userId)) {
+    throw new Error(`invalid user id "${userId}"`);
+  }
+  if (userId === DEFAULT_ID) return false;
+
   const from = config.keystorePath;
   const to = pathFor(userId);
-  if (userId === DEFAULT_ID || !fs.existsSync(from) || fs.existsSync(to)) return false;
+  if (!fs.existsSync(from) || fs.existsSync(to)) return false;
   fs.renameSync(from, to);
   instances.clear();
+
+  // Best effort: --adopt should mean the user's whole prior footprint, not
+  // just the wallets. The wallets have already moved by this point, so if
+  // history's target happens to exist, we leave history behind rather than
+  // fail the adopt (which already succeeded) with no way to signal a partial
+  // result — the caller only gets a boolean.
+  const historyFrom = config.historyPath;
+  const historyTo = history.pathFor(userId);
+  if (fs.existsSync(historyFrom) && !fs.existsSync(historyTo)) {
+    fs.renameSync(historyFrom, historyTo);
+  }
+
   return true;
 }
 

@@ -69,6 +69,10 @@ function historyFor(userId = DEFAULT_ID) {
 
 module.exports = {
   historyFor,
+  // Exposed so adoptLegacy (keystore.js) can move the history file to the
+  // same path a user's history will be read from, without duplicating the
+  // naming scheme in two places.
+  pathFor,
   // Bound to the default user so every existing caller keeps working.
   record: (...a) => historyFor(DEFAULT_ID).record(...a),
   list: (...a) => historyFor(DEFAULT_ID).list(...a),
