@@ -54,7 +54,8 @@ export default function LogoField({ value, onChange, onUploading }) {
     setError('');
     onChange('');
     if (!ACCEPT.includes(file.type)) return fail('Use a PNG, JPEG or WebP image.');
-    if (!file.size || file.size > MAX_BYTES) return fail('Images must be smaller than 5 MB.');
+    if (!file.size) return fail('The image is empty.');
+    if (file.size > MAX_BYTES) return fail('Images must be smaller than 5 MB.');
 
     showPreview(URL.createObjectURL(file));
     setFileName(file.name);
@@ -73,12 +74,14 @@ export default function LogoField({ value, onChange, onUploading }) {
   }
 
   return (
-    <label className="wide logo">
+    // A div, not a label: the confirm checkbox below gets its own label instead,
+    // so clicking the caption/thumbnail/hint text can't toggle it off.
+    <div className="wide logo">
       Logo
-      <span className="logoConfirm">
+      <label className="logoConfirm">
         <input type="checkbox" checked={confirmed} onChange={(e) => setConfirmed(e.target.checked)} />
         I understand that selected artwork will be moderated and uploaded to public IPFS.
-      </span>
+      </label>
       <input
         ref={input}
         type="file"
@@ -107,6 +110,6 @@ export default function LogoField({ value, onChange, onUploading }) {
           </button>
         )}
       </span>
-    </label>
+    </div>
   );
 }

@@ -230,6 +230,16 @@ td input[type='number'] {
   font-family: var(--mono);
 }
 
+/* The field's wrapper is a div, not a label (see LogoField.jsx), so it needs
+   the same flex/typography the bare `label` selector above gives every other
+   field explicitly. */
+.logo {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  font-size: 12px;
+  color: var(--muted);
+}
 .logo .logoConfirm {
   display: flex;
   align-items: center;
