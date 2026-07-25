@@ -1,6 +1,7 @@
 import { useState } from 'react';
 import { api } from '../api.js';
 import Section, { Busy } from './Section.jsx';
+import LogoField from './LogoField.jsx';
 
 const BLANK = {
   name: '',
@@ -21,6 +22,7 @@ export default function LaunchForm({ configs, wallets, rows, live, reload, reloa
   const [launchConfigId, setLaunchConfigId] = useState(0);
   const [dexId, setDexId] = useState(0);
   const [busy, setBusy] = useState('');
+  const [uploading, setUploading] = useState(false);
 
   const set = (k) => (e) => setF((prev) => ({ ...prev, [k]: e.target.value }));
 
@@ -95,10 +97,11 @@ export default function LaunchForm({ configs, wallets, rows, live, reload, reloa
           Symbol
           <input value={f.symbol} onChange={set('symbol')} placeholder="PONSCAT" />
         </label>
-        <label>
-          Logo URL
-          <input value={f.logo} onChange={set('logo')} placeholder="https://…/logo.png" />
-        </label>
+        <LogoField
+          value={f.logo}
+          onChange={(logo) => setF((prev) => ({ ...prev, logo }))}
+          onUploading={setUploading}
+        />
         <label>
           Website
           <input value={f.website} onChange={set('website')} placeholder="https://…" />
@@ -163,10 +166,15 @@ export default function LaunchForm({ configs, wallets, rows, live, reload, reloa
       )}
 
       <div className="row">
-        <Busy busy={busy === 'preflight'} className="ghost" onClick={() => act('preflight', () => api('/preflight', 'POST', body()))}>
+        <Busy
+          busy={busy === 'preflight'}
+          disabled={uploading}
+          className="ghost"
+          onClick={() => act('preflight', () => api('/preflight', 'POST', body()))}
+        >
           Preflight (signs, sends nothing)
         </Busy>
-        <Busy busy={busy === 'launch'} className="danger" onClick={launch}>
+        <Busy busy={busy === 'launch'} disabled={uploading} className="danger" onClick={launch}>
           LAUNCH + BUNDLE
         </Busy>
       </div>
