@@ -29,6 +29,14 @@ const ID = /^[a-z0-9][a-z0-9-]{0,31}$/;
 const RESERVED = /^(default|con|prn|aux|nul|com[1-9]|lpt[1-9])$/;
 
 let cache = null;
+// { mtimeMs, size } of usersPath as of the read that filled `cache`, or null
+// when cache reflects "no file". Lets load() notice a file written by a
+// different process (the CLI) without re-reading on every single call.
+let stamp = null;
+// Multi-user is a one-way door at runtime. If the file is deleted or emptied
+// under a running server, falling back to "no users" would silently unlock
+// every wallet — so the last known set keeps being enforced until a restart.
+let everEnabled = false;
 
 function slug(name) {
   const s = String(name || '')
@@ -50,18 +58,71 @@ function hash(key) {
 }
 
 function load() {
-  if (cache) return cache;
-  if (!fs.existsSync(config.usersPath)) {
+  // The CLI (backend/scripts/user.js) is a separate process: it writes
+  // usersPath directly, with nothing to tell this process's in-memory cache
+  // to drop. Re-stat on every call (cheap — no file content is read unless
+  // mtime/size actually moved) so a user created while the server is running
+  // is picked up on its next request, not on next restart.
+  let stat = null;
+  try {
+    stat = fs.statSync(config.usersPath);
+  } catch (_err) {
+    stat = null; // no file (yet, or anymore)
+  }
+
+  const fresh = stat && stamp && stat.mtimeMs === stamp.mtimeMs && stat.size === stamp.size;
+  if (cache && fresh) return cache;
+
+  if (!stat) {
+    // The file is missing. If users never existed, that's the normal
+    // single-tenant state. If users DID exist, this is the file having been
+    // deleted out from under a running server — treat that as the one-way
+    // door: keep enforcing the last known set rather than opening every
+    // wallet back up. See `everEnabled` above.
+    if (everEnabled && cache) return cache;
     cache = { version: VERSION, users: [] };
+    stamp = null;
     return cache;
   }
-  cache = JSON.parse(fs.readFileSync(config.usersPath, 'utf8'));
+
+  // /api/health calls enabled() on every request; a mid-write read (or a
+  // corrupt file) must degrade to "keep the last known set" (or "no users"
+  // pre-first-write), never throw and never 500 the health check.
+  let parsed;
+  try {
+    parsed = JSON.parse(fs.readFileSync(config.usersPath, 'utf8'));
+  } catch (_err) {
+    if (everEnabled && cache) return cache;
+    cache = { version: VERSION, users: [] };
+    stamp = null;
+    return cache;
+  }
+
+  if (everEnabled && (!parsed || !Array.isArray(parsed.users) || parsed.users.length === 0)) {
+    // Same one-way door, from the emptied-file direction rather than the
+    // deleted-file one: a truncated/blanked users.json must not read as
+    // "single-tenant now" once real users have existed.
+    console.error(
+      '[users] users.json exists but has no users, after users previously existed — ' +
+        'refusing to fall back to single-tenant. Restart the server if this is intentional.'
+    );
+    return cache;
+  }
+
+  cache = parsed;
+  stamp = { mtimeMs: stat.mtimeMs, size: stat.size };
+  if (cache.users && cache.users.length > 0) everEnabled = true;
   return cache;
 }
 
 function persist() {
   fs.mkdirSync(path.dirname(config.usersPath), { recursive: true });
   fs.writeFileSync(config.usersPath, JSON.stringify(cache, null, 2), { mode: 0o600 });
+  // Record our own write's stamp so the very next load() in this process
+  // doesn't immediately re-read the file it just wrote.
+  const stat = fs.statSync(config.usersPath);
+  stamp = { mtimeMs: stat.mtimeMs, size: stat.size };
+  if (cache.users && cache.users.length > 0) everEnabled = true;
 }
 
 function publicView(u) {
@@ -120,6 +181,8 @@ function findByKey(key) {
 /** Test seam — drops the in-memory cache. */
 function _reset() {
   cache = null;
+  stamp = null;
+  everEnabled = false;
 }
 
 module.exports = { enabled, create, list, remove, findByKey, slug, _reset };

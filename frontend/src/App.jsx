@@ -88,6 +88,13 @@ export default function App() {
             }}
           />
         )}
+
+        {/* Multi-user deployments proxy through nginx, which overwrites this
+            field's header with the key mapped to your login — if that map is
+            missing an entry, the key you paste here is silently ignored. */}
+        {health && health.multiUser && !health.user && (
+          <div className="hint">not signed in — nginx may be swallowing the key field; ask whoever runs this deployment to check the login map</div>
+        )}
       </header>
 
       <main>

@@ -5,6 +5,7 @@ const assert = require('node:assert');
 const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
+const crypto = require('node:crypto');
 
 const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'pons-users-'));
 process.env.USERS_PATH = path.join(dir, 'users.json');
@@ -80,4 +81,67 @@ test('remove drops the user and their key stops working', () => {
   assert.equal(users.findByKey(key), null);
   assert.ok(!users.list().some((u) => u.name === 'bob'));
   assert.throws(() => users.remove('bob'), /no user/);
+});
+
+// --- cross-process visibility (the Critical fix) ---------------------------
+//
+// The admin CLI (backend/scripts/user.js) is a separate OS process from the
+// running server. It writes users.json directly with fs.writeFileSync, with
+// no IPC to tell the server's in-memory cache to drop. These tests simulate
+// that by bypassing the `users` module entirely — writing the file by hand —
+// and proving the *same* long-lived module instance (no _reset()) still
+// notices, the way a running server would on its next request.
+
+let carolKey;
+
+test('a user written to users.json by another process is visible without _reset()', () => {
+  const before = users.list().length;
+
+  const raw = JSON.parse(fs.readFileSync(process.env.USERS_PATH, 'utf8'));
+  carolKey = crypto.randomBytes(32).toString('hex');
+  raw.users.push({
+    id: 'carol',
+    name: 'carol',
+    keyHash: crypto.createHash('sha256').update(carolKey).digest('hex'),
+    createdAt: new Date().toISOString(),
+  });
+  // Deliberately NOT going through users.create()/persist() — this is the
+  // CLI-in-another-process case, not an in-process write.
+  fs.writeFileSync(process.env.USERS_PATH, JSON.stringify(raw, null, 2));
+
+  assert.equal(users.enabled(), true);
+  assert.equal(users.findByKey(carolKey).name, 'carol');
+  assert.equal(users.list().length, before + 1);
+});
+
+test('repeated list() calls do not re-read an unchanged file', () => {
+  // Prime the cache against the file's current stamp.
+  users.list();
+
+  const original = fs.readFileSync;
+  let reads = 0;
+  fs.readFileSync = function patched(...args) {
+    reads += 1;
+    return original.apply(fs, args);
+  };
+  try {
+    for (let i = 0; i < 5; i += 1) users.list();
+  } finally {
+    fs.readFileSync = original;
+  }
+
+  assert.equal(reads, 0, 'an unchanged file must not be re-read on every call');
+});
+
+test('deleting users.json after users existed does not disable enabled()', () => {
+  assert.equal(users.enabled(), true);
+
+  fs.unlinkSync(process.env.USERS_PATH);
+
+  // Falling back to "no users" here is the same zero-auth hole from the
+  // other direction — reachable by deleting a file, not just failing to
+  // move fast enough after the CLI writes one.
+  assert.equal(users.enabled(), true, 'must stay enabled once users have existed');
+  assert.equal(users.findByKey(carolKey).name, 'carol', 'the last known set keeps being enforced');
+  assert.throws(() => users.remove('nonexistent-user'), /no user/);
 });
