@@ -29,19 +29,25 @@ export default function App() {
   const loadWallets = useCallback(async () => setWallets(await api('/wallets')), []);
   const loadHistory = useCallback(async () => setHistory(await api('/launches?limit=15')), []);
 
-  useEffect(() => {
-    (async () => {
-      try {
-        setHealth(await api('/health'));
-        await loadWallets();
-        setConfigs(await api('/configs'));
-        await loadHistory();
-        setOutput('Ready. Run Preflight when the checklist above is complete.');
-      } catch (err) {
-        setOutput(`ERROR: ${err.message}`);
-      }
-    })();
+  const loadAll = useCallback(async () => {
+    try {
+      setHealth(await api('/health'));
+      await loadWallets();
+      setConfigs(await api('/configs'));
+      await loadHistory();
+      setOutput('Ready. Run Preflight when the checklist above is complete.');
+    } catch (err) {
+      setOutput(`ERROR: ${err.message}`);
+    }
   }, [loadWallets, loadHistory]);
+
+  // Re-read everything when the key changes: the key decides not just what you
+  // may do but what you can see, so a new key means a different console.
+  // Debounced because this fires on every keystroke of a pasted key.
+  useEffect(() => {
+    const t = setTimeout(loadAll, key ? 400 : 0);
+    return () => clearTimeout(t);
+  }, [loadAll, key]);
 
   const live = Boolean(health && !health.dryRun);
   const funded = wallets.filter((w) => w.role !== 'dev' && Number(w.balanceEth) > 0).length;
