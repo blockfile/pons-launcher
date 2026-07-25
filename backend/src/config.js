@@ -38,6 +38,9 @@ const config = {
   keystorePath:
     process.env.KEYSTORE_PATH || path.join(__dirname, '..', 'data', 'wallets.keystore.json'),
   historyPath: process.env.HISTORY_PATH || path.join(__dirname, '..', 'data', 'launches.json'),
+  // Beside the keystore: one users file for the whole deployment. Absent means
+  // single-tenant, which is what every existing install is.
+  usersPath: process.env.USERS_PATH || path.join(__dirname, '..', 'data', 'users.json'),
 
   apiKey: process.env.API_KEY || null,
 
