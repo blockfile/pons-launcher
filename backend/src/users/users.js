@@ -37,6 +37,10 @@ let stamp = null;
 // under a running server, falling back to "no users" would silently unlock
 // every wallet — so the last known set keeps being enforced until a restart.
 let everEnabled = false;
+// Latches the one-way-door refusal log to once per transition into the bad
+// state, not once per load() call (a single request can call load() several
+// times via enabled()/findByKey()). Reset once the file is valid again.
+let warnedStale = false;
 
 function slug(name) {
   const s = String(name || '')
@@ -85,39 +89,58 @@ function load() {
     return cache;
   }
 
-  // /api/health calls enabled() on every request; a mid-write read (or a
-  // corrupt file) must degrade to "keep the last known set" (or "no users"
-  // pre-first-write), never throw and never 500 the health check.
   let parsed;
   try {
     parsed = JSON.parse(fs.readFileSync(config.usersPath, 'utf8'));
-  } catch (_err) {
-    if (everEnabled && cache) return cache;
-    cache = { version: VERSION, users: [] };
-    stamp = null;
-    return cache;
+  } catch (err) {
+    // A users file that exists but will not parse is an error, never an
+    // absence. Degrading to "no users" here would mean "no authentication" —
+    // reachable from an interrupted CLI write, a full disk, or a hand-edit
+    // typo, then any restart — so refuse to answer instead of guessing. A
+    // thrown error (500-ish) is recoverable; an open console holding private
+    // keys is not.
+    //
+    // The one exception is a server that has already latched a good read in
+    // this process (`cache` is set): that read already proved the deployment
+    // is multi-user (or genuinely not), so a *subsequent* unreadable file is
+    // the one-way door again, and the last known set keeps being enforced —
+    // no throw, no dropped requests, just no worse than a moment ago.
+    if (cache) return cache;
+    throw new Error(`cannot read ${config.usersPath}: ${err.message}`);
   }
 
   if (everEnabled && (!parsed || !Array.isArray(parsed.users) || parsed.users.length === 0)) {
     // Same one-way door, from the emptied-file direction rather than the
     // deleted-file one: a truncated/blanked users.json must not read as
     // "single-tenant now" once real users have existed.
-    console.error(
-      '[users] users.json exists but has no users, after users previously existed — ' +
-        'refusing to fall back to single-tenant. Restart the server if this is intentional.'
-    );
+    if (!warnedStale) {
+      console.error(
+        '[users] users.json exists but has no users, after users previously existed — ' +
+          'refusing to fall back to single-tenant. Restart the server if this is intentional.'
+      );
+      warnedStale = true;
+    }
     return cache;
   }
 
   cache = parsed;
   stamp = { mtimeMs: stat.mtimeMs, size: stat.size };
   if (cache.users && cache.users.length > 0) everEnabled = true;
+  warnedStale = false; // the file is valid again — a later relapse should warn again
   return cache;
 }
 
 function persist() {
   fs.mkdirSync(path.dirname(config.usersPath), { recursive: true });
-  fs.writeFileSync(config.usersPath, JSON.stringify(cache, null, 2), { mode: 0o600 });
+  // Write to a sibling temp file and rename over the target. A rename within
+  // one directory is atomic on both POSIX and Windows/NTFS, so a concurrent
+  // reader (or this same process crashing mid-write) sees either the old
+  // file or the complete new one — never a truncated half-write, which is
+  // exactly the corrupt-file case the parse-error branch above has to guard
+  // against.
+  const tmp = `${config.usersPath}.tmp`;
+  fs.writeFileSync(tmp, JSON.stringify(cache, null, 2), { mode: 0o600 });
+  fs.renameSync(tmp, config.usersPath);
   // Record our own write's stamp so the very next load() in this process
   // doesn't immediately re-read the file it just wrote.
   const stat = fs.statSync(config.usersPath);
@@ -183,6 +206,7 @@ function _reset() {
   cache = null;
   stamp = null;
   everEnabled = false;
+  warnedStale = false;
 }
 
 module.exports = { enabled, create, list, remove, findByKey, slug, _reset };

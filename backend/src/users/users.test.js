@@ -145,3 +145,67 @@ test('deleting users.json after users existed does not disable enabled()', () =>
   assert.equal(users.findByKey(carolKey).name, 'carol', 'the last known set keeps being enforced');
   assert.throws(() => users.remove('nonexistent-user'), /no user/);
 });
+
+// --- corrupt users.json: never "no users" -----------------------------------
+//
+// A file that exists but fails to parse (truncated write, full disk,
+// hand-edit typo) must never read as "the deployment is single-tenant" — that
+// is "no authentication" for a deployment that has users. On a fresh boot
+// (nothing cached yet) there is no "last known set" to fall back on, so the
+// only safe answer is to refuse to serve at all.
+
+test('a corrupt users.json throws on a fresh boot — never returns false', () => {
+  fs.writeFileSync(process.env.USERS_PATH, 'not json at all');
+  users._reset(); // simulates a fresh process: no cache to fall back on
+
+  assert.throws(() => users.enabled(), /cannot read/);
+  // Specifically not "false" — a caller that only checks a boolean must be
+  // unable to observe this as "single-tenant, carry on".
+  assert.throws(() => users.enabled());
+});
+
+test('a corrupt users.json keeps enforcing once already latched, without throwing', () => {
+  // Re-establish a valid, latched cache first — this is the "server has been
+  // running fine" case, not a fresh boot.
+  fs.writeFileSync(
+    process.env.USERS_PATH,
+    JSON.stringify({
+      version: 1,
+      users: [
+        {
+          id: 'dave',
+          name: 'dave',
+          keyHash: crypto.createHash('sha256').update('dave-key').digest('hex'),
+          createdAt: new Date().toISOString(),
+        },
+      ],
+    })
+  );
+  assert.equal(users.enabled(), true); // latches cache + everEnabled
+
+  fs.writeFileSync(process.env.USERS_PATH, 'not json at all');
+
+  assert.doesNotThrow(() => users.enabled());
+  assert.equal(users.enabled(), true, 'must keep enforcing the last known set, not fall open');
+  assert.equal(users.findByKey('dave-key').name, 'dave');
+});
+
+test('a missing file still means single-tenant after a reset — fresh-boot regression check', () => {
+  users._reset();
+  if (fs.existsSync(process.env.USERS_PATH)) fs.unlinkSync(process.env.USERS_PATH);
+
+  assert.equal(users.enabled(), false);
+  assert.deepEqual(users.list(), []);
+});
+
+test('persist() writes atomically — no leftover .tmp file, target is always valid JSON', () => {
+  users._reset();
+  if (fs.existsSync(process.env.USERS_PATH)) fs.unlinkSync(process.env.USERS_PATH);
+
+  users.create('erin');
+
+  assert.equal(fs.existsSync(`${process.env.USERS_PATH}.tmp`), false, 'no leftover .tmp file after a write');
+  const onDisk = fs.readFileSync(process.env.USERS_PATH, 'utf8');
+  const parsed = JSON.parse(onDisk); // throws if this isn't valid JSON
+  assert.ok(parsed.users.some((u) => u.id === 'erin'));
+});
