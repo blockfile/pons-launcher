@@ -7,7 +7,7 @@ const { prepare } = require('../bundle/prepare');
 const { fire } = require('../bundle/fire');
 const history = require('../store/history');
 const { requireApiKey } = require('../middleware/auth');
-const { uploadImage } = require('../ipfs/upload');
+const { uploadImage, ACCEPTED, MAX_BYTES } = require('../ipfs/upload');
 
 const router = express.Router();
 
@@ -43,7 +43,9 @@ router.get('/configs', async (req, res, next) => {
 router.post(
   '/logo',
   requireApiKey,
-  express.raw({ type: ['image/png', 'image/jpeg', 'image/webp'], limit: '5mb' }),
+  // Same accepted types and size ceiling uploadImage itself enforces — one
+  // source of truth instead of a second hardcoded list drifting from it.
+  express.raw({ type: [...ACCEPTED.keys()], limit: MAX_BYTES }),
   async (req, res, next) => {
     try {
       // A content-type express.raw did not match leaves req.body as {} — the

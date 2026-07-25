@@ -48,6 +48,8 @@ async function uploadImage(buffer, mime) {
   const form = new FormData();
   form.append('image', new Blob([buffer], { type }), `logo.${ACCEPTED.get(type)}`);
 
+  // Without a cap a hung worker holds the request for undici's 300s default,
+  // leaving Preflight/LAUNCH disabled with nothing the operator can do about it.
   let res;
   try {
     res = await fetch(config.ipfsUploadUrl, {
@@ -57,9 +59,17 @@ async function uploadImage(buffer, mime) {
         referer: `${config.ipfsUploadOrigin}/launchpad/create`,
       },
       body: form,
+      signal: AbortSignal.timeout(30_000),
     });
   } catch (err) {
-    throw new Error(`pons IPFS uploader unreachable: ${err.message}`);
+    // AbortSignal.timeout rejects with a bare "TimeoutError"/"AbortError" name —
+    // meaningless to an operator staring at the console, so name it plainly.
+    const timedOut = err.name === 'TimeoutError' || err.name === 'AbortError';
+    throw new Error(
+      timedOut
+        ? 'pons IPFS uploader timed out after 30s'
+        : `pons IPFS uploader unreachable: ${err.message}`
+    );
   }
 
   const json = await res.json().catch(() => null);

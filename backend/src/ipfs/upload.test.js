@@ -90,3 +90,16 @@ test('uploadImage reports an unreachable worker as such', async () => {
     }
   );
 });
+
+test('uploadImage reports a hung worker as a timeout, not a bare AbortError', async () => {
+  await withFetch(
+    () => {
+      const err = new Error('The operation was aborted due to timeout');
+      err.name = 'TimeoutError';
+      throw err;
+    },
+    async () => {
+      await assert.rejects(() => uploadImage(png, 'image/png'), /timed out/);
+    }
+  );
+});
