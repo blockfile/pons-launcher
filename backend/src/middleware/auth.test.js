@@ -35,6 +35,13 @@ test('with no users file every request is the default user', () => {
   assert.deepEqual(req.user, DEFAULT_USER);
 });
 
+test('the default user cannot be mutated into someone else', () => {
+  const first = run(undefined);
+  first.req.user.id = 'attacker';
+  const second = run(undefined);
+  assert.equal(second.req.user.id, 'default');
+});
+
 test('once a user exists a valid key resolves to them', () => {
   const { key } = users.create('ivan');
   const { req, nexted } = run(key);

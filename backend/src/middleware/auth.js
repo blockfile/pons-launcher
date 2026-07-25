@@ -4,8 +4,10 @@ const config = require('../config');
 const users = require('../users/users');
 
 // A deployment with no users.json is single-tenant: every request is this one
-// user, reading the original keystore path.
-const DEFAULT_USER = { id: 'default', name: 'default' };
+// user, reading the original keystore path. Frozen because Task 4 hangs a
+// keystore choice off req.user.id — a handler mutating it would corrupt every
+// later request sharing this same object, not just its own.
+const DEFAULT_USER = Object.freeze({ id: 'default', name: 'default' });
 
 function presentedKey(req) {
   return req.get('x-api-key') || req.query.key;
@@ -21,7 +23,7 @@ function presentedKey(req) {
  */
 function identify(req, res, next) {
   if (!users.enabled()) {
-    req.user = DEFAULT_USER;
+    req.user = { ...DEFAULT_USER };
     return next();
   }
   const user = users.findByKey(presentedKey(req));
