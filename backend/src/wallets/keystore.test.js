@@ -5,6 +5,7 @@ const assert = require('node:assert');
 const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
+const { Wallet } = require('ethers');
 
 const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'pons-keystore-'));
 process.env.KEYSTORE_PATH = path.join(dir, 'wallets.keystore.json');
@@ -56,6 +57,19 @@ test('allows only one dev wallet', () => {
 test('separates dev from bundle wallets', () => {
   assert.ok(keystore.bundleWallets().length >= 3);
   assert.ok(keystore.bundleWallets().every((w) => w.role === 'bundle'));
+});
+
+test('exportAll returns a usable key for every wallet', () => {
+  const before = keystore.list();
+  const backup = keystore.exportAll();
+
+  assert.equal(backup.length, before.length);
+  for (const w of backup) {
+    // A backup is only worth having if each entry restores its own wallet.
+    assert.match(w.privateKey, /^0x[0-9a-f]{64}$/i);
+    assert.equal(new Wallet(w.privateKey).address, w.address);
+    assert.ok(w.role && w.id);
+  }
 });
 
 test('removes a wallet', () => {

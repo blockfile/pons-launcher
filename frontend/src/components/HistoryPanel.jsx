@@ -4,7 +4,9 @@ export default function HistoryPanel({ entries, explorer }) {
   if (!entries.length) {
     return (
       <Section title="History">
-        <div className="history">no launches yet</div>
+        <div className="history">
+          No launches yet. Every launch and dry run is recorded here once it runs.
+        </div>
       </Section>
     );
   }

@@ -1,6 +1,7 @@
 'use strict';
 
 const express = require('express');
+const config = require('../config');
 const keystore = require('../wallets/keystore');
 const funding = require('../wallets/funding');
 const { requireApiKey } = require('../middleware/auth');
@@ -56,6 +57,30 @@ router.post('/wallets/export', requireApiKey, (req, res, next) => {
     if (confirm !== true) throw new Error('export requires { confirm: true }');
     console.warn(`[pons-launcher] PRIVATE KEY EXPORTED for wallet ${id}`);
     res.json(keystore.exportKey(id));
+  } catch (err) {
+    next(err);
+  }
+});
+
+// POST /api/wallets/backup — every key at once, for an offline backup. Same
+// two locks as the single export, and logged the same way: whoever holds the
+// file this produces controls every wallet in it.
+router.post('/wallets/backup', requireApiKey, (req, res, next) => {
+  try {
+    if ((req.body || {}).confirm !== true) throw new Error('backup requires { confirm: true }');
+    const wallets = keystore.exportAll();
+    console.warn(`[pons-launcher] FULL KEYSTORE EXPORTED — ${wallets.length} private keys`);
+    res.json({
+      exportedAt: new Date().toISOString(),
+      chainId: config.chainId,
+      count: wallets.length,
+      // Stated in the file itself, because a backup outlives the session that
+      // produced it and the person opening it may not be the one who made it.
+      warning:
+        'These private keys control real funds. Anyone holding this file can spend every wallet in it. ' +
+        'Store it offline. There are no mnemonics: the keystore holds private keys only.',
+      wallets,
+    });
   } catch (err) {
     next(err);
   }

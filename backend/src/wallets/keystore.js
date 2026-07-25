@@ -166,6 +166,24 @@ function exportKey(id) {
   return { address: get(id).address, privateKey: decrypt(get(id)) };
 }
 
+/**
+ * Every wallet with its plaintext key, for the operator to back up offline.
+ *
+ * There are no mnemonics to return: generate() derives each wallet from its own
+ * random HD node but stores only the private key, so the phrase is gone the
+ * moment the wallet is created. A private key restores a wallet in any EVM
+ * client, which is what a backup needs to do.
+ *
+ * The most dangerous call in the app — the caller must demand explicit
+ * confirmation and log it.
+ */
+function exportAll() {
+  return load().wallets.map((w) => ({
+    ...publicView(w),
+    privateKey: decrypt(w),
+  }));
+}
+
 function devWallet() {
   const dev = load().wallets.find((w) => w.role === 'dev');
   if (!dev) throw new Error('no dev wallet in the keystore — generate or import one first');
@@ -189,6 +207,7 @@ module.exports = {
   remove,
   signer,
   exportKey,
+  exportAll,
   devWallet,
   bundleWallets,
   _reset,

@@ -1,9 +1,9 @@
 import { useState } from 'react';
-import { api } from '../api.js';
+import { api, downloadBackup } from '../api.js';
 import Section, { Busy } from './Section.jsx';
 
 /**
- * Wallet table. Per-row fund / buy-mode / buy-amount inputs live in `rows`,
+ * The wallet table. Per-row fund / buy-mode / buy-amount inputs live in `rows`,
  * owned by App, because the Fund and Launch panels both read them.
  */
 export default function WalletsPanel({ wallets, rows, setRow, reload, report }) {
@@ -27,15 +27,34 @@ export default function WalletsPanel({ wallets, rows, setRow, reload, report }) 
 
   const hasDev = wallets.some((w) => w.role === 'dev');
 
+  function backup(format) {
+    // Typed confirmation, not a click-through: this hands over every key the
+    // console holds, and a mis-click should not be enough to do it.
+    const typed = prompt(
+      `This downloads the PRIVATE KEY of all ${wallets.length} wallets.\n` +
+        'Anyone who opens that file can spend every one of them.\n\n' +
+        'Type EXPORT to continue.'
+    );
+    if (typed !== 'EXPORT') return;
+    act('backup', () => downloadBackup(format));
+  }
+
   return (
-    <Section step="1" title="Wallets">
+    <Section step="1" title="Wallets" done={hasDev && wallets.length > 1}>
+      <p className="lede">
+        The dev wallet signs the launch, makes the uncapped buy, and funds everything else. Bundle
+        wallets each buy behind it, and each is capped at 5% of supply.
+      </p>
+
       <div className="row">
         <Busy
           busy={busy === 'dev'}
           className="ghost"
           disabled={hasDev}
           title={hasDev ? 'a dev wallet already exists' : ''}
-          onClick={() => act('dev', () => api('/wallets/generate', 'POST', { count: 1, role: 'dev', label: 'dev' }))}
+          onClick={() =>
+            act('dev', () => api('/wallets/generate', 'POST', { count: 1, role: 'dev', label: 'dev' }))
+          }
         >
           Generate dev wallet
         </Busy>
@@ -44,7 +63,11 @@ export default function WalletsPanel({ wallets, rows, setRow, reload, report }) 
           className="ghost"
           onClick={() =>
             act('bundle', () =>
-              api('/wallets/generate', 'POST', { count: Number(count) || 1, role: 'bundle', label: 'bundle' })
+              api('/wallets/generate', 'POST', {
+                count: Number(count) || 1,
+                role: 'bundle',
+                label: 'bundle',
+              })
             )
           }
         >
@@ -59,54 +82,70 @@ export default function WalletsPanel({ wallets, rows, setRow, reload, report }) 
           title="how many"
         />
         <button className="ghost" onClick={() => setShowImport((v) => !v)}>
-          Import keys…
+          Import keys
         </button>
-        <Busy busy={busy === 'reload'} className="ghost" onClick={() => act('reload', async () => 'balances refreshed')}>
+        <Busy
+          busy={busy === 'reload'}
+          className="ghost"
+          onClick={() => act('reload', async () => 'balances refreshed')}
+        >
           Refresh balances
         </Busy>
+
+        <span className="spacer" />
+
+        <Busy
+          busy={busy === 'backup'}
+          className="ghost"
+          disabled={!wallets.length}
+          onClick={() => backup('json')}
+        >
+          Download backup
+        </Busy>
+        <button className="link" disabled={!wallets.length} onClick={() => backup('csv')}>
+          as CSV
+        </button>
       </div>
 
       {showImport && (
-        <div className="importBox">
+        <div className="row">
           <textarea
             rows="3"
             placeholder="private keys, one per line"
             value={keys}
             onChange={(e) => setKeys(e.target.value)}
           />
-          <div className="row">
-            <select value={importRole} onChange={(e) => setImportRole(e.target.value)}>
-              <option value="bundle">bundle</option>
-              <option value="dev">dev</option>
-            </select>
-            <Busy
-              busy={busy === 'import'}
-              onClick={() =>
-                act('import', async () => {
-                  const made = await api('/wallets/import', 'POST', {
-                    privateKeys: keys.split('\n'),
-                    role: importRole,
-                  });
-                  setKeys('');
-                  return made;
-                })
-              }
-            >
-              Import
-            </Busy>
-          </div>
+          <select value={importRole} onChange={(e) => setImportRole(e.target.value)}>
+            <option value="bundle">bundle</option>
+            <option value="dev">dev</option>
+          </select>
+          <Busy
+            busy={busy === 'import'}
+            onClick={() =>
+              act('import', async () => {
+                const made = await api('/wallets/import', 'POST', {
+                  privateKeys: keys.split('\n'),
+                  role: importRole,
+                });
+                setKeys('');
+                return made;
+              })
+            }
+          >
+            Import
+          </Busy>
         </div>
       )}
 
       <table>
         <thead>
           <tr>
-            <th>role</th>
-            <th>address</th>
-            <th>balance</th>
-            <th>fund (ETH)</th>
-            <th>buy mode</th>
-            <th>buy (ETH)</th>
+            <th>Role</th>
+            <th>Address</th>
+            <th>Balance</th>
+            <th>Fund (ETH)</th>
+            <th>Buy mode</th>
+            <th>Buy (ETH)</th>
             <th />
           </tr>
         </thead>
@@ -114,20 +153,23 @@ export default function WalletsPanel({ wallets, rows, setRow, reload, report }) 
           {wallets.length === 0 && (
             <tr>
               <td colSpan="7" className="empty">
-                no wallets yet — generate a dev wallet to start
+                No wallets yet. Generate a dev wallet to start.
               </td>
             </tr>
           )}
           {wallets.map((w) => {
             const row = rows[w.id] || {};
             const isDev = w.role === 'dev';
+            const bal = Number(w.balanceEth);
             return (
               <tr key={w.id}>
                 <td>
                   <span className={`role ${w.role}`}>{w.role}</span>
                 </td>
                 <td className="addr">{w.address}</td>
-                <td className="addr">{Number(w.balanceEth).toFixed(6)}</td>
+                <td>
+                  <span className={`bal ${bal === 0 ? 'zero' : ''}`}>{bal.toFixed(6)}</span>
+                </td>
                 <td>
                   {!isDev && (
                     <input
@@ -168,6 +210,7 @@ export default function WalletsPanel({ wallets, rows, setRow, reload, report }) 
                   <Busy
                     busy={busy === w.id}
                     className="ghost"
+                    title="delete this wallet"
                     onClick={() => {
                       if (!confirm(`Delete ${w.address}? Its key is erased from the keystore.`)) return;
                       act(w.id, () => api(`/wallets/${w.id}`, 'DELETE'));

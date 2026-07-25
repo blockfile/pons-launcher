@@ -1,0 +1,101 @@
+import Section from './Section.jsx';
+
+// A plan or a launch result, read at a glance before the raw JSON. Warnings are
+// pulled out of the payload and shown first: buried in 200 lines of JSON, a cap
+// breach is invisible, and a cap breach is the difference between a wallet
+// buying and a wallet burning gas for nothing.
+export default function ResultPanel({ output }) {
+  const plan = output && typeof output === 'object' ? output : null;
+  const inner = plan?.plan || plan; // /launch nests the plan; /preflight does not
+  const result = plan?.result;
+  const warnings = inner?.warnings || [];
+  const buys = inner?.buys || [];
+  const overCap = buys.filter((b) => b.capExceeded);
+
+  return (
+    <Section step="4" title="Result">
+      {!plan && <pre>{String(output ?? '')}</pre>}
+
+      {plan && (
+        <>
+          {result && (
+            <div className="stats">
+              <div className="stat">
+                <span>Token</span>
+                <b>{(result.token || '—').slice(0, 10)}…</b>
+              </div>
+              <div className={`stat ${result.launch?.status === 'confirmed' ? 'ok' : 'bad'}`}>
+                <span>Launch</span>
+                <b>{result.launch?.status || '—'}</b>
+              </div>
+              <div className="stat ok">
+                <span>Buys confirmed</span>
+                <b>
+                  {result.buys?.filter((b) => b.status === 'confirmed').length ?? 0}/
+                  {result.buys?.length ?? 0}
+                </b>
+              </div>
+              <div className={`stat ${result.sameBlock ? 'ok' : ''}`}>
+                <span>In launch block</span>
+                <b>{result.sameBlock ?? 0}</b>
+              </div>
+            </div>
+          )}
+
+          {!result && inner?.token && (
+            <div className="stats">
+              <div className="stat">
+                <span>Token will be</span>
+                <b>{inner.token.slice(0, 10)}…</b>
+              </div>
+              <div className="stat">
+                <span>Bundle wallets</span>
+                <b>{buys.length}</b>
+              </div>
+              <div className="stat">
+                <span>Total buy</span>
+                <b>{inner.totalBuyEth} </b>
+              </div>
+              <div className="stat">
+                <span>Dev buy</span>
+                <b>{inner.launch?.devBuyEth}</b>
+              </div>
+            </div>
+          )}
+
+          {overCap.length > 0 && (
+            <div className="notice danger">
+              <h3>These buys will revert</h3>
+              <ul>
+                {overCap.map((b) => (
+                  <li key={b.walletId}>
+                    {b.address} — {b.amountEth} ETH ≈ {(b.estShareBps / 100).toFixed(2)}% of supply,
+                    over the cap. Lower the amount.
+                  </li>
+                ))}
+              </ul>
+            </div>
+          )}
+
+          {warnings.length > 0 && (
+            <div className="notice warn">
+              <h3>Check before launching</h3>
+              <ul>
+                {warnings.map((w, i) => (
+                  <li key={i}>{w}</li>
+                ))}
+              </ul>
+            </div>
+          )}
+
+          <details style={{ marginTop: 12 }}>
+            <summary className="hint" style={{ cursor: 'pointer' }}>
+              full response
+            </summary>
+            <pre style={{ marginTop: 8 }}>{JSON.stringify(plan, null, 2)}</pre>
+          </details>
+        </>
+      )}
+    </Section>
+  );
+}

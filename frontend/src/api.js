@@ -18,6 +18,35 @@ export async function api(path, method = 'GET', body) {
 }
 
 /**
+ * Download every wallet's private key as a file.
+ *
+ * The keys go straight from the response into a Blob and never touch the DOM:
+ * anything rendered on screen can be screenshotted, shoulder-surfed, or left
+ * open in a tab. `format` is 'json' or 'csv' — csv because checking twenty
+ * addresses is a spreadsheet job.
+ */
+export async function downloadBackup(format = 'json') {
+  const data = await api('/wallets/backup', 'POST', { confirm: true });
+
+  const body =
+    format === 'csv'
+      ? ['role,label,address,privateKey']
+          .concat(data.wallets.map((w) => [w.role, w.label, w.address, w.privateKey].join(',')))
+          .join('\n')
+      : JSON.stringify(data, null, 2);
+
+  const stamp = data.exportedAt.slice(0, 10);
+  const url = URL.createObjectURL(new Blob([body], { type: 'text/plain' }));
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = `pons-wallets-${stamp}.${format}`;
+  a.click();
+  URL.revokeObjectURL(url);
+
+  return `${data.count} keys written to pons-wallets-${stamp}.${format} — store it offline`;
+}
+
+/**
  * The raw file is the request body — the backend re-wraps it as multipart for
  * the pons worker. Same API key gate as every other mutating route.
  */
