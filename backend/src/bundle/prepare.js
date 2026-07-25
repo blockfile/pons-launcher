@@ -13,6 +13,7 @@ const { provider } = require('../evm/provider');
 const { getFees, gasCost } = require('../evm/fees');
 const factory = require('../evm/factory');
 const { buildBuyTx } = require('../evm/router');
+const { capCheck } = require('../evm/pricing');
 const keystore = require('../wallets/keystore');
 const { spendableFromBalance } = require('../wallets/funding');
 
@@ -151,6 +152,21 @@ async function prepare(input) {
       }
     }
 
+    // Every bundle buy lands inside the restriction window — the window is set
+    // by EVM block.number, which advances roughly every 16s on this chain, so
+    // no amount of speed escapes it. A buy over the cap does not clamp, it
+    // REVERTS: gas spent, nothing bought. Warn while the operator can still
+    // resize, rather than after the launch.
+    const cap = capCheck({ amountInWei: amountIn, launchConfig, token });
+    if (cap.exceedsWallet || cap.exceedsTx) {
+      const which = cap.exceedsWallet ? `max wallet ${launchConfig.maxWalletBps / 100}%` : `max buy ${launchConfig.maxTxBps / 100}%`;
+      warnings.push(
+        `${known.address}: ${formatEther(amountIn)} ETH is about ${(cap.estBps / 100).toFixed(2)}% of supply, ` +
+          `over ${which} — this buy will REVERT inside the restriction window. Estimated at the pool's ` +
+          'initial price and ignoring the rest of the bundle, so treat it as a ceiling.'
+      );
+    }
+
     const buyTx = await buildBuyTx({
       dexConfig,
       launchConfig,
@@ -165,6 +181,8 @@ async function prepare(input) {
       walletId: known.id,
       address: known.address,
       amountEth: formatEther(amountIn),
+      estShareBps: Math.round(cap.estBps),
+      capExceeded: cap.exceedsWallet || cap.exceedsTx,
       nonce,
       raw: await signer.signTransaction(
         toSignable(buyTx, { nonce, gasLimit: buyGas, fees, chainId })

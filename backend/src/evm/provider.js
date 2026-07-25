@@ -37,29 +37,63 @@ function isTransient(errObj) {
   return TRANSIENT_RE.test(String(errObj.message || ''));
 }
 
+// A refusal that proves the request never reached the sequencer: the provider
+// rejected it on the way in, on quota grounds, before doing anything with it.
+// This is the ONLY class of broadcast failure that is safe to retry — see the
+// attempts logic below.
+// Deliberately narrow. A bare /exceeded/ would also match evaluation-stage
+// rejections, and the whole point of this predicate is that matching it means
+// the transaction was never seen.
+const RATE_LIMIT_CODES = new Set([-32005, -32007, -32029]);
+const RATE_LIMIT_RE =
+  /rate.?limit|request limit|limit reached|limit exceeded|too many requests|429|quota|credits?\b/i;
+
+function isRateLimited(errObj) {
+  if (!errObj) return false;
+  if (RATE_LIMIT_CODES.has(errObj.code)) return true;
+  const text = `${errObj.message || ''} ${errObj.shortMessage || ''} ${
+    (errObj.info && errObj.info.responseStatus) || ''
+  }`;
+  return RATE_LIMIT_RE.test(text);
+}
+
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
 class RetryJsonRpcProvider extends JsonRpcProvider {
   async _send(payload) {
-    // Never retry a broadcast: a re-sent raw transaction that already landed
-    // comes back as "already known"/nonce-used and would look like a failure.
+    // A broadcast is never retried on a generic failure: a re-sent raw
+    // transaction that already landed comes back as "already known"/nonce-used
+    // and would look like a failure.
+    //
+    // The one exception is an explicit rate-limit refusal. That answer proves
+    // the provider dropped the request at the door and the sequencer never saw
+    // it, so re-sending cannot double-broadcast — and NOT re-sending silently
+    // costs a bundle wallet its buy, which is the failure this exists to stop.
+    // Backoff is short here: being a block late still beats not buying at all.
     const method = Array.isArray(payload) ? null : payload && payload.method;
-    const attempts = method === 'eth_sendRawTransaction' ? 1 : 4;
+    const broadcast = method === 'eth_sendRawTransaction';
+    const attempts = broadcast ? 3 : 4;
+    const retryable = broadcast ? isRateLimited : isTransient;
+    const backoff = (n) => (broadcast ? 40 * n : 300 * n);
 
     let lastErr;
     for (let attempt = 1; attempt <= attempts; attempt++) {
       try {
         const resp = await super._send(payload);
         const arr = Array.isArray(resp) ? resp : [resp];
-        if (arr.some((r) => r && r.error && isTransient(r.error)) && attempt < attempts) {
-          await sleep(300 * attempt);
+        if (arr.some((r) => r && r.error && retryable(r.error)) && attempt < attempts) {
+          await sleep(backoff(attempt));
           continue;
         }
         return resp;
       } catch (err) {
         lastErr = err;
-        if (attempt < attempts) {
-          await sleep(300 * attempt);
+        // A thrown error on a read is retried as it always was (a dropped
+        // socket carries no error code to match on). A broadcast is retried
+        // only when the throw itself says "rate limited".
+        const retryThrown = broadcast ? isRateLimited(err) : true;
+        if (attempt < attempts && retryThrown) {
+          await sleep(backoff(attempt));
           continue;
         }
         throw err;
@@ -92,4 +126,4 @@ async function warmPool(count, rpc = provider) {
   );
 }
 
-module.exports = { provider, RetryJsonRpcProvider, warmPool, keepAlive };
+module.exports = { provider, RetryJsonRpcProvider, warmPool, keepAlive, isRateLimited, isTransient };

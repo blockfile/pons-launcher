@@ -7,8 +7,16 @@ const { fire } = require('./fire');
 
 function fakeProvider({ failOn = [], blockOf = () => 10 } = {}) {
   const order = [];
+  const warmed = [];
   return {
     order,
+    // The real warmPool opens sockets with a raw send; without this the tests
+    // would silently exercise its failure path instead of the real one.
+    warmed,
+    async send(method) {
+      warmed.push(method);
+      return '0x1';
+    },
     async broadcastTransaction(raw) {
       order.push(raw);
       if (failOn.includes(raw)) throw new Error(`rejected ${raw}`);
@@ -77,6 +85,8 @@ test('a dry run does not open sockets it will never use', async () => {
 test('broadcasts the launch before any buy', async () => {
   const rpc = fakeProvider();
   await fire(plan, { provider: rpc, dryRun: false });
+  // The default warm-up ran for real against the fake: one socket per buy.
+  assert.equal(rpc.warmed.length, plan.buys.length);
   assert.equal(rpc.order[0], 'LAUNCH', 'the launch must go out first');
   assert.deepEqual(rpc.order.slice(1).sort(), ['BUY_A', 'BUY_B']);
 });
