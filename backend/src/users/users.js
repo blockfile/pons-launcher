@@ -16,6 +16,11 @@ const VERSION = 1;
 // The id becomes part of a filename. Anything outside this alphabet — a slash,
 // a dot, a null — must never reach the filesystem.
 const ID = /^[a-z0-9][a-z0-9-]{0,31}$/;
+// Windows reserves these as device names regardless of extension. Not
+// currently reachable through Task 3's `wallets.<id>.keystore.json` template
+// (the id is never the leading dot-segment), but the guarantee should not
+// depend on a template that lives in a different file.
+const RESERVED = /^(con|prn|aux|nul|com[1-9]|lpt[1-9])$/;
 
 let cache = null;
 
@@ -30,6 +35,7 @@ function slug(name) {
     .replace(/\s+/g, '-')
     .replace(/^-+|-+$/g, '');
   if (!ID.test(s)) throw new Error(`invalid name "${name}" — use letters, numbers and dashes`);
+  if (RESERVED.test(s)) throw new Error(`invalid name "${name}" — reserved`);
   return s;
 }
 
@@ -91,9 +97,15 @@ function remove(name) {
   return { removed: id };
 }
 
-/** Resolve a presented key to a user. Constant work, no early return on length. */
+/**
+ * Resolve a presented key to a user. Timing is not a concern here: the
+ * compared value is a SHA-256 of a 256-bit random key, so there is nothing
+ * an attacker could learn from how long the lookup takes.
+ */
 function findByKey(key) {
-  if (!key) return null;
+  // Express turns ?key=a&key=b into an array, so this is reachable from a
+  // request. An identity check must never coerce its way to a match.
+  if (typeof key !== 'string' || !key) return null;
   const h = hash(key);
   const found = load().users.find((u) => u.keyHash === h);
   return found ? publicView(found) : null;

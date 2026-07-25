@@ -23,6 +23,8 @@ test('slug makes a filename-safe id and refuses anything else', () => {
   assert.throws(() => users.slug('../../etc/passwd'), /invalid name/);
   assert.throws(() => users.slug(''), /invalid name/);
   assert.throws(() => users.slug('!!!'), /invalid name/);
+  // Windows reserves these regardless of extension.
+  assert.throws(() => users.slug('CON'), /invalid name/);
 });
 
 test('create returns a key once and stores only its hash', () => {
@@ -45,6 +47,13 @@ test('findByKey resolves the right user and rejects anything else', () => {
   assert.equal(users.findByKey('nope'), null);
   assert.equal(users.findByKey(''), null);
   assert.equal(users.findByKey(undefined), null);
+
+  // Express turns ?key=a&key=b into an array — a non-string must never
+  // authenticate, even one carrying the real key.
+  assert.equal(users.findByKey([key]), null);
+  assert.equal(users.findByKey({ toString: () => key }), null);
+  assert.equal(users.findByKey(12345), null);
+  assert.equal(users.findByKey(null), null);
 });
 
 test('list exposes no key material', () => {
