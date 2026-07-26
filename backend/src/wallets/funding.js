@@ -14,8 +14,26 @@ const { erc20, readTokenBalance } = require('../evm/erc20');
 const { rpcMessage } = require('../evm/errors');
 const keystore = require('./keystore');
 
-const TRANSFER_GAS = 21000n;
+// A plain transfer costs 21,195 gas on this chain, not the 21,000 every EVM
+// tutorial assumes. Hardcoding the textbook number had the node reject every
+// sweep with "intrinsic gas too low" — by 195 gas. So ask the chain, and keep
+// this only as the floor for when estimation is unavailable.
+const TRANSFER_GAS = 30000n;
 const TOKEN_TRANSFER_GAS = 120000n;
+
+/**
+ * What a native transfer really costs here, with headroom. Never throws: a
+ * failed estimate falls back to the floor above rather than stopping a sweep.
+ */
+async function transferGas(from, to) {
+  try {
+    const est = await provider.estimateGas({ from, to, value: 1n });
+    const withHeadroom = (est * 12n) / 10n;
+    return withHeadroom > TRANSFER_GAS ? withHeadroom : TRANSFER_GAS;
+  } catch (_err) {
+    return TRANSFER_GAS;
+  }
+}
 
 // Fee headroom. Quoting the base fee exactly gets the transaction rejected the
 // moment it ticks up between the quote and the broadcast — observed on a sweep
@@ -50,11 +68,14 @@ async function disperse(targets, { keystore: ks = keystore } = {}) {
     value: parseEther(String(t.amountEth)),
   }));
 
+  if (!planned.length) throw new Error('targets[] is required');
   const missing = planned.find((p) => !p.address);
   if (missing) throw new Error(`no wallet ${missing.walletId}`);
 
   const total = planned.reduce((sum, p) => sum + p.value, 0n);
-  const cost = gasCost(fees, TRANSFER_GAS) * BigInt(planned.length);
+  // Every transfer in the batch is the same shape, so one estimate covers all.
+  const perTransferGas = await transferGas(dev.address, planned[0].address);
+  const cost = gasCost(fees, perTransferGas) * BigInt(planned.length);
   const balance = await provider.getBalance(dev.address);
   if (balance < total + cost) {
     throw new Error(
@@ -80,7 +101,7 @@ async function disperse(targets, { keystore: ks = keystore } = {}) {
           to: p.address,
           value: p.value,
           nonce: nonce++,
-          gasLimit: TRANSFER_GAS,
+          gasLimit: perTransferGas,
           ...fees,
         });
         return { walletId: p.walletId, address: p.address, amountEth: formatEther(p.value), hash: tx.hash };
@@ -125,7 +146,8 @@ async function sweep({ includeTokens = false, tokenAddress = null } = {}, { keys
       }
 
       const balance = await provider.getBalance(w.address);
-      const reserve = gasCost(fees, TRANSFER_GAS);
+      const sweepGas = await transferGas(w.address, dev.address);
+      const reserve = gasCost(fees, sweepGas);
       const value = balance - reserve;
       if (value <= 0n) {
         entry.skipped = `balance ${formatEther(balance)} ETH does not cover the sweep's own gas`;
@@ -139,7 +161,7 @@ async function sweep({ includeTokens = false, tokenAddress = null } = {}, { keys
         const tx = await signer.sendTransaction({
           to: dev.address,
           value,
-          gasLimit: TRANSFER_GAS,
+          gasLimit: sweepGas,
           ...fees,
         });
         entry.eth = { amountEth: formatEther(value), hash: tx.hash };
