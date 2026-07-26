@@ -17,6 +17,14 @@ const keystore = require('./keystore');
 const TRANSFER_GAS = 21000n;
 const TOKEN_TRANSFER_GAS = 120000n;
 
+// Fee headroom. Quoting the base fee exactly gets the transaction rejected the
+// moment it ticks up between the quote and the broadcast — observed on a sweep
+// where every transfer failed against a base fee 0.18% higher than quoted. The
+// cost of the headroom is a fraction of a cent; the cost of a rejection is the
+// whole operation.
+const DISPERSE_FEE_BUMP_PCT = 25;
+const SWEEP_FEE_BUMP_PCT = 25;
+
 async function balances({ keystore: ks = keystore } = {}) {
   const wallets = ks.list();
   const out = [];
@@ -34,7 +42,7 @@ async function balances({ keystore: ks = keystore } = {}) {
 async function disperse(targets, { keystore: ks = keystore } = {}) {
   const dev = ks.devWallet();
   const signer = ks.signer(dev.id, provider);
-  const fees = await getFees(10);
+  const fees = await getFees(DISPERSE_FEE_BUMP_PCT);
 
   const planned = targets.map((t) => ({
     walletId: t.walletId,
@@ -93,7 +101,7 @@ async function disperse(targets, { keystore: ks = keystore } = {}) {
 async function sweep({ includeTokens = false, tokenAddress = null } = {}, { keystore: ks = keystore } = {}) {
   const dev = ks.devWallet();
   const wallets = ks.bundleWallets();
-  const fees = await getFees(0);
+  const fees = await getFees(SWEEP_FEE_BUMP_PCT);
   const results = [];
 
   for (const w of wallets) {
