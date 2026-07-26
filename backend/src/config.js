@@ -44,7 +44,11 @@ const config = {
   // wait for block.number to tick past the launch, then fire instantly.
   waitForLaunchBlock: bool(process.env.WAIT_FOR_LAUNCH_BLOCK, true),
   // How often to ask whether it has ticked, and how long to keep asking.
-  launchBlockPollMs: num(process.env.LAUNCH_BLOCK_POLL_MS, 200),
+  // 50ms against a 6ms read is ~320 sequential reads across a 16s block —
+  // comfortably inside the rate limits, and it caps how late the bundle can
+  // be to the tick. A competitor spamming a buy every block detects the tick
+  // instantly, so this is the number that decides whether they are ahead.
+  launchBlockPollMs: num(process.env.LAUNCH_BLOCK_POLL_MS, 50),
   launchBlockWaitMs: num(process.env.LAUNCH_BLOCK_WAIT_MS, 90000),
 
   keystorePassphrase: process.env.KEYSTORE_PASSPHRASE || null,

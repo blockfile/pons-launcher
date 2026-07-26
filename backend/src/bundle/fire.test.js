@@ -101,6 +101,23 @@ test('a bundle is never fired in the launch block', async () => {
   }
 });
 
+test('records when each buy was accepted, so a spread can be attributed', async () => {
+  const rpc = fakeProvider();
+  const res = await fire(plan, {
+    provider: rpc,
+    dryRun: false,
+    waitForLaunchBlock: false,
+    warmPool: async () => {},
+  });
+
+  // Without this there is no way to tell a slow burst from slow inclusion.
+  for (const b of res.buys) {
+    assert.equal(typeof b.sentMs, 'number', `${b.address} should record when it was sent`);
+    assert.ok(b.sentMs >= 0);
+  }
+  assert.equal(typeof res.burstMs, 'number');
+});
+
 test('an unreadable block.number does not stop the launch', async () => {
   const rpc = fakeProvider();
   const res = await fire(plan, {

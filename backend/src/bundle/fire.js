@@ -124,20 +124,46 @@ async function fire(plan, deps = {}) {
   }
 
   // 4. Every buy at once, over sockets that are already open.
+  //
+  // Each buy records when the RPC accepted it, measured from the instant the
+  // burst began. On a real launch the bundle spread across three RPC blocks —
+  // wider than the polling error — and without this there is no way to tell
+  // whether that spread is ours (the burst) or the sequencer's (inclusion).
+  const burstAt = Date.now();
+  const sentMs = new Array(plan.buys.length).fill(null);
   const broadcasts = await Promise.allSettled(
-    plan.buys.map((b) => rpc.broadcastTransaction(b.raw))
+    plan.buys.map((b, i) =>
+      rpc.broadcastTransaction(b.raw).then(
+        (r) => {
+          sentMs[i] = Date.now() - burstAt;
+          return r;
+        },
+        (err) => {
+          sentMs[i] = Date.now() - burstAt;
+          throw err;
+        }
+      )
+    )
   );
 
   const buys = plan.buys.map((b, i) => {
     const r = broadcasts[i];
     return r.status === 'fulfilled'
-      ? { walletId: b.walletId, address: b.address, amountEth: b.amountEth, hash: r.value.hash, status: 'sent' }
+      ? {
+          walletId: b.walletId,
+          address: b.address,
+          amountEth: b.amountEth,
+          hash: r.value.hash,
+          status: 'sent',
+          sentMs: sentMs[i],
+        }
       : {
           walletId: b.walletId,
           address: b.address,
           amountEth: b.amountEth,
           hash: null,
           status: 'rejected',
+          sentMs: sentMs[i],
           error: rpcMessage(r.reason),
         };
   });
@@ -172,6 +198,10 @@ async function fire(plan, deps = {}) {
     // null means the wait was skipped or block.number could not be read.
     waitedMs,
     launchBlockNumber: launchBlock === null ? null : launchBlock.toString(),
+    // How long the whole burst took to be accepted, end to end. If this is a
+    // few milliseconds and the buys still land in different blocks, the spread
+    // is the sequencer's and no client change will close it.
+    burstMs: sentMs.filter((m) => m !== null).reduce((a, b) => Math.max(a, b), 0),
     // How many buys landed in the same RPC block as each other — a measure of
     // how tightly the bundle held together, NOT of beating anyone: landing in
     // the launch block is a revert, not a win.
