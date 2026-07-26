@@ -42,6 +42,101 @@ const plan = {
   ],
 };
 
+// The chain's block.number advances about every 16 seconds, and a buy landing
+// in the launch block reverts with LaunchBlockBuyBlocked. These tests pin the
+// wait that keeps the bundle out of that block.
+function blockTicker(sequence) {
+  let i = 0;
+  return async () => sequence[Math.min(i++, sequence.length - 1)];
+}
+
+test('holds the buys until block.number passes the launch block', async () => {
+  const rpc = fakeProvider();
+  // Reads: the pre-launch read, then two polls still in the launch block,
+  // then the tick.
+  const res = await fire(plan, {
+    provider: rpc,
+    dryRun: false,
+    evmBlockNumber: blockTicker([100n, 100n, 100n, 101n]),
+    sleep: async () => {},
+    warmPool: async () => {},
+  });
+
+  assert.equal(rpc.order[0], 'LAUNCH', 'the launch still goes first');
+  assert.deepEqual(rpc.order.slice(1).sort(), ['BUY_A', 'BUY_B']);
+  assert.equal(res.launchBlockNumber, '100');
+  assert.notEqual(res.waitedMs, null, 'it must record that it waited');
+});
+
+test('a bundle is never fired in the launch block', async () => {
+  let current = 100n; // the block the launch executes in
+  const firedAt = [];
+
+  // Records block.number at the exact moment each buy is offered — the only
+  // assertion that actually proves the wait works.
+  const rpc = {
+    async broadcastTransaction(raw) {
+      if (raw.startsWith('BUY')) firedAt.push(current);
+      return { hash: `hash:${raw}`, async wait() { return { status: 1, blockNumber: 10 }; } };
+    },
+    async waitForTransaction() {
+      return { status: 1, blockNumber: 10 };
+    },
+  };
+
+  let polls = 0;
+  await fire(plan, {
+    provider: rpc,
+    dryRun: false,
+    evmBlockNumber: async () => current,
+    sleep: async () => {
+      if (++polls >= 2) current = 101n; // the chain ticks on the second poll
+    },
+    warmPool: async () => {},
+  });
+
+  assert.equal(firedAt.length, plan.buys.length, 'every buy should have been offered');
+  for (const at of firedAt) {
+    assert.equal(at, 101n, 'a buy offered at block 100 would revert LaunchBlockBuyBlocked');
+  }
+});
+
+test('an unreadable block.number does not stop the launch', async () => {
+  const rpc = fakeProvider();
+  const res = await fire(plan, {
+    provider: rpc,
+    dryRun: false,
+    evmBlockNumber: async () => {
+      throw new Error('multicall missing');
+    },
+    sleep: async () => {},
+    warmPool: async () => {},
+  });
+
+  // Better a bundle that fires late than a launch that never happens.
+  assert.equal(rpc.order[0], 'LAUNCH');
+  assert.equal(res.buys.filter((b) => b.status === 'confirmed').length, 2);
+  assert.equal(res.launchBlockNumber, null);
+  assert.equal(res.waitedMs, null);
+});
+
+test('the wait can be switched off', async () => {
+  const rpc = fakeProvider();
+  let read = false;
+  const res = await fire(plan, {
+    provider: rpc,
+    dryRun: false,
+    waitForLaunchBlock: false,
+    evmBlockNumber: async () => {
+      read = true;
+      return 100n;
+    },
+    warmPool: async () => {},
+  });
+  assert.equal(read, false, 'it should not even ask for the block number');
+  assert.equal(res.waitedMs, null);
+});
+
 test('warms the connection pool before anything is broadcast', async () => {
   const rpc = fakeProvider();
   let warmedWith = null;

@@ -169,7 +169,7 @@ async function prepare(input, { keystore: ks = keystore } = {}) {
     // no amount of speed escapes it. A buy over the cap does not clamp, it
     // REVERTS: gas spent, nothing bought. Warn while the operator can still
     // resize, rather than after the launch.
-    const cap = capCheck({ amountInWei: amountIn, launchConfig, token });
+    const cap = capCheck({ amountInWei: amountIn, launchConfig });
     if (cap.exceedsWallet || cap.exceedsTx) {
       const which = cap.exceedsWallet ? `max wallet ${launchConfig.maxWalletBps / 100}%` : `max buy ${launchConfig.maxTxBps / 100}%`;
       warnings.push(

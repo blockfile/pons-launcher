@@ -3,69 +3,65 @@
 const test = require('node:test');
 const assert = require('node:assert');
 
-const { priceFromTick, estimateTokensOut, capCheck } = require('./pricing');
+const { rateFromTick, estimateTokensOut, capCheck } = require('./pricing');
 
 const eth = (n) => BigInt(Math.round(n * 1e18));
 
-// Addresses chosen so the ordering is unambiguous in each direction.
-const LOW = '0x0000000000000000000000000000000000000001';
-const HIGH = '0xffffffffffffffffffffffffffffffffffffffff';
-
-test('tick 0 is a price of 1', () => {
-  assert.equal(priceFromTick(0), 1);
-});
-
-test('tick direction matches Uniswap (1.0001^tick)', () => {
-  assert.ok(priceFromTick(10000) > 2.7 && priceFromTick(10000) < 2.8);
-  assert.ok(priceFromTick(-10000) > 0.36 && priceFromTick(-10000) < 0.37);
-});
-
-test('token ordering flips the arithmetic', () => {
-  // At tick 0 the price is 1, so 1 ETH buys 1 token whichever side we are on.
-  const asToken0 = estimateTokensOut({ amountInWei: eth(1), initialTick: 0, token: LOW, pairToken: HIGH });
-  const asToken1 = estimateTokensOut({ amountInWei: eth(1), initialTick: 0, token: HIGH, pairToken: LOW });
-  assert.equal(asToken0, 1);
-  assert.equal(asToken1, 1);
-
-  // Away from tick 0 the two sides must move in OPPOSITE directions — this is
-  // the mistake that would silently misprice a whole bundle.
-  const t0 = estimateTokensOut({ amountInWei: eth(1), initialTick: 10000, token: LOW, pairToken: HIGH });
-  const t1 = estimateTokensOut({ amountInWei: eth(1), initialTick: 10000, token: HIGH, pairToken: LOW });
-  assert.ok(t0 < 1, 'as token0 a positive tick means fewer tokens per ETH');
-  assert.ok(t1 > 1, 'as token1 a positive tick means more tokens per ETH');
-});
-
-test('bad input yields 0 rather than NaN', () => {
-  assert.equal(estimateTokensOut({ amountInWei: 0n, initialTick: 0, token: LOW, pairToken: HIGH }), 0);
-  assert.equal(estimateTokensOut({ amountInWei: eth(1), initialTick: 9e9, token: LOW, pairToken: HIGH }), 0);
-});
-
-// A supply of 1,000,000 tokens priced at tick 0: 1 ETH buys 1 token = 1 bps.
-const cfg = {
-  supply: (1_000_000n * 10n ** 18n).toString(),
-  initialTick: 0,
-  pairToken: HIGH,
+// A real launch, used as the anchor for every number below:
+//   token        0x4aE28f7022F0db76F9B791ff3DEe6bE67B40137F
+//   initialTick  -204200
+//   supply       1,000,000,000
+//   observed     0.003 ETH bought 2,186,029 tokens (dev buy, on chain)
+const REAL = {
+  supply: (1_000_000_000n * 10n ** 18n).toString(),
+  initialTick: -204200,
   maxWalletBps: 500, // 5%
   maxTxBps: 550, // 5.5%
 };
+const OBSERVED_TOKENS = 2_186_029;
 
-test('a buy under the caps is not flagged', () => {
-  const r = capCheck({ amountInWei: eth(1000), launchConfig: cfg, token: LOW });
-  assert.equal(Math.round(r.estBps), 10); // 1000 of 1,000,000 tokens
+test('the opening rate matches what the chain actually paid out', () => {
+  const est = estimateTokensOut({ amountInWei: eth(0.003), initialTick: REAL.initialTick });
+  const ratio = est / OBSERVED_TOKENS;
+  // Within 10%: the estimate ignores the 1% pool fee and price impact, so it
+  // reads a little high. Being wrong by orders of magnitude — the bug this
+  // test exists to catch — is what must never happen again.
+  assert.ok(ratio > 0.9 && ratio < 1.1, `estimated ${est}, chain paid ${OBSERVED_TOKENS} (ratio ${ratio})`);
+});
+
+test('the sign of the tick does not flip the answer', () => {
+  // The tick's sign follows the pool's address ordering, not the economics.
+  assert.equal(rateFromTick(-204200), rateFromTick(204200));
+});
+
+test('a real bundle buy is correctly seen as far under the cap', () => {
+  // 0.00156489 ETH — the amount each bundle wallet used on that launch.
+  const r = capCheck({ amountInWei: eth(0.00156489), launchConfig: REAL });
+  assert.ok(r.estBps > 5 && r.estBps < 20, `expected ~11 bps, got ${r.estBps}`);
   assert.equal(r.exceedsWallet, false);
   assert.equal(r.exceedsTx, false);
 });
 
-test('a buy over the wallet cap is flagged before it can revert', () => {
-  // 60,000 tokens of 1,000,000 = 6%, past the 5% wallet cap but under 5.5% tx.
-  const r = capCheck({ amountInWei: eth(60000), launchConfig: cfg, token: LOW });
-  assert.equal(Math.round(r.estBps), 600);
+test('a buy that would really breach 5% is flagged', () => {
+  // 5% of a billion tokens is 50,000,000, which needs roughly 0.068 ETH here.
+  const r = capCheck({ amountInWei: eth(0.09), launchConfig: REAL });
+  assert.ok(r.estBps > 500, `expected over 500 bps, got ${r.estBps}`);
   assert.equal(r.exceedsWallet, true);
   assert.equal(r.exceedsTx, true);
 });
 
-test('a cap check on nonsense config degrades quietly', () => {
-  const r = capCheck({ amountInWei: eth(1), launchConfig: { ...cfg, supply: '0' }, token: LOW });
+test('the wallet cap bites before the transaction cap', () => {
+  // Between 5% and 5.5% only the wallet limit is breached.
+  const r = capCheck({ amountInWei: eth(0.0705), launchConfig: REAL });
+  assert.ok(r.estBps > 500 && r.estBps < 550, `expected 500-550 bps, got ${r.estBps}`);
+  assert.equal(r.exceedsWallet, true);
+  assert.equal(r.exceedsTx, false);
+});
+
+test('unusable input degrades to zero rather than NaN', () => {
+  assert.equal(estimateTokensOut({ amountInWei: 0n, initialTick: -204200 }), 0);
+  assert.equal(estimateTokensOut({ amountInWei: eth(1), initialTick: 9e9 }), 0);
+  const r = capCheck({ amountInWei: eth(1), launchConfig: { ...REAL, supply: '0' } });
   assert.equal(r.estBps, 0);
   assert.equal(r.exceedsWallet, false);
 });

@@ -34,6 +34,19 @@ const config = {
   // Normally read from the selected dex config; this only overrides it.
   swapRouterOverride: lowerOrNull(process.env.SWAP_ROUTER),
 
+  // Multicall3, at its standard address on this chain. Used only to read the
+  // EVM's own block.number, which advances every ~16s and is what every launch
+  // restriction is measured against — the RPC's block height is not.
+  multicallAddress:
+    lowerOrNull(process.env.MULTICALL_ADDRESS) || '0xca11bde05977b3631167028862be2a173976ca11',
+  // A bundle must NOT land in the launch block: the token blocks every
+  // pool-to-user buy there except the factory's own atomic one. So the buys
+  // wait for block.number to tick past the launch, then fire instantly.
+  waitForLaunchBlock: bool(process.env.WAIT_FOR_LAUNCH_BLOCK, true),
+  // How often to ask whether it has ticked, and how long to keep asking.
+  launchBlockPollMs: num(process.env.LAUNCH_BLOCK_POLL_MS, 200),
+  launchBlockWaitMs: num(process.env.LAUNCH_BLOCK_WAIT_MS, 90000),
+
   keystorePassphrase: process.env.KEYSTORE_PASSPHRASE || null,
   keystorePath:
     process.env.KEYSTORE_PATH || path.join(__dirname, '..', 'data', 'wallets.keystore.json'),
