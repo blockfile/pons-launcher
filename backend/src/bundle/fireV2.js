@@ -22,6 +22,7 @@ const { rpcMessage } = require('../evm/errors');
 const v2factory = require('../evm/v2/factory');
 const { buildBuyTx } = require('../evm/v2/curve');
 const { toSignable } = require('./prepareV2');
+const { waitForReceipt } = require('../evm/receipt');
 const keystore = require('../wallets/keystore');
 
 /**
@@ -33,6 +34,9 @@ async function fireV2(plan, deps = {}) {
   const ks = deps.keystore || keystore;
   const dryRun = deps.dryRun ?? config.dryRun;
   const parseLaunch = deps.parseLaunch || v2factory.parseLaunch;
+  // NOT launchResp.wait(): that polls at ethers' 4s default, which would leave
+  // the bundle forty blocks behind a curve anyone else can already buy.
+  const awaitReceipt = deps.waitForReceipt || waitForReceipt;
   const buildBuy = deps.buildBuyTx || buildBuyTx;
 
   if (dryRun) {
@@ -65,7 +69,7 @@ async function fireV2(plan, deps = {}) {
 
   // 2. The launch.
   const launchResp = await rpc.broadcastTransaction(plan.launch.raw);
-  const launchReceipt = await launchResp.wait();
+  const launchReceipt = await awaitReceipt(rpc, launchResp.hash);
 
   const launched = launchReceipt ? parseLaunch(launchReceipt) : null;
   const launchOk = launchReceipt && launchReceipt.status === 1;

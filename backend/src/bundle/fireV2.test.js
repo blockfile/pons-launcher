@@ -32,6 +32,12 @@ function fakeProvider({ launchStatus = 1, blockOf = () => 10 } = {}) {
     async send() {
       return '0x1';
     },
+    // fireV2 polls getTransactionReceipt directly rather than using ethers'
+    // tx.wait(), which would notice a receipt up to 4s late on a 100ms chain.
+    async getTransactionReceipt(hash) {
+      const raw = String(hash).replace('hash:', '');
+      return { status: raw === 'LAUNCH' ? launchStatus : 1, blockNumber: blockOf(raw), logs: [] };
+    },
     async broadcastTransaction(raw) {
       order.push(raw);
       return {

@@ -41,6 +41,12 @@ const config = {
   v2FactoryAddress:
     lowerOrNull(process.env.PONS_V2_FACTORY) || '0x7e1eabd52ae29598e6483f72dcf1a70b14284db8',
 
+  // ethers' tx.wait() polls every 4s by default, which is forty blocks on this
+  // chain. v2 reads the curve address out of the launch receipt, so that delay
+  // would sit squarely in the critical path — poll for it directly instead.
+  receiptPollMs: num(process.env.RECEIPT_POLL_MS, 50),
+  receiptTimeoutMs: num(process.env.RECEIPT_TIMEOUT_MS, 120000),
+
   // Multicall3, at its standard address on this chain. Used only to read the
   // EVM's own block.number, which advances every ~16s and is what every launch
   // restriction is measured against — the RPC's block height is not.
