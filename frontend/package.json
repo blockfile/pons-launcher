@@ -15,5 +15,9 @@
   "devDependencies": {
     "@vitejs/plugin-react": "^6.0.4",
     "vite": "^8.1.5"
+  },
+  "optionalDependencies": {
+    "@rolldown/binding-linux-x64-gnu": "1.1.5",
+    "@rolldown/binding-win32-x64-msvc": "1.1.5"
   }
 }
