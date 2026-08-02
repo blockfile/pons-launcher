@@ -11,6 +11,11 @@
 // through a multisend cost 68,847 gas against 63,585 for three plain transfers,
 // because the contract call pays its own 21k base cost on top of each internal
 // transfer. shouldBatch() encodes that threshold so callers stop guessing.
+//
+// Several disperser addresses may be configured, in which case a run is split
+// across them. Three contracts turn twenty wallets into three transactions
+// instead of one: still far below the concurrency that caused trouble, and a
+// batch that reverts takes down only its own share rather than the whole run.
 
 const { Contract, getAddress } = require('ethers');
 const config = require('../config');
@@ -25,22 +30,54 @@ const DISPERSE_ABI = [
 // Below this, individual transfers cost less gas than one batched call.
 const BATCH_THRESHOLD = 5;
 
-function disperser(runner = provider) {
-  if (!config.disperserAddress) throw new Error('DISPERSER_ADDRESS is not set');
-  return new Contract(config.disperserAddress, DISPERSE_ABI, runner);
+/** Every configured disperser, in order. Empty when none is set. */
+function addresses() {
+  return config.disperserAddresses.map((a) => getAddress(a));
+}
+
+function disperser(address, runner = provider) {
+  return new Contract(getAddress(address), DISPERSE_ABI, runner);
 }
 
 /** Whether batching actually wins for this many recipients. */
 function shouldBatch(count) {
-  return Boolean(config.disperserAddress) && count >= BATCH_THRESHOLD;
+  return addresses().length > 0 && count >= BATCH_THRESHOLD;
 }
 
 /**
- * One unsigned transaction paying every target.
+ * Deal the recipients across the configured contracts.
+ *
+ * Contiguous chunks rather than round-robin: each contract's transaction then
+ * covers a block of the list, which is far easier to reconcile when one batch
+ * fails and you need to know exactly who missed out.
+ *
+ * A chunk is never smaller than one recipient, so more contracts than
+ * recipients simply leaves the extra contracts unused.
+ *
+ * @param {Array} targets
+ * @param {string[]} [into] defaults to every configured disperser
+ * @returns {Array<{disperser: string, targets: Array}>}
+ */
+function splitAcross(targets, into = addresses()) {
+  if (!into.length) throw new Error('no disperser configured');
+  const usable = Math.min(into.length, targets.length);
+  const perChunk = Math.ceil(targets.length / usable);
+
+  const chunks = [];
+  for (let i = 0; i < usable; i++) {
+    const slice = targets.slice(i * perChunk, (i + 1) * perChunk);
+    if (slice.length) chunks.push({ disperser: into[i], targets: slice });
+  }
+  return chunks;
+}
+
+/**
+ * One unsigned transaction paying every target through `address`.
  * @param {Array<{address: string, value: bigint}>} targets
  */
-async function buildDisperseTx(targets) {
+async function buildDisperseTx(targets, address = addresses()[0]) {
   if (!targets.length) throw new Error('nothing to disperse');
+  if (!address) throw new Error('no disperser configured');
 
   const to = targets.map((t) => getAddress(t.address));
   const amounts = targets.map((t) => t.value);
@@ -49,11 +86,19 @@ async function buildDisperseTx(targets) {
   // Every amount identical is the usual case when funding a bundle, and the
   // equal variant sends a fraction of the calldata.
   const allEqual = amounts.every((v) => v === amounts[0]);
-  const d = disperser();
+  const d = disperser(address);
 
   return allEqual
     ? d.disperseEqual.populateTransaction(to, amounts[0], { value: total })
     : d.disperse.populateTransaction(to, amounts, { value: total });
 }
 
-module.exports = { DISPERSE_ABI, BATCH_THRESHOLD, disperser, shouldBatch, buildDisperseTx };
+module.exports = {
+  DISPERSE_ABI,
+  BATCH_THRESHOLD,
+  addresses,
+  disperser,
+  shouldBatch,
+  splitAcross,
+  buildDisperseTx,
+};

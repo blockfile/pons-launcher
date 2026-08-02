@@ -46,7 +46,14 @@ const config = {
   // broadcasts — the pattern that tripped the provider's rate limiter and
   // failed a whole sweep. Below five, individual sends are cheaper and are
   // used regardless.
-  disperserAddress: lowerOrNull(process.env.DISPERSER_ADDRESS),
+  // One address, or several comma-separated. With several, a funding run is
+  // split across them — so twenty wallets go out as three transactions rather
+  // than one, which also isolates failures: a batch that reverts takes only its
+  // own share down.
+  disperserAddresses: (process.env.DISPERSER_ADDRESSES || process.env.DISPERSER_ADDRESS || '')
+    .split(',')
+    .map((a) => a.trim().toLowerCase())
+    .filter(Boolean),
 
   // Optional PonsV2BundleHelper (contracts/PonsV2BundleHelper.sol). When set,
   // v2 buys are pre-signed against an epoch instead of waiting for the launch

@@ -3,9 +3,12 @@
 const test = require('node:test');
 const assert = require('node:assert');
 
-process.env.DISPERSER_ADDRESS = '0x1234567890123456789012345678901234567890';
+const A = '0x1111111111111111111111111111111111111111';
+const B = '0x2222222222222222222222222222222222222222';
+const C = '0x3333333333333333333333333333333333333333';
+process.env.DISPERSER_ADDRESSES = [A, B, C].join(',');
 
-const { shouldBatch, buildDisperseTx, BATCH_THRESHOLD } = require('./disperse');
+const { shouldBatch, buildDisperseTx, splitAcross, BATCH_THRESHOLD } = require('./disperse');
 const { Interface, parseEther } = require('ethers');
 const { DISPERSE_ABI } = require('./disperse');
 
@@ -53,4 +56,44 @@ test('mixed amounts use the per-recipient variant', async () => {
 
 test('an empty batch is refused rather than sent', async () => {
   await assert.rejects(() => buildDisperseTx([]), /nothing to disperse/);
+});
+
+
+// ── splitting across several contracts ────────────────────────────────────
+
+test('twenty wallets split evenly across three contracts', () => {
+  const targets = Array.from({ length: 20 }, (_, i) => ({ address: addr((i % 9) + 1), value: 1n }));
+  const chunks = splitAcross(targets);
+
+  assert.equal(chunks.length, 3, 'one transaction per contract');
+  assert.deepEqual(chunks.map((c) => c.targets.length), [7, 7, 6]);
+  // Every recipient must appear exactly once — a split that drops or duplicates
+  // one would under- or double-fund a wallet.
+  assert.equal(chunks.reduce((n, c) => n + c.targets.length, 0), 20);
+  assert.deepEqual(chunks.map((c) => c.disperser), [A, B, C]);
+});
+
+test('chunks are contiguous, so a failed batch names exactly who missed out', () => {
+  const targets = Array.from({ length: 9 }, (_, i) => ({ address: addr(i + 1), value: 1n }));
+  const chunks = splitAcross(targets);
+  assert.deepEqual(chunks.map((c) => c.targets.map((t) => t.address)), [
+    [addr(1), addr(2), addr(3)],
+    [addr(4), addr(5), addr(6)],
+    [addr(7), addr(8), addr(9)],
+  ]);
+});
+
+test('more contracts than recipients leaves the extras unused', () => {
+  const chunks = splitAcross([{ address: addr(1), value: 1n }, { address: addr(2), value: 1n }]);
+  assert.equal(chunks.length, 2);
+  assert.equal(chunks.reduce((n, c) => n + c.targets.length, 0), 2);
+});
+
+test('each chunk builds against its own contract', async () => {
+  const targets = Array.from({ length: 6 }, (_, i) => ({ address: addr(i + 1), value: parseEther('0.01') }));
+  const chunks = splitAcross(targets);
+  for (const chunk of chunks) {
+    const tx = await buildDisperseTx(chunk.targets, chunk.disperser);
+    assert.equal(tx.to.toLowerCase(), chunk.disperser.toLowerCase());
+  }
 });
