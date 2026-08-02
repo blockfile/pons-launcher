@@ -12,7 +12,7 @@ import { Busy } from './Section.jsx';
  * There is no restart step. The backend reads this list per funding run, so a
  * contract deployed here is in use on the very next Fund.
  */
-export default function DispersersPanel({ explorer, report }) {
+export default function DispersersPanel({ explorer, apiKey, report }) {
   const [state, setState] = useState(null);
   const [count, setCount] = useState(3);
   const [busy, setBusy] = useState('');
@@ -27,9 +27,14 @@ export default function DispersersPanel({ explorer, report }) {
     }
   }
 
+  // Re-read when the key changes, not just on mount. The key decides whether
+  // this route may be read at all, and the panel mounts before it is pasted —
+  // loading once left it stuck on "invalid or missing API key" for the whole
+  // session. Debounced to match App, which fires on every keystroke of a paste.
   useEffect(() => {
-    load();
-  }, []);
+    const t = setTimeout(load, apiKey ? 400 : 0);
+    return () => clearTimeout(t);
+  }, [apiKey]);
 
   async function act(name, fn) {
     setBusy(name);
@@ -46,7 +51,9 @@ export default function DispersersPanel({ explorer, report }) {
     }
   }
 
-  if (error) return <p className="hint">dispersers unavailable — {error}</p>;
+  // Before a key is entered the header already says so; repeating it here
+  // would just be noise next to every other panel doing the same.
+  if (error) return apiKey ? <p className="hint">dispersers unavailable — {error}</p> : null;
   if (!state) return null;
 
   const { dispersers, addresses, usingFallback, batchThreshold, quote } = state;

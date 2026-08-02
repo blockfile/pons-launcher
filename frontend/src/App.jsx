@@ -110,7 +110,7 @@ export default function App() {
           report={report}
         />
         <FundPanel wallets={wallets} rows={rows} reload={loadWallets} report={report} />
-        <DispersersPanel explorer={health?.explorer || ''} report={report} />
+        <DispersersPanel explorer={health?.explorer || ''} apiKey={key} report={report} />
         <LaunchForm
           configs={configs}
           wallets={wallets}
