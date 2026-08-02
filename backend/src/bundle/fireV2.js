@@ -69,6 +69,15 @@ async function fireV2(plan, deps = {}) {
 
   // 2. The launch.
   const launchResp = await rpc.broadcastTransaction(plan.launch.raw);
+
+  // Helper mode: the buys were already signed against an epoch, so they go out
+  // immediately without waiting to learn any address. An early arrival reverts
+  // on NotArmed rather than paying ETH into a codeless address, which is what
+  // makes this safe here and unsafe without the helper.
+  if (plan.mode === 'helper') {
+    return firePresigned({ plan, rpc, launchResp, awaitReceipt });
+  }
+
   const launchReceipt = await awaitReceipt(rpc, launchResp.hash);
 
   const launched = launchReceipt ? parseLaunch(launchReceipt) : null;
@@ -195,6 +204,76 @@ async function fireV2(plan, deps = {}) {
     ? buys.filter((b) => b.block === launchReceipt.blockNumber).length
     : 0;
   return result;
+}
+
+/**
+ * The helper path: buys are pre-signed, so this is v1's optimistic firing —
+ * broadcast everything, then collect outcomes.
+ */
+async function firePresigned({ plan, rpc, launchResp, awaitReceipt }) {
+  const burstAt = Date.now();
+  const sentMs = new Array(plan.buys.length).fill(null);
+  const broadcasts = await Promise.allSettled(
+    plan.buys.map((b, i) =>
+      rpc.broadcastTransaction(b.raw).then(
+        (r) => {
+          sentMs[i] = Date.now() - burstAt;
+          return r;
+        },
+        (err) => {
+          sentMs[i] = Date.now() - burstAt;
+          throw err;
+        }
+      )
+    )
+  );
+
+  const buys = plan.buys.map((b, i) => {
+    const r = broadcasts[i];
+    const base = { walletId: b.walletId, address: b.address, amountEth: b.amountEth, sentMs: sentMs[i] };
+    return r.status === 'fulfilled'
+      ? { ...base, hash: r.value.hash, status: 'sent' }
+      : { ...base, hash: null, status: 'rejected', error: rpcMessage(r.reason) };
+  });
+
+  const launchReceipt = await awaitReceipt(rpc, launchResp.hash);
+  const launched = launchReceipt ? v2factory.parseLaunch(launchReceipt) : null;
+
+  await Promise.allSettled(
+    buys.map(async (b) => {
+      if (!b.hash) return;
+      try {
+        const receipt = await awaitReceipt(rpc, b.hash);
+        b.status = receipt && receipt.status === 1 ? 'confirmed' : 'reverted';
+        b.block = receipt ? receipt.blockNumber : null;
+      } catch (err) {
+        b.status = 'unknown';
+        b.error = rpcMessage(err);
+      }
+    })
+  );
+
+  return {
+    simulated: false,
+    protocol: 'v2',
+    mode: 'helper',
+    epoch: plan.epoch,
+    token: launched ? launched.token : null,
+    curve: launched ? launched.curve : null,
+    launch: {
+      address: plan.launch.address,
+      hash: launchResp.hash,
+      block: launchReceipt ? launchReceipt.blockNumber : null,
+      status: launchReceipt && launchReceipt.status === 1 ? 'confirmed' : 'reverted',
+    },
+    buys,
+    burstMs: sentMs.filter((m) => m !== null).reduce((a, b) => Math.max(a, b), 0),
+    // In helper mode this is the number that matters: buys in the launch block
+    // are the whole point, and v2 has no rule against them.
+    sameBlock: launchReceipt
+      ? buys.filter((b) => b.block === launchReceipt.blockNumber).length
+      : 0,
+  };
 }
 
 module.exports = { fireV2 };

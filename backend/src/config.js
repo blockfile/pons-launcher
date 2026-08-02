@@ -41,6 +41,12 @@ const config = {
   v2FactoryAddress:
     lowerOrNull(process.env.PONS_V2_FACTORY) || '0x7e1eabd52ae29598e6483f72dcf1a70b14284db8',
 
+  // Optional PonsV2BundleHelper (contracts/PonsV2BundleHelper.sol). When set,
+  // v2 buys are pre-signed against an epoch instead of waiting for the launch
+  // receipt, which puts the bundle back in the launch block. The helper — not
+  // your dev wallet — is what the factory whitelist applies to.
+  v2HelperAddress: lowerOrNull(process.env.PONS_V2_HELPER),
+
   // ethers' tx.wait() polls every 4s by default, which is forty blocks on this
   // chain. v2 reads the curve address out of the launch receipt, so that delay
   // would sit squarely in the critical path — poll for it directly instead.

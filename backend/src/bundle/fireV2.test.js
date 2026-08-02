@@ -118,6 +118,69 @@ test('each buy keeps its own wallet and nonce', async () => {
   assert.deepEqual(buys, [`SIGNED:a:${CURVE}:1`, `SIGNED:b:${CURVE}:3`]);
 });
 
+// ── helper mode ───────────────────────────────────────────────────────────
+// With PonsV2BundleHelper deployed the buys are pre-signed against an epoch,
+// so they fire immediately and can land in the launch block.
+const helperPlan = {
+  ...plan,
+  mode: 'helper',
+  epoch: '7',
+  helper: '0x9999999999999999999999999999999999999999',
+  buys: plan.buys.map((b, i) => ({ ...b, raw: `PRESIGNED_BUY_${i}` })),
+};
+
+test('helper mode fires pre-signed buys without waiting to learn any address', async () => {
+  const rpc = fakeProvider();
+  const order = [];
+  const timed = {
+    ...rpc,
+    async broadcastTransaction(raw) {
+      order.push(raw);
+      return rpc.broadcastTransaction(raw);
+    },
+  };
+
+  const res = await fireV2(helperPlan, {
+    provider: timed,
+    ...deps({
+      // If this were consulted before the buys went out, the receipt would be
+      // back in the critical path — the very thing the helper removes.
+      waitForReceipt: async (_rpc, hash) => {
+        order.push(`RECEIPT:${hash}`);
+        return { status: 1, blockNumber: 10, logs: [] };
+      },
+    }),
+  });
+
+  assert.equal(order[0], 'LAUNCH');
+  assert.deepEqual(order.slice(1, 3).sort(), ['PRESIGNED_BUY_0', 'PRESIGNED_BUY_1']);
+  assert.ok(
+    order.indexOf('PRESIGNED_BUY_0') < order.findIndex((o) => o.startsWith('RECEIPT:')),
+    'buys must be broadcast BEFORE any receipt is awaited'
+  );
+  assert.equal(res.mode, 'helper');
+  assert.equal(res.epoch, '7');
+  assert.equal(res.buys.filter((b) => b.status === 'confirmed').length, 2);
+});
+
+test('helper mode never signs anything at fire time', async () => {
+  const rpc = fakeProvider();
+  let signed = false;
+  await fireV2(helperPlan, {
+    provider: rpc,
+    ...deps({
+      keystore: {
+        signer: () => {
+          signed = true;
+          return { async signTransaction() { return 'LATE_SIGN'; } };
+        },
+      },
+    }),
+  });
+  // Signing at fire time would mean the pre-signing never happened.
+  assert.equal(signed, false);
+});
+
 test('a dry run broadcasts nothing', async () => {
   const rpc = fakeProvider();
   const res = await fireV2(plan, { provider: rpc, ...deps({ dryRun: true }) });

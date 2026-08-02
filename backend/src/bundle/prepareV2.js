@@ -18,6 +18,7 @@ const config = require('../config');
 const { provider } = require('../evm/provider');
 const { getFees, gasCost } = require('../evm/fees');
 const v2 = require('../evm/v2/factory');
+const v2helper = require('../evm/v2/helper');
 const keystore = require('../wallets/keystore');
 const { spendableFromBalance } = require('../wallets/funding');
 
@@ -106,12 +107,15 @@ async function prepareV2(input, { keystore: ks = keystore } = {}) {
   const launchFee = BigInt(cfgs.launchFee);
 
   // There is no dev buy in v2 — value is the fee and nothing more.
-  const launchTx = await v2.buildLaunchTx({
-    params: fullParams,
-    launchConfigId,
-    pairToken,
-    value: launchFee,
-  });
+  //
+  // With a helper deployed the launch goes through arm() instead, so the helper
+  // records the curve the factory just created and the buys can reference it by
+  // epoch rather than by a guessed address.
+  const useHelper = Boolean(config.v2HelperAddress);
+  const epoch = useHelper ? (await v2helper.nextEpoch()).toString() : null;
+  const launchTx = useHelper
+    ? await v2helper.buildArmTx({ params: fullParams, launchConfigId, pairToken, value: launchFee })
+    : await v2.buildLaunchTx({ params: fullParams, launchConfigId, pairToken, value: launchFee });
 
   let launchGas = LAUNCH_GAS_FALLBACK;
   try {
@@ -174,17 +178,34 @@ async function prepareV2(input, { keystore: ks = keystore } = {}) {
       }
     }
 
-    buys.push({
+    const nonce = await provider.getTransactionCount(wallet.address, 'pending');
+    const entry = {
       walletId: wallet.id,
       address: wallet.address,
       amountEth: formatEther(amountIn),
       amountIn: amountIn.toString(),
-      nonce: await provider.getTransactionCount(wallet.address, 'pending'),
-    });
+      nonce,
+    };
+
+    // Helper mode signs now; without it the curve address does not exist yet
+    // and fireV2 has to wait for the receipt before it can sign anything.
+    if (useHelper) {
+      const buyTx = await v2helper.buildBuyTx({ epoch, amountIn, minTokensOut: 0n });
+      const signer = ks.signer(wallet.id, provider);
+      entry.raw = await signer.signTransaction(
+        toSignable(buyTx, { nonce, gasLimit: buyGas, fees, chainId })
+      );
+    }
+    buys.push(entry);
   }
 
   return {
     protocol: 'v2',
+    // 'helper' buys are pre-signed and fire immediately; 'reactive' buys are
+    // signed after the receipt names the curve.
+    mode: useHelper ? 'helper' : 'reactive',
+    helper: config.v2HelperAddress,
+    epoch,
     // No predicted token address: v2 cannot tell us one before the launch runs.
     token: null,
     curve: null,
