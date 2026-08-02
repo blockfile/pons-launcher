@@ -20,6 +20,7 @@ const { getFees, gasCost } = require('../src/evm/fees');
 const { waitForReceipt } = require('../src/evm/receipt');
 const { rpcMessage } = require('../src/evm/errors');
 const keystore = require('../src/wallets/keystore');
+const users = require('../src/users/users');
 
 const CONTRACTS_DIR = path.join(__dirname, '..', '..', 'contracts');
 
@@ -31,12 +32,13 @@ const OPTIMIZER = { enabled: true, runs: 200 };
 function usage() {
   console.log(`
 usage:
-  node scripts/deploy-contract.js <Name> [count] [--broadcast] [--key 0x…]
+  node scripts/deploy-contract.js <Name> [count] [--broadcast] [--user <name>]
 
   <Name>       contract file in contracts/, without .sol — e.g. Disperse
   [count]      how many copies to deploy (default 1)
   --broadcast  actually send. Without it, this compiles and prices only
   --key        deploy from this private key instead of the keystore dev wallet
+  --user       pay from this user's dev wallet, if user:add has been run
   --args       constructor arguments, comma-separated
 
 examples:
@@ -100,6 +102,32 @@ function constructorArgs(name, abi, raw) {
   );
 }
 
+/**
+ * The dev wallet that pays for the deployment, decrypted with
+ * KEYSTORE_PASSPHRASE.
+ *
+ * Without --user this is the 'default' keystore. On a deployment where
+ * `user:add --adopt` has run, that file no longer exists — the wallets were
+ * renamed under the user who adopted them — so say which user to pass rather
+ * than reporting a missing dev wallet on a machine that plainly has one.
+ */
+function devSigner(userId) {
+  const ks = userId ? keystore.keystoreFor(userId) : keystore;
+  try {
+    return ks.signer(ks.devWallet().id, provider);
+  } catch (err) {
+    // Only for a missing dev wallet. A wrong passphrase fails here too, and
+    // "pass --user" would send you looking in entirely the wrong place.
+    if (!/no dev wallet/.test(err.message)) throw err;
+
+    const names = users.enabled() ? users.list().map((u) => u.id) : [];
+    if (!userId && names.length) {
+      throw new Error(`${err.message}\nthese wallets belong to a user — pass --user ${names.join(' | ')}`);
+    }
+    throw err;
+  }
+}
+
 async function main() {
   const argv = process.argv.slice(2);
   const name = argv.find((a) => !a.startsWith('--') && !/^\d+$/.test(a));
@@ -119,9 +147,7 @@ async function main() {
   const args = constructorArgs(name, abi, flag('--args'));
   if (args.length) console.log(`args      ${args.join(', ')}`);
 
-  const deployer = rawKey
-    ? new Wallet(rawKey.trim(), provider)
-    : keystore.signer(keystore.devWallet().id, provider);
+  const deployer = rawKey ? new Wallet(rawKey.trim(), provider) : devSigner(flag('--user'));
   const from = await deployer.getAddress();
 
   const factory = new ContractFactory(abi, bytecode, deployer);
