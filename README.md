@@ -64,6 +64,12 @@ docs/       design spec
 
 npm workspaces, so one `npm install` at the root covers both.
 
+The frontend pins its native build binaries — rolldown and lightningcss — for
+both Linux and Windows in `optionalDependencies`. npm only records the platform
+it installed on, so a lockfile generated on one and installed on the other
+leaves the build with no native binding at all. Re-pin these to whatever the new
+rolldown and lightningcss want if vite is ever upgraded.
+
 In **development** the Vite server on `:5173` serves the console and proxies
 `/api` to the backend on `:3100`. In **production** `npm run build` emits
 `frontend/dist` and the backend serves it — one origin, one nginx block, no
