@@ -41,6 +41,13 @@ const config = {
   v2FactoryAddress:
     lowerOrNull(process.env.PONS_V2_FACTORY) || '0x7e1eabd52ae29598e6483f72dcf1a70b14284db8',
 
+  // Optional Disperse contract (contracts/Disperse.sol). When set, funding
+  // five or more wallets goes out as ONE transaction instead of N concurrent
+  // broadcasts — the pattern that tripped the provider's rate limiter and
+  // failed a whole sweep. Below five, individual sends are cheaper and are
+  // used regardless.
+  disperserAddress: lowerOrNull(process.env.DISPERSER_ADDRESS),
+
   // Optional PonsV2BundleHelper (contracts/PonsV2BundleHelper.sol). When set,
   // v2 buys are pre-signed against an epoch instead of waiting for the launch
   // receipt, which puts the bundle back in the launch block. The helper — not

@@ -12,6 +12,7 @@ const { provider } = require('../evm/provider');
 const { getFees, gasCost } = require('../evm/fees');
 const { erc20, readTokenBalance } = require('../evm/erc20');
 const { rpcMessage } = require('../evm/errors');
+const { shouldBatch, buildDisperseTx } = require('../evm/disperse');
 const keystore = require('./keystore');
 
 // A plain transfer costs 21,195 gas on this chain, not the 21,000 every EVM
@@ -91,6 +92,27 @@ async function disperse(targets, { keystore: ks = keystore } = {}) {
       hash: null,
       simulated: true,
     }));
+  }
+
+  // One transaction beats N concurrent broadcasts once there are enough
+  // recipients: cheaper, and it cannot be partially rate-limited.
+  if (shouldBatch(planned.length)) {
+    const tx = await buildDisperseTx(planned.map((p) => ({ address: p.address, value: p.value })));
+    try {
+      const sentTx = await signer.sendTransaction({ ...tx, ...fees });
+      return planned.map((p) => ({
+        walletId: p.walletId,
+        address: p.address,
+        amountEth: formatEther(p.value),
+        hash: sentTx.hash,
+        batched: true,
+      }));
+    } catch (err) {
+      // A batch that will not go out should not silently strand the funding;
+      // fall through to individual transfers, which is what used to happen.
+      const why = rpcMessage(err);
+      console.warn(`[pons-launcher] disperse batch failed (${why}) — falling back to individual transfers`);
+    }
   }
 
   let nonce = await provider.getTransactionCount(dev.address, 'pending');
