@@ -34,6 +34,13 @@ const config = {
   // Normally read from the selected dex config; this only overrides it.
   swapRouterOverride: lowerOrNull(process.env.SWAP_ROUTER),
 
+  // pons v2 — a different protocol, not a newer factory. Deployed and verified
+  // on chain, but launchEnabled was false and no pair token approved at the
+  // time of writing, so every launchToken call reverts. The v2 routes exist so
+  // the port is ready; they refuse loudly rather than burning a fee.
+  v2FactoryAddress:
+    lowerOrNull(process.env.PONS_V2_FACTORY) || '0x7e1eabd52ae29598e6483f72dcf1a70b14284db8',
+
   // Multicall3, at its standard address on this chain. Used only to read the
   // EVM's own block.number, which advances every ~16s and is what every launch
   // restriction is measured against — the RPC's block height is not.

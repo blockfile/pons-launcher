@@ -38,13 +38,20 @@ function build(userId) {
     const entries = load();
     const entry = {
       at: new Date().toISOString(),
+      protocol: plan.protocol || 'v1',
       dryRun: Boolean(plan.dryRun),
-      token: plan.token,
-      salt: plan.salt,
+      // v1 predicts the token before launching; v2 cannot, so the address only
+      // exists on the result. Take whichever the protocol actually produced.
+      token: plan.token ?? result.token ?? null,
+      curve: result.curve ?? null,
+      salt: plan.salt ?? null,
       params: plan.params,
       launchConfigId: plan.launchConfigId,
-      dexId: plan.dexId,
-      devBuyEth: plan.launch.devBuyEth,
+      dexId: plan.dexId ?? null,
+      pairToken: plan.pairToken ?? null,
+      // v2 has no dev buy at all — recording 0 would imply one was possible.
+      devBuyEth: plan.launch.devBuyEth ?? null,
+      creatorTaxBps: plan.creatorTaxBps ?? null,
       totalBuyEth: plan.totalBuyEth,
       launch: result.launch,
       buys: result.buys,
