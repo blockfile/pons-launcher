@@ -171,27 +171,48 @@ async function main() {
     throw new Error(`deployer has ${formatEther(balance)} ETH but needs ${formatEther(each * BigInt(count))}`);
   }
 
-  // Sequential, not concurrent. Each deployment's address depends on the
-  // deployer's nonce, so a reordering would still be safe — but a failure
-  // halfway through a concurrent batch leaves a nonce gap that stalls every
-  // later transaction from this wallet until it is filled.
+  // Nonces are assigned here rather than left to ethers, which asks the node
+  // for the pending count before every send. Deploying three in a row, the
+  // second send came back "nonce has already been used": the RPC is load
+  // balanced, and the backend that answered had not yet seen the first
+  // transaction. Counting locally from one reading cannot race that way.
+  //
+  // Sequential rather than concurrent: a gap left by a failure halfway through
+  // stalls every later transaction from this wallet until it is filled.
   const deployed = [];
-  for (let i = 0; i < count; i++) {
-    const tx = await deployer.sendTransaction({ ...deployTx, gasLimit: (gas * 12n) / 10n, ...fees });
-    const receipt = await waitForReceipt(provider, tx.hash, { timeoutMs: 120_000 });
+  let nonce = await provider.getTransactionCount(from, 'pending');
 
-    if (!receipt || receipt.status !== 1) throw new Error(`deployment ${i + 1} reverted (${tx.hash})`);
-    if (!receipt.contractAddress) throw new Error(`deployment ${i + 1} mined without a contract address`);
+  try {
+    for (let i = 0; i < count; i++) {
+      const tx = await deployer.sendTransaction({
+        ...deployTx,
+        nonce: nonce++,
+        gasLimit: (gas * 12n) / 10n,
+        ...fees,
+      });
+      const receipt = await waitForReceipt(provider, tx.hash, { timeoutMs: 120_000 });
 
-    // A receipt is not proof there is code at the address — confirm it, or a
-    // silently empty deployment would be written straight into the config.
-    const code = await provider.getCode(receipt.contractAddress);
-    if (code === '0x') throw new Error(`nothing deployed at ${receipt.contractAddress}`);
+      if (!receipt || receipt.status !== 1) throw new Error(`deployment ${i + 1} reverted (${tx.hash})`);
+      if (!receipt.contractAddress) throw new Error(`deployment ${i + 1} mined without a contract address`);
 
-    deployed.push(receipt.contractAddress);
-    console.log(`\n${i + 1}/${count}  ${receipt.contractAddress}`);
-    console.log(`       ${config.explorerUrl}/address/${receipt.contractAddress}`);
-    console.log(`       gas used ${receipt.gasUsed}`);
+      // A receipt is not proof there is code at the address — confirm it, or a
+      // silently empty deployment would be written straight into the config.
+      const code = await provider.getCode(receipt.contractAddress);
+      if (code === '0x') throw new Error(`nothing deployed at ${receipt.contractAddress}`);
+
+      deployed.push(receipt.contractAddress);
+      console.log(`\n${i + 1}/${count}  ${receipt.contractAddress}`);
+      console.log(`       ${config.explorerUrl}/address/${receipt.contractAddress}`);
+      console.log(`       gas used ${receipt.gasUsed}`);
+    }
+  } catch (err) {
+    // Whatever already landed is deployed and paid for. Report it before
+    // failing, or the run has to be started over from nothing.
+    if (deployed.length) {
+      console.error(`\n${deployed.length} of ${count} deployed before this failed:\n  ${deployed.join('\n  ')}`);
+      console.error(`re-run with ${count - deployed.length} to deploy the rest.`);
+    }
+    throw err;
   }
 
   const envVar = name === 'Disperse' ? 'DISPERSER_ADDRESSES' : 'PONS_V2_HELPER';
