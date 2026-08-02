@@ -4,6 +4,11 @@ const express = require('express');
 const config = require('../config');
 const { keystoreFor } = require('../wallets/keystore');
 const funding = require('../wallets/funding');
+const { dispersersFor } = require('../store/dispersers');
+const { BATCH_THRESHOLD } = require('../evm/disperse');
+const { estimate, deploy } = require('../evm/deploy');
+const { provider } = require('../evm/provider');
+const { formatEther } = require('ethers');
 const { requireApiKey } = require('../middleware/auth');
 
 const router = express.Router();
@@ -98,7 +103,7 @@ router.post('/fund', requireApiKey, async (req, res, next) => {
     const ks = keystoreFor(req.user.id);
     const { targets } = req.body || {};
     if (!Array.isArray(targets) || !targets.length) throw new Error('targets[] is required');
-    res.json(await funding.disperse(targets, { keystore: ks }));
+    res.json(await funding.disperse(targets, { keystore: ks, userId: req.user.id }));
   } catch (err) {
     next(err);
   }
@@ -110,6 +115,87 @@ router.post('/sweep', requireApiKey, async (req, res, next) => {
     const ks = keystoreFor(req.user.id);
     const { includeTokens = false, tokenAddress = null } = req.body || {};
     res.json(await funding.sweep({ includeTokens, tokenAddress }, { keystore: ks }));
+  } catch (err) {
+    next(err);
+  }
+});
+
+// ── disperser contracts ───────────────────────────────────────────────────
+// Deploying from the console rather than the shell, and recorded in a file
+// rather than .env: the process reads the list per funding run, so a new
+// contract is live immediately and nothing has to be restarted. See
+// src/store/dispersers.js for why that matters.
+
+// GET /api/dispersers — what this user funds through, and what it would cost
+// to deploy one more.
+router.get('/dispersers', async (req, res, next) => {
+  try {
+    const store = dispersersFor(req.user.id);
+    const out = {
+      dispersers: store.records(),
+      addresses: store.addresses(),
+      usingFallback: store.usingFallback(),
+      batchThreshold: BATCH_THRESHOLD,
+    };
+
+    // Best effort: the panel is still useful when the node is unreachable, and
+    // a failed price quote must not hide the list of contracts.
+    try {
+      const ks = keystoreFor(req.user.id);
+      const signer = ks.signer(ks.devWallet().id, provider);
+      const { each, from, balance } = await estimate('Disperse', 1, signer);
+      out.quote = {
+        deployer: from,
+        balanceEth: formatEther(balance),
+        costEachEth: formatEther(each),
+      };
+    } catch (err) {
+      out.quote = { error: err.message };
+    }
+
+    res.json(out);
+  } catch (err) {
+    next(err);
+  }
+});
+
+// POST /api/dispersers/deploy — deploy and record N new Disperse contracts.
+// Spends real ETH, so it takes the same explicit confirm as a key export.
+router.post('/dispersers/deploy', requireApiKey, async (req, res, next) => {
+  try {
+    const { count = 1, confirm } = req.body || {};
+    const n = Number(count);
+    if (!Number.isInteger(n) || n < 1 || n > 10) throw new Error('count must be 1-10');
+    if (confirm !== true) throw new Error('deploying spends ETH — requires { confirm: true }');
+    if (config.dryRun) throw new Error('DRY_RUN is on — nothing would be deployed');
+
+    const ks = keystoreFor(req.user.id);
+    const signer = ks.signer(ks.devWallet().id, provider);
+    const store = dispersersFor(req.user.id);
+
+    try {
+      const deployed = await deploy('Disperse', n, signer);
+      store.add(deployed);
+      console.warn(`[pons-launcher] ${req.user.id} deployed ${deployed.length} disperser(s)`);
+      res.json({ deployed, dispersers: store.records(), addresses: store.addresses() });
+    } catch (err) {
+      // Contracts that landed before the failure are paid for. Record them
+      // before reporting the error, or they are lost and paid for twice.
+      if (err.deployed?.length) store.add(err.deployed);
+      throw err;
+    }
+  } catch (err) {
+    next(err);
+  }
+});
+
+// DELETE /api/dispersers/:address — stop funding through one. The contract
+// stays on chain; nothing is destroyed and nothing is held in it.
+router.delete('/dispersers/:address', requireApiKey, (req, res, next) => {
+  try {
+    const store = dispersersFor(req.user.id);
+    store.remove(req.params.address);
+    res.json({ dispersers: store.records(), addresses: store.addresses() });
   } catch (err) {
     next(err);
   }

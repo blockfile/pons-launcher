@@ -12,7 +12,7 @@ const { provider } = require('../evm/provider');
 const { getFees, gasCost } = require('../evm/fees');
 const { erc20, readTokenBalance } = require('../evm/erc20');
 const { rpcMessage } = require('../evm/errors');
-const { shouldBatch, splitAcross, buildDisperseTx } = require('../evm/disperse');
+const { shouldBatch, splitAcross, buildDisperseTx, addresses } = require('../evm/disperse');
 const keystore = require('./keystore');
 
 // A plain transfer costs 21,195 gas on this chain, not the 21,000 every EVM
@@ -58,7 +58,7 @@ async function balances({ keystore: ks = keystore } = {}) {
  * Send native ETH from the dev wallet to bundle wallets.
  * @param {Array<{walletId:string, amountEth:string|number}>} targets
  */
-async function disperse(targets, { keystore: ks = keystore } = {}) {
+async function disperse(targets, { keystore: ks = keystore, userId = 'default' } = {}) {
   const dev = ks.devWallet();
   const signer = ks.signer(dev.id, provider);
   const fees = await getFees(DISPERSE_FEE_BUMP_PCT);
@@ -98,8 +98,8 @@ async function disperse(targets, { keystore: ks = keystore } = {}) {
   // recipients: cheaper, and they cannot be partially rate-limited. With
   // several dispersers configured the run is split across them, so one failing
   // batch costs only its own share.
-  if (shouldBatch(planned.length)) {
-    const chunks = splitAcross(planned.map((p) => ({ ...p, value: p.value })));
+  if (shouldBatch(planned.length, userId)) {
+    const chunks = splitAcross(planned.map((p) => ({ ...p, value: p.value })), addresses(userId));
     let batchNonce = await provider.getTransactionCount(dev.address, 'pending');
 
     const results = await Promise.all(

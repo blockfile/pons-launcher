@@ -18,7 +18,7 @@
 // batch that reverts takes down only its own share rather than the whole run.
 
 const { Contract, getAddress } = require('ethers');
-const config = require('../config');
+const { dispersersFor } = require('../store/dispersers');
 const { provider } = require('./provider');
 
 const DISPERSE_ABI = [
@@ -30,9 +30,12 @@ const DISPERSE_ABI = [
 // Below this, individual transfers cost less gas than one batched call.
 const BATCH_THRESHOLD = 5;
 
-/** Every configured disperser, in order. Empty when none is set. */
-function addresses() {
-  return config.disperserAddresses.map((a) => getAddress(a));
+/**
+ * Every disperser in force for a user, in order. Empty when none is set.
+ * Comes from the user's own list, or DISPERSER_ADDRESSES as the fallback.
+ */
+function addresses(userId = 'default') {
+  return dispersersFor(userId).addresses().map((a) => getAddress(a));
 }
 
 function disperser(address, runner = provider) {
@@ -40,8 +43,8 @@ function disperser(address, runner = provider) {
 }
 
 /** Whether batching actually wins for this many recipients. */
-function shouldBatch(count) {
-  return addresses().length > 0 && count >= BATCH_THRESHOLD;
+function shouldBatch(count, userId = 'default') {
+  return addresses(userId).length > 0 && count >= BATCH_THRESHOLD;
 }
 
 /**

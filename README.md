@@ -125,23 +125,31 @@ could never claim them.
 | `API_KEY` | *(none)* | Required on every mutating route |
 | `GAS_BUFFER_ETH` | `0.0004` | Left behind when a wallet buys with its entire balance |
 | `BUY_GAS_LIMIT` | `400000` | Bundle buys are signed before the pool exists, so they can't be estimated |
-| `DISPERSER_ADDRESSES` | *(none)* | One or more deployed `Disperse.sol`, comma-separated. Funding batches through them at five recipients or more |
+| `DISPERSER_ADDRESSES` | *(none)* | Fallback list of deployed `Disperse.sol`, comma-separated. Used only until a user deploys their own from the console |
 
 ### Dispersing through contracts
 
 Funding twenty wallets one transfer at a time is twenty concurrent broadcasts —
 the exact shape that tripped the provider's rate limiter and failed a whole
-sweep. Deploy [`contracts/Disperse.sol`](contracts/Disperse.sol) and set
-`DISPERSER_ADDRESSES`, and a funding run goes out as batched calls instead.
+sweep. [`contracts/Disperse.sol`](contracts/Disperse.sol) makes a funding run
+one batched call instead.
+
+Deploy them from the console: **Disperser contracts** under Fund shows the cost
+first, and the list it writes takes effect on the next funding run — there is
+nothing to restart. Each contract is about 0.000009 ETH.
+
+Contracts are per user, and each one is paid for by that user's own dev wallet.
+`DISPERSER_ADDRESSES` still works as a fallback for a deployment that has never
+opened the panel; once a user records contracts of their own, those win and the
+env value stops being read.
+
+The same job from the shell, for scripted setup or when the API is down:
 
     npm run deploy -- Disperse 3               # compiles and prices it
     npm run deploy -- Disperse 3 --broadcast   # …and deploys
 
-Nothing is sent without `--broadcast`. The three copies come out of the dev
-wallet's next three nonces, cost about 0.000009 ETH each, and the script prints
-the line to paste into `.env`:
-
-    DISPERSER_ADDRESSES=0xAAA…,0xBBB…,0xCCC…
+Nothing is sent without `--broadcast`, and what it deploys goes into the same
+list the console writes.
 
 Twenty wallets then become three transactions rather than one, in contiguous
 chunks of 7/7/6. Still far below the concurrency that caused trouble, and a

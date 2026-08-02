@@ -4,6 +4,7 @@ import Guide from './components/Guide.jsx';
 import Readiness from './components/Readiness.jsx';
 import WalletsPanel from './components/WalletsPanel.jsx';
 import FundPanel from './components/FundPanel.jsx';
+import DispersersPanel from './components/DispersersPanel.jsx';
 import LaunchForm from './components/LaunchForm.jsx';
 import ResultPanel from './components/ResultPanel.jsx';
 import HistoryPanel from './components/HistoryPanel.jsx';
@@ -109,6 +110,7 @@ export default function App() {
           report={report}
         />
         <FundPanel wallets={wallets} rows={rows} reload={loadWallets} report={report} />
+        <DispersersPanel explorer={health?.explorer || ''} report={report} />
         <LaunchForm
           configs={configs}
           wallets={wallets}

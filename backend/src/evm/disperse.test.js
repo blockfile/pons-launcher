@@ -3,6 +3,15 @@
 const test = require('node:test');
 const assert = require('node:assert');
 
+const fs = require('node:fs');
+const os = require('node:os');
+const path = require('node:path');
+
+// The disperser list lives beside the history file. Point both at a temp dir
+// so a real dispersers.json on the developer's machine cannot decide what
+// these assertions see.
+process.env.HISTORY_PATH = path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'pons-disperse-')), 'launches.json');
+
 const A = '0x1111111111111111111111111111111111111111';
 const B = '0x2222222222222222222222222222222222222222';
 const C = '0x3333333333333333333333333333333333333333';

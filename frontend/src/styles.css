@@ -680,3 +680,41 @@ pre {
     transition: none !important;
   }
 }
+
+/* ── disperser contracts ──────────────────────────────────────────────────
+   A disclosure rather than a numbered step: it is infrastructure you set up
+   once, not part of the launch sequence, and an unopened panel should not
+   suggest there is something left to do. */
+.disperse-panel {
+  background: var(--panel);
+  border: 1px solid var(--rule);
+  border-radius: 6px;
+  padding: 14px var(--pad);
+}
+.disperse-panel > summary {
+  cursor: pointer;
+  font: 600 12px/1.4 var(--mono);
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--dim);
+  list-style-position: outside;
+}
+.disperse-panel[open] > summary {
+  margin-bottom: 10px;
+  color: var(--ink);
+}
+.disperse-panel > summary .hint {
+  display: inline;
+  text-transform: none;
+  letter-spacing: 0;
+  font-weight: 400;
+}
+.disperser-list td {
+  font-family: var(--mono);
+  font-size: 12px;
+}
+.disperser-list td:last-child {
+  text-align: right;
+  width: 1%;
+  white-space: nowrap;
+}
