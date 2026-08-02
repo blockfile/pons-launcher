@@ -12,7 +12,8 @@
     "user:add": "node scripts/user.js add",
     "user:list": "node scripts/user.js list",
     "user:remove": "node scripts/user.js remove",
-    "v2:watch": "node scripts/v2-watch.js"
+    "v2:watch": "node scripts/v2-watch.js",
+    "deploy": "node scripts/deploy-contract.js"
   },
   "engines": {
     "node": ">=20"
@@ -21,5 +22,8 @@
     "dotenv": "^16.4.7",
     "ethers": "^6.13.5",
     "express": "^4.21.2"
+  },
+  "devDependencies": {
+    "solc": "^0.8.36"
   }
 }

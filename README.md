@@ -134,7 +134,12 @@ the exact shape that tripped the provider's rate limiter and failed a whole
 sweep. Deploy [`contracts/Disperse.sol`](contracts/Disperse.sol) and set
 `DISPERSER_ADDRESSES`, and a funding run goes out as batched calls instead.
 
-Setting several addresses splits each run across them:
+    npm run deploy -- Disperse 3               # compiles and prices it
+    npm run deploy -- Disperse 3 --broadcast   # …and deploys
+
+Nothing is sent without `--broadcast`. The three copies come out of the dev
+wallet's next three nonces, cost about 0.000009 ETH each, and the script prints
+the line to paste into `.env`:
 
     DISPERSER_ADDRESSES=0xAAA…,0xBBB…,0xCCC…
 
@@ -144,6 +149,11 @@ batch that reverts takes down only its own share — the rest are already mined,
 so the retry knows exactly who missed out. Below five recipients the batch is
 skipped entirely: measured on this chain, three recipients through a multisend
 cost 68,847 gas against 63,585 sent individually.
+
+The contract has no owner, so who deploys it grants no control over it — but the
+deployer is recorded on-chain forever, and every run through it is a public link
+from that address to the wallets it paid. Pass `--key 0x…` to deploy from
+somewhere other than the dev wallet.
 
 ## Multiple operators
 
