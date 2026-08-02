@@ -16,7 +16,8 @@
     "test": "npm test --workspace backend",
     "user:add": "npm run user:add --workspace backend --",
     "user:list": "npm run user:list --workspace backend",
-    "user:remove": "npm run user:remove --workspace backend --"
+    "user:remove": "npm run user:remove --workspace backend --",
+    "v2:watch": "npm run v2:watch --workspace backend --"
   },
   "engines": {
     "node": ">=20"

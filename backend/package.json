@@ -11,7 +11,8 @@
     "test": "node --test",
     "user:add": "node scripts/user.js add",
     "user:list": "node scripts/user.js list",
-    "user:remove": "node scripts/user.js remove"
+    "user:remove": "node scripts/user.js remove",
+    "v2:watch": "node scripts/v2-watch.js"
   },
   "engines": {
     "node": ">=20"
