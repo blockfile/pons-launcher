@@ -113,13 +113,11 @@ router.post('/v2/launch', requireApiKey, async (req, res, next) => {
     const ks = keystoreFor(req.user.id);
     const plan = await prepareV2(req.body || {}, { keystore: ks });
 
-    // Refuse rather than burn the fee. Every launchToken call on chain reverts
-    // while the factory is gated, and the caller has no way to see that from a
-    // failed transaction.
-    if (!plan.launchEnabled && !plan.whitelisted) {
-      throw new Error(
-        'pons v2 launching is disabled and this dev wallet is not whitelisted — the factory would revert'
-      );
+    // Refuse rather than burn the fee. canLaunch() is the factory's own gate;
+    // reading whitelistedLaunchers instead reports false for wallets that can
+    // launch perfectly well.
+    if (!plan.canLaunch) {
+      throw new Error('the pons v2 factory will not let this dev wallet launch — canLaunch() is false');
     }
     if (!plan.pairApproved) {
       throw new Error(`pons v2 has not approved ${plan.pairToken} as a pair token — the factory would revert`);

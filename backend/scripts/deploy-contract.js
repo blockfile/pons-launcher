@@ -1,11 +1,11 @@
 'use strict';
 
-// Deploy the contracts in contracts/ — Disperse and PonsV2BundleHelper.
+// Deploy the contracts in contracts/.
 //
 // The console's disperser panel does the same job for Disperse; this stays for
-// the helper, for scripted setup, and for the case where the API is down. Both
-// go through src/evm/deploy.js, so there is one definition of what gets
-// deployed and on what compiler settings.
+// scripted setup and for the case where the API is down. Both go through
+// src/evm/deploy.js, so there is one definition of what gets deployed and on
+// what compiler settings.
 //
 // Nothing is broadcast without --broadcast. The default run compiles, prices
 // the deployment and stops, because the failure mode of a deploy script that
@@ -36,18 +36,10 @@ usage:
 examples:
   node scripts/deploy-contract.js Disperse 3
   node scripts/deploy-contract.js Disperse 3 --broadcast
-  node scripts/deploy-contract.js PonsV2BundleHelper --broadcast
 `);
 }
 
-/**
- * Constructor arguments, from --args or from what the app already knows.
- *
- * PonsV2BundleHelper takes the v2 factory, and the config holds the verified
- * address the rest of the app talks to. Defaulting to it means the helper
- * cannot be deployed pointing at a different factory by accident — which would
- * arm launches the bundle then could not buy from.
- */
+/** Constructor arguments, from --args. */
 function constructorArgs(name, abi, raw) {
   const inputs = abi.find((f) => f.type === 'constructor')?.inputs ?? [];
   if (!inputs.length) return [];
@@ -60,7 +52,6 @@ function constructorArgs(name, abi, raw) {
     return given;
   }
 
-  if (name === 'PonsV2BundleHelper') return [config.v2FactoryAddress];
   throw new Error(
     `${name} needs ${inputs.length} constructor argument(s) — pass --args ${inputs.map((i) => i.name || i.type).join(',')}`
   );
@@ -147,8 +138,6 @@ async function main() {
   if (name === 'Disperse') {
     recordDispersers(deployed, userId);
     console.log('\nrecorded — funding runs use these on the next request, no restart needed.');
-  } else {
-    console.log(`\nadd to backend/.env:\n\nPONS_V2_HELPER=${deployed.map((d) => d.address).join(',')}\n`);
   }
 
   console.log(

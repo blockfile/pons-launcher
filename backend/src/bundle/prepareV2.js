@@ -1,24 +1,29 @@
 'use strict';
 
-// Builds a pons v2 launch. Deliberately does LESS than v1's prepare().
+// Builds a pons v2 launch, fully signed before anything is broadcast.
 //
-// v1 signed everything up front because predictTokenAddress told us the token's
-// address before it existed. v2 has no such function: the token and curve come
-// from plain CREATE, so their addresses depend on the deployer's nonce, which
-// moves whenever anyone else launches. A buy signed against a predicted address
-// would, if another launch slipped in first, spend real money buying a
-// stranger's token. That failure is worse than being a few hundred milliseconds
-// slow, so the buys are signed in fireV2() once the receipt names the curve.
+// This used to sign only the launch, because the curve address was unknowable
+// until the launch was mined. The live factory changed that: TokenParams takes
+// a `salt`, and PonsV2LaunchDeployer.predictLaunchAddresses returns the exact
+// token and curve that salt produces. So v2 now prepares the way v1 does —
+// every buy signed in advance, nothing left to compute at fire time.
 //
-// What this function still does: validate the gate, pin the economics, check
-// balances, and sign the launch itself.
+// Two safeguards around the prediction, because a buy sent to an address with
+// no contract SUCCEEDS on the EVM and silently keeps the money:
+//
+//   1. The prediction is cross-checked against a static call of the real
+//      launch. Two independent derivations must agree before anything is
+//      signed.
+//   2. The bundle wallets are declared in `snipeTaxExemptions`, so they are the
+//      only addresses that clear at the untaxed price during the opening
+//      window. Undeclared buyers pay a tax starting at 99%.
 
-const { parseEther, formatEther, getAddress } = require('ethers');
+const { parseEther, formatEther, getAddress, ZeroAddress } = require('ethers');
 const config = require('../config');
 const { provider } = require('../evm/provider');
 const { getFees, gasCost } = require('../evm/fees');
 const v2 = require('../evm/v2/factory');
-const v2helper = require('../evm/v2/helper');
+const { buildBuyTx } = require('../evm/v2/curve');
 const keystore = require('../wallets/keystore');
 const { spendableFromBalance } = require('../wallets/funding');
 
@@ -35,23 +40,22 @@ function toSignable(tx, { nonce, gasLimit, fees, chainId }) {
 
 /**
  * @param {object} input
- * @param {object} input.params v2 TokenParams minus expectedEconomics, which is
- *   fetched here: name, symbol, logo, description, socials, creatorFeeRecipient,
- *   creatorTaxBps, buybackEnabled
+ * @param {object} input.params v2 TokenParams minus salt/expectedEconomics
  * @param {number} input.launchConfigId
- * @param {string} input.pairToken the launch's currency; must be factory-approved
+ * @param {string} [input.pairToken] defaults to native ETH
+ * @param {string|number} [input.devBuyEth] bought atomically inside the launch
  * @param {Array<{walletId, mode, amountEth}>} input.wallets bundle buyers
- * @returns {Promise<object>} a plan whose launch is signed and whose buys are not
+ * @returns {Promise<object>} a plan in which EVERYTHING is signed
  */
 async function prepareV2(input, { keystore: ks = keystore } = {}) {
-  const { params, launchConfigId, pairToken, wallets = [] } = input;
+  const { params, launchConfigId, pairToken = ZeroAddress, wallets = [], devBuyEth = 0 } = input;
 
   if (!params || !params.name || !params.symbol) throw new Error('name and symbol are required');
   if (!params.logo) throw new Error('logo is required');
-  if (!pairToken) throw new Error('pairToken is required');
 
   const dev = ks.devWallet();
   const warnings = [];
+  const pair = getAddress(pairToken);
 
   // Resolve every referenced wallet through the CALLER's keystore before any
   // chain work, so a foreign wallet id fails as "no wallet" rather than being
@@ -61,9 +65,7 @@ async function prepareV2(input, { keystore: ks = keystore } = {}) {
     if (!known.has(w.walletId)) throw new Error(`no wallet ${w.walletId}`);
   }
 
-  // Cheap, free, and the difference between a clear message and a reverted
-  // transaction: every launchToken call on chain reverts today.
-  const gate = await v2.preflightGate({ launcher: dev.address, pairToken });
+  const gate = await v2.preflightGate({ launcher: dev.address, pairToken: pair });
   for (const problem of gate.problems) warnings.push(problem);
 
   const cfgs = await v2.getConfigs();
@@ -76,11 +78,6 @@ async function prepareV2(input, { keystore: ks = keystore } = {}) {
       `creatorTaxBps ${params.creatorTaxBps} exceeds the factory maximum of ${cfgs.maxCreatorTaxBps}`
     );
   }
-
-  // Pins the config's economics into the transaction. If the config is updated
-  // between building and mining, the launch reverts instead of quietly
-  // launching on different terms.
-  const expectedEconomics = await v2.previewEconomics({ launchConfigId, pairToken });
 
   const fullParams = {
     name: params.name.trim(),
@@ -99,23 +96,83 @@ async function prepareV2(input, { keystore: ks = keystore } = {}) {
       : getAddress(dev.address),
     creatorTaxBps: Number(params.creatorTaxBps || 0),
     buybackEnabled: Boolean(params.buybackEnabled),
-    expectedEconomics,
+    // Left at zero deliberately. The factory only enforces this commitment when
+    // it is non-zero, and pinning it turns an owner tweaking an unrelated fee
+    // between preflight and launch into a reverted launch.
+    expectedEconomics: `0x${'00'.repeat(32)}`,
+    salt: params.salt || v2.newSalt(),
   };
 
   const fees = await getFees(FEE_BUMP_PCT);
   const chainId = BigInt(config.chainId);
   const launchFee = BigInt(cfgs.launchFee);
+  const devBuy = parseEther(String(devBuyEth || 0));
 
-  // There is no dev buy in v2 — value is the fee and nothing more.
-  //
-  // With a helper deployed the launch goes through arm() instead, so the helper
-  // records the curve the factory just created and the buys can reference it by
-  // epoch rather than by a guessed address.
-  const useHelper = Boolean(config.v2HelperAddress);
-  const epoch = useHelper ? (await v2helper.nextEpoch()).toString() : null;
-  const launchTx = useHelper
-    ? await v2helper.buildArmTx({ params: fullParams, launchConfigId, pairToken, value: launchFee })
-    : await v2.buildLaunchTx({ params: fullParams, launchConfigId, pairToken, value: launchFee });
+  // ── who is exempt from the opening tax ────────────────────────────────────
+  // The dev and the creator fee recipient are exempted by the factory itself.
+  // Everyone else has to be declared here, and the list is capped at 32.
+  const exemptions = wallets.map((w) => getAddress(known.get(w.walletId).address));
+  if (exemptions.length > v2.MAX_SNIPE_TAX_EXEMPTIONS) {
+    throw new Error(
+      `${exemptions.length} bundle wallets, but the factory exempts at most ` +
+        `${v2.MAX_SNIPE_TAX_EXEMPTIONS} — the rest would pay the ${cfgs.snipeTaxStartBps / 100}% opening tax`
+    );
+  }
+
+  // ── where the token will be ───────────────────────────────────────────────
+  const predicted = await v2.predictAddresses({
+    params: fullParams,
+    launchConfigId,
+    pairToken: pair,
+    deployer: dev.address,
+  });
+
+  // The launch, run as a call. Free, and derived by the factory rather than by
+  // our reconstruction of it — so agreement is real evidence, not the same
+  // guess made twice. It also proves the launch would not revert.
+  const simulated = await v2.simulateLaunch({
+    from: dev.address,
+    params: fullParams,
+    launchConfigId,
+    pairToken: pair,
+    exemptions,
+    value: launchFee,
+  });
+
+  if (simulated.curve !== predicted.curve || simulated.token !== predicted.token) {
+    throw new Error(
+      `address prediction disagrees with the factory — predicted curve ${predicted.curve}, ` +
+        `the launch would create ${simulated.curve}. Refusing to pre-sign buys against either.`
+    );
+  }
+
+  const token = predicted.token;
+  const curve = predicted.curve;
+
+  // ── the launch ────────────────────────────────────────────────────────────
+  // With a dev buy it goes through the forwarder, which launches and buys in one
+  // transaction — nothing can be in front of the dev. Without one, straight to
+  // the factory, which rejects any msg.value that is not exactly the fee.
+  const launchTx =
+    devBuy > 0n
+      ? await v2.buildLaunchAndBuyTx({
+          params: fullParams,
+          launchConfigId,
+          pairToken: pair,
+          quoteIn: devBuy,
+          minTokensOut: 0n,
+          recipient: dev.address,
+          exemptions,
+          value: launchFee + devBuy,
+          forwarderAddress: predicted.wiring.forwarder,
+        })
+      : await v2.buildLaunchTx({
+          params: fullParams,
+          launchConfigId,
+          pairToken: pair,
+          exemptions,
+          value: launchFee,
+        });
 
   let launchGas = LAUNCH_GAS_FALLBACK;
   try {
@@ -125,11 +182,13 @@ async function prepareV2(input, { keystore: ks = keystore } = {}) {
   }
 
   const devBalance = await provider.getBalance(dev.address);
-  const devNeeded = launchFee + gasCost(fees, launchGas);
+  const devNeeded = launchFee + devBuy + gasCost(fees, launchGas);
   if (devBalance < devNeeded) {
     throw new Error(
       `dev wallet ${dev.address} has ${formatEther(devBalance)} ETH but the launch needs ` +
-        `${formatEther(devNeeded)} (fee ${formatEther(launchFee)} + gas)`
+        `${formatEther(devNeeded)} (fee ${formatEther(launchFee)}` +
+        (devBuy > 0n ? ` + dev buy ${formatEther(devBuy)}` : '') +
+        ' + gas)'
     );
   }
 
@@ -138,16 +197,18 @@ async function prepareV2(input, { keystore: ks = keystore } = {}) {
   const signedLaunch = {
     walletId: dev.id,
     address: dev.address,
-    valueEth: formatEther(launchFee),
+    valueEth: formatEther(launchFee + devBuy),
+    devBuyEth: formatEther(devBuy),
     nonce: devNonce,
+    atomic: devBuy > 0n,
     raw: await devSigner.signTransaction(
       toSignable(launchTx, { nonce: devNonce, gasLimit: launchGas, fees, chainId })
     ),
   };
 
   // ── the buys ──────────────────────────────────────────────────────────────
-  // Resolved and costed here, signed later. Each entry carries everything
-  // fireV2 needs the moment the curve address is known.
+  // Signed here, against the predicted curve. Nothing is left to do at fire
+  // time but broadcast.
   const buyGas = BigInt(config.buyGasLimit);
   const buyCost = gasCost(fees, buyGas);
   const buffer = parseEther(String(config.gasBufferEth));
@@ -179,49 +240,64 @@ async function prepareV2(input, { keystore: ks = keystore } = {}) {
     }
 
     const nonce = await provider.getTransactionCount(wallet.address, 'pending');
-    const entry = {
+    const buyTx = await buildBuyTx({
+      curveAddress: curve,
+      amountIn,
+      minTokensOut: 0n,
+      recipient: wallet.address,
+      nativeQuote: pair === ZeroAddress,
+    });
+    const signer = ks.signer(wallet.id, provider);
+
+    buys.push({
       walletId: wallet.id,
       address: wallet.address,
       amountEth: formatEther(amountIn),
       amountIn: amountIn.toString(),
       nonce,
-    };
-
-    // Helper mode signs now; without it the curve address does not exist yet
-    // and fireV2 has to wait for the receipt before it can sign anything.
-    if (useHelper) {
-      const buyTx = await v2helper.buildBuyTx({ epoch, amountIn, minTokensOut: 0n });
-      const signer = ks.signer(wallet.id, provider);
-      entry.raw = await signer.signTransaction(
+      exempt: true,
+      raw: await signer.signTransaction(
         toSignable(buyTx, { nonce, gasLimit: buyGas, fees, chainId })
-      );
-    }
-    buys.push(entry);
+      ),
+    });
+  }
+
+  // A wallet that was dropped for lack of funds is still on the exemption list,
+  // which costs nothing but would mislead anyone reading the plan.
+  const funded = new Set(buys.map((b) => b.address));
+  const declaredButSkipped = exemptions.filter((a) => !funded.has(a));
+  if (declaredButSkipped.length) {
+    warnings.push(
+      `${declaredButSkipped.length} wallet(s) are declared snipe-tax exempt but have no buy — harmless, but they will not be in the bundle`
+    );
   }
 
   return {
     protocol: 'v2',
-    // 'helper' buys are pre-signed and fire immediately; 'reactive' buys are
-    // signed after the receipt names the curve.
-    mode: useHelper ? 'helper' : 'reactive',
-    helper: config.v2HelperAddress,
-    epoch,
-    // No predicted token address: v2 cannot tell us one before the launch runs.
-    token: null,
-    curve: null,
+    mode: 'presigned',
+    token,
+    curve,
+    predictedBy: 'salt',
     launchConfigId: Number(launchConfigId),
-    pairToken: getAddress(pairToken),
+    pairToken: pair,
     launchFeeEth: formatEther(launchFee),
     params: fullParams,
+    salt: fullParams.salt,
     dryRun: config.dryRun,
+    canLaunch: gate.canLaunch,
     launchEnabled: gate.enabled,
-    whitelisted: gate.whitelisted,
     pairApproved: gate.approved,
     supply: launchConfig.supply,
     graduationThreshold: launchConfig.graduationThreshold,
     curveFeeBps: launchConfig.curveFeeBps,
     creatorTaxBps: fullParams.creatorTaxBps,
     buybackEnabled: fullParams.buybackEnabled,
+    snipeTax: {
+      startBps: cfgs.snipeTaxStartBps,
+      seconds: cfgs.snipeTaxSeconds,
+      exemptions,
+      max: v2.MAX_SNIPE_TAX_EXEMPTIONS,
+    },
     launch: signedLaunch,
     buys,
     totalBuyEth: formatEther(buys.reduce((s, b) => s + BigInt(b.amountIn), 0n)),

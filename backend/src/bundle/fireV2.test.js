@@ -5,146 +5,64 @@ const assert = require('node:assert');
 
 const { fireV2 } = require('./fireV2');
 
-// A plan as prepareV2 produces it: the launch is signed, the buys are not,
-// because the curve address does not exist until the launch is mined.
+const CURVE = '0x1111111111111111111111111111111111111111';
+const TOKEN = '0x2222222222222222222222222222222222222222';
+
+// A plan as prepareV2 now produces it: everything signed, including the buys,
+// because the curve address is predicted from the salt before anything is sent.
 const plan = {
   protocol: 'v2',
-  token: null,
-  curve: null,
+  mode: 'presigned',
+  token: TOKEN,
+  curve: CURVE,
   pairToken: '0x0000000000000000000000000000000000000000',
   launch: { address: '0xdev', raw: 'LAUNCH' },
   buys: [
-    { walletId: 'a', address: '0xa', amountEth: '0.1', amountIn: '100000000000000000', nonce: 1 },
-    { walletId: 'b', address: '0xb', amountEth: '0.2', amountIn: '200000000000000000', nonce: 3 },
+    { walletId: 'a', address: '0xa', amountEth: '0.1', nonce: 1, exempt: true, raw: 'BUY_A' },
+    { walletId: 'b', address: '0xb', amountEth: '0.2', nonce: 3, exempt: true, raw: 'BUY_B' },
   ],
   fees: { type: 2, maxFeePerGas: 1000n, maxPriorityFeePerGas: 10n },
   buyGas: '400000',
   chainId: '4663',
 };
 
-const CURVE = '0x1111111111111111111111111111111111111111';
-const TOKEN = '0x2222222222222222222222222222222222222222';
-
-function fakeProvider({ launchStatus = 1, blockOf = () => 10 } = {}) {
-  const order = [];
+function fakeProvider({ launchStatus = 1, block = 10, order = [] } = {}) {
   return {
     order,
-    async send() {
-      return '0x1';
-    },
-    // fireV2 polls getTransactionReceipt directly rather than using ethers'
-    // tx.wait(), which would notice a receipt up to 4s late on a 100ms chain.
-    async getTransactionReceipt(hash) {
-      const raw = String(hash).replace('hash:', '');
-      return { status: raw === 'LAUNCH' ? launchStatus : 1, blockNumber: blockOf(raw), logs: [] };
-    },
     async broadcastTransaction(raw) {
       order.push(raw);
-      return {
-        hash: `hash:${raw}`,
-        async wait() {
-          return { status: launchStatus, blockNumber: blockOf(raw), logs: [] };
-        },
-      };
+      return { hash: `hash:${raw}` };
     },
-    async waitForTransaction(hash) {
-      return { status: 1, blockNumber: blockOf(hash.replace('hash:', '')) };
+    async getTransactionReceipt(hash) {
+      const raw = String(hash).replace('hash:', '');
+      return { status: raw === 'LAUNCH' ? launchStatus : 1, blockNumber: block, logs: [] };
     },
   };
 }
 
-const fakeKeystore = {
-  signer: (walletId) => ({
-    async signTransaction(tx) {
-      return `SIGNED:${walletId}:${tx.to}:${tx.nonce}`;
-    },
-  }),
-};
-
 const deps = (over = {}) => ({
   dryRun: false,
-  keystore: fakeKeystore,
   warmPool: async () => {},
   parseLaunch: () => ({ token: TOKEN, curve: CURVE, pairToken: plan.pairToken }),
-  buildBuyTx: async ({ curveAddress, amountIn, recipient }) => ({
-    to: curveAddress,
-    data: '0xbuy',
-    value: amountIn,
-    _recipient: recipient,
-  }),
   ...over,
 });
 
-test('buys are signed against the curve from the receipt, not a guess', async () => {
+test('the launch goes out first, then every pre-signed buy', async () => {
   const rpc = fakeProvider();
   const res = await fireV2(plan, { provider: rpc, ...deps() });
 
-  assert.equal(rpc.order[0], 'LAUNCH', 'the launch goes first');
-  assert.equal(res.curve, CURVE);
-  assert.equal(res.token, TOKEN);
-  // Every buy must be addressed to the curve the launch actually produced.
-  for (const raw of rpc.order.slice(1)) {
-    assert.match(raw, new RegExp(`^SIGNED:[ab]:${CURVE}:`), `buy signed to the wrong target: ${raw}`);
-  }
-  assert.equal(res.buys.length, 2);
-  assert.equal(res.buys.filter((b) => b.status === 'confirmed').length, 2);
+  assert.equal(rpc.order[0], 'LAUNCH');
+  assert.deepEqual(rpc.order.slice(1).sort(), ['BUY_A', 'BUY_B']);
+  assert.equal(res.confirmed, 2);
+  assert.equal(res.sameBlock, 2);
 });
 
-test('a reverted launch buys nothing at all', async () => {
-  const rpc = fakeProvider({ launchStatus: 0 });
-  const res = await fireV2(plan, { provider: rpc, ...deps() });
-
-  assert.equal(res.launch.status, 'reverted');
-  assert.equal(rpc.order.length, 1, 'only the launch should ever have been broadcast');
-  assert.ok(res.buys.every((b) => b.status === 'skipped'));
-  assert.match(res.buys[0].error, /launch reverted/);
-});
-
-test('a missing TokenLaunched event never becomes a guessed curve', async () => {
-  const rpc = fakeProvider();
-  const res = await fireV2(plan, { provider: rpc, ...deps({ parseLaunch: () => null }) });
-
-  // Buying a guessed address would spend real money on someone else's token.
-  assert.equal(res.curve, null);
-  assert.equal(rpc.order.length, 1);
-  assert.ok(res.buys.every((b) => b.status === 'skipped'));
-  assert.match(res.buys[0].error, /TokenLaunched/);
-});
-
-test('each buy keeps its own wallet and nonce', async () => {
-  const rpc = fakeProvider();
-  await fireV2(plan, { provider: rpc, ...deps() });
-  const buys = rpc.order.slice(1).sort();
-  assert.deepEqual(buys, [`SIGNED:a:${CURVE}:1`, `SIGNED:b:${CURVE}:3`]);
-});
-
-// ── helper mode ───────────────────────────────────────────────────────────
-// With PonsV2BundleHelper deployed the buys are pre-signed against an epoch,
-// so they fire immediately and can land in the launch block.
-const helperPlan = {
-  ...plan,
-  mode: 'helper',
-  epoch: '7',
-  helper: '0x9999999999999999999999999999999999999999',
-  buys: plan.buys.map((b, i) => ({ ...b, raw: `PRESIGNED_BUY_${i}` })),
-};
-
-test('helper mode fires pre-signed buys without waiting to learn any address', async () => {
-  const rpc = fakeProvider();
+test('no receipt is awaited before the buys are broadcast', async () => {
   const order = [];
-  const timed = {
-    ...rpc,
-    async broadcastTransaction(raw) {
-      order.push(raw);
-      return rpc.broadcastTransaction(raw);
-    },
-  };
-
-  const res = await fireV2(helperPlan, {
-    provider: timed,
+  const rpc = fakeProvider({ order });
+  await fireV2(plan, {
+    provider: rpc,
     ...deps({
-      // If this were consulted before the buys went out, the receipt would be
-      // back in the critical path — the very thing the helper removes.
       waitForReceipt: async (_rpc, hash) => {
         order.push(`RECEIPT:${hash}`);
         return { status: 1, blockNumber: 10, logs: [] };
@@ -152,33 +70,66 @@ test('helper mode fires pre-signed buys without waiting to learn any address', a
     }),
   });
 
-  assert.equal(order[0], 'LAUNCH');
-  assert.deepEqual(order.slice(1, 3).sort(), ['PRESIGNED_BUY_0', 'PRESIGNED_BUY_1']);
-  assert.ok(
-    order.indexOf('PRESIGNED_BUY_0') < order.findIndex((o) => o.startsWith('RECEIPT:')),
-    'buys must be broadcast BEFORE any receipt is awaited'
-  );
-  assert.equal(res.mode, 'helper');
-  assert.equal(res.epoch, '7');
-  assert.equal(res.buys.filter((b) => b.status === 'confirmed').length, 2);
+  // Waiting first is exactly what the old reactive flow did, and removing it is
+  // the whole point of predicting the curve address.
+  const firstReceipt = order.findIndex((o) => o.startsWith('RECEIPT:'));
+  assert.ok(order.indexOf('BUY_A') < firstReceipt, 'BUY_A must precede any receipt');
+  assert.ok(order.indexOf('BUY_B') < firstReceipt, 'BUY_B must precede any receipt');
 });
 
-test('helper mode never signs anything at fire time', async () => {
+test('an unsigned buy is refused rather than signed late', async () => {
   const rpc = fakeProvider();
-  let signed = false;
-  await fireV2(helperPlan, {
+  const halfSigned = { ...plan, buys: [plan.buys[0], { ...plan.buys[1], raw: undefined }] };
+
+  // Signing here would put key derivation back in the critical path.
+  await assert.rejects(
+    () => fireV2(halfSigned, { provider: rpc, ...deps() }),
+    /1 buy\(s\) are unsigned/
+  );
+  assert.equal(rpc.order.length, 0, 'nothing may be broadcast once the plan is known to be bad');
+});
+
+test('a curve that does not match the prediction is reported, not hidden', async () => {
+  const rpc = fakeProvider();
+  const OTHER = '0x9999999999999999999999999999999999999999';
+  const res = await fireV2(plan, {
     provider: rpc,
-    ...deps({
-      keystore: {
-        signer: () => {
-          signed = true;
-          return { async signTransaction() { return 'LATE_SIGN'; } };
-        },
-      },
-    }),
+    ...deps({ parseLaunch: () => ({ token: TOKEN, curve: OTHER, pairToken: plan.pairToken }) }),
   });
-  // Signing at fire time would mean the pre-signing never happened.
-  assert.equal(signed, false);
+
+  // The buys are already spent by this point. Saying so plainly beats leaving
+  // it to be worked out from a balance that never arrives.
+  assert.match(res.mismatch, /launch created curve 0x9999/);
+  assert.match(res.mismatch, /signed against 0x1111/);
+});
+
+test('a reverted launch is reported with the buys that already went out', async () => {
+  const rpc = fakeProvider({ launchStatus: 0 });
+  const res = await fireV2(plan, { provider: rpc, ...deps() });
+
+  // Unlike the old flow there is no holding the buys back — they are broadcast
+  // before the launch result is known. Pretending otherwise would be a lie.
+  assert.equal(res.launch.status, 'reverted');
+  assert.equal(res.buys.length, 2);
+  assert.equal(res.mismatch, undefined);
+});
+
+test('a broadcast failure fails only its own wallet', async () => {
+  const rpc = fakeProvider();
+  const flaky = {
+    ...rpc,
+    async broadcastTransaction(raw) {
+      if (raw === 'BUY_A') throw new Error('nonce too low');
+      return rpc.broadcastTransaction(raw);
+    },
+  };
+  const res = await fireV2(plan, { provider: flaky, ...deps() });
+
+  const a = res.buys.find((b) => b.walletId === 'a');
+  const b = res.buys.find((b) => b.walletId === 'b');
+  assert.equal(a.status, 'failed');
+  assert.match(a.error, /nonce too low/);
+  assert.equal(b.status, 'confirmed');
 });
 
 test('a dry run broadcasts nothing', async () => {
@@ -186,5 +137,6 @@ test('a dry run broadcasts nothing', async () => {
   const res = await fireV2(plan, { provider: rpc, ...deps({ dryRun: true }) });
   assert.equal(rpc.order.length, 0);
   assert.equal(res.simulated, true);
+  assert.equal(res.curve, CURVE, 'a dry run still reports where the buys would go');
   assert.ok(res.buys.every((b) => b.status === 'simulated'));
 });

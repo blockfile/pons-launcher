@@ -34,12 +34,15 @@ const config = {
   // Normally read from the selected dex config; this only overrides it.
   swapRouterOverride: lowerOrNull(process.env.SWAP_ROUTER),
 
-  // pons v2 — a different protocol, not a newer factory. Deployed and verified
-  // on chain, but launchEnabled was false and no pair token approved at the
-  // time of writing, so every launchToken call reverts. The v2 routes exist so
-  // the port is ready; they refuse loudly rather than burning a fee.
+  // pons v2 — a different protocol, not a newer factory. LIVE: thousands of
+  // launches, launchEnabled true, and canLaunch() true for ordinary wallets.
+  //
+  // This is NOT the address in docs.ponsfamily.com/v2, which points at a
+  // superseded deployment that has never emitted an event. It was found by
+  // scanning the chain for the TokenLaunched topic rather than trusting the
+  // docs, so treat that page as unreliable for addresses.
   v2FactoryAddress:
-    lowerOrNull(process.env.PONS_V2_FACTORY) || '0x7e1eabd52ae29598e6483f72dcf1a70b14284db8',
+    lowerOrNull(process.env.PONS_V2_FACTORY) || '0x7ed598bcef8bd9edd8c97a195c6d13f40801ec7e',
 
   // Optional Disperse contract (contracts/Disperse.sol). When set, funding
   // five or more wallets goes out as ONE transaction instead of N concurrent
@@ -54,12 +57,6 @@ const config = {
     .split(',')
     .map((a) => a.trim().toLowerCase())
     .filter(Boolean),
-
-  // Optional PonsV2BundleHelper (contracts/PonsV2BundleHelper.sol). When set,
-  // v2 buys are pre-signed against an epoch instead of waiting for the launch
-  // receipt, which puts the bundle back in the launch block. The helper — not
-  // your dev wallet — is what the factory whitelist applies to.
-  v2HelperAddress: lowerOrNull(process.env.PONS_V2_HELPER),
 
   // ethers' tx.wait() polls every 4s by default, which is forty blocks on this
   // chain. v2 reads the curve address out of the launch receipt, so that delay

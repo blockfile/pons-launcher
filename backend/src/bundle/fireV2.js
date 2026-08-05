@@ -1,29 +1,26 @@
 'use strict';
 
-// Broadcasts a pons v2 launch, then buys the curve it creates.
+// Broadcasts a pons v2 launch and the bundle behind it.
 //
-// The shape is forced by the protocol. v1 could fire pre-signed buys the instant
-// the launch went out, because the token address was known in advance. v2's
-// curve address only exists once the launch is mined, so the sequence is:
+//   warm the pool → broadcast the launch → immediately blast every pre-signed
+//   buy → collect receipts
 //
-//   warm the pool → broadcast the launch → await the receipt → read the curve
-//   from TokenLaunched → sign every buy → fire them all at once
+// Nothing is signed here and nothing is read from a receipt before the buys go
+// out. prepareV2 already knows the curve address, because the live factory
+// takes a salt and the deployer predicts what it produces. The earlier version
+// of this file had to wait for the launch receipt to learn where to buy; that
+// round trip is gone.
 //
-// That costs a receipt round trip, which is the price of not buying a stranger's
-// token. Everyone else has to observe the launch before they can react to it, so
-// knowing it was coming is still an advantage — just a smaller one.
-//
-// There is no launch-block wait here: v2 has no LaunchBlockBuyBlocked rule and
-// no restriction window. The curve is open the moment it exists.
+// There is no launch-block wait. v2 has no equivalent of v1's
+// LaunchBlockBuyBlocked, and the bundle wallets are declared snipe-tax exempt
+// inside the launch itself — they are the only addresses that can buy at the
+// untaxed price during the opening window, so there is nothing to race.
 
 const config = require('../config');
 const { provider, warmPool } = require('../evm/provider');
 const { rpcMessage } = require('../evm/errors');
 const v2factory = require('../evm/v2/factory');
-const { buildBuyTx } = require('../evm/v2/curve');
-const { toSignable } = require('./prepareV2');
 const { waitForReceipt } = require('../evm/receipt');
-const keystore = require('../wallets/keystore');
 
 /**
  * @param {object} plan from prepareV2()
@@ -31,248 +28,118 @@ const keystore = require('../wallets/keystore');
  */
 async function fireV2(plan, deps = {}) {
   const rpc = deps.provider || provider;
-  const ks = deps.keystore || keystore;
   const dryRun = deps.dryRun ?? config.dryRun;
   const parseLaunch = deps.parseLaunch || v2factory.parseLaunch;
-  // NOT launchResp.wait(): that polls at ethers' 4s default, which would leave
-  // the bundle forty blocks behind a curve anyone else can already buy.
+  // NOT tx.wait(): that polls at ethers' 4s default, which on a chain making
+  // ten blocks a second reports a landed bundle up to forty blocks late.
   const awaitReceipt = deps.waitForReceipt || waitForReceipt;
-  const buildBuy = deps.buildBuyTx || buildBuyTx;
+  const warm = deps.warmPool || warmPool;
 
   if (dryRun) {
     return {
       simulated: true,
       protocol: 'v2',
-      token: null,
-      curve: null,
+      mode: plan.mode,
+      token: plan.token,
+      curve: plan.curve,
       launch: { address: plan.launch.address, hash: null, status: 'simulated' },
       buys: plan.buys.map((b) => ({
         walletId: b.walletId,
         address: b.address,
         amountEth: b.amountEth,
-        hash: null,
         status: 'simulated',
+        hash: null,
       })),
     };
   }
 
-  // 1. Open a socket per buy while nothing is racing. The buys go out in one
-  //    burst later and a cold pool would make each pay its own TLS handshake.
-  const warm = deps.warmPool || warmPool;
-  if (plan.buys.length) {
-    try {
-      await warm(plan.buys.length, rpc);
-    } catch (err) {
-      console.warn(`[pons-launcher] connection warm-up failed: ${err.message}`);
-    }
+  if (!plan.launch?.raw) throw new Error('plan has no signed launch');
+  const unsigned = plan.buys.filter((b) => !b.raw);
+  if (unsigned.length) {
+    // Signing here would put key derivation back in the critical path, which is
+    // the whole thing this rebuild removed.
+    throw new Error(`${unsigned.length} buy(s) are unsigned — re-run preflight`);
   }
 
-  // 2. The launch.
+  // Open the sockets before the clock matters. A cold TLS handshake in the
+  // middle of the burst costs more than everything else here put together.
+  await warm();
+
+  const t0 = Date.now();
   const launchResp = await rpc.broadcastTransaction(plan.launch.raw);
+  const sentMs = Date.now() - t0;
 
-  // Helper mode: the buys were already signed against an epoch, so they go out
-  // immediately without waiting to learn any address. An early arrival reverts
-  // on NotArmed rather than paying ETH into a codeless address, which is what
-  // makes this safe here and unsafe without the helper.
-  if (plan.mode === 'helper') {
-    return firePresigned({ plan, rpc, launchResp, awaitReceipt });
-  }
+  // Straight into the buys. The launch is in flight, not confirmed — and it
+  // does not need to be, because the curve address does not depend on anything
+  // the launch tells us.
+  const results = await Promise.all(
+    plan.buys.map(async (b) => {
+      const entry = {
+        walletId: b.walletId,
+        address: b.address,
+        amountEth: b.amountEth,
+        nonce: b.nonce,
+        exempt: b.exempt,
+      };
+      try {
+        const resp = await rpc.broadcastTransaction(b.raw);
+        entry.hash = resp.hash;
+        entry.status = 'sent';
+      } catch (err) {
+        entry.status = 'failed';
+        entry.error = rpcMessage(err);
+      }
+      return entry;
+    })
+  );
+  const burstMs = Date.now() - t0;
 
+  // Only now, with everything on the wire, do we wait for anything.
   const launchReceipt = await awaitReceipt(rpc, launchResp.hash);
-
-  const launched = launchReceipt ? parseLaunch(launchReceipt) : null;
-  const launchOk = launchReceipt && launchReceipt.status === 1;
-
-  const result = {
-    simulated: false,
-    protocol: 'v2',
-    token: launched ? launched.token : null,
-    curve: launched ? launched.curve : null,
-    launch: {
-      address: plan.launch.address,
-      hash: launchResp.hash,
-      block: launchReceipt ? launchReceipt.blockNumber : null,
-      status: launchOk ? 'confirmed' : 'reverted',
-    },
-    buys: [],
+  const launch = {
+    hash: launchResp.hash,
+    status: !launchReceipt ? 'pending' : launchReceipt.status === 1 ? 'confirmed' : 'reverted',
+    blockNumber: launchReceipt?.blockNumber ?? null,
   };
 
-  // A launch that reverted, or one whose event we could not read, leaves
-  // nothing to buy. Never guess at a curve address.
-  if (!launchOk || !launched) {
-    result.buys = plan.buys.map((b) => ({
-      walletId: b.walletId,
-      address: b.address,
-      amountEth: b.amountEth,
-      hash: null,
-      status: 'skipped',
-      error: launchOk ? 'no TokenLaunched event in the receipt' : 'launch reverted',
-    }));
-    return result;
-  }
-
-  // 3. Sign every buy now that the curve is known. Signing is local and takes
-  //    microseconds; it is the receipt above that costs time, not this.
-  const nativeQuote = plan.pairToken === '0x0000000000000000000000000000000000000000';
-  const signed = [];
-  for (const b of plan.buys) {
-    try {
-      const tx = await buildBuy({
-        curveAddress: launched.curve,
-        amountIn: BigInt(b.amountIn),
-        recipient: b.address,
-        minTokensOut: 0n,
-        nativeQuote,
-      });
-      const signer = ks.signer(b.walletId, rpc);
-      const raw = await signer.signTransaction(
-        toSignable(tx, {
-          nonce: b.nonce,
-          gasLimit: BigInt(plan.buyGas),
-          fees: plan.fees,
-          chainId: BigInt(plan.chainId),
-        })
-      );
-      signed.push({ ...b, raw });
-    } catch (err) {
-      signed.push({ ...b, raw: null, signError: rpcMessage(err) });
+  // The launch's own event is the authority. If it disagrees with what the buys
+  // were signed against, every buy went somewhere else, and that has to be said
+  // loudly rather than inferred from a confusing balance later.
+  let mismatch = null;
+  if (launchReceipt && launchReceipt.status === 1) {
+    const actual = parseLaunch(launchReceipt);
+    if (actual) {
+      launch.token = actual.token;
+      launch.curve = actual.curve;
+      if (actual.curve.toLowerCase() !== String(plan.curve).toLowerCase()) {
+        mismatch = `launch created curve ${actual.curve}, but the buys were signed against ${plan.curve}`;
+      }
     }
   }
 
-  // 4. Every buy at once, over the already-warm sockets.
-  const burstAt = Date.now();
-  const sentMs = new Array(signed.length).fill(null);
-  const broadcasts = await Promise.allSettled(
-    signed.map((b, i) => {
-      if (!b.raw) return Promise.reject(new Error(b.signError || 'could not sign'));
-      return rpc.broadcastTransaction(b.raw).then(
-        (r) => {
-          sentMs[i] = Date.now() - burstAt;
-          return r;
-        },
-        (err) => {
-          sentMs[i] = Date.now() - burstAt;
-          throw err;
-        }
-      );
-    })
-  );
+  for (const r of results) {
+    if (r.status !== 'sent') continue;
+    const receipt = await awaitReceipt(rpc, r.hash);
+    r.status = !receipt ? 'pending' : receipt.status === 1 ? 'confirmed' : 'reverted';
+    r.blockNumber = receipt?.blockNumber ?? null;
+  }
 
-  const buys = signed.map((b, i) => {
-    const r = broadcasts[i];
-    return r.status === 'fulfilled'
-      ? {
-          walletId: b.walletId,
-          address: b.address,
-          amountEth: b.amountEth,
-          hash: r.value.hash,
-          status: 'sent',
-          sentMs: sentMs[i],
-        }
-      : {
-          walletId: b.walletId,
-          address: b.address,
-          amountEth: b.amountEth,
-          hash: null,
-          status: 'rejected',
-          sentMs: sentMs[i],
-          error: rpcMessage(r.reason),
-        };
-  });
-
-  // 5. Collect outcomes.
-  await Promise.allSettled(
-    buys.map(async (b) => {
-      if (!b.hash) return;
-      try {
-        const receipt = await rpc.waitForTransaction(b.hash);
-        b.status = receipt && receipt.status === 1 ? 'confirmed' : 'reverted';
-        b.block = receipt ? receipt.blockNumber : null;
-      } catch (err) {
-        b.status = 'unknown';
-        b.error = rpcMessage(err);
-      }
-    })
-  );
-
-  result.buys = buys;
-  result.burstMs = sentMs.filter((m) => m !== null).reduce((a, b) => Math.max(a, b), 0);
-  // How far behind the launch the bundle landed, in RPC blocks. v2 has no
-  // restriction window, so being in the launch block is a win here rather than
-  // the revert it would have been in v1.
-  result.sameBlock = launchReceipt
-    ? buys.filter((b) => b.block === launchReceipt.blockNumber).length
-    : 0;
-  return result;
-}
-
-/**
- * The helper path: buys are pre-signed, so this is v1's optimistic firing —
- * broadcast everything, then collect outcomes.
- */
-async function firePresigned({ plan, rpc, launchResp, awaitReceipt }) {
-  const burstAt = Date.now();
-  const sentMs = new Array(plan.buys.length).fill(null);
-  const broadcasts = await Promise.allSettled(
-    plan.buys.map((b, i) =>
-      rpc.broadcastTransaction(b.raw).then(
-        (r) => {
-          sentMs[i] = Date.now() - burstAt;
-          return r;
-        },
-        (err) => {
-          sentMs[i] = Date.now() - burstAt;
-          throw err;
-        }
-      )
-    )
-  );
-
-  const buys = plan.buys.map((b, i) => {
-    const r = broadcasts[i];
-    const base = { walletId: b.walletId, address: b.address, amountEth: b.amountEth, sentMs: sentMs[i] };
-    return r.status === 'fulfilled'
-      ? { ...base, hash: r.value.hash, status: 'sent' }
-      : { ...base, hash: null, status: 'rejected', error: rpcMessage(r.reason) };
-  });
-
-  const launchReceipt = await awaitReceipt(rpc, launchResp.hash);
-  const launched = launchReceipt ? v2factory.parseLaunch(launchReceipt) : null;
-
-  await Promise.allSettled(
-    buys.map(async (b) => {
-      if (!b.hash) return;
-      try {
-        const receipt = await awaitReceipt(rpc, b.hash);
-        b.status = receipt && receipt.status === 1 ? 'confirmed' : 'reverted';
-        b.block = receipt ? receipt.blockNumber : null;
-      } catch (err) {
-        b.status = 'unknown';
-        b.error = rpcMessage(err);
-      }
-    })
-  );
+  const sameBlock = results.filter(
+    (r) => r.blockNumber != null && r.blockNumber === launch.blockNumber
+  ).length;
 
   return {
-    simulated: false,
     protocol: 'v2',
-    mode: 'helper',
-    epoch: plan.epoch,
-    token: launched ? launched.token : null,
-    curve: launched ? launched.curve : null,
-    launch: {
-      address: plan.launch.address,
-      hash: launchResp.hash,
-      block: launchReceipt ? launchReceipt.blockNumber : null,
-      status: launchReceipt && launchReceipt.status === 1 ? 'confirmed' : 'reverted',
-    },
-    buys,
-    burstMs: sentMs.filter((m) => m !== null).reduce((a, b) => Math.max(a, b), 0),
-    // In helper mode this is the number that matters: buys in the launch block
-    // are the whole point, and v2 has no rule against them.
-    sameBlock: launchReceipt
-      ? buys.filter((b) => b.block === launchReceipt.blockNumber).length
-      : 0,
+    mode: plan.mode,
+    token: plan.token,
+    curve: plan.curve,
+    launch,
+    buys: results,
+    sameBlock,
+    confirmed: results.filter((r) => r.status === 'confirmed').length,
+    sentMs,
+    burstMs,
+    ...(mismatch ? { mismatch } : {}),
   };
 }
 

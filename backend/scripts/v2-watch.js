@@ -35,7 +35,7 @@ async function snapshot(devAddress) {
     pairs[label] = await f.approvedPairTokens(addr);
   }
 
-  const whitelisted = devAddress ? await f.whitelistedLaunchers(getAddress(devAddress)) : null;
+  const canLaunch = devAddress ? await f.canLaunch(getAddress(devAddress)) : null;
 
   return {
     launchEnabled: enabled,
@@ -43,16 +43,18 @@ async function snapshot(devAddress) {
     maxCreatorTaxBps: Number(maxTax),
     launchConfigCount: Number(configs),
     pairs,
-    whitelisted,
+    canLaunch,
     // The single question that matters: could we launch right now?
-    open: (enabled || whitelisted === true) && Object.values(pairs).some(Boolean),
+    // Native ETH is never checked against approvedPairTokens, so an approved
+    // pair is not required for a native launch.
+    open: enabled && canLaunch === true,
   };
 }
 
 function describe(s) {
   return [
     `launchEnabled=${s.launchEnabled}`,
-    `whitelisted=${s.whitelisted}`,
+    `canLaunch=${s.canLaunch}`,
     `pairs=${Object.entries(s.pairs).map(([k, v]) => `${k}:${v}`).join(' ')}`,
     `configs=${s.launchConfigCount}`,
     `fee=${s.launchFeeEth}`,
