@@ -326,6 +326,10 @@ export default function LaunchForm({
                 : ' — they buy at the untaxed price'}
             </li>
             <li>no wallet or per-buy cap: v2 has no restriction window</li>
+            <li>
+              priced in <b>native ETH</b> — the factory has approved no other quote asset, so there
+              is nothing to choose
+            </li>
           </ul>
         </div>
       )}
