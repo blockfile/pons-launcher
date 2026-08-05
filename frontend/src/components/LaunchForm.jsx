@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import { api } from '../api.js';
 import Section, { Busy } from './Section.jsx';
 import LogoField from './LogoField.jsx';
@@ -20,7 +20,13 @@ const BLANK = {
   website: '',
   farcaster: '',
   devBuyEth: '0.05',
+  creatorTaxBps: '0',
+  buybackEnabled: false,
 };
+
+// v2's opening tax is charged on the RECIPIENT of a buy, and the factory
+// exempts at most this many declared addresses.
+const MAX_EXEMPTIONS = 32;
 
 export default function LaunchForm({
   configs,
@@ -33,6 +39,8 @@ export default function LaunchForm({
   onLogo,
 }) {
   const [f, setF] = useState(BLANK);
+  const [protocol, setProtocol] = useState('v1');
+  const [v2, setV2] = useState(null);
   const [launchConfigId, setLaunchConfigId] = useState(0);
   const [dexId, setDexId] = useState(0);
   const [busy, setBusy] = useState('');
@@ -45,35 +53,74 @@ export default function LaunchForm({
     onLogo?.(logo);
   };
 
-  const lc = configs?.launchConfigs.find((c) => c.id === Number(launchConfigId));
+  const isV2 = protocol === 'v2';
+  const active = isV2 ? v2 : configs;
+  const lc = active?.launchConfigs.find((c) => c.id === Number(launchConfigId));
+
+  // v2's factory is a different contract with its own configs and its own
+  // gating, so they are read separately and only when the operator asks for it.
+  useEffect(() => {
+    if (!isV2 || v2) return;
+    api('/v2/configs')
+      .then(setV2)
+      .catch((err) => report(`ERROR: v2 configs — ${err.message}`));
+  }, [isV2, v2]);
+
+  // Config ids are per-factory; carrying v1's selection into v2 would silently
+  // pick a different set of terms.
+  useEffect(() => setLaunchConfigId(0), [protocol]);
 
   function body() {
+    const bundle = wallets
+      .filter((w) => w.role !== 'dev')
+      .map((w) => ({
+        walletId: w.id,
+        mode: rows[w.id]?.mode ?? 'fixed',
+        amountEth: rows[w.id]?.buy,
+      }))
+      .filter((w) => w.mode === 'all' || Number(w.amountEth) > 0);
+
+    const socials = {
+      twitter: f.twitter.trim(),
+      telegram: f.telegram.trim(),
+      discord: f.discord.trim(),
+      website: f.website.trim(),
+      farcaster: f.farcaster.trim(),
+    };
+
+    if (isV2) {
+      return {
+        params: {
+          name: f.name.trim(),
+          symbol: f.symbol.trim(),
+          logo: f.logo.trim(),
+          description: f.description.trim(),
+          socials,
+          // v2 calls this the creator fee recipient. Same field, same meaning:
+          // where the creator's cut of trading fees goes.
+          creatorFeeRecipient: f.feeWallet.trim() || undefined,
+          creatorTaxBps: Number(f.creatorTaxBps || 0),
+          buybackEnabled: Boolean(f.buybackEnabled),
+        },
+        launchConfigId: Number(launchConfigId),
+        devBuyEth: f.devBuyEth || 0,
+        wallets: bundle,
+      };
+    }
+
     return {
       params: {
         name: f.name.trim(),
         symbol: f.symbol.trim(),
         logo: f.logo.trim(),
         description: f.description.trim(),
-        socials: {
-          twitter: f.twitter.trim(),
-          telegram: f.telegram.trim(),
-          discord: f.discord.trim(),
-          website: f.website.trim(),
-          farcaster: f.farcaster.trim(),
-        },
+        socials,
         feeWallet: f.feeWallet.trim(),
       },
       launchConfigId: Number(launchConfigId),
       dexId: Number(dexId),
       devBuyEth: f.devBuyEth || 0,
-      wallets: wallets
-        .filter((w) => w.role !== 'dev')
-        .map((w) => ({
-          walletId: w.id,
-          mode: rows[w.id]?.mode ?? 'fixed',
-          amountEth: rows[w.id]?.buy,
-        }))
-        .filter((w) => w.mode === 'all' || Number(w.amountEth) > 0),
+      wallets: bundle,
     };
   }
 
@@ -98,7 +145,7 @@ export default function LaunchForm({
     if (!confirm(msg)) return;
 
     act('launch', async () => {
-      const res = await api('/launch', 'POST', b);
+      const res = await api(isV2 ? '/v2/launch' : '/launch', 'POST', b);
       reloadHistory();
       // Re-lock the guard: one arming, one launch.
       setArmed(false);
@@ -115,9 +162,29 @@ export default function LaunchForm({
 
   return (
     <Section step="3" title="Launch" done={ready}>
+      <div className="protocol">
+        {['v1', 'v2'].map((p) => (
+          <button
+            key={p}
+            type="button"
+            className={protocol === p ? 'on' : 'ghost'}
+            onClick={() => setProtocol(p)}
+          >
+            pons {p}
+          </button>
+        ))}
+        {isV2 && !v2 && <span className="hint">reading the v2 factory…</span>}
+        {isV2 && v2 && !v2.launchEnabled && <span className="hint">v2 launching is disabled right now</span>}
+      </div>
+
       <p className="lede">
-        The launch transaction deploys the token, opens the pool and makes your dev buy in one call.
-        Every bundle buy is signed in advance and broadcast the instant it lands.
+        {isV2
+          ? `A v2 launch creates a bonding curve, not a pool — a Uniswap pool is only built at
+             graduation. Opening buys are taxed from ${(v2?.snipeTaxStartBps ?? 9900) / 100}% down to
+             zero over ${v2?.snipeTaxSeconds ?? 3}s, and your bundle wallets are declared exempt
+             inside the launch itself, so they are the only ones buying untaxed.`
+          : `The launch transaction deploys the token, opens the pool and makes your dev buy in one
+             call. Every bundle buy is signed in advance and broadcast the instant it lands.`}
       </p>
 
       <div className="grid">
@@ -170,24 +237,43 @@ export default function LaunchForm({
         <label>
           Launch config
           <select value={launchConfigId} onChange={(e) => setLaunchConfigId(e.target.value)}>
-            {configs?.launchConfigs.map((c) => (
+            {active?.launchConfigs.map((c) => (
               <option key={c.id} value={c.id} disabled={!c.enabled}>
-                #{c.id} — {c.maxWalletBps / 100}% wallet / {c.restrictionBlocks} blk
+                {isV2
+                  ? `#${c.id} — ${Number(c.supply) / 1e18} supply / graduates at ${Number(c.graduationThreshold) / 1e18} ETH`
+                  : `#${c.id} — ${c.maxWalletBps / 100}% wallet / ${c.restrictionBlocks} blk`}
                 {c.enabled ? '' : ' (disabled)'}
               </option>
             ))}
           </select>
         </label>
-        <label>
-          DEX
-          <select value={dexId} onChange={(e) => setDexId(e.target.value)}>
-            {configs?.dexConfigs.map((d) => (
-              <option key={d.id} value={d.id} disabled={!d.enabled}>
-                #{d.id} — {d.name} ({d.poolFee / 10000}%)
-              </option>
-            ))}
-          </select>
-        </label>
+        {isV2 ? (
+          <label>
+            Creator tax (bps)
+            <input
+              type="number"
+              step="1"
+              min="0"
+              max={v2?.maxCreatorTaxBps ?? 1000}
+              value={f.creatorTaxBps}
+              onChange={set('creatorTaxBps')}
+            />
+            <span className="hint">
+              Your cut of every trade, immutable once launched. Max {v2?.maxCreatorTaxBps ?? 1000} bps.
+            </span>
+          </label>
+        ) : (
+          <label>
+            DEX
+            <select value={dexId} onChange={(e) => setDexId(e.target.value)}>
+              {configs?.dexConfigs.map((d) => (
+                <option key={d.id} value={d.id} disabled={!d.enabled}>
+                  #{d.id} — {d.name} ({d.poolFee / 10000}%)
+                </option>
+              ))}
+            </select>
+          </label>
+        )}
         <label className="half">
           Dev buy (ETH)
           <input type="number" step="0.0001" value={f.devBuyEth} onChange={set('devBuyEth')} />
@@ -197,12 +283,12 @@ export default function LaunchForm({
         </label>
       </div>
 
-      {lc && configs && (
+      {lc && active && !isV2 && (
         <div className="notice">
           <h3>What config #{launchConfigId} enforces</h3>
           <ul>
             <li>
-              launch fee {Number(configs.launchFee) / 1e18} ETH · router{' '}
+              launch fee {Number(active.launchFee) / 1e18} ETH · router{' '}
               {lc.routerRequiresDeadline ? 'V3 (deadline)' : 'Router02'}
             </li>
             <li>
@@ -217,13 +303,40 @@ export default function LaunchForm({
         </div>
       )}
 
+      {lc && active && isV2 && (
+        <div className="notice">
+          <h3>What config #{launchConfigId} enforces</h3>
+          <ul>
+            <li>
+              launch fee {Number(active.launchFee) / 1e18} ETH · supply{' '}
+              {(Number(lc.supply) / 1e18).toLocaleString()} · curve fee {lc.curveFeeBps / 100}%
+            </li>
+            <li>
+              graduates to a Uniswap v4 pool at {Number(lc.graduationThreshold) / 1e18} ETH raised
+            </li>
+            <li>
+              opening tax {active.snipeTaxStartBps / 100}% decaying to zero over{' '}
+              {active.snipeTaxSeconds}s — charged on the buyer's <b>recipient</b>, so an undeclared
+              wallet keeps almost nothing
+            </li>
+            <li>
+              {buying} of your wallets declared exempt (max {active.maxExemptions ?? MAX_EXEMPTIONS})
+              {buying > (active.maxExemptions ?? MAX_EXEMPTIONS)
+                ? ' — too many, the launch would revert'
+                : ' — they buy at the untaxed price'}
+            </li>
+            <li>no wallet or per-buy cap: v2 has no restriction window</li>
+          </ul>
+        </div>
+      )}
+
       <div className={`arm ${live ? 'is-live' : ''}`}>
         <Busy
           busy={busy === 'preflight'}
           className="ghost"
           disabled={!ready}
           title={ready ? 'signs everything, broadcasts nothing' : 'fill in name, symbol and a logo'}
-          onClick={() => act('preflight', () => api('/preflight', 'POST', body()))}
+          onClick={() => act('preflight', () => api(isV2 ? '/v2/preflight' : '/preflight', 'POST', body()))}
         >
           Preflight — signs, sends nothing
         </Busy>

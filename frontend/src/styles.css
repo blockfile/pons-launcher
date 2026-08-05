@@ -718,3 +718,25 @@ pre {
   width: 1%;
   white-space: nowrap;
 }
+
+/* ── protocol switch ──────────────────────────────────────────────────────
+   v1 and v2 are different factories with different rules, not versions of one
+   form. The switch sits above the fields so it reads as "which protocol", not
+   "which option within a launch". */
+.protocol {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 12px;
+}
+.protocol button {
+  font: 600 11px/1 var(--mono);
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  padding: 7px 14px;
+}
+.protocol button.on {
+  background: var(--amber);
+  border-color: var(--amber);
+  color: var(--void);
+}

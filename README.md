@@ -169,6 +169,41 @@ deployer is recorded on-chain forever, and every run through it is a public link
 from that address to the wallets it paid. Pass `--key 0x…` to deploy from
 somewhere other than the dev wallet.
 
+## pons v2
+
+v2 is a different protocol on a different factory —
+`0x7eD598BcEf8bd9Edd8C97A195C6d13f40801EC7e`, **not** the address in
+docs.ponsfamily.com/v2, which points at a deployment that has never emitted an
+event. It was found by scanning the chain for the `TokenLaunched` topic; treat
+that documentation page as unreliable for addresses.
+
+A launch creates a bonding curve holding the whole supply. A Uniswap v4 pool is
+only built at graduation, at 4.2 ETH raised.
+
+Two things shape the bundle:
+
+**An opening tax.** Buys in the launch window pay a tax starting at 99% and
+decaying to zero over 3 seconds. It is charged on the *recipient* of the buy.
+
+**A declared exemption list.** `launchToken` takes up to 32 addresses exempt
+from that tax, applied atomically inside the launch. The contract's own comment
+calls this "the sanctioned pathway for organized teams that bundle their opening
+buys across several wallets". Preflight puts every bundle wallet on it and
+refuses above 32.
+
+Because `TokenParams` carries a `salt` and the deployer exposes
+`predictLaunchAddresses`, the curve address is known before the launch is sent —
+so every buy is signed in advance, exactly as on v1. The prediction is
+cross-checked against a static call of the real launch before anything is
+signed: a buy sent to an address with no contract *succeeds* on the EVM and
+silently keeps the money, so one derivation is not enough.
+
+Pick **pons v2** at the top of the Launch panel. A dev buy routes through the
+forwarder's `launchAndBuy`, which launches, buys and applies the exemptions in
+one transaction.
+
+    npm run v2:watch -- --loop 300     # prints only when a gate changes
+
 ## Multiple operators
 
 By default the deployment is single-tenant: one keystore, one dev wallet,
