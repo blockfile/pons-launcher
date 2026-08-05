@@ -20,11 +20,28 @@ const router = express.Router();
  * holding a raw signed buy could broadcast it, so it never leaves the server.
  */
 function publicPlan(plan) {
-  return {
+  return jsonSafe({
     ...plan,
     launch: { ...plan.launch, raw: undefined },
     buys: plan.buys.map((b) => ({ ...b, raw: undefined })),
-  };
+  });
+}
+
+/**
+ * BigInt -> string, everywhere in the tree.
+ *
+ * JSON.stringify throws on a BigInt rather than skipping it, so one stray wei
+ * value turns a perfectly good plan into "Do not know how to serialize a
+ * BigInt" with nothing to say where it came from. Callers should not have to
+ * remember which fields are wei; this makes forgetting harmless.
+ */
+function jsonSafe(value) {
+  if (typeof value === 'bigint') return value.toString();
+  if (Array.isArray(value)) return value.map(jsonSafe);
+  if (value && typeof value === 'object' && value.constructor === Object) {
+    return Object.fromEntries(Object.entries(value).map(([k, v]) => [k, jsonSafe(v)]));
+  }
+  return value;
 }
 
 // GET /api/configs — launch configs, dex configs and the current launch fee,
@@ -140,3 +157,4 @@ router.get('/launches', (req, res, next) => {
 });
 
 module.exports = router;
+module.exports.jsonSafe = jsonSafe;

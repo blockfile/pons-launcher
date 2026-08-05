@@ -301,7 +301,13 @@ async function prepareV2(input, { keystore: ks = keystore } = {}) {
     launch: signedLaunch,
     buys,
     totalBuyEth: formatEther(buys.reduce((s, b) => s + BigInt(b.amountIn), 0n)),
-    fees,
+    // Strings, not the BigInts getFees returns. This object is JSON-encoded
+    // twice — once as the preflight response, once into the launch history —
+    // and JSON.stringify throws on a BigInt rather than skipping it, so a
+    // successful plan came back as "Do not know how to serialize a BigInt".
+    fees: Object.fromEntries(
+      Object.entries(fees).map(([k, v]) => [k, typeof v === 'bigint' ? v.toString() : v])
+    ),
     buyGas: buyGas.toString(),
     chainId: chainId.toString(),
     warnings,
