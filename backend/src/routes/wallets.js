@@ -5,6 +5,7 @@ const config = require('../config');
 const { keystoreFor } = require('../wallets/keystore');
 const funding = require('../wallets/funding');
 const { dispersersFor } = require('../store/dispersers');
+const { activityFor, summariseTransfers } = require('../store/activity');
 const { BATCH_THRESHOLD } = require('../evm/disperse');
 const { estimate, deploy } = require('../evm/deploy');
 const { provider } = require('../evm/provider');
@@ -29,7 +30,11 @@ router.post('/wallets/generate', requireApiKey, (req, res, next) => {
     const { count = 1, label, role = 'bundle' } = req.body || {};
     const n = Number(count);
     if (!Number.isInteger(n) || n < 1 || n > 100) throw new Error('count must be 1-100');
-    res.json(ks.generate(n, { label, role }));
+    const made = ks.generate(n, { label, role });
+    activityFor(req.user.id).record('wallets', `generated ${made.length} ${role} wallet(s)`, {
+      addresses: made.map((w) => w.address),
+    });
+    res.json(made);
   } catch (err) {
     next(err);
   }
@@ -43,7 +48,11 @@ router.post('/wallets/import', requireApiKey, (req, res, next) => {
       ? privateKeys
       : String(privateKeys || '').split(/[\s,]+/);
     if (!keys.filter(Boolean).length) throw new Error('privateKeys is required');
-    res.json(ks.importKeys(keys, { label, role }));
+    const added = ks.importKeys(keys, { label, role });
+    activityFor(req.user.id).record('wallets', `imported ${added.length} ${role} wallet(s)`, {
+      addresses: added.map((w) => w.address),
+    });
+    res.json(added);
   } catch (err) {
     next(err);
   }
@@ -52,7 +61,12 @@ router.post('/wallets/import', requireApiKey, (req, res, next) => {
 router.delete('/wallets/:id', requireApiKey, (req, res, next) => {
   try {
     const ks = keystoreFor(req.user.id);
-    res.json(ks.remove(req.params.id));
+    const gone = ks.list().find((w) => w.id === req.params.id);
+    const out = ks.remove(req.params.id);
+    activityFor(req.user.id).record('wallets', `removed wallet ${gone?.address || req.params.id}`, {
+      address: gone?.address || null,
+    });
+    res.json(out);
   } catch (err) {
     next(err);
   }
@@ -66,7 +80,12 @@ router.post('/wallets/export', requireApiKey, (req, res, next) => {
     const { id, confirm } = req.body || {};
     if (confirm !== true) throw new Error('export requires { confirm: true }');
     console.warn(`[pons-launcher] PRIVATE KEY EXPORTED for wallet ${id}`);
-    res.json(ks.exportKey(id));
+    const out = ks.exportKey(id);
+    // The fact, never the key.
+    activityFor(req.user.id).record('export', `exported the private key for ${out.address}`, {
+      address: out.address,
+    });
+    res.json(out);
   } catch (err) {
     next(err);
   }
@@ -81,6 +100,11 @@ router.post('/wallets/backup', requireApiKey, (req, res, next) => {
     if ((req.body || {}).confirm !== true) throw new Error('backup requires { confirm: true }');
     const wallets = ks.exportAll();
     console.warn(`[pons-launcher] FULL KEYSTORE EXPORTED — ${wallets.length} private keys`);
+    // The count and the fact, never the keys — an audit trail that is itself a
+    // copy of the keystore would be worse than no audit trail.
+    activityFor(req.user.id).record('export', `downloaded a full backup of ${wallets.length} private key(s)`, {
+      count: wallets.length,
+    });
     res.json({
       exportedAt: new Date().toISOString(),
       chainId: config.chainId,
@@ -103,7 +127,14 @@ router.post('/fund', requireApiKey, async (req, res, next) => {
     const ks = keystoreFor(req.user.id);
     const { targets } = req.body || {};
     if (!Array.isArray(targets) || !targets.length) throw new Error('targets[] is required');
-    res.json(await funding.disperse(targets, { keystore: ks, userId: req.user.id }));
+    const out = await funding.disperse(targets, { keystore: ks, userId: req.user.id });
+    const s = summariseTransfers(out);
+    activityFor(req.user.id).record(
+      'fund',
+      `funded ${s.sent}/${s.wallets} wallet(s)` + (s.failed ? `, ${s.failed} failed` : ''),
+      s
+    );
+    res.json(out);
   } catch (err) {
     next(err);
   }
@@ -114,7 +145,14 @@ router.post('/sweep', requireApiKey, async (req, res, next) => {
   try {
     const ks = keystoreFor(req.user.id);
     const { includeTokens = false, tokenAddress = null } = req.body || {};
-    res.json(await funding.sweep({ includeTokens, tokenAddress }, { keystore: ks }));
+    const out = await funding.sweep({ includeTokens, tokenAddress }, { keystore: ks });
+    const s = summariseTransfers(out);
+    activityFor(req.user.id).record(
+      'sweep',
+      `swept ${s.sent}/${s.wallets} wallet(s) to the dev wallet` + (s.failed ? `, ${s.failed} failed` : ''),
+      { ...s, includeTokens, tokenAddress }
+    );
+    res.json(out);
   } catch (err) {
     next(err);
   }
@@ -177,6 +215,9 @@ router.post('/dispersers/deploy', requireApiKey, async (req, res, next) => {
       const deployed = await deploy('Disperse', n, signer);
       store.add(deployed);
       console.warn(`[pons-launcher] ${req.user.id} deployed ${deployed.length} disperser(s)`);
+      activityFor(req.user.id).record('deploy', `deployed ${deployed.length} disperser contract(s)`, {
+        contracts: deployed.map((d) => ({ address: d.address, txHash: d.txHash, gasUsed: d.gasUsed })),
+      });
       res.json({ deployed, dispersers: store.records(), addresses: store.addresses() });
     } catch (err) {
       // Contracts that landed before the failure are paid for. Record them
@@ -196,6 +237,18 @@ router.delete('/dispersers/:address', requireApiKey, (req, res, next) => {
     const store = dispersersFor(req.user.id);
     store.remove(req.params.address);
     res.json({ dispersers: store.records(), addresses: store.addresses() });
+  } catch (err) {
+    next(err);
+  }
+});
+
+// GET /api/activity — this user's own record of funding, sweeps, deploys,
+// wallets and exports. Scoped like everything else: there is no view of anyone
+// else's, because there is no admin role to grant one.
+router.get('/activity', (req, res, next) => {
+  try {
+    const { limit = 100, kind = null } = req.query;
+    res.json(activityFor(req.user.id).list({ limit: Number(limit), kind }));
   } catch (err) {
     next(err);
   }

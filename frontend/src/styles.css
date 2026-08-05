@@ -740,3 +740,32 @@ pre {
   border-color: var(--amber);
   color: var(--void);
 }
+
+/* ── activity log ─────────────────────────────────────────────────────────
+   The kind tag is colour-coded by what it costs to get wrong: money moving,
+   contracts created, key material touched. */
+.activity-list td {
+  font-size: 12px;
+  vertical-align: top;
+}
+.activity-list .tag {
+  display: inline-block;
+  font: 600 10px/1 var(--mono);
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  padding: 4px 7px;
+  border-radius: 3px;
+  border: 1px solid;
+}
+.activity-list .tag.moved {
+  color: var(--jade);
+  border-color: var(--jade);
+}
+.activity-list .tag.built {
+  color: var(--amber);
+  border-color: var(--amber);
+}
+.activity-list .tag.keys {
+  color: var(--vermilion);
+  border-color: var(--vermilion);
+}

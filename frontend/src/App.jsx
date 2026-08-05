@@ -8,6 +8,7 @@ import DispersersPanel from './components/DispersersPanel.jsx';
 import LaunchForm from './components/LaunchForm.jsx';
 import ResultPanel from './components/ResultPanel.jsx';
 import HistoryPanel from './components/HistoryPanel.jsx';
+import ActivityPanel from './components/ActivityPanel.jsx';
 
 export default function App() {
   const [health, setHealth] = useState(null);
@@ -123,6 +124,7 @@ export default function App() {
         />
         <ResultPanel output={output} />
         <HistoryPanel entries={history} explorer={health?.explorer || ''} />
+        <ActivityPanel explorer={health?.explorer || ''} apiKey={key} />
       </main>
     </>
   );
