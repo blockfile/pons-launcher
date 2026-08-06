@@ -1,0 +1,22 @@
+[   32972ms] Error: Value is null
+    at X (https://pools.trade/assets/t._address-QEOH-wWZ.js:1:24000)
+    at Ho.Candlestick [as Yh] (https://pools.trade/assets/t._address-QEOH-wWZ.js:1:66800)
+    at Ho.Hs (https://pools.trade/assets/t._address-QEOH-wWZ.js:1:67582)
+    at eo.ne (https://pools.trade/assets/t._address-QEOH-wWZ.js:1:52136)
+    at https://pools.trade/assets/t._address-QEOH-wWZ.js:1:48571
+    at Array.map (<anonymous>)
+    at eo.qs (https://pools.trade/assets/t._address-QEOH-wWZ.js:1:48558)
+    at eo.Fs (https://pools.trade/assets/t._address-QEOH-wWZ.js:1:46103)
+    at eo.xt (https://pools.trade/assets/t._address-QEOH-wWZ.js:1:45937)
+    at gc (https://pools.trade/assets/t._address-QEOH-wWZ.js:1:114240)
+[   32976ms] Error: Value is null
+    at X (https://pools.trade/assets/t._address-QEOH-wWZ.js:1:24000)
+    at Ho.Candlestick [as Yh] (https://pools.trade/assets/t._address-QEOH-wWZ.js:1:66800)
+    at Ho.Hs (https://pools.trade/assets/t._address-QEOH-wWZ.js:1:67582)
+    at eo.ne (https://pools.trade/assets/t._address-QEOH-wWZ.js:1:52136)
+    at https://pools.trade/assets/t._address-QEOH-wWZ.js:1:48571
+    at Array.map (<anonymous>)
+    at eo.qs (https://pools.trade/assets/t._address-QEOH-wWZ.js:1:48558)
+    at eo.Fs (https://pools.trade/assets/t._address-QEOH-wWZ.js:1:46103)
+    at eo.xt (https://pools.trade/assets/t._address-QEOH-wWZ.js:1:45937)
+    at gc (https://pools.trade/assets/t._address-QEOH-wWZ.js:1:114240)
