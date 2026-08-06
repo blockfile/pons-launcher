@@ -12,7 +12,7 @@ import { Busy } from './Section.jsx';
  * There is no restart step. The backend reads this list per funding run, so a
  * contract deployed here is in use on the very next Fund.
  */
-export default function DispersersPanel({ explorer, apiKey, report }) {
+export default function DispersersPanel({ explorer, credential, report }) {
   const [state, setState] = useState(null);
   const [count, setCount] = useState(3);
   const [busy, setBusy] = useState('');
@@ -27,14 +27,16 @@ export default function DispersersPanel({ explorer, apiKey, report }) {
     }
   }
 
-  // Re-read when the key changes, not just on mount. The key decides whether
-  // this route may be read at all, and the panel mounts before it is pasted —
-  // loading once left it stuck on "invalid or missing API key" for the whole
+  // Re-read when the credential changes, not just on mount. It decides whether
+  // this route may be read at all, and the panel mounts before a key is pasted
+  // — loading once left it stuck on "invalid or missing API key" for the whole
   // session. Debounced to match App, which fires on every keystroke of a paste.
+  // A key restored from sessionStorage is already present on the first render,
+  // so that case loads immediately and correctly.
   useEffect(() => {
-    const t = setTimeout(load, apiKey ? 400 : 0);
+    const t = setTimeout(load, credential ? 400 : 0);
     return () => clearTimeout(t);
-  }, [apiKey]);
+  }, [credential]);
 
   async function act(name, fn) {
     setBusy(name);
@@ -53,7 +55,7 @@ export default function DispersersPanel({ explorer, apiKey, report }) {
 
   // Before a key is entered the header already says so; repeating it here
   // would just be noise next to every other panel doing the same.
-  if (error) return apiKey ? <p className="hint">dispersers unavailable — {error}</p> : null;
+  if (error) return credential ? <p className="hint">dispersers unavailable — {error}</p> : null;
   if (!state) return null;
 
   const { dispersers, addresses, usingFallback, batchThreshold, quote } = state;

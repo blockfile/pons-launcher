@@ -811,3 +811,137 @@ pre {
   color: var(--vermilion);
   border-color: var(--vermilion);
 }
+
+/* ── confirmation dialogs ─────────────────────────────────────────────────
+   Every irreversible action is confirmed here rather than by window.confirm.
+   A browser dialog cannot carry the console's own language — it is the same
+   grey box on a dry run as on a live launch — and it can be suppressed by the
+   browser entirely, which for a button that spends real funds is a hazard.
+   The vermilion rule holds inside the dialog too: is-danger is for things that
+   cannot be undone, and for nothing else. */
+.modal-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 100;
+  display: grid;
+  place-items: center;
+  padding: 24px;
+  background: rgba(6, 9, 13, 0.8);
+}
+
+.modal {
+  width: min(560px, 100%);
+  max-height: calc(100vh - 48px);
+  overflow-y: auto;
+  background: var(--panel);
+  border: 1px solid var(--rule);
+  border-top: 3px solid var(--dimmer);
+  border-radius: 6px;
+  padding: 20px;
+  box-shadow: 0 24px 64px rgba(0, 0, 0, 0.6);
+}
+/* The panel takes focus on open so a stray Enter has nothing to press; that
+   should not draw a focus ring around the whole dialog. */
+.modal:focus {
+  outline: none;
+}
+.modal.is-danger {
+  border-color: var(--vermilion-dim);
+  border-top-color: var(--vermilion);
+}
+
+/* Overrides the section label: no hairline, and it is a sentence, not a
+   silkscreen tag. */
+.modal-title {
+  display: block;
+  margin: 0 0 10px;
+  font: 600 14px/1.45 var(--sans);
+  letter-spacing: 0;
+  text-transform: none;
+  color: var(--ink);
+}
+.modal-title::after {
+  content: none;
+}
+.modal.is-danger .modal-title {
+  color: var(--vermilion);
+  font: 700 13px/1.45 var(--mono);
+  letter-spacing: 0.04em;
+}
+
+.modal-body p {
+  margin: 0 0 10px;
+  color: var(--dim);
+}
+
+/* The figures to be checked: one per line, labelled, right-aligned so the
+   amounts stack against each other. */
+.modal-facts {
+  display: grid;
+  gap: 1px;
+  background: var(--rule-soft);
+  border: 1px solid var(--rule);
+  border-radius: 4px;
+  overflow: hidden;
+  margin: 12px 0;
+}
+.modal-fact {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 16px;
+  padding: 9px 12px;
+  background: var(--panel-2);
+}
+.modal-fact span {
+  font: 500 11px/1.2 var(--mono);
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--dimmer);
+  white-space: nowrap;
+}
+.modal-fact b {
+  font: 600 13px/1.35 var(--sans);
+  font-variant-numeric: tabular-nums;
+  color: var(--ink);
+  text-align: right;
+}
+.modal-fact b.addr {
+  font: 12px/1.35 var(--mono);
+  color: var(--dim);
+  word-break: break-all;
+}
+
+.modal-question {
+  margin: 14px 0 0;
+  font: 600 13px/1.4 var(--sans);
+  color: var(--ink);
+}
+
+.modal-foot {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+  margin-top: 18px;
+  padding-top: 14px;
+  border-top: 1px solid var(--rule);
+}
+
+/* Typed confirmation: the field is part of the body, not a footer control. */
+.modal-type {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin-top: 12px;
+  /* The word to type is part of the instruction, so the instruction is not
+     silkscreened into caps the way other field labels are. */
+  font: 500 12px/1.4 var(--sans);
+  letter-spacing: 0;
+  text-transform: none;
+  color: var(--dim);
+}
+.modal-type input {
+  width: 100%;
+  font-family: var(--mono);
+  letter-spacing: 0.1em;
+}

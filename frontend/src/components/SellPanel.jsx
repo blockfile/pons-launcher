@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react';
 import { api } from '../api.js';
 import { Busy } from './Section.jsx';
+import Modal, { Fact } from './Modal.jsx';
 
 /**
  * Exit a launched token from every bundle wallet at once.
@@ -33,7 +34,7 @@ function price(v) {
 // The picker's wallet field is a count; tolerate a list in case it is one.
 const walletCount = (t) => (Array.isArray(t?.wallets) ? t.wallets.length : Number(t?.wallets || 0));
 
-export default function SellPanel({ explorer, apiKey, live, reload, report }) {
+export default function SellPanel({ explorer, credential, live, reload, report }) {
   const [list, setList] = useState(null);
   const [missing, setMissing] = useState(false);
   const [error, setError] = useState('');
@@ -42,6 +43,10 @@ export default function SellPanel({ explorer, apiKey, live, reload, report }) {
   const [result, setResult] = useState(null);
   const [armed, setArmed] = useState(false);
   const [busy, setBusy] = useState('');
+  // What the confirmation is asking about, frozen at the moment it opened, so
+  // the figures on screen are the ones the sell is built from. Null means no
+  // dialog is open — and no dialog open means no sell can be sent.
+  const [pending, setPending] = useState(null);
 
   async function load() {
     try {
@@ -56,12 +61,13 @@ export default function SellPanel({ explorer, apiKey, live, reload, report }) {
     }
   }
 
-  // Re-read when the key changes, not just on mount: the key decides whether
-  // this route may be read at all, and the panel mounts before it is pasted.
+  // Re-read when the credential changes, not just on mount: it decides whether
+  // this route may be read at all, and the panel mounts before a key is pasted.
+  // A key restored from sessionStorage is there on the first render already.
   useEffect(() => {
-    const t = setTimeout(load, apiKey ? 400 : 0);
+    const t = setTimeout(load, credential ? 400 : 0);
     return () => clearTimeout(t);
-  }, [apiKey]);
+  }, [credential]);
 
   const rows = Array.isArray(list) ? list : [];
   const selected = rows.find((r) => r.token === token) || null;
@@ -82,6 +88,9 @@ export default function SellPanel({ explorer, apiKey, live, reload, report }) {
     setPlan(null);
     setResult(null);
     setArmed(false);
+    // A dialog left open across a change of selection would be asking about
+    // the previous token under the new token's name.
+    setPending(null);
   }, [token]);
 
   async function act(name, fn) {
@@ -107,20 +116,24 @@ export default function SellPanel({ explorer, apiKey, live, reload, report }) {
     });
   }
 
+  // Opens the confirmation. Nothing is sent from here; only the dialog's
+  // confirm button reaches fire().
   function sell() {
-    const symbol = selected?.symbol || plan?.symbol || 'this token';
-    const count = plan ? plan.wallets.length : walletCount(selected);
-    const msg = live
-      ? `SELL ALL — irreversible, and it spends real funds.\n\n` +
-        `${symbol}\n${token}\n${count} wallet${count === 1 ? '' : 's'} sell their entire balance\n\n` +
-        `There is no slippage floor. Every wallet takes whatever price it gets, ` +
-        `including a bad one.\n\nProceed?`
-      : `Dry run sell of ${symbol} from ${count} wallet${count === 1 ? '' : 's'}. ` +
-        `Nothing will be broadcast. Proceed?`;
-    if (!confirm(msg)) return;
+    if (!token) return;
+    setPending({
+      token,
+      symbol: selected?.symbol || plan?.symbol || 'this token',
+      count: plan ? plan.wallets.length : walletCount(selected),
+    });
+  }
+
+  function fire() {
+    const p = pending;
+    setPending(null);
+    if (!p) return;
 
     act('sell', async () => {
-      const res = await api('/sell', 'POST', { token, confirm: true });
+      const res = await api('/sell', 'POST', { token: p.token, confirm: true });
       setResult(res);
       // Re-lock the guard: one arming, one sell.
       setArmed(false);
@@ -137,7 +150,7 @@ export default function SellPanel({ explorer, apiKey, live, reload, report }) {
   // Nothing to say when the routes are not there. Before a key is entered the
   // header already says so; repeating it next to every other panel is noise.
   if (missing) return null;
-  if (error) return apiKey ? <p className="hint">sell unavailable — {error}</p> : null;
+  if (error) return credential ? <p className="hint">sell unavailable — {error}</p> : null;
   if (!list) return null;
 
   const results = Array.isArray(result?.results) ? result.results : [];
@@ -353,6 +366,48 @@ export default function SellPanel({ explorer, apiKey, live, reload, report }) {
           </p>
         </>
       )}
+
+      {/* The live dialog restates the missing slippage floor rather than
+          relying on the notice above: by the time this opens, that notice has
+          been scrolled past and read as furniture. The dry-run dialog says
+          instead that nothing is broadcast, so the two can never be confused
+          for one another. */}
+      <Modal
+        open={Boolean(pending)}
+        danger={live}
+        title={
+          live
+            ? 'SELL ALL — irreversible, and it spends real funds.'
+            : `Dry run sell of ${pending?.symbol || ''} from ${pending?.count ?? 0} wallet${
+                pending?.count === 1 ? '' : 's'
+              }`
+        }
+        confirmLabel={live ? 'Sell all' : 'Sell all (dry run)'}
+        onConfirm={fire}
+        onCancel={() => setPending(null)}
+      >
+        {!live && <p>Nothing will be broadcast.</p>}
+        <div className="modal-facts">
+          <Fact label="Symbol">{pending?.symbol || '—'}</Fact>
+          <Fact label="Token" mono>
+            {pending?.token || '—'}
+          </Fact>
+          <Fact label="Wallets">
+            {pending?.count ?? 0} wallet{pending?.count === 1 ? '' : 's'} sell their entire balance
+          </Fact>
+        </div>
+        {live && (
+          <div className="notice danger">
+            <h3>No slippage floor</h3>
+            <ul>
+              <li>
+                There is no slippage floor. Every wallet takes whatever price it gets, including a
+                bad one.
+              </li>
+            </ul>
+          </div>
+        )}
+      </Modal>
     </details>
   );
 }

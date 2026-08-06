@@ -1,9 +1,43 @@
-// The API key lives in module scope for the life of the tab and is never
-// persisted — localStorage would expose it to anything else on the origin.
-let apiKey = '';
+// The API key lives in module scope for the life of the tab, mirrored into
+// sessionStorage so that a refresh does not cost the operator a re-paste.
+//
+// sessionStorage, NOT localStorage. localStorage is shared by every tab on the
+// origin and survives until something explicitly clears it, so a key written
+// there outlives the session that needed it and is readable by anything that
+// ever runs on this origin — for a credential that can spend every wallet the
+// console holds, that is too long a life and too wide an audience.
+// sessionStorage is scoped to this one tab: a refresh keeps the key, closing
+// the tab discards it, and a second tab starts blank.
+//
+// Deployments that inject the key at nginx (see deploy/nginx-rhbond.conf) never
+// call setApiKey at all, so in that arrangement nothing is stored anywhere.
+const STORAGE_KEY = 'pons-launcher.apiKey';
+
+// Storage can be disabled outright, and a console that refuses to load because
+// of a browser setting is worse than one that asks for the key again.
+function readStored() {
+  try {
+    return sessionStorage.getItem(STORAGE_KEY) || '';
+  } catch {
+    return '';
+  }
+}
+
+let apiKey = readStored();
+
+/** The key this tab is using, if any. Read once at mount to seed the field. */
+export function getApiKey() {
+  return apiKey;
+}
 
 export function setApiKey(key) {
   apiKey = key || '';
+  try {
+    if (apiKey) sessionStorage.setItem(STORAGE_KEY, apiKey);
+    else sessionStorage.removeItem(STORAGE_KEY);
+  } catch {
+    // Not fatal — the key still works for this page view.
+  }
 }
 
 export async function api(path, method = 'GET', body) {

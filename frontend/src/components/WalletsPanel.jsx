@@ -1,6 +1,7 @@
 import { useState } from 'react';
 import { api, downloadBackup } from '../api.js';
 import Section, { Busy } from './Section.jsx';
+import Modal, { Fact } from './Modal.jsx';
 
 /**
  * The wallet table. Per-row fund / buy-mode / buy-amount inputs live in `rows`,
@@ -12,6 +13,12 @@ export default function WalletsPanel({ wallets, rows, setRow, reload, report }) 
   const [keys, setKeys] = useState('');
   const [importRole, setImportRole] = useState('bundle');
   const [busy, setBusy] = useState('');
+  // 'json' | 'csv' while the export confirmation is open, '' otherwise, plus
+  // whatever has been typed into it so far.
+  const [exporting, setExporting] = useState('');
+  const [typed, setTyped] = useState('');
+  // The wallet the delete confirmation is asking about, or null.
+  const [deleting, setDeleting] = useState(null);
 
   async function act(name, fn) {
     setBusy(name);
@@ -27,16 +34,10 @@ export default function WalletsPanel({ wallets, rows, setRow, reload, report }) 
 
   const hasDev = wallets.some((w) => w.role === 'dev');
 
+  // Opens the typed confirmation. Nothing is exported from here.
   function backup(format) {
-    // Typed confirmation, not a click-through: this hands over every key the
-    // console holds, and a mis-click should not be enough to do it.
-    const typed = prompt(
-      `This downloads the PRIVATE KEY of all ${wallets.length} wallets.\n` +
-        'Anyone who opens that file can spend every one of them.\n\n' +
-        'Type EXPORT to continue.'
-    );
-    if (typed !== 'EXPORT') return;
-    act('backup', () => downloadBackup(format));
+    setTyped('');
+    setExporting(format);
   }
 
   return (
@@ -211,10 +212,7 @@ export default function WalletsPanel({ wallets, rows, setRow, reload, report }) 
                     busy={busy === w.id}
                     className="ghost"
                     title="delete this wallet"
-                    onClick={() => {
-                      if (!confirm(`Delete ${w.address}? Its key is erased from the keystore.`)) return;
-                      act(w.id, () => api(`/wallets/${w.id}`, 'DELETE'));
-                    }}
+                    onClick={() => setDeleting(w)}
                   >
                     ×
                   </Busy>
@@ -224,6 +222,60 @@ export default function WalletsPanel({ wallets, rows, setRow, reload, report }) 
           })}
         </tbody>
       </table>
+
+      {/* Typed confirmation, not a click-through: this hands over every key the
+          console holds, and a mis-click should not be enough to do it. */}
+      <Modal
+        open={Boolean(exporting)}
+        danger
+        title={`This downloads the PRIVATE KEY of all ${wallets.length} wallets.`}
+        question={null}
+        confirmLabel={exporting === 'csv' ? 'Download CSV' : 'Download'}
+        confirmDisabled={typed !== 'EXPORT'}
+        onConfirm={() => {
+          const format = exporting;
+          setExporting('');
+          act('backup', () => downloadBackup(format));
+        }}
+        onCancel={() => setExporting('')}
+      >
+        <p>Anyone who opens that file can spend every one of them.</p>
+        <label className="modal-type">
+          Type EXPORT to continue.
+          <input
+            data-autofocus
+            value={typed}
+            autoComplete="off"
+            spellCheck="false"
+            onChange={(e) => setTyped(e.target.value)}
+          />
+        </label>
+      </Modal>
+
+      {/* Deleting a wallet erases its key, so it carries the vermilion: there
+          is no undo and no second copy unless a backup was taken. */}
+      <Modal
+        open={Boolean(deleting)}
+        danger
+        title="Delete this wallet?"
+        question={null}
+        confirmLabel="Delete"
+        onConfirm={() => {
+          const w = deleting;
+          setDeleting(null);
+          if (w) act(w.id, () => api(`/wallets/${w.id}`, 'DELETE'));
+        }}
+        onCancel={() => setDeleting(null)}
+      >
+        <div className="modal-facts">
+          <Fact label="Address" mono>
+            {deleting?.address || '—'}
+          </Fact>
+          <Fact label="Role">{deleting?.role || '—'}</Fact>
+          <Fact label="Balance">{Number(deleting?.balanceEth || 0).toFixed(6)} ETH</Fact>
+        </div>
+        <p>Its key is erased from the keystore.</p>
+      </Modal>
     </Section>
   );
 }

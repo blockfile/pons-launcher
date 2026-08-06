@@ -22,7 +22,7 @@ const KINDS = {
  * Scoped to the caller, like the wallets and the history. There is no view of
  * another user's activity because there is no admin role to grant one.
  */
-export default function ActivityPanel({ explorer, apiKey }) {
+export default function ActivityPanel({ explorer, credential }) {
   const [entries, setEntries] = useState(null);
   const [filter, setFilter] = useState('');
   const [error, setError] = useState('');
@@ -36,14 +36,16 @@ export default function ActivityPanel({ explorer, apiKey }) {
     }
   }
 
-  // Re-read on key change as well as on mount: the key decides whose log this
-  // is, and the panel mounts before it is pasted.
+  // Re-read on credential change as well as on mount: the credential decides
+  // whose log this is, and the panel mounts before a key is pasted. One
+  // restored from sessionStorage is present on the first render, so that case
+  // loads the right log straight away.
   useEffect(() => {
-    const t = setTimeout(load, apiKey ? 400 : 0);
+    const t = setTimeout(load, credential ? 400 : 0);
     return () => clearTimeout(t);
-  }, [apiKey, filter]);
+  }, [credential, filter]);
 
-  if (error) return apiKey ? <p className="hint">activity unavailable — {error}</p> : null;
+  if (error) return credential ? <p className="hint">activity unavailable — {error}</p> : null;
   if (!entries) return null;
 
   return (

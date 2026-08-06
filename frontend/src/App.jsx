@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useState } from 'react';
-import { api, setApiKey } from './api.js';
+import { api, getApiKey, setApiKey } from './api.js';
 import Guide from './components/Guide.jsx';
 import Readiness from './components/Readiness.jsx';
 import WalletsPanel from './components/WalletsPanel.jsx';
@@ -17,7 +17,10 @@ export default function App() {
   const [configs, setConfigs] = useState(null);
   const [history, setHistory] = useState([]);
   const [output, setOutput] = useState('Connecting…');
-  const [key, setKey] = useState('');
+  // Seeded from the key api.js restored out of sessionStorage, so a refresh
+  // finds the field already filled and every panel below already entitled to
+  // read — see the note in api.js for why sessionStorage and not localStorage.
+  const [key, setKey] = useState(getApiKey);
   const [logo, setLogo] = useState('');
   // Per-wallet fund / buy-mode / buy-amount, keyed by wallet id. Lifted here
   // because both the Fund and Launch panels read the same rows.
@@ -55,6 +58,20 @@ export default function App() {
   const live = Boolean(health && !health.dryRun);
   const funded = wallets.filter((w) => w.role !== 'dev' && Number(w.balanceEth) > 0).length;
 
+  // Whether this console may read at all, and what it re-reads on. It is not
+  // the key: a deployment that injects the key at nginx (the map block in
+  // deploy/nginx-rhbond.conf) never puts one in the browser, and health comes
+  // back with `user` set instead; a deployment with no key configured needs
+  // nothing at all. The panels below key their reloads on this string, so it
+  // has to change when the identity changes and be truthy whenever the console
+  // is entitled — otherwise they hide their own errors as "no key yet".
+  const credential =
+    key || health?.user || (health && !health.apiKeyRequired ? 'open' : '');
+
+  // Only ask for a key when one is actually missing. If nginx supplies it, or
+  // the deployment has none, the field is not a prompt — it is a lie.
+  const needsKey = Boolean(health && health.apiKeyRequired && !health.user);
+
   return (
     <>
       <header className={`strip ${live ? 'is-live' : ''}`}>
@@ -79,17 +96,33 @@ export default function App() {
           {!health ? 'connecting' : live ? 'live · spends real funds' : 'dry run · broadcasts nothing'}
         </div>
 
-        {health && health.apiKeyRequired && !health.user && (
-          <input
-            type="password"
-            placeholder="API key"
-            autoComplete="off"
-            value={key}
-            onChange={(e) => {
-              setKey(e.target.value);
-              setApiKey(e.target.value);
-            }}
-          />
+        {needsKey && (
+          <>
+            <input
+              type="password"
+              placeholder="API key"
+              autoComplete="off"
+              value={key}
+              onChange={(e) => {
+                setKey(e.target.value);
+                setApiKey(e.target.value);
+              }}
+            />
+            {/* A key that survives a refresh needs a way out that is not
+                "close every tab" — a shared screen is the usual reason. */}
+            {key && (
+              <button
+                className="link"
+                title="clear the key from this tab"
+                onClick={() => {
+                  setKey('');
+                  setApiKey('');
+                }}
+              >
+                forget
+              </button>
+            )}
+          </>
         )}
 
         {/* Multi-user deployments proxy through nginx, which overwrites this
@@ -101,7 +134,7 @@ export default function App() {
       </header>
 
       <main>
-        <Readiness wallets={wallets} funded={funded} logo={logo} apiKey={key || !health?.apiKeyRequired} />
+        <Readiness wallets={wallets} funded={funded} logo={logo} health={health} apiKey={key} />
         <Guide />
 
         <WalletsPanel
@@ -112,7 +145,7 @@ export default function App() {
           report={report}
         />
         <FundPanel wallets={wallets} rows={rows} reload={loadWallets} report={report} />
-        <DispersersPanel explorer={health?.explorer || ''} apiKey={key} report={report} />
+        <DispersersPanel explorer={health?.explorer || ''} credential={credential} report={report} />
         <LaunchForm
           configs={configs}
           wallets={wallets}
@@ -128,13 +161,13 @@ export default function App() {
             numbered step would imply the sequence is unfinished until it runs. */}
         <SellPanel
           explorer={health?.explorer || ''}
-          apiKey={key}
+          credential={credential}
           live={live}
           reload={loadWallets}
           report={report}
         />
         <HistoryPanel entries={history} explorer={health?.explorer || ''} />
-        <ActivityPanel explorer={health?.explorer || ''} apiKey={key} />
+        <ActivityPanel explorer={health?.explorer || ''} credential={credential} />
       </main>
     </>
   );

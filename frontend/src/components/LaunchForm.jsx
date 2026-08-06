@@ -2,6 +2,7 @@ import { useEffect, useState } from 'react';
 import { api } from '../api.js';
 import Section, { Busy } from './Section.jsx';
 import LogoField from './LogoField.jsx';
+import Modal, { Fact } from './Modal.jsx';
 
 // The chain makes a block every ~100ms, but the restriction window is counted
 // in the EVM's own block number, which advances roughly every 16 seconds. So
@@ -46,6 +47,11 @@ export default function LaunchForm({
   const [busy, setBusy] = useState('');
   const [uploading, setUploading] = useState(false);
   const [armed, setArmed] = useState(false);
+  // The request body as it stood when the dialog opened. Held rather than
+  // rebuilt on confirm so that what was read is exactly what is broadcast —
+  // and null whenever no dialog is open, which is the only state in which a
+  // launch can be fired at all.
+  const [pending, setPending] = useState(null);
 
   const set = (k) => (e) => setF((prev) => ({ ...prev, [k]: e.target.value }));
   const setLogo = (logo) => {
@@ -135,14 +141,16 @@ export default function LaunchForm({
     }
   }
 
+  // Opens the confirmation. Nothing is sent from here; only the dialog's
+  // confirm button reaches fire().
   function launch() {
-    const b = body();
-    // The wording changes with DRY_RUN so a live bundle can never be fired in
-    // the belief that it was a rehearsal.
-    const msg = live
-      ? `LIVE LAUNCH — this spends real funds.\n\n${b.params.symbol}\ndev buy ${b.devBuyEth} ETH\n${b.wallets.length} bundle wallets\n\nProceed?`
-      : `Dry run launch of ${b.params.symbol}. Nothing will be broadcast. Proceed?`;
-    if (!confirm(msg)) return;
+    setPending(body());
+  }
+
+  function fire() {
+    const b = pending;
+    setPending(null);
+    if (!b) return;
 
     act('launch', async () => {
       const res = await api(isV2 ? '/v2/launch' : '/launch', 'POST', b);
@@ -377,6 +385,29 @@ export default function LaunchForm({
           dev buy {f.devBuyEth || 0} ETH
         </div>
       </div>
+
+      {/* The wording changes with DRY_RUN so a live bundle can never be fired
+          in the belief that it was a rehearsal — the headline, the colour and
+          the button label all differ, not just one of them. */}
+      <Modal
+        open={Boolean(pending)}
+        danger={live}
+        title={
+          live
+            ? 'LIVE LAUNCH — this spends real funds.'
+            : `Dry run launch of ${pending?.params.symbol || ''}`
+        }
+        confirmLabel={live ? 'Launch + bundle' : 'Launch (dry run)'}
+        onConfirm={fire}
+        onCancel={() => setPending(null)}
+      >
+        {!live && <p>Nothing will be broadcast.</p>}
+        <div className="modal-facts">
+          <Fact label="Symbol">{pending?.params.symbol || '—'}</Fact>
+          <Fact label="Dev buy">{pending?.devBuyEth || 0} ETH</Fact>
+          <Fact label="Bundle wallets">{pending?.wallets.length ?? 0}</Fact>
+        </div>
+      </Modal>
     </Section>
   );
 }
