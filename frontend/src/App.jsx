@@ -7,6 +7,7 @@ import FundPanel from './components/FundPanel.jsx';
 import DispersersPanel from './components/DispersersPanel.jsx';
 import LaunchForm from './components/LaunchForm.jsx';
 import ResultPanel from './components/ResultPanel.jsx';
+import SellPanel from './components/SellPanel.jsx';
 import HistoryPanel from './components/HistoryPanel.jsx';
 import ActivityPanel from './components/ActivityPanel.jsx';
 
@@ -123,6 +124,15 @@ export default function App() {
           onLogo={setLogo}
         />
         <ResultPanel output={output} />
+        {/* After the launch, not part of it: exiting is a later decision, and a
+            numbered step would imply the sequence is unfinished until it runs. */}
+        <SellPanel
+          explorer={health?.explorer || ''}
+          apiKey={key}
+          live={live}
+          reload={loadWallets}
+          report={report}
+        />
         <HistoryPanel entries={history} explorer={health?.explorer || ''} />
         <ActivityPanel explorer={health?.explorer || ''} apiKey={key} />
       </main>

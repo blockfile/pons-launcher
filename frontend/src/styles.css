@@ -741,6 +741,48 @@ pre {
   color: var(--void);
 }
 
+/* ── sell everything ──────────────────────────────────────────────────────
+   The exit is irreversible and has no price floor, so the panel carries the
+   vermilion the launch button does — and the picker is a radio list rather than
+   a select, because "which token" and "how much of it is out there" have to be
+   read together before anything is armed. */
+.sell-list td,
+.sell-results td {
+  font-size: 12px;
+  vertical-align: top;
+}
+.sell-list td:first-child,
+.sell-results td:first-child {
+  width: 1%;
+  white-space: nowrap;
+}
+.sell-list input[type='radio'] {
+  width: 16px;
+  height: 16px;
+  padding: 0;
+  accent-color: var(--vermilion);
+  cursor: pointer;
+}
+.sell-list .hint a,
+.sell-results .hint a {
+  color: var(--dim);
+  text-decoration: none;
+}
+.sell-list .hint a:hover,
+.sell-results .hint a:hover {
+  color: var(--amber);
+  text-decoration: underline;
+}
+.sell-results .fill-ok {
+  color: var(--jade);
+}
+.sell-results .fill-bad {
+  color: var(--vermilion);
+}
+.sell-panel .stats {
+  margin-top: 14px;
+}
+
 /* ── activity log ─────────────────────────────────────────────────────────
    The kind tag is colour-coded by what it costs to get wrong: money moving,
    contracts created, key material touched. */
