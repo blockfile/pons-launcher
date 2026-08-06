@@ -30,6 +30,31 @@ Graduated or not is readable per token: `getLaunchedToken(token).phase` on the
 v2 factory, or `graduated()` / `readyToGraduate()` on the curve. The button
 reads it at preflight and routes accordingly rather than asking the operator.
 
+## Which token to sell — decided
+
+The candidate list is an INTERSECTION, and the order matters:
+
+    tokens the dev wallet launched   INTERSECT   tokens the bundle wallets hold
+
+The first set comes from `TokenLaunched` filtered on `deployer`, plus launch
+history. The balance check only narrows that set; it never adds to it.
+
+**Never list a token merely because a wallet holds it.** Bundle wallets get
+dusted, and selling an unknown token means approving an unknown contract and
+calling into it — a hostile ERC-20 can do anything it likes in `transferFrom`,
+including behaving differently for one address than another. A sell-all that
+swept everything with a balance would be an invitation to send poisoned tokens
+to the wallets.
+
+Approvals only ever go to the curve or router for a token the dev wallet
+launched.
+
+One dev wallet does launch several tokens in practice — `0x1ada673A…97C8ee`
+has launched at least twice — so the picker is required, not optional. It
+shows symbol, total held across the bundle, how many wallets hold any, and
+whether the curve has graduated. Old launches drop off the list on their own
+once their balance is gone.
+
 ## Still open
 
 - Where the ETH goes: left in each bundle wallet, or swept to dev in the same
