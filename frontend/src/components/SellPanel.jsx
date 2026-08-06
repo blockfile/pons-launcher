@@ -332,7 +332,9 @@ export default function SellPanel({ explorer, apiKey, live, reload, report }) {
                       {r.status || '—'}
                     </span>
                     {r.error && <div className="hint">{r.error}</div>}
-                    {(r.hashes || []).map((h) => (
+                    {/* Losing the receipts to a render crash is worst exactly
+                        here — after something irreversible has happened. */}
+                    {(Array.isArray(r.hashes) ? r.hashes : []).map((h) => (
                       <div key={h} className="hint">
                         <a href={`${explorer}/tx/${h}`} target="_blank" rel="noreferrer">
                           {h.slice(0, 18)}…
