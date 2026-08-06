@@ -205,18 +205,20 @@ function historyTokens(userId) {
 // get dusted, and selling an unknown token means approving an unknown contract.
 // See the header of evm/v2/holdings.js for the full reasoning before changing
 // anything here.
+// The console renders this as a plain list, so the list is what it gets. The
+// scan's own diagnostics go to the server log rather than into the array —
+// there is nowhere in a row to put "the scan was partial", and inventing a
+// wrapper object would leave the picker rendering nothing at all.
 router.get('/sellable', async (req, res, next) => {
   try {
     const ks = keystoreFor(req.user.id);
-    res.json(
-      jsonSafe(
-        await findSellable({
-          deployer: ks.devWallet().address,
-          wallets: ks.bundleWallets(),
-          knownTokens: historyTokens(req.user.id),
-        })
-      )
-    );
+    const out = await findSellable({
+      deployer: ks.devWallet().address,
+      wallets: ks.bundleWallets(),
+      knownTokens: historyTokens(req.user.id),
+    });
+    for (const w of out.warnings) console.warn(`[pons-launcher] sellable: ${w}`);
+    res.json(jsonSafe(out.tokens));
   } catch (err) {
     next(err);
   }
@@ -252,11 +254,16 @@ router.post('/sell', requireApiKey, async (req, res, next) => {
     // The failures are why anyone comes back to this log, so the per-wallet
     // results go in whole rather than as a count.
     const t = result.totals;
+    // A dry run says so first. "sold X from 0/2 wallets" is true of a
+    // simulation and of a total failure, and the log is read long afterwards.
+    const summary = result.simulated
+      ? `DRY RUN — would sell ${plan.totalTokens} ${plan.symbol} from ${t.wallets} wallet(s)`
+      : `sold ${plan.symbol} from ${t.sold}/${t.wallets} wallet(s)` +
+        (t.failed ? `, ${t.failed} failed` : '') +
+        (t.ethReceived ? ` — ${t.ethReceived} ETH` : '');
     activityFor(req.user.id).record(
       'sell',
-      `sold ${plan.symbol} from ${t.sold}/${t.wallets} wallet(s)` +
-        (t.failed ? `, ${t.failed} failed` : '') +
-        (t.ethReceived ? ` — ${t.ethReceived} ETH` : ''),
+      summary,
       jsonSafe({
         token: plan.token,
         symbol: plan.symbol,
@@ -266,12 +273,15 @@ router.post('/sell', requireApiKey, async (req, res, next) => {
         minQuoteOut: '0',
         totals: t,
         fill: result.fill,
-        wallets: result.wallets,
+        results: result.results,
         skipped: result.skipped,
       })
     );
 
-    res.json({ plan: publicSellPlan(plan), result: jsonSafe(result) });
+    // The result IS the response, with the plan hung off it. The console reads
+    // response.results/totalEth/bestPrice directly — burying it under a
+    // `result` key showed an empty table after an irreversible sell.
+    res.json(jsonSafe({ ...result, plan: publicSellPlan(plan) }));
   } catch (err) {
     next(err);
   }

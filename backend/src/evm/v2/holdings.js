@@ -522,8 +522,7 @@ async function findSellable({ deployer, wallets = [], knownTokens = [] }, deps =
       ]);
       detail = { ...m, ...curveInfo, held };
     }
-    const { symbol, decimals, held } = detail;
-    const curveInfo = detail;
+    const { symbol, decimals, graduated, readyToGraduate, held } = detail;
 
     const holders = held.filter((h) => h.balance > 0n);
     if (!holders.length) continue; // old launches fall off the list on their own
@@ -536,11 +535,11 @@ async function findSellable({ deployer, wallets = [], knownTokens = [] }, deps =
       curve: record.curve,
       pairToken: record.pairToken,
       phase: record.phase,
-      graduated: curveInfo.graduated,
-      readyToGraduate: curveInfo.readyToGraduate,
+      graduated,
+      readyToGraduate,
       // One button, but the route is decided by the curve's own state — the
       // operator never picks.
-      route: curveInfo.graduated ? 'uniswap-v4' : 'curve',
+      route: graduated ? 'uniswap-v4' : 'curve',
       totalTokens: formatUnits(total, decimals),
       totalTokensRaw: total.toString(),
       wallets: holders.length,

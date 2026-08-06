@@ -65,12 +65,14 @@ async function fireSell(plan, deps = {}) {
       token: plan.token,
       symbol: plan.symbol,
       curve: plan.curve,
-      wallets: plan.wallets.map((w) => ({
+      results: plan.wallets.map((w) => ({
         walletId: w.walletId,
         address: w.address,
         tokens: w.tokens,
         tokensSold: w.tokens,
         ethReceived: null,
+        status: 'simulated',
+        hashes: [],
         approve: { hash: null, status: 'simulated' },
         sell: { hash: null, status: 'simulated' },
       })),
@@ -81,6 +83,9 @@ async function fireSell(plan, deps = {}) {
         tokensSold: zero,
         ethReceived: null,
       },
+      totalEth: null,
+      bestPrice: null,
+      worstPrice: null,
       fill: null,
     };
   }
@@ -218,6 +223,12 @@ async function fireSell(plan, deps = {}) {
       r.priceEth = r.priceRaw === null ? null : formatEther(r.priceRaw);
     }
 
+    // One field the console can colour on, and one list of hashes to link.
+    // Rolling these up here rather than in the route keeps the shape the
+    // operator sees identical to the shape the activity log keeps.
+    r.status = r.approve.status === 'failed' ? 'failed' : r.sell.status;
+    r.hashes = [r.approve.hash, r.sell.hash].filter(Boolean);
+
     delete r._spent;
   }
 
@@ -245,7 +256,7 @@ async function fireSell(plan, deps = {}) {
     symbol: plan.symbol,
     curve: plan.curve,
     minQuoteOut: '0',
-    wallets: results,
+    results,
     skipped: plan.skipped || [],
     totals: {
       wallets: results.length,
@@ -256,6 +267,11 @@ async function fireSell(plan, deps = {}) {
       ethReceived: anyProceeds ? formatEther(totalEth) : null,
       ethReceivedRaw: anyProceeds ? totalEth.toString() : null,
     },
+    // Flat aliases for the console, which reads a result straight off the
+    // response. Same numbers as `totals` and `fill`, one level up.
+    totalEth: anyProceeds ? formatEther(totalEth) : null,
+    bestPrice: priced.length ? priced[0].priceEth : null,
+    worstPrice: priced.length ? priced[priced.length - 1].priceEth : null,
     fill: priced.length
       ? { best: summarise(priced[0]), worst: summarise(priced[priced.length - 1]) }
       : null,

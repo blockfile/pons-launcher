@@ -125,8 +125,8 @@ test("one wallet's broadcast failure does not stop the others", async () => {
   const node = fakeNode({ fail: (raw) => raw === 'SELL_A' });
   const res = await fireSell(plan, { provider: node, ...deps() });
 
-  const a = res.wallets.find((w) => w.walletId === 'a');
-  const b = res.wallets.find((w) => w.walletId === 'b');
+  const a = res.results.find((w) => w.walletId === 'a');
+  const b = res.results.find((w) => w.walletId === 'b');
   assert.equal(a.sell.status, 'failed');
   assert.match(a.error, /nonce too low/);
   assert.equal(a.tokensSold, '0.0', 'a wallet whose sell failed keeps its tokens');
@@ -142,7 +142,7 @@ test('an approval that will not broadcast cancels its own sell rather than stran
   const res = await fireSell(plan, { provider: node, ...deps() });
 
   assert.equal(node.order.includes('SELL_A'), false, 'the sell must not be sent into a nonce gap');
-  const a = res.wallets.find((w) => w.walletId === 'a');
+  const a = res.results.find((w) => w.walletId === 'a');
   assert.equal(a.approve.status, 'failed');
   assert.equal(a.sell.status, 'skipped');
   assert.match(a.error, /nonce too low/);
@@ -153,7 +153,7 @@ test('a reverted sell is reported as reverted, not as a sale', async () => {
   const node = fakeNode({ sellStatus: { SELL_B: 0 } });
   const res = await fireSell(plan, { provider: node, ...deps() });
 
-  const b = res.wallets.find((w) => w.walletId === 'b');
+  const b = res.results.find((w) => w.walletId === 'b');
   assert.equal(b.sell.status, 'reverted');
   assert.equal(b.tokensSold, '0.0');
   assert.equal(res.totals.sold, 1);
@@ -166,8 +166,8 @@ test('proceeds and the best and worst fill are reported, because the tail fills 
   });
   const res = await fireSell(plan, { provider: node, ...deps() });
 
-  const a = res.wallets.find((w) => w.walletId === 'a');
-  const b = res.wallets.find((w) => w.walletId === 'b');
+  const a = res.results.find((w) => w.walletId === 'a');
+  const b = res.results.find((w) => w.walletId === 'b');
   assert.equal(a.ethReceived, '0.002');
   assert.equal(b.ethReceived, '0.0005');
   assert.equal(res.totals.ethReceived, '0.0025');
@@ -194,7 +194,7 @@ test('a dry run broadcasts nothing', async () => {
 
   assert.equal(node.order.length, 0);
   assert.equal(res.simulated, true);
-  assert.ok(res.wallets.every((w) => w.sell.status === 'simulated'));
+  assert.ok(res.results.every((w) => w.sell.status === 'simulated'));
   assert.equal(res.token, getAddress(TOKEN));
 });
 
@@ -212,6 +212,40 @@ test('an unsigned plan is refused rather than signed late', async () => {
   assert.equal(node.order.length, 0, 'nothing may be broadcast once the plan is known to be bad');
 });
 
+// The console reads a sell result straight off the response, so these field
+// names ARE the contract. They were mismatched once already — the panel read
+// `results` while this returned `wallets`, and the whole table came back empty
+// after an irreversible action. Pinned here so it cannot happen again quietly.
+test('the result carries exactly the fields the console renders', async () => {
+  const node = fakeNode({
+    proceeds: { [A]: parseEther('0.002'), [B]: parseEther('0.0005') },
+  });
+  const res = await fireSell(plan, { provider: node, ...deps() });
+
+  assert.ok(Array.isArray(res.results), 'results[] — not wallets[]');
+  assert.equal(res.totalEth, '0.0025');
+  assert.equal(res.bestPrice, res.fill.best.priceEth);
+  assert.equal(res.worstPrice, res.fill.worst.priceEth);
+
+  for (const r of res.results) {
+    assert.ok(r.address && r.walletId);
+    assert.equal(typeof r.tokensSold, 'string');
+    assert.equal(typeof r.ethReceived, 'string');
+    // One rolled-up status to colour on, and both hashes to link.
+    assert.equal(r.status, 'confirmed');
+    assert.deepEqual(r.hashes, [r.approve.hash, r.sell.hash]);
+  }
+});
+
+test('a wallet whose approval never broadcast rolls up as failed, with no hashes', async () => {
+  const node = fakeNode({ fail: (raw) => raw === 'APPROVE_A' });
+  const res = await fireSell(plan, { provider: node, ...deps() });
+
+  const a = res.results.find((w) => w.walletId === 'a');
+  assert.equal(a.status, 'failed');
+  assert.deepEqual(a.hashes, []);
+});
+
 test('the result is JSON — no BigInt reaches the activity log', async () => {
   const node = fakeNode({ proceeds: { [A]: parseEther('0.002') } });
   const res = await fireSell(plan, { provider: node, ...deps() });
@@ -227,7 +261,7 @@ test('proceeds are not invented for a non-native quote asset', async () => {
     { provider: node, ...deps() }
   );
 
-  assert.ok(res.wallets.every((w) => w.ethReceived === null));
+  assert.ok(res.results.every((w) => w.ethReceived === null));
   assert.equal(res.totals.ethReceived, null);
   assert.equal(res.fill, null);
 });
