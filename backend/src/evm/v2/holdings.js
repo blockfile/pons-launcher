@@ -14,16 +14,19 @@
 // would become a way to get an arbitrary contract approved by twenty funded
 // wallets at once, with the operator clicking the button.
 //
-// So the candidate set comes from the factory's own TokenLaunched events
-// filtered on the indexed `deployer`, unioned with this user's launch history,
-// and EVERY candidate is then re-checked against the factory's getLaunchedToken
-// record — a token gets into the list only if the factory says this dev wallet
-// launched it. Balances only ever narrow that set; they never widen it.
+// So the candidate set is this user's launch history plus, only when history
+// has nothing to offer, the factory's own TokenLaunched events filtered on the
+// indexed `deployer` — and EVERY candidate is then re-checked against the
+// factory's getLaunchedToken record. A token gets into the list only if the
+// factory says this dev wallet launched it. History says WHERE TO LOOK; it is
+// never proof of provenance. Balances only ever narrow the set; never widen it.
 //
-// The deployer being indexed is what makes this cheap: one filtered getLogs
-// enumerates every launch a dev wallet ever made. The public RPC refuses a
-// query matching more than 10000 logs, so the scan walks backwards in windows
-// and splits any window the node refuses.
+// HISTORY IS READ FIRST BECAUSE IT IS FREE AND ALMOST ALWAYS RIGHT.
+// data/launches.<user>.json records every launch made through this console,
+// with the token and the curve, so the ordinary case answers with zero log
+// calls. The log scan below exists for launches this console did not make, and
+// it is a bounded last resort — read the comment on LOG_WINDOW before touching
+// it, because the unbounded version of it hung /api/sellable in production.
 
 const { Contract, Interface, getAddress, formatUnits, ZeroAddress } = require('ethers');
 const config = require('../../config');
@@ -52,11 +55,27 @@ const MULTICALL3_ABI = [
 // Keeps a single request from growing unbounded with wallets x tokens.
 const MULTICALL_CHUNK = 250;
 
-// Blocks per getLogs call in the FALLBACK walk — see launchedByDeployer for why
-// it is only a fallback.
-const LOG_WINDOW = 500_000;
-// How far back that walk is willing to go before giving up and saying so.
-const MAX_WINDOWS = 60;
+// ── the log scan, and why every one of these caps is load-bearing ──────────
+//
+// THE UNBOUNDED WALK HUNG /api/sellable IN PRODUCTION. curl never returned, the
+// process was healthy, and the error handler never fired — the request was not
+// failing, it was still working. Do not widen this back.
+//
+// What actually happened: the operator's node (QuickNode) refuses any
+// eth_getLogs spanning more than 10000 blocks, so the whole-chain query in
+// launchedByDeployer always failed and the walk always ran. The chain is at
+// ~28.7M blocks and produces ten a second, so reaching block 0 is thousands of
+// SEQUENTIAL round trips. Worse, each window the node refuses is retried four
+// times with backoff by RetryJsonRpcProvider (see evm/provider.js) before it is
+// even split, and each 500k window then split down to something acceptable is
+// 63 refusals and 64 accepted calls. Sixty of those is hours, not seconds.
+//
+// So the walk is capped three ways and all three are needed:
+const LOG_WINDOW = 10_000; // what this node will actually answer, so no splitting
+const MAX_WINDOWS = 20; // 200k blocks, newest first — recent launches only
+// A window count is NOT a time bound: one refused window can still fan out into
+// dozens of calls with backoff between them. This is the bound that holds.
+const SCAN_BUDGET_MS = 10_000;
 // A refused window is halved and retried; this caps that recursion so a node
 // that refuses everything fails loudly instead of issuing thousands of calls.
 const MAX_SPLIT_DEPTH = 6;
@@ -104,27 +123,67 @@ function factoryContract(deps = {}) {
 }
 
 /**
+ * `p`, or `fallback` if `p` has not settled within `ms`.
+ *
+ * Nothing in ethers can cancel an in-flight RPC call, so this does not try: the
+ * point is that the CALLER stops waiting. The abandoned promise is left to
+ * finish on its own, with its rejection swallowed — an unhandled rejection
+ * arriving after we have already answered would take the process down, which is
+ * a worse outcome than the slow list this exists to avoid.
+ */
+function withDeadline(p, ms, fallback) {
+  const settled = Promise.resolve(p);
+  settled.catch(() => {});
+  let timer;
+  return Promise.race([
+    settled,
+    new Promise((resolve) => {
+      timer = setTimeout(() => resolve(fallback), ms);
+      if (typeof timer.unref === 'function') timer.unref(); // never hold the process open
+    }),
+  ]).finally(() => clearTimeout(timer));
+}
+
+/** What a truncated scan tells the operator: exactly which blocks it saw. */
+function truncationWarning(from, to) {
+  // from > to means not one window finished — say "no blocks", not "1001-1000".
+  const nothing = from == null || (to != null && from > to);
+  const covered = nothing ? 'no blocks' : `blocks ${from}-${to ?? 'head'}`;
+  return (
+    `the launch scan was truncated and only covered ${covered} — launches older than that ` +
+    'appear only if they are in this account launch history'
+  );
+}
+
+/**
  * getLogs for one range, splitting it in half whenever the node refuses.
  *
- * The RPC's refusal is a count limit, not a range limit, so there is no window
- * size that is always safe — a dev wallet with thousands of launches would trip
- * it at any width. Halving on refusal converges on whatever this node will
- * actually answer, instead of hardcoding a guess.
+ * The RPC's refusal is a count limit as well as a range limit, so there is no
+ * window size that is always safe — a dev wallet with thousands of launches
+ * would trip it at any width. Halving on refusal converges on whatever this
+ * node will actually answer, instead of hardcoding a guess.
+ *
+ * `outOfTime` is checked before every call AND before every split: the split is
+ * where an innocent-looking window turns into 127 requests, and that fan-out is
+ * half of what made the old scan hang.
  */
-async function getLogsSplitting(rpc, base, from, to, out, depth = 0) {
+async function getLogsSplitting(rpc, base, from, to, out, depth = 0, outOfTime = () => false) {
+  if (outOfTime()) throw new Error('the launch scan ran out of time');
   try {
     const logs = await rpc.getLogs({ ...base, fromBlock: from, toBlock: to });
     out.push(...logs);
   } catch (err) {
-    if (from >= to || depth >= MAX_SPLIT_DEPTH) throw err;
+    if (from >= to || depth >= MAX_SPLIT_DEPTH || outOfTime()) throw err;
     const mid = Math.floor((from + to) / 2);
-    await getLogsSplitting(rpc, base, from, mid, out, depth + 1);
-    await getLogsSplitting(rpc, base, mid + 1, to, out, depth + 1);
+    await getLogsSplitting(rpc, base, from, mid, out, depth + 1, outOfTime);
+    await getLogsSplitting(rpc, base, mid + 1, to, out, depth + 1, outOfTime);
   }
 }
 
 /**
- * Every token this deployer launched, newest first.
+ * Every token this deployer launched that the bounded scan can see, newest
+ * first. NOT authoritative on its own and NOT the primary source — see the file
+ * header: history is read first, and this only runs when history is empty.
  *
  * ONE CALL FOR THE WHOLE CHAIN IS THE FAST PATH, and the windowed walk below it
  * is only what happens when the node refuses that. This is the opposite of what
@@ -138,29 +197,42 @@ async function getLogsSplitting(rpc, base, from, to, out, depth = 0) {
  *
  * The node serialises concurrent getLogs and then some, so issuing windows in
  * parallel is FIVE TIMES SLOWER than issuing them one at a time. Do not
- * "optimise" the fallback by making it concurrent again.
+ * "optimise" the fallback by making it concurrent again — and do not "fix" the
+ * slowness by removing the caps either, which is what produced the production
+ * hang. A truncated list with a warning beats an endless spinner.
  *
- * The whole-chain query is safe because `deployer` is indexed: the RPC's refusal
- * is a limit on MATCHED logs (10000), and one dev wallet's launches are a
- * handful however long the chain gets. The same query without the deployer
- * filter already matches 5242 and will cross the limit on its own — which is
- * exactly why the walk is kept as a fallback rather than deleted.
+ * The whole-chain query is safe where it works because `deployer` is indexed:
+ * that RPC's refusal is a limit on MATCHED logs (10000), and one dev wallet's
+ * launches are a handful however long the chain gets. QuickNode instead limits
+ * the RANGE, so it refuses the query outright and the walk runs every time —
+ * which is why the walk's caps, not the fast path, decide how long this takes.
  *
  * @returns {Promise<{launches: Array<{token,curve,pairToken,launchConfigId,blockNumber}>,
- *                    scannedFrom: number, complete: boolean}>}
- *   `complete` is false when the fallback ran out of windows before reaching
- *   block 0 — the caller must say so rather than presenting a partial list as
- *   the whole truth.
+ *                    scannedFrom: number, scannedTo: number, complete: boolean,
+ *                    warning: ?string}>}
+ *   `complete` is false whenever the walk stopped early — out of windows, out of
+ *   time, or refused. It NEVER throws and it never returns nothing when it found
+ *   something: whatever was seen comes back, with `warning` saying how far it
+ *   got, and the caller must show that rather than present a partial list as the
+ *   whole truth.
  */
 async function launchedByDeployer(deployer, deps = {}) {
   const rpc = deps.provider || provider;
   const window = deps.window || LOG_WINDOW;
   const maxWindows = deps.maxWindows || MAX_WINDOWS;
+  const budgetMs = deps.scanBudgetMs ?? SCAN_BUDGET_MS;
+  const now = deps.now || Date.now;
   const address = deps.factoryAddress || config.v2FactoryAddress;
 
   const head = deps.head ?? (await rpc.getBlockNumber());
   const topics = iface.encodeFilterTopics('TokenLaunched', [null, null, getAddress(deployer)]);
   const base = { address, topics };
+
+  // One clock for the whole scan, started before the first request. Every exit
+  // below checks it; nothing in here is allowed to outlive it by more than the
+  // call already in flight.
+  const stopAt = now() + budgetMs;
+  const outOfTime = () => now() >= stopAt;
 
   const raw = [];
   let scannedFrom;
@@ -170,7 +242,8 @@ async function launchedByDeployer(deployer, deps = {}) {
   try {
     whole = await rpc.getLogs({ ...base, fromBlock: 0, toBlock: head });
   } catch (_err) {
-    // Too many matches, or a node that will not take an open range. Fall back.
+    // Too many matches, or a node that will not take a range this wide. Fall
+    // back — and note this failure is the NORMAL case on QuickNode, not an edge.
     whole = null;
   }
 
@@ -185,8 +258,16 @@ async function launchedByDeployer(deployer, deps = {}) {
     scannedFrom = head + 1;
     complete = false;
     for (let i = 0; i < maxWindows && to >= 0; i++) {
+      if (outOfTime()) break;
       const from = Math.max(0, to - window + 1);
-      await getLogsSplitting(rpc, base, from, to, raw);
+      try {
+        await getLogsSplitting(rpc, base, from, to, raw, 0, outOfTime);
+      } catch (_err) {
+        // A window this node will not answer, or the budget running out mid
+        // split. Either way the scan stops here and says so; throwing would
+        // lose the launches the earlier windows already found.
+        break;
+      }
       scannedFrom = from;
       if (from === 0) {
         complete = true;
@@ -218,7 +299,13 @@ async function launchedByDeployer(deployer, deps = {}) {
   }
 
   const launches = [...byToken.values()].sort((a, b) => b.blockNumber - a.blockNumber);
-  return { launches, scannedFrom, complete };
+  return {
+    launches,
+    scannedFrom,
+    scannedTo: head,
+    complete,
+    warning: complete ? null : truncationWarning(scannedFrom, head),
+  };
 }
 
 /**
@@ -362,6 +449,25 @@ async function tokenHoldings(token, wallets, deps = {}) {
 /**
  * The picker: every token this dev launched that the bundle still holds.
  *
+ * HISTORY FIRST, LOG SCAN ONLY IF HISTORY YIELDS NOTHING. `knownTokens` is this
+ * user's own launch file and it is the primary source, not a top-up: it is
+ * already the right answer for every launch made through this console, and it
+ * costs no chain calls at all. The scan runs only when that produced no
+ * sellable row, and it is bounded and deadlined — the unbounded version of it
+ * hung /api/sellable in production (see LOG_WINDOW). This function never throws
+ * on a scan failure and never waits forever for one; it returns what it has
+ * with a warning saying what it missed.
+ *
+ * The consequence, stated so it is a choice and not a surprise: a dev wallet
+ * that has BOTH a launch in this history file and a launch made elsewhere will
+ * only be offered the ones in the file. That is deliberate. The alternative is
+ * paying thousands of round trips on every page load to find a token the
+ * operator can still reach by launching through the console.
+ *
+ * The gate does not move: every candidate, whatever its source, is re-checked
+ * against the factory's getLaunchedToken before it is listed. History says
+ * where to look; the factory says what is true.
+ *
  * Amounts come back as human decimal strings, because everything else the
  * console renders (balanceEth and friends) is a decimal string and a raw base
  * unit shows up as 1e24-scale nonsense. The base units are kept alongside under
@@ -370,186 +476,238 @@ async function tokenHoldings(token, wallets, deps = {}) {
  * @param {object} input
  * @param {string} input.deployer the dev wallet
  * @param {Array<{id,address}>} input.wallets bundle wallets
- * @param {string[]} [input.knownTokens] tokens from local launch history
+ * @param {string[]} [input.knownTokens] tokens from this user's launch history
  */
 async function findSellable({ deployer, wallets = [], knownTokens = [] }, deps = {}) {
   const scan = deps.launchedByDeployer || ((d) => launchedByDeployer(d, deps));
   const describe = deps.describeToken || ((t) => describeToken(t, deps));
   const state = deps.curveState || ((c) => curveState(c, deps));
   const meta = deps.tokenMeta || ((t) => tokenMeta(t, deps));
+  const budgetMs = deps.scanBudgetMs ?? SCAN_BUDGET_MS;
 
   const dev = getAddress(deployer);
   const warnings = [];
+  const batched = !deps.describeToken && !deps.curveState && !deps.tokenMeta;
 
-  const scanned = await scan(dev);
-  if (!scanned.complete) {
-    warnings.push(
-      `the launch scan only scanned back to block ${scanned.scannedFrom} — launches older than ` +
-        'that appear only if they are in this account launch history'
-    );
+  /**
+   * Candidates → listable rows. Everything expensive lives here so that it can
+   * be run over history alone, and only then over whatever the scan adds.
+   */
+  async function evaluate(tokens) {
+    if (!tokens.length) return [];
+
+    // ── round one: who launched each candidate ──────────────────────────────
+    const records = new Map();
+    if (batched) {
+      try {
+        const slots = await multicall(
+          tokens.map((t) => ({
+            target: deps.factoryAddress || config.v2FactoryAddress,
+            callData: iface.encodeFunctionData('getLaunchedToken', [t]),
+          })),
+          deps
+        );
+        tokens.forEach((t, i) => {
+          const rec = decodeOr(iface, 'getLaunchedToken', slots[i]);
+          records.set(
+            t,
+            rec && rec.exists
+              ? {
+                  token: t,
+                  curve: getAddress(rec.curve),
+                  deployer: getAddress(rec.deployer),
+                  pairToken: getAddress(rec.pairToken),
+                  creatorTaxBps: Number(rec.creatorTaxBps),
+                  phase: Number(rec.phase),
+                  exists: true,
+                }
+              : { token: t, exists: false }
+          );
+        });
+      } catch (_err) {
+        records.clear(); // fall through to the per-token path below
+      }
+    }
+    for (const t of tokens) {
+      if (records.has(t)) continue;
+      try {
+        records.set(t, await describe(t));
+      } catch (err) {
+        warnings.push(`could not read the factory record for ${t}: ${err.message}`);
+        records.set(t, { token: t, exists: false });
+      }
+    }
+
+    // ── the gate ────────────────────────────────────────────────────────────
+    // A token the factory does not know, or says someone else launched, never
+    // reaches a balance check — let alone an approval. This applies to history
+    // exactly as it applies to the scan: a local file naming a token is not
+    // evidence that this dev wallet launched it.
+    const mine = [];
+    for (const t of tokens) {
+      const record = records.get(t);
+      if (!record || !record.exists) continue;
+      if (getAddress(record.deployer) !== dev) {
+        warnings.push(
+          `${t} is in this account launch history but the factory says ${record.deployer} ` +
+            'launched it — not offered'
+        );
+        continue;
+      }
+      mine.push(record);
+    }
+
+    // ── round two: metadata, curve state and every balance, in one request ──
+    const details = new Map();
+    if (batched && mine.length) {
+      try {
+        const calls = [];
+        for (const r of mine) {
+          calls.push({ target: r.token, callData: erc20Iface.encodeFunctionData('symbol', []) });
+          calls.push({ target: r.token, callData: erc20Iface.encodeFunctionData('decimals', []) });
+          calls.push({ target: r.curve, callData: curveIface.encodeFunctionData('graduated', []) });
+          calls.push({
+            target: r.curve,
+            callData: curveIface.encodeFunctionData('readyToGraduate', []),
+          });
+          for (const w of wallets) {
+            calls.push({
+              target: r.token,
+              callData: erc20Iface.encodeFunctionData('balanceOf', [getAddress(w.address)]),
+            });
+          }
+        }
+        const slots = await multicall(calls, deps);
+        let i = 0;
+        for (const r of mine) {
+          const symbol = decodeOr(erc20Iface, 'symbol', slots[i++], '???');
+          const decimals = decodeOr(erc20Iface, 'decimals', slots[i++], 18);
+          const graduated = decodeOr(curveIface, 'graduated', slots[i++], false);
+          const readyToGraduate = decodeOr(curveIface, 'readyToGraduate', slots[i++], false);
+          const held = wallets.map((w) => ({
+            walletId: w.id,
+            address: getAddress(w.address),
+            balance: BigInt(decodeOr(erc20Iface, 'balanceOf', slots[i++], 0n)),
+          }));
+          details.set(r.token, {
+            symbol: String(symbol),
+            decimals: Number(decimals),
+            graduated: Boolean(graduated),
+            readyToGraduate: Boolean(readyToGraduate),
+            held,
+          });
+        }
+      } catch (_err) {
+        details.clear(); // fall through
+      }
+    }
+
+    const out = [];
+    for (const record of mine) {
+      const token = record.token;
+      let detail = details.get(token);
+      if (!detail) {
+        const [m, curveInfo, held] = await Promise.all([
+          meta(token).catch(() => ({ symbol: '???', decimals: 18 })),
+          state(record.curve).catch(() => ({ graduated: false, readyToGraduate: false })),
+          tokenHoldings(token, wallets, deps),
+        ]);
+        detail = { ...m, ...curveInfo, held };
+      }
+      const { symbol, decimals, graduated, readyToGraduate, held } = detail;
+
+      const holders = held.filter((h) => h.balance > 0n);
+      if (!holders.length) continue; // old launches fall off the list on their own
+
+      const total = holders.reduce((s, h) => s + h.balance, 0n);
+      out.push({
+        token,
+        symbol,
+        decimals,
+        curve: record.curve,
+        pairToken: record.pairToken,
+        phase: record.phase,
+        graduated,
+        readyToGraduate,
+        // One button, but the route is decided by the curve's own state — the
+        // operator never picks.
+        route: graduated ? 'uniswap-v4' : 'curve',
+        totalTokens: formatUnits(total, decimals),
+        totalTokensRaw: total.toString(),
+        wallets: holders.length,
+        holders: holders.map((h) => ({
+          walletId: h.walletId,
+          address: h.address,
+          tokens: formatUnits(h.balance, decimals),
+          tokensRaw: h.balance.toString(),
+        })),
+      });
+    }
+    return out;
   }
 
-  // Union, deduped by address. History is a convenience for launches older than
-  // the scan window; it is NOT a second source of authority — every candidate
-  // is checked against the factory below regardless of where it came from.
-  const candidates = new Map();
-  for (const l of scanned.launches) candidates.set(l.token.toLowerCase(), l.token);
+  // ── the free source ────────────────────────────────────────────────────────
+  const seen = new Set();
+  const fromHistory = [];
   for (const t of knownTokens) {
     try {
       const a = getAddress(t);
-      if (!candidates.has(a.toLowerCase())) candidates.set(a.toLowerCase(), a);
+      if (seen.has(a.toLowerCase())) continue;
+      seen.add(a.toLowerCase());
+      fromHistory.push(a);
     } catch (_err) {
       // A malformed address in the history file is not worth failing the list.
     }
   }
 
-  const tokens = [...candidates.values()];
+  const rows = fromHistory.length ? await evaluate(fromHistory) : [];
 
-  // ── round one: who launched each candidate ────────────────────────────────
-  const records = new Map();
-  const batched = !deps.describeToken && !deps.curveState && !deps.tokenMeta;
-  if (batched) {
+  // ── the paid one, only if the free one came back empty ─────────────────────
+  let scanned = { from: null, to: null, complete: true, ran: false };
+  if (!rows.length) {
+    // The scan bounds itself, but a single stalled getLogs is outside its
+    // control, so the caller gets its own clock as well. Half again as long as
+    // the scan's own budget: enough that an honest scan finishing normally is
+    // never cut off, short enough that a dead socket cannot hold the route.
+    const timeout = {
+      launches: [],
+      scannedFrom: null,
+      scannedTo: null,
+      complete: false,
+      warning:
+        `the launch scan did not answer within ${Math.round(budgetMs * 1.5)}ms — only launches ` +
+        'in this account launch history are listed',
+    };
+    let found = timeout;
     try {
-      const slots = await multicall(
-        tokens.map((t) => ({
-          target: deps.factoryAddress || config.v2FactoryAddress,
-          callData: iface.encodeFunctionData('getLaunchedToken', [t]),
-        })),
-        deps
-      );
-      tokens.forEach((t, i) => {
-        const rec = decodeOr(iface, 'getLaunchedToken', slots[i]);
-        records.set(
-          t,
-          rec && rec.exists
-            ? {
-                token: t,
-                curve: getAddress(rec.curve),
-                deployer: getAddress(rec.deployer),
-                pairToken: getAddress(rec.pairToken),
-                creatorTaxBps: Number(rec.creatorTaxBps),
-                phase: Number(rec.phase),
-                exists: true,
-              }
-            : { token: t, exists: false }
-        );
-      });
-    } catch (_err) {
-      records.clear(); // fall through to the per-token path below
-    }
-  }
-  for (const t of tokens) {
-    if (records.has(t)) continue;
-    try {
-      records.set(t, await describe(t));
+      found = await withDeadline(scan(dev), Math.round(budgetMs * 1.5), timeout);
     } catch (err) {
-      warnings.push(`could not read the factory record for ${t}: ${err.message}`);
-      records.set(t, { token: t, exists: false });
+      // A scan that fails is a smaller list, never a failed request: the whole
+      // point of the picker is that the operator can still exit.
+      found = {
+        ...timeout,
+        warning: `the launch scan failed (${err.message}) — only launches in this account launch history are listed`,
+      };
     }
-  }
 
-  // ── the gate ──────────────────────────────────────────────────────────────
-  // A token the factory does not know, or says someone else launched, never
-  // reaches a balance check — let alone an approval.
-  const mine = [];
-  for (const t of tokens) {
-    const record = records.get(t);
-    if (!record || !record.exists) continue;
-    if (getAddress(record.deployer) !== dev) {
-      warnings.push(
-        `${t} is in this account launch history but the factory says ${record.deployer} ` +
-          'launched it — not offered'
-      );
-      continue;
+    scanned = {
+      from: found.scannedFrom ?? null,
+      to: found.scannedTo ?? null,
+      complete: Boolean(found.complete),
+      ran: true,
+    };
+    const note =
+      found.warning || (found.complete ? null : truncationWarning(scanned.from, scanned.to));
+    if (note) warnings.push(note);
+
+    const fresh = [];
+    for (const l of found.launches || []) {
+      const key = l.token.toLowerCase();
+      if (seen.has(key)) continue;
+      seen.add(key);
+      fresh.push(getAddress(l.token));
     }
-    mine.push(record);
-  }
-
-  // ── round two: metadata, curve state and every balance, in one request ────
-  const details = new Map();
-  if (batched && mine.length) {
-    try {
-      const calls = [];
-      for (const r of mine) {
-        calls.push({ target: r.token, callData: erc20Iface.encodeFunctionData('symbol', []) });
-        calls.push({ target: r.token, callData: erc20Iface.encodeFunctionData('decimals', []) });
-        calls.push({ target: r.curve, callData: curveIface.encodeFunctionData('graduated', []) });
-        calls.push({
-          target: r.curve,
-          callData: curveIface.encodeFunctionData('readyToGraduate', []),
-        });
-        for (const w of wallets) {
-          calls.push({
-            target: r.token,
-            callData: erc20Iface.encodeFunctionData('balanceOf', [getAddress(w.address)]),
-          });
-        }
-      }
-      const slots = await multicall(calls, deps);
-      let i = 0;
-      for (const r of mine) {
-        const symbol = decodeOr(erc20Iface, 'symbol', slots[i++], '???');
-        const decimals = decodeOr(erc20Iface, 'decimals', slots[i++], 18);
-        const graduated = decodeOr(curveIface, 'graduated', slots[i++], false);
-        const readyToGraduate = decodeOr(curveIface, 'readyToGraduate', slots[i++], false);
-        const held = wallets.map((w) => ({
-          walletId: w.id,
-          address: getAddress(w.address),
-          balance: BigInt(decodeOr(erc20Iface, 'balanceOf', slots[i++], 0n)),
-        }));
-        details.set(r.token, {
-          symbol: String(symbol),
-          decimals: Number(decimals),
-          graduated: Boolean(graduated),
-          readyToGraduate: Boolean(readyToGraduate),
-          held,
-        });
-      }
-    } catch (_err) {
-      details.clear(); // fall through
-    }
-  }
-
-  const rows = [];
-  for (const record of mine) {
-    const token = record.token;
-    let detail = details.get(token);
-    if (!detail) {
-      const [m, curveInfo, held] = await Promise.all([
-        meta(token).catch(() => ({ symbol: '???', decimals: 18 })),
-        state(record.curve).catch(() => ({ graduated: false, readyToGraduate: false })),
-        tokenHoldings(token, wallets, deps),
-      ]);
-      detail = { ...m, ...curveInfo, held };
-    }
-    const { symbol, decimals, graduated, readyToGraduate, held } = detail;
-
-    const holders = held.filter((h) => h.balance > 0n);
-    if (!holders.length) continue; // old launches fall off the list on their own
-
-    const total = holders.reduce((s, h) => s + h.balance, 0n);
-    rows.push({
-      token,
-      symbol,
-      decimals,
-      curve: record.curve,
-      pairToken: record.pairToken,
-      phase: record.phase,
-      graduated,
-      readyToGraduate,
-      // One button, but the route is decided by the curve's own state — the
-      // operator never picks.
-      route: graduated ? 'uniswap-v4' : 'curve',
-      totalTokens: formatUnits(total, decimals),
-      totalTokensRaw: total.toString(),
-      wallets: holders.length,
-      holders: holders.map((h) => ({
-        walletId: h.walletId,
-        address: h.address,
-        tokens: formatUnits(h.balance, decimals),
-        tokensRaw: h.balance.toString(),
-      })),
-    });
+    rows.push(...(await evaluate(fresh)));
   }
 
   // Biggest position first — that is the one anyone is here to exit.
@@ -558,7 +716,7 @@ async function findSellable({ deployer, wallets = [], knownTokens = [] }, deps =
   return {
     deployer: dev,
     tokens: rows,
-    scan: { from: scanned.scannedFrom, complete: scanned.complete },
+    scan: scanned,
     warnings,
   };
 }
@@ -572,7 +730,9 @@ module.exports = {
   tokenMeta,
   tokenHoldings,
   findSellable,
+  withDeadline,
   LOG_WINDOW,
   MAX_WINDOWS,
+  SCAN_BUDGET_MS,
   ZERO_ADDRESS: ZeroAddress,
 };

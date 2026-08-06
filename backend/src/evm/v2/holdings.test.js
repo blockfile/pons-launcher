@@ -221,6 +221,46 @@ test('a scan that runs out of windows says so instead of implying it saw everyth
 
   assert.equal(out.complete, false);
   assert.equal(out.scannedFrom, 801);
+  assert.ok(/truncated/.test(out.warning) && /801-1000/.test(out.warning));
+});
+
+test('the walk stops on its own clock, and returns what it found', async () => {
+  // THE PRODUCTION HANG. This node refuses anything wider than a window, so the
+  // whole-chain call fails and the walk runs — and the real chain is 28.7M
+  // blocks, which at this window is thousands of sequential round trips. The
+  // wall clock is what stops it. Without it, this test would issue maxWindows
+  // requests and the real thing never returned at all.
+  let clock = 0;
+  const node = fakeNode({
+    head: 1_000_000,
+    rejectWiderThan: 10_000,
+    logs: [launchLog({ token: TOKEN_A, curve: CURVE_A, deployer: DEV, blockNumber: 999_000 })],
+  });
+  const slow = {
+    ...node,
+    async getLogs(f) {
+      clock += 3000; // every round trip costs three seconds
+      return node.getLogs(f);
+    },
+  };
+
+  const out = await holdings.launchedByDeployer(DEV, {
+    provider: slow,
+    factoryAddress: FACTORY,
+    window: 10_000,
+    maxWindows: 2870, // what reaching block 0 would actually take
+    scanBudgetMs: 10_000,
+    now: () => clock,
+  });
+
+  // Found in the first window, so it comes back — truncated is not empty.
+  assert.deepEqual(
+    out.launches.map((l) => l.token),
+    [getAddress(TOKEN_A)]
+  );
+  assert.equal(out.complete, false);
+  assert.ok(/truncated/.test(out.warning), 'the operator has to be told the list is partial');
+  assert.ok(node.ranges.length <= 6, `gave up early, issued ${node.ranges.length} requests`);
 });
 
 // ── selection: launched-by-dev INTERSECT held-by-bundle ────────────────────
@@ -295,11 +335,17 @@ test('a token from local history that the factory says someone else launched is 
   );
 });
 
-test('a token from local history that the dev did launch is offered even if the log scan missed it', async () => {
+test('a token from local history that the dev did launch is offered without any log scan', async () => {
+  // History first: the file already names the token, so there is nothing to
+  // enumerate. The scan below would fail the test if it were reached.
+  let scans = 0;
   const out = await holdings.findSellable(
     { deployer: DEV, wallets: WALLETS, knownTokens: [DUST] },
     sellableDeps({
-      launchedByDeployer: async () => ({ launches: [], scannedFrom: 900, complete: false }),
+      launchedByDeployer: async () => {
+        scans += 1;
+        return { launches: [], scannedFrom: 900, scannedTo: 1000, complete: false };
+      },
       describeToken: async (token) => ({
         token: getAddress(token),
         curve: getAddress(CURVE_A),
@@ -315,9 +361,116 @@ test('a token from local history that the dev did launch is offered even if the 
     out.tokens.map((t) => t.token),
     [getAddress(DUST)]
   );
-  // A partial scan has to be said out loud, or a missing token looks like a
-  // sold-out one.
-  assert.ok(out.warnings.some((w) => /only scanned back to block 900/.test(w)));
+  assert.equal(scans, 0, 'history answered it — the chain must not have been enumerated');
+  assert.equal(out.scan.ran, false);
+  assert.deepEqual(out.warnings, []);
+});
+
+test('a partial scan is said out loud, with the blocks it actually covered', async () => {
+  // A missing token has to look different from a sold-out one, or the operator
+  // reads "nothing to sell" and believes it.
+  const out = await holdings.findSellable(
+    { deployer: DEV, wallets: WALLETS, knownTokens: [] },
+    sellableDeps({
+      launchedByDeployer: async () => ({
+        launches: [],
+        scannedFrom: 900,
+        scannedTo: 1000,
+        complete: false,
+      }),
+    })
+  );
+
+  assert.deepEqual(out.tokens, []);
+  assert.ok(out.warnings.some((w) => /truncated/.test(w) && /900-1000/.test(w)));
+});
+
+test('a truncated scan returns what it found, plus the warning — it never hangs', async () => {
+  // The production failure was the opposite: no answer at all. Whatever the
+  // scan managed to see must come back, labelled.
+  const out = await holdings.findSellable(
+    { deployer: DEV, wallets: WALLETS, knownTokens: [] },
+    sellableDeps({
+      launchedByDeployer: async () => ({
+        launches: [{ token: getAddress(TOKEN_A), curve: getAddress(CURVE_A), blockNumber: 990 }],
+        scannedFrom: 900,
+        scannedTo: 1000,
+        complete: false,
+        warning: 'the launch scan was truncated and only covered blocks 900-1000 — older launches',
+      }),
+    })
+  );
+
+  assert.deepEqual(
+    out.tokens.map((t) => t.token),
+    [getAddress(TOKEN_A)],
+    'a truncated list beats no list'
+  );
+  assert.equal(out.scan.complete, false);
+  assert.ok(out.warnings.some((w) => /truncated/.test(w)));
+});
+
+test('a scan that never answers is abandoned, not waited on', async () => {
+  // This is the production hang, reproduced: the scan simply never resolves.
+  // The route has to come back anyway.
+  const started = Date.now();
+  const out = await holdings.findSellable(
+    { deployer: DEV, wallets: WALLETS, knownTokens: [] },
+    sellableDeps({
+      launchedByDeployer: () => new Promise(() => {}),
+      scanBudgetMs: 20,
+    })
+  );
+
+  assert.deepEqual(out.tokens, []);
+  assert.ok(Date.now() - started < 2000, 'it must give up in its own budget, not eventually');
+  assert.ok(out.warnings.some((w) => /did not answer/.test(w)));
+});
+
+test('a scan that throws costs the list its extras, not the request', async () => {
+  const out = await holdings.findSellable(
+    { deployer: DEV, wallets: WALLETS, knownTokens: [] },
+    sellableDeps({
+      launchedByDeployer: async () => {
+        throw new Error('rate limited');
+      },
+    })
+  );
+
+  assert.deepEqual(out.tokens, []);
+  assert.ok(out.warnings.some((w) => /the launch scan failed \(rate limited\)/.test(w)));
+});
+
+test('a history entry the factory attributes to another wallet is excluded even with no scan', async () => {
+  // The dusting rule applied to the local file: history says where to look, the
+  // factory says what is true. TOKEN_A keeps the list non-empty so the fallback
+  // scan never runs and the exclusion is the only thing under test.
+  let scans = 0;
+  const out = await holdings.findSellable(
+    { deployer: DEV, wallets: WALLETS, knownTokens: [DUST, TOKEN_A] },
+    sellableDeps({
+      launchedByDeployer: async () => {
+        scans += 1;
+        return { launches: [], scannedFrom: 0, scannedTo: 250, complete: true };
+      },
+      describeToken: async (token) => ({
+        token: getAddress(token),
+        curve: getAddress(CURVE_A),
+        // The file names DUST; the factory says a stranger launched it.
+        deployer: getAddress(token === getAddress(DUST) ? STRANGER : DEV),
+        pairToken: ZeroAddress,
+        phase: 1,
+        exists: true,
+      }),
+    })
+  );
+
+  assert.equal(scans, 0);
+  assert.deepEqual(
+    out.tokens.map((t) => t.token),
+    [getAddress(TOKEN_A)]
+  );
+  assert.ok(out.warnings.some((w) => /launched it — not offered/.test(w)));
 });
 
 test('graduation is read once per token and reported on the row', async () => {
@@ -400,15 +553,19 @@ const MULTICALL = '0xca11bde05977b3631167028862be2a173976ca11';
  * `revertOn` names selectors a given target refuses, to exercise allowFailure.
  */
 function multicallNode({ head = 250, logs = [], world = {}, revertOn = () => false } = {}) {
-  const state = { calls: 0 };
+  const state = { calls: 0, logCalls: 0 };
   const node = {
     get calls() {
       return state.calls;
+    },
+    get logCalls() {
+      return state.logCalls;
     },
     async getBlockNumber() {
       return head;
     },
     async getLogs({ fromBlock, toBlock, topics }) {
+      state.logCalls += 1;
       const wanted = topics[3];
       return logs.filter(
         (l) =>
@@ -530,6 +687,67 @@ test('the multicall path lists the dev own launches and decodes every field', as
   // Two requests for two tokens across two wallets: one for the factory
   // records, one for everything else.
   assert.equal(node.calls, 2);
+});
+
+test('the history-first path makes no log call at all', async () => {
+  // The fix for the production hang, end to end through the real reader: a
+  // token in this user's launch history is listed without eth_getLogs ever
+  // being issued. The node below has the logs; nothing should ask for them.
+  const node = multicallNode({
+    head: 28_700_000,
+    logs: [launchLog({ token: TOKEN_A, curve: CURVE_A, deployer: DEV, blockNumber: 28_699_000 })],
+    world: {
+      [getAddress(TOKEN_A)]: {
+        symbol: 'AYE',
+        decimals: 18,
+        balances: { [getAddress(WALLETS[0].address)]: 3n * 10n ** 18n },
+        record: launchedRecord({ token: TOKEN_A, curve: CURVE_A, deployer: DEV }),
+      },
+      [getAddress(CURVE_A)]: { graduated: false, ready: false },
+    },
+  });
+
+  const out = await holdings.findSellable(
+    { deployer: DEV, wallets: WALLETS, knownTokens: [TOKEN_A] },
+    { provider: node, factoryAddress: FACTORY, multicallAddress: MULTICALL }
+  );
+
+  assert.equal(node.logCalls, 0, 'history had the answer — the chain must not be enumerated');
+  assert.deepEqual(
+    out.tokens.map((t) => t.token),
+    [getAddress(TOKEN_A)]
+  );
+  // Two multicalls and nothing else: the factory records, then metadata,
+  // curve state and every balance.
+  assert.equal(node.calls, 2);
+  assert.equal(out.scan.ran, false);
+});
+
+test('the log scan still runs when the history file has nothing to offer', async () => {
+  const node = multicallNode({
+    head: 250,
+    logs: [launchLog({ token: TOKEN_A, curve: CURVE_A, deployer: DEV, blockNumber: 200 })],
+    world: {
+      [getAddress(TOKEN_A)]: {
+        symbol: 'AYE',
+        decimals: 18,
+        balances: { [getAddress(WALLETS[0].address)]: 3n * 10n ** 18n },
+        record: launchedRecord({ token: TOKEN_A, curve: CURVE_A, deployer: DEV }),
+      },
+      [getAddress(CURVE_A)]: { graduated: false, ready: false },
+    },
+  });
+
+  const out = await holdings.findSellable(
+    { deployer: DEV, wallets: WALLETS, knownTokens: [] },
+    { provider: node, factoryAddress: FACTORY, multicallAddress: MULTICALL }
+  );
+
+  assert.ok(node.logCalls > 0, 'a launch made outside this console is still reachable');
+  assert.deepEqual(
+    out.tokens.map((t) => t.token),
+    [getAddress(TOKEN_A)]
+  );
 });
 
 test('the multicall path drops a token the factory attributes to someone else', async () => {

@@ -48,9 +48,31 @@ picks — the curve's own state decides.
 ### Finding what can be sold
 
 ```
-launches = TokenLaunched(deployer = devWallet)  UNION  history
-sellable = launches where SUM(bundle wallet balances) > 0
+candidates = history  (and only if that yields nothing sellable:
+              TokenLaunched(deployer = devWallet), bounded scan)
+launches   = candidates where factory.getLaunchedToken(t).deployer == devWallet
+sellable   = launches where SUM(bundle wallet balances) > 0
 ```
+
+**Amended 2026-08-06, after a production hang.** The original spec said
+`TokenLaunched UNION history`, with the log scan run first and unconditionally.
+On the operator's node that scan never finished: QuickNode caps `eth_getLogs` at
+a 10000-block range, the chain is at ~28.7M blocks and grows ten a second, and
+the backwards walk turned into thousands of sequential requests — each refusal
+retried four times with backoff before the window was split. `GET /api/sellable`
+simply never returned.
+
+So history is now the primary source, not a top-up: `data/launches.<user>.json`
+already holds the token and curve for every launch this console made, and
+reading it costs nothing. The log scan is a fallback, runs only when history
+yields no sellable row, and is capped at 20 windows of 10000 blocks with a
+10-second wall clock; when it runs out it returns what it found with a warning
+naming the blocks it covered. **The gate did not move** — every candidate,
+history included, is still re-checked against `getLaunchedToken`, because a
+local file naming a token is not evidence that this dev wallet launched it.
+
+The cost of this is stated rather than hidden: a launch made outside this
+console, by a dev wallet that also has launches inside it, will not be offered.
 
 The picker shows, per token: symbol, total held across the bundle, how many
 wallets hold any, and whether the curve has graduated. Old launches fall off the

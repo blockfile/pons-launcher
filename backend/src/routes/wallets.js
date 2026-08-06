@@ -12,7 +12,7 @@ const { estimate, deploy } = require('../evm/deploy');
 const { provider } = require('../evm/provider');
 const { formatEther } = require('ethers');
 const { requireApiKey } = require('../middleware/auth');
-const { findSellable } = require('../evm/v2/holdings');
+const { findSellable, withDeadline } = require('../evm/v2/holdings');
 const { prepareSell } = require('../bundle/prepareSell');
 const { fireSell } = require('../bundle/fireSell');
 const { jsonSafe } = require('./launch');
@@ -184,7 +184,16 @@ function publicSellPlan(plan) {
   });
 }
 
-/** Tokens this user launched through the console, for the union in findSellable. */
+/**
+ * Every token this user has launched through the console, newest first.
+ *
+ * THIS IS THE PRIMARY SOURCE FOR THE PICKER, not a top-up. data/launches.<user>
+ * .json already records the token and the curve for every launch this console
+ * made, so reading it answers the common case with no chain calls at all — and
+ * the alternative, enumerating TokenLaunched over 28.7M blocks, is what hung
+ * this route in production. It is still only a hint about WHERE TO LOOK:
+ * findSellable re-checks every one of these against the factory.
+ */
 function historyTokens(userId) {
   try {
     return historyFor(userId)
@@ -192,11 +201,19 @@ function historyTokens(userId) {
       .map((e) => e.token)
       .filter(Boolean);
   } catch (_err) {
-    // The picker works without history — it is a convenience for launches older
-    // than the log scan window, not a source of authority.
+    // A missing or corrupt history file costs speed, not correctness — the
+    // bounded log scan still runs.
     return [];
   }
 }
+
+// The route's own last line of defence. findSellable already bounds its scan and
+// swallows its own failures, so reaching this means something below it stalled
+// (a socket with no timeout, a multicall that never answers). AN EMPTY LIST IS A
+// BETTER ANSWER THAN NO ANSWER: the operator sees "nothing to sell" and can
+// retry, instead of watching a spinner that never resolves. That is exactly the
+// bug this replaced.
+const SELLABLE_TIMEOUT_MS = 30_000;
 
 // GET /api/sellable — what this bundle could exit right now.
 //
@@ -212,11 +229,21 @@ function historyTokens(userId) {
 router.get('/sellable', async (req, res, next) => {
   try {
     const ks = keystoreFor(req.user.id);
-    const out = await findSellable({
-      deployer: ks.devWallet().address,
-      wallets: ks.bundleWallets(),
-      knownTokens: historyTokens(req.user.id),
-    });
+    const out = await withDeadline(
+      findSellable({
+        deployer: ks.devWallet().address,
+        wallets: ks.bundleWallets(),
+        knownTokens: historyTokens(req.user.id),
+      }),
+      SELLABLE_TIMEOUT_MS,
+      {
+        tokens: [],
+        warnings: [
+          `listing sellable tokens took longer than ${SELLABLE_TIMEOUT_MS}ms — answered empty ` +
+            'rather than leaving the request open; retry',
+        ],
+      }
+    );
     for (const w of out.warnings) console.warn(`[pons-launcher] sellable: ${w}`);
     res.json(jsonSafe(out.tokens));
   } catch (err) {
