@@ -91,6 +91,22 @@ const config = {
 
   apiKey: process.env.API_KEY || null,
 
+  // Who may read another user's activity log. Comma-separated user ids, the
+  // same ids `npm run user:list` prints. Empty — the default — means nobody is
+  // an admin and every log stays private, which is what every existing install
+  // gets on upgrade.
+  //
+  // GRANTED HERE AND NOWHERE ELSE. There is deliberately no route that adds an
+  // admin, because admin status that could be set over the API would be
+  // reachable with a stolen key: one compromised account would promote itself
+  // and then read every other user's addresses, amounts and key-export
+  // history. Changing this list means editing the environment and restarting
+  // the process — a step that needs the box, not a credential.
+  adminUsers: (process.env.ADMIN_USERS || '')
+    .split(',')
+    .map((u) => u.trim().toLowerCase())
+    .filter(Boolean),
+
   // ponsfamily's own IPFS uploader — the same endpoint their /launchpad/create
   // form posts to, so our tokens carry the same kind of ipfs:// logo as a
   // launch made from their site. Undocumented, hence configurable.

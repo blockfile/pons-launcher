@@ -25,6 +25,12 @@ if (hasBuild) app.use(express.static(dist));
 
 app.get('/api/health', (req, res) => {
   const user = users.enabled() ? users.findByKey(req.get('x-api-key') || req.query.key) : null;
+  // Who the /api routes below would resolve this same request to — in a
+  // single-tenant deployment that is the frozen default user, which `user`
+  // above deliberately reports as null. The admin bit has to be computed from
+  // the same id the routes will use, or the console offers a control the
+  // backend then ignores.
+  const callerId = users.enabled() ? user?.id : 'default';
   res.json({
     name: 'pons-launcher',
     dryRun: config.dryRun,
@@ -34,6 +40,12 @@ app.get('/api/health', (req, res) => {
     apiKeyRequired: users.enabled() || Boolean(config.apiKey),
     multiUser: users.enabled(),
     user: user ? user.name : null,
+    // Whether this caller may read other users' activity logs. Granted only by
+    // ADMIN_USERS in the environment — never by anything the API can write.
+    // The console uses it to decide whether the selector exists at all; the
+    // routes check it again for themselves, because a client-side flag is a
+    // hint, not a permission.
+    admin: users.isAdmin(callerId),
   });
 });
 

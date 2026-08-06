@@ -188,6 +188,24 @@ function remove(name) {
 }
 
 /**
+ * Whether this user id may read other users' activity logs.
+ *
+ * Read from config.adminUsers (the ADMIN_USERS environment variable) and from
+ * nothing else — not from users.json, which this process writes, and not from
+ * any route. See the comment on config.adminUsers: an admin bit that lived in a
+ * file the API can write would be grantable by anyone who stole a key.
+ *
+ * Deliberately does not require the id to exist in users.json. In a
+ * single-tenant deployment every caller is 'default', and naming that id in
+ * ADMIN_USERS is the operator's business — there is nobody else's log to read
+ * there anyway.
+ */
+function isAdmin(userId) {
+  if (typeof userId !== 'string' || !userId) return false;
+  return config.adminUsers.includes(userId.toLowerCase());
+}
+
+/**
  * Resolve a presented key to a user. Timing is not a concern here: the
  * compared value is a SHA-256 of a 256-bit random key, so there is nothing
  * an attacker could learn from how long the lookup takes.
@@ -209,4 +227,4 @@ function _reset() {
   warnedStale = false;
 }
 
-module.exports = { enabled, create, list, remove, findByKey, slug, _reset };
+module.exports = { enabled, create, list, remove, findByKey, isAdmin, slug, _reset };

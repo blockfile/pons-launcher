@@ -167,7 +167,16 @@ export default function App() {
           report={report}
         />
         <HistoryPanel entries={history} explorer={health?.explorer || ''} />
-        <ActivityPanel explorer={health?.explorer || ''} credential={credential} />
+        {/* `admin` comes from health, which is the server's answer about this
+            caller — it decides whether the user selector is drawn at all. The
+            backend checks it again on every read; this flag draws controls, it
+            does not grant anything. */}
+        <ActivityPanel
+          explorer={health?.explorer || ''}
+          credential={credential}
+          admin={Boolean(health?.admin)}
+          me={health?.user || ''}
+        />
       </main>
     </>
   );

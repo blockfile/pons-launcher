@@ -10,9 +10,25 @@
 // per user and rotates.
 //
 // Same isolation rule as the keystore and the history: a user sees their own
-// and nobody else's. There is no admin view, because there is no admin — whoever
-// can read another user's activity can see their addresses and amounts, and
-// nothing in this app needs that.
+// and nobody else's. Whoever can read another user's activity can see their
+// addresses and amounts, so the default is still that nobody can.
+//
+// THE ONE EXCEPTION IS THE ADMIN VIEW, and it is deliberately narrow (viewFor,
+// at the bottom of this file):
+//
+//   * Admin is granted by ADMIN_USERS in the environment and by nothing else.
+//     No route grants it, so a stolen key cannot promote itself into one. See
+//     config.adminUsers.
+//   * It is read-only, and it is only this log. Wallets, keys and launch
+//     history remain isolated with no exception at all.
+//   * A non-admin who asks for someone else's log is not refused — the request
+//     is answered with their OWN log, because a 403 would confirm that admins
+//     exist and let a caller map who they are.
+//   * The admin's own log records every log they open. Someone who can read
+//     everyone invisibly is worse than someone whose looking is itself on the
+//     record; if a second operator is ever added, that record is what makes
+//     this arrangement checkable by them. Nothing is written into the log that
+//     was read — that view was not its owner's action.
 //
 // PRIVATE KEYS ARE NEVER WRITTEN HERE. An export is recorded as the fact that
 // an export happened, with a count. Anything else would turn an audit trail
@@ -21,6 +37,7 @@
 const fs = require('fs');
 const path = require('path');
 const config = require('../config');
+const users = require('../users/users');
 
 const DEFAULT_ID = 'default';
 const instances = new Map();
@@ -33,8 +50,11 @@ const MAX_ENTRIES = 500;
 /** Where a user's activity log lives. */
 function pathFor(userId) {
   const dir = path.dirname(config.historyPath);
-  // userId is validated at creation (users.slug) and never taken from a
-  // request, so it cannot escape this directory.
+  // userId is validated at creation (users.slug). The admin view is the only
+  // path on which one arrives from a request, and viewFor resolves that string
+  // against the real user list before it ever reaches this function — an id
+  // nobody has is answered empty rather than turned into a filename, so
+  // ?user=../../etc/passwd cannot escape this directory.
   return userId === DEFAULT_ID
     ? path.join(dir, 'activity.json')
     : path.join(dir, `activity.${userId}.json`);
@@ -67,7 +87,7 @@ function build(userId) {
    * line about it, and failing the response at that point would tell the
    * operator their funding failed when it did not.
    *
-   * @param {string} kind fund | sweep | deploy | wallets | export
+   * @param {string} kind fund | sweep | sell | deploy | wallets | export | admin
    * @param {string} summary one line, already human-readable
    * @param {object} [detail] anything structured worth keeping. No key material.
    */
@@ -98,6 +118,70 @@ function activityFor(userId = DEFAULT_ID) {
   return instances.get(userId);
 }
 
+// An admin opening a panel re-reads the log on every filter click and every
+// reload, and each read writes a line into the admin's own capped log. Left
+// alone, an afternoon of looking would push a month of funding and exports off
+// the end of the admin's own record — the audit trail eating itself. So a
+// repeat view of the SAME user within this window does not write a second line.
+// The window is short on purpose: it collapses one sitting, not one day.
+const ADMIN_VIEW_COALESCE_MS = 60_000;
+
+/** Record, in the admin's own log, that they opened someone else's. */
+function recordAdminView(adminId, viewedId) {
+  const log = activityFor(adminId);
+  const [newest] = log.list({ limit: 1 });
+  if (
+    newest &&
+    newest.kind === 'admin' &&
+    newest.viewed === viewedId &&
+    Date.now() - Date.parse(newest.at) < ADMIN_VIEW_COALESCE_MS
+  ) {
+    return null;
+  }
+  return log.record('admin', `viewed ${viewedId}'s activity`, { viewed: viewedId });
+}
+
+/**
+ * Read a log on behalf of a caller — the whole admin exception, in one place.
+ *
+ * @param {string} callerId whoever is authenticated. Never the requested id.
+ * @param {object} [opts]
+ * @param {string} [opts.user] the id asked for, straight off the query string
+ *   and therefore untrusted. IGNORED unless the caller is an admin.
+ * @returns {{viewed: string, own: boolean, unknown: boolean, entries: object[]}}
+ */
+function viewFor(callerId, { user: requested = null, limit = 100, kind = null } = {}) {
+  const own = () => ({
+    viewed: callerId,
+    own: true,
+    unknown: false,
+    entries: activityFor(callerId).list({ limit, kind }),
+  });
+
+  // Express turns ?user=a&user=b into an array, so this is not always a string.
+  const wanted = typeof requested === 'string' ? requested.trim().toLowerCase() : '';
+
+  // For everyone else the parameter simply is not there. Not a 403: refusing
+  // would answer the question "does this deployment have admins, and am I
+  // one?", which is exactly what someone holding a stolen key wants to know.
+  if (!wanted || !users.isAdmin(callerId) || wanted === callerId) return own();
+
+  // An admin may name a user who exists, and that is the whole vocabulary.
+  // A typo, a deleted user, or a traversal attempt are all the same answer:
+  // an empty log, no file touched, nothing recorded.
+  if (!users.list().some((u) => u.id === wanted)) {
+    return { viewed: wanted, own: false, unknown: true, entries: [] };
+  }
+
+  recordAdminView(callerId, wanted);
+  return {
+    viewed: wanted,
+    own: false,
+    unknown: false,
+    entries: activityFor(wanted).list({ limit, kind }),
+  };
+}
+
 /**
  * Condense a funding or sweep result into something worth reading back.
  * Keeps per-wallet outcomes — which is the whole point, since the failures are
@@ -112,8 +196,10 @@ function summariseTransfers(results) {
 
 module.exports = {
   activityFor,
+  viewFor,
   pathFor,
   summariseTransfers,
   MAX_ENTRIES,
+  ADMIN_VIEW_COALESCE_MS,
   _reset: () => instances.clear(),
 };

@@ -5,7 +5,8 @@ const config = require('../config');
 const { keystoreFor } = require('../wallets/keystore');
 const funding = require('../wallets/funding');
 const { dispersersFor } = require('../store/dispersers');
-const { activityFor, summariseTransfers } = require('../store/activity');
+const { activityFor, viewFor, summariseTransfers } = require('../store/activity');
+const users = require('../users/users');
 const { historyFor } = require('../store/history');
 const { BATCH_THRESHOLD } = require('../evm/disperse');
 const { estimate, deploy } = require('../evm/deploy');
@@ -399,15 +400,28 @@ router.delete('/dispersers/:address', requireApiKey, (req, res, next) => {
 });
 
 // GET /api/activity — this user's own record of funding, sweeps, deploys,
-// wallets and exports. Scoped like everything else: there is no view of anyone
-// else's, because there is no admin role to grant one.
+// wallets and exports.
+//
+// ?user=<id> is the admin exception, and it is honoured ONLY for a caller named
+// in ADMIN_USERS. For anyone else the parameter is ignored outright — they get
+// their own log, exactly as if they had not passed it. That is not laziness:
+// an error would tell a caller holding a stolen key that admins exist here and
+// let them enumerate who. See the header of store/activity.js.
 router.get('/activity', (req, res, next) => {
   try {
-    const { limit = 100, kind = null } = req.query;
-    res.json(activityFor(req.user.id).list({ limit: Number(limit), kind }));
+    const { limit = 100, kind = null, user = null } = req.query;
+    res.json(viewFor(req.user.id, { user, limit: Number(limit), kind }).entries);
   } catch (err) {
     next(err);
   }
+});
+
+// GET /api/users — who exists, so an admin's console can offer a selector.
+// Admin only, and ids and names only: no keys, no hashes, no counts of what
+// anyone holds.
+router.get('/users', (req, res) => {
+  if (!users.isAdmin(req.user.id)) return res.status(403).json({ error: 'not permitted' });
+  return res.json(users.list().map((u) => ({ id: u.id, name: u.name })));
 });
 
 module.exports = router;

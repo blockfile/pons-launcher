@@ -811,6 +811,21 @@ pre {
   color: var(--vermilion);
   border-color: var(--vermilion);
 }
+/* Someone else's log, opened by an admin. Marked down the whole edge of the
+   table so that a glance, or a screenshot pasted into a chat, cannot be taken
+   for your own record. Amber, not vermilion: reading is not irreversible. */
+.activity-list[data-elsewhere] {
+  border-left: 3px solid var(--amber-dim);
+  padding-left: 10px;
+}
+
+/* An admin having opened someone else's log. Grey on purpose: it is neither
+   ready, dangerous, nor confirmed on chain, and the palette has no fourth
+   colour to spend on it. */
+.activity-list .tag.seen {
+  color: var(--dim);
+  border-color: var(--rule);
+}
 
 /* ── confirmation dialogs ─────────────────────────────────────────────────
    Every irreversible action is confirmed here rather than by window.confirm.
