@@ -28,24 +28,73 @@
 const { Contract, Interface, getAddress, formatUnits, ZeroAddress } = require('ethers');
 const config = require('../../config');
 const { provider } = require('../provider');
-const { erc20 } = require('../erc20');
+const { erc20, ERC20_ABI } = require('../erc20');
 const { curve } = require('./curve');
-const { FACTORY_V2_ABI } = require('./abi');
+const { FACTORY_V2_ABI, CURVE_V2_ABI } = require('./abi');
 
 const iface = new Interface(FACTORY_V2_ABI);
-const TOKEN_LAUNCHED = iface.getEvent('TokenLaunched');
+const curveIface = new Interface(CURVE_V2_ABI);
+const erc20Iface = new Interface(ERC20_ABI);
 
-// Blocks per getLogs call. Robinhood Chain makes blocks fast enough that a
-// naive fromBlock:0 query is refused outright, so the scan is windowed.
+// EVERY READ IN THIS FILE IS BATCHED THROUGH MULTICALL3, AND THAT IS NOT A
+// MICRO-OPTIMISATION. This node degrades badly under concurrent requests: the
+// same eth_call that answers in 0.5s alone took 22s when issued alongside four
+// others, and eight concurrent getLogs took 16s against 0.3s each sequentially.
+// Listing five tokens across twenty wallets is 125 reads. One at a time that is
+// most of a minute; all at once it is worse. As one multicall it is one request.
+//
+// Multicall3 is at its standard address on this chain (see evm/blocknumber.js).
+// allowFailure is always true, so a hostile token that reverts on symbol() costs
+// itself a field and nothing else.
+const MULTICALL3_ABI = [
+  'function aggregate3((address target, bool allowFailure, bytes callData)[] calls) view returns ((bool success, bytes returnData)[] returnData)',
+];
+// Keeps a single request from growing unbounded with wallets x tokens.
+const MULTICALL_CHUNK = 250;
+
+// Blocks per getLogs call in the FALLBACK walk — see launchedByDeployer for why
+// it is only a fallback.
 const LOG_WINDOW = 500_000;
-// How far back the scan is willing to walk before giving up and saying so.
-// LOG_WINDOW * MAX_WINDOWS blocks of history, in that many sequential reads.
+// How far back that walk is willing to go before giving up and saying so.
 const MAX_WINDOWS = 60;
 // A refused window is halved and retried; this caps that recursion so a node
 // that refuses everything fails loudly instead of issuing thousands of calls.
 const MAX_SPLIT_DEPTH = 6;
 
 const BPS = 10_000n;
+
+/**
+ * Run many reads as one request.
+ * @param {Array<{target: string, callData: string}>} calls
+ * @returns {Promise<Array<{success: boolean, returnData: string}>>} positional
+ */
+async function multicall(calls, deps = {}) {
+  if (!calls.length) return [];
+  const rpc = deps.provider || provider;
+  const mc = new Contract(deps.multicallAddress || config.multicallAddress, MULTICALL3_ABI, rpc);
+
+  const out = [];
+  for (let i = 0; i < calls.length; i += MULTICALL_CHUNK) {
+    const chunk = calls.slice(i, i + MULTICALL_CHUNK).map((c) => ({
+      target: c.target,
+      allowFailure: true,
+      callData: c.callData,
+    }));
+    const res = await mc.aggregate3.staticCall(chunk);
+    for (const r of res) out.push({ success: r[0], returnData: r[1] });
+  }
+  return out;
+}
+
+/** Decode one multicall slot, or null if that call failed. */
+function decodeOr(ifc, name, slot, fallback = null) {
+  if (!slot || !slot.success || !slot.returnData || slot.returnData === '0x') return fallback;
+  try {
+    return ifc.decodeFunctionResult(name, slot.returnData)[0];
+  } catch (_err) {
+    return fallback;
+  }
+}
 
 function factoryContract(deps = {}) {
   if (deps.factory) return deps.factory;
@@ -77,11 +126,31 @@ async function getLogsSplitting(rpc, base, from, to, out, depth = 0) {
 /**
  * Every token this deployer launched, newest first.
  *
+ * ONE CALL FOR THE WHOLE CHAIN IS THE FAST PATH, and the windowed walk below it
+ * is only what happens when the node refuses that. This is the opposite of what
+ * it looks like it should be, so the measurements are recorded here rather than
+ * lost:
+ *
+ *   whole chain (0 → head), deployer-filtered      2.2s, 1 log
+ *   one 500k-block window, deployer-filtered       0.3s
+ *   sixty 500k windows, eight at a time           76.0s
+ *   eight 500k windows concurrently               16.0s
+ *
+ * The node serialises concurrent getLogs and then some, so issuing windows in
+ * parallel is FIVE TIMES SLOWER than issuing them one at a time. Do not
+ * "optimise" the fallback by making it concurrent again.
+ *
+ * The whole-chain query is safe because `deployer` is indexed: the RPC's refusal
+ * is a limit on MATCHED logs (10000), and one dev wallet's launches are a
+ * handful however long the chain gets. The same query without the deployer
+ * filter already matches 5242 and will cross the limit on its own — which is
+ * exactly why the walk is kept as a fallback rather than deleted.
+ *
  * @returns {Promise<{launches: Array<{token,curve,pairToken,launchConfigId,blockNumber}>,
  *                    scannedFrom: number, complete: boolean}>}
- *   `complete` is false when the walk ran out of windows before reaching block
- *   0 — the caller must say so rather than presenting a partial list as the
- *   whole truth.
+ *   `complete` is false when the fallback ran out of windows before reaching
+ *   block 0 — the caller must say so rather than presenting a partial list as
+ *   the whole truth.
  */
 async function launchedByDeployer(deployer, deps = {}) {
   const rpc = deps.provider || provider;
@@ -91,21 +160,40 @@ async function launchedByDeployer(deployer, deps = {}) {
 
   const head = deps.head ?? (await rpc.getBlockNumber());
   const topics = iface.encodeFilterTopics('TokenLaunched', [null, null, getAddress(deployer)]);
+  const base = { address, topics };
 
   const raw = [];
-  let to = head;
-  let scannedFrom = head + 1;
-  let complete = false;
+  let scannedFrom;
+  let complete;
 
-  for (let i = 0; i < maxWindows && to >= 0; i++) {
-    const from = Math.max(0, to - window + 1);
-    await getLogsSplitting(rpc, { address, topics }, from, to, raw);
-    scannedFrom = from;
-    if (from === 0) {
-      complete = true;
-      break;
+  let whole = null;
+  try {
+    whole = await rpc.getLogs({ ...base, fromBlock: 0, toBlock: head });
+  } catch (_err) {
+    // Too many matches, or a node that will not take an open range. Fall back.
+    whole = null;
+  }
+
+  if (whole) {
+    raw.push(...whole);
+    scannedFrom = 0;
+    complete = true;
+  } else {
+    // Backwards from the head, one window at a time, splitting any window the
+    // node refuses. Sequential on purpose — see the measurements above.
+    let to = head;
+    scannedFrom = head + 1;
+    complete = false;
+    for (let i = 0; i < maxWindows && to >= 0; i++) {
+      const from = Math.max(0, to - window + 1);
+      await getLogsSplitting(rpc, base, from, to, raw);
+      scannedFrom = from;
+      if (from === 0) {
+        complete = true;
+        break;
+      }
+      to = from - 1;
     }
-    to = from - 1;
   }
 
   // One token can only be launched once, but a re-org replay or an overlapping
@@ -233,15 +321,42 @@ function balanceOfDefault(token, owner, deps = {}) {
 
 /** Per-wallet balances of one token, as BigInts. Zero balances are kept. */
 async function tokenHoldings(token, wallets, deps = {}) {
-  const balanceOf = deps.balanceOf || ((t, o) => balanceOfDefault(t, o, deps));
   const address = getAddress(token);
-  return Promise.all(
-    wallets.map(async (w) => ({
+  if (!wallets.length) return [];
+
+  if (!deps.balanceOf) {
+    try {
+      const slots = await multicall(
+        wallets.map((w) => ({
+          target: address,
+          callData: erc20Iface.encodeFunctionData('balanceOf', [getAddress(w.address)]),
+        })),
+        deps
+      );
+      return wallets.map((w, i) => ({
+        walletId: w.id,
+        address: getAddress(w.address),
+        // A balance that would not read is treated as zero, which can only ever
+        // drop a wallet from a sell. Guessing high would sign a sell for tokens
+        // that are not there.
+        balance: BigInt(decodeOr(erc20Iface, 'balanceOf', slots[i], 0n)),
+      }));
+    } catch (_err) {
+      // No multicall on this chain, or it refused. One call per wallet still
+      // works; it is only slower.
+    }
+  }
+
+  const balanceOf = deps.balanceOf || ((t, o) => balanceOfDefault(t, o, deps));
+  const out = [];
+  for (const w of wallets) {
+    out.push({
       walletId: w.id,
       address: getAddress(w.address),
       balance: BigInt(await balanceOf(address, getAddress(w.address))),
-    }))
-  );
+    });
+  }
+  return out;
 }
 
 /**
@@ -288,32 +403,127 @@ async function findSellable({ deployer, wallets = [], knownTokens = [] }, deps =
     }
   }
 
-  const rows = [];
-  for (const token of candidates.values()) {
-    let record;
-    try {
-      record = await describe(token);
-    } catch (err) {
-      warnings.push(`could not read the factory record for ${token}: ${err.message}`);
-      continue;
-    }
+  const tokens = [...candidates.values()];
 
-    // The gate. A token the factory does not know, or says someone else
-    // launched, never reaches a balance check — let alone an approval.
-    if (!record.exists) continue;
+  // ── round one: who launched each candidate ────────────────────────────────
+  const records = new Map();
+  const batched = !deps.describeToken && !deps.curveState && !deps.tokenMeta;
+  if (batched) {
+    try {
+      const slots = await multicall(
+        tokens.map((t) => ({
+          target: deps.factoryAddress || config.v2FactoryAddress,
+          callData: iface.encodeFunctionData('getLaunchedToken', [t]),
+        })),
+        deps
+      );
+      tokens.forEach((t, i) => {
+        const rec = decodeOr(iface, 'getLaunchedToken', slots[i]);
+        records.set(
+          t,
+          rec && rec.exists
+            ? {
+                token: t,
+                curve: getAddress(rec.curve),
+                deployer: getAddress(rec.deployer),
+                pairToken: getAddress(rec.pairToken),
+                creatorTaxBps: Number(rec.creatorTaxBps),
+                phase: Number(rec.phase),
+                exists: true,
+              }
+            : { token: t, exists: false }
+        );
+      });
+    } catch (_err) {
+      records.clear(); // fall through to the per-token path below
+    }
+  }
+  for (const t of tokens) {
+    if (records.has(t)) continue;
+    try {
+      records.set(t, await describe(t));
+    } catch (err) {
+      warnings.push(`could not read the factory record for ${t}: ${err.message}`);
+      records.set(t, { token: t, exists: false });
+    }
+  }
+
+  // ── the gate ──────────────────────────────────────────────────────────────
+  // A token the factory does not know, or says someone else launched, never
+  // reaches a balance check — let alone an approval.
+  const mine = [];
+  for (const t of tokens) {
+    const record = records.get(t);
+    if (!record || !record.exists) continue;
     if (getAddress(record.deployer) !== dev) {
       warnings.push(
-        `${token} is in this account launch history but the factory says ${record.deployer} ` +
+        `${t} is in this account launch history but the factory says ${record.deployer} ` +
           'launched it — not offered'
       );
       continue;
     }
+    mine.push(record);
+  }
 
-    const [{ symbol, decimals }, curveInfo, held] = await Promise.all([
-      meta(token).catch(() => ({ symbol: '???', decimals: 18 })),
-      state(record.curve).catch(() => ({ graduated: false, readyToGraduate: false })),
-      tokenHoldings(token, wallets, deps),
-    ]);
+  // ── round two: metadata, curve state and every balance, in one request ────
+  const details = new Map();
+  if (batched && mine.length) {
+    try {
+      const calls = [];
+      for (const r of mine) {
+        calls.push({ target: r.token, callData: erc20Iface.encodeFunctionData('symbol', []) });
+        calls.push({ target: r.token, callData: erc20Iface.encodeFunctionData('decimals', []) });
+        calls.push({ target: r.curve, callData: curveIface.encodeFunctionData('graduated', []) });
+        calls.push({
+          target: r.curve,
+          callData: curveIface.encodeFunctionData('readyToGraduate', []),
+        });
+        for (const w of wallets) {
+          calls.push({
+            target: r.token,
+            callData: erc20Iface.encodeFunctionData('balanceOf', [getAddress(w.address)]),
+          });
+        }
+      }
+      const slots = await multicall(calls, deps);
+      let i = 0;
+      for (const r of mine) {
+        const symbol = decodeOr(erc20Iface, 'symbol', slots[i++], '???');
+        const decimals = decodeOr(erc20Iface, 'decimals', slots[i++], 18);
+        const graduated = decodeOr(curveIface, 'graduated', slots[i++], false);
+        const readyToGraduate = decodeOr(curveIface, 'readyToGraduate', slots[i++], false);
+        const held = wallets.map((w) => ({
+          walletId: w.id,
+          address: getAddress(w.address),
+          balance: BigInt(decodeOr(erc20Iface, 'balanceOf', slots[i++], 0n)),
+        }));
+        details.set(r.token, {
+          symbol: String(symbol),
+          decimals: Number(decimals),
+          graduated: Boolean(graduated),
+          readyToGraduate: Boolean(readyToGraduate),
+          held,
+        });
+      }
+    } catch (_err) {
+      details.clear(); // fall through
+    }
+  }
+
+  const rows = [];
+  for (const record of mine) {
+    const token = record.token;
+    let detail = details.get(token);
+    if (!detail) {
+      const [m, curveInfo, held] = await Promise.all([
+        meta(token).catch(() => ({ symbol: '???', decimals: 18 })),
+        state(record.curve).catch(() => ({ graduated: false, readyToGraduate: false })),
+        tokenHoldings(token, wallets, deps),
+      ]);
+      detail = { ...m, ...curveInfo, held };
+    }
+    const { symbol, decimals, held } = detail;
+    const curveInfo = detail;
 
     const holders = held.filter((h) => h.balance > 0n);
     if (!holders.length) continue; // old launches fall off the list on their own

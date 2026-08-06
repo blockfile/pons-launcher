@@ -91,7 +91,9 @@ function sellableDeps(over = {}) {
 
 // ── enumerating a dev wallet's launches ────────────────────────────────────
 
-test('the deployer scan walks backwards in windows and stops at genesis', async () => {
+test('the whole chain is asked for in one call — the deployer topic is indexed', async () => {
+  // Measured against the live node: one open-range query is 2.2s, the windowed
+  // walk is 76s. The walk exists for a node that refuses this, nothing else.
   const node = fakeNode({
     head: 250,
     logs: [launchLog({ token: TOKEN_A, curve: CURVE_A, deployer: DEV, blockNumber: 210 })],
@@ -104,7 +106,31 @@ test('the deployer scan walks backwards in windows and stops at genesis', async 
     maxWindows: 10,
   });
 
+  assert.deepEqual(node.ranges, [[0, 250]], 'one call, not a walk');
+  assert.equal(out.complete, true);
+  assert.equal(out.scannedFrom, 0);
+  assert.deepEqual(
+    out.launches.map((l) => l.token),
+    [getAddress(TOKEN_A)]
+  );
+});
+
+test('a node that refuses the open range gets a backwards walk instead', async () => {
+  const node = fakeNode({
+    head: 250,
+    rejectWiderThan: 100,
+    logs: [launchLog({ token: TOKEN_A, curve: CURVE_A, deployer: DEV, blockNumber: 210 })],
+  });
+
+  const out = await holdings.launchedByDeployer(DEV, {
+    provider: node,
+    factoryAddress: FACTORY,
+    window: 100,
+    maxWindows: 10,
+  });
+
   assert.deepEqual(node.ranges, [
+    [0, 250], // refused
     [151, 250],
     [51, 150],
     [0, 50],
@@ -185,7 +211,7 @@ test('a window the RPC refuses is split rather than abandoned', async () => {
 });
 
 test('a scan that runs out of windows says so instead of implying it saw everything', async () => {
-  const node = fakeNode({ head: 1000, logs: [] });
+  const node = fakeNode({ head: 1000, logs: [], rejectWiderThan: 100 });
   const out = await holdings.launchedByDeployer(DEV, {
     provider: node,
     factoryAddress: FACTORY,
@@ -345,6 +371,247 @@ test('a token whose factory record does not exist is dropped, not guessed at', a
     out.tokens.map((t) => t.token),
     [getAddress(TOKEN_B)]
   );
+});
+
+// ── the batched path ───────────────────────────────────────────────────────
+// Everything above injects per-token readers, which bypasses the multicall the
+// real thing uses. These drive that path end to end, through a node that
+// actually decodes aggregate3 — otherwise the code that runs in production is
+// the only code with no test.
+
+const MULTICALL_IFACE = new Interface([
+  'function aggregate3((address target, bool allowFailure, bytes callData)[] calls) view returns ((bool success, bytes returnData)[] returnData)',
+]);
+const ERC20_IFACE = new Interface([
+  'function balanceOf(address) view returns (uint256)',
+  'function decimals() view returns (uint8)',
+  'function symbol() view returns (string)',
+]);
+const CURVE_IFACE = new Interface([
+  'function readyToGraduate() view returns (bool)',
+  'function graduated() view returns (bool)',
+]);
+const sel = (ifc, name) => ifc.getFunction(name).selector;
+
+const MULTICALL = '0xca11bde05977b3631167028862be2a173976ca11';
+
+/**
+ * A node that answers getLogs and a real aggregate3, from a small world model.
+ * `revertOn` names selectors a given target refuses, to exercise allowFailure.
+ */
+function multicallNode({ head = 250, logs = [], world = {}, revertOn = () => false } = {}) {
+  const state = { calls: 0 };
+  const node = {
+    get calls() {
+      return state.calls;
+    },
+    async getBlockNumber() {
+      return head;
+    },
+    async getLogs({ fromBlock, toBlock, topics }) {
+      const wanted = topics[3];
+      return logs.filter(
+        (l) =>
+          l.blockNumber >= fromBlock && l.blockNumber <= toBlock && (!wanted || l.topics[3] === wanted)
+      );
+    },
+    async call({ data }) {
+      state.calls += 1;
+      const [batch] = MULTICALL_IFACE.decodeFunctionData('aggregate3', data);
+      const results = batch.map(([target, _allow, callData]) => {
+        const s = callData.slice(0, 10);
+        const key = getAddress(target);
+        if (revertOn(key, s)) return [false, '0x'];
+
+        // getLaunchedToken is asked of the FACTORY, so the record is looked up
+        // by the token in the arguments rather than by the call's target.
+        if (s === iface.getFunction('getLaunchedToken').selector) {
+          const [asked] = iface.decodeFunctionData('getLaunchedToken', callData);
+          const rec = world[getAddress(asked)]?.record;
+          return rec ? [true, iface.encodeFunctionResult('getLaunchedToken', [rec])] : [false, '0x'];
+        }
+
+        const entry = world[key];
+        if (!entry) return [false, '0x'];
+
+        if (s === sel(ERC20_IFACE, 'symbol')) {
+          return [true, ERC20_IFACE.encodeFunctionResult('symbol', [entry.symbol])];
+        }
+        if (s === sel(ERC20_IFACE, 'decimals')) {
+          return [true, ERC20_IFACE.encodeFunctionResult('decimals', [entry.decimals])];
+        }
+        if (s === sel(ERC20_IFACE, 'balanceOf')) {
+          const [who] = ERC20_IFACE.decodeFunctionData('balanceOf', callData);
+          return [
+            true,
+            ERC20_IFACE.encodeFunctionResult('balanceOf', [
+              (entry.balances || {})[getAddress(who)] ?? 0n,
+            ]),
+          ];
+        }
+        if (s === sel(CURVE_IFACE, 'graduated')) {
+          return [true, CURVE_IFACE.encodeFunctionResult('graduated', [!!entry.graduated])];
+        }
+        if (s === sel(CURVE_IFACE, 'readyToGraduate')) {
+          return [true, CURVE_IFACE.encodeFunctionResult('readyToGraduate', [!!entry.ready])];
+        }
+        return [false, '0x'];
+      });
+      return MULTICALL_IFACE.encodeFunctionResult('aggregate3', [results]);
+    },
+  };
+  return node;
+}
+
+/** The 15-field LaunchedToken struct, positionally. */
+const launchedRecord = ({ token, curve, deployer, exists = true }) => [
+  getAddress(token),
+  getAddress(curve),
+  getAddress(deployer),
+  getAddress(deployer),
+  ZeroAddress,
+  0n,
+  3000,
+  60,
+  0,
+  false,
+  1,
+  0n,
+  0n,
+  0n,
+  exists,
+];
+
+test('the multicall path lists the dev own launches and decodes every field', async () => {
+  const node = multicallNode({
+    head: 250,
+    logs: [
+      launchLog({ token: TOKEN_A, curve: CURVE_A, deployer: DEV, blockNumber: 200 }),
+      launchLog({ token: TOKEN_B, curve: CURVE_B, deployer: DEV, blockNumber: 100 }),
+    ],
+    world: {
+      [getAddress(TOKEN_A)]: {
+        symbol: 'AYE',
+        decimals: 18,
+        balances: { [getAddress(WALLETS[0].address)]: 3n * 10n ** 18n },
+        record: launchedRecord({ token: TOKEN_A, curve: CURVE_A, deployer: DEV }),
+      },
+      [getAddress(TOKEN_B)]: {
+        symbol: 'BEE',
+        decimals: 6,
+        balances: { [getAddress(WALLETS[1].address)]: 1_500_000n },
+        record: launchedRecord({ token: TOKEN_B, curve: CURVE_B, deployer: DEV }),
+      },
+      [getAddress(CURVE_A)]: { graduated: false, ready: false },
+      [getAddress(CURVE_B)]: { graduated: true, ready: true },
+    },
+  });
+
+  const out = await holdings.findSellable(
+    { deployer: DEV, wallets: WALLETS, knownTokens: [] },
+    { provider: node, factoryAddress: FACTORY, multicallAddress: MULTICALL }
+  );
+
+  assert.equal(out.tokens.length, 2);
+  const a = out.tokens.find((t) => t.token === getAddress(TOKEN_A));
+  const b = out.tokens.find((t) => t.token === getAddress(TOKEN_B));
+
+  assert.equal(a.symbol, 'AYE');
+  assert.equal(a.totalTokens, '3.0');
+  assert.equal(a.wallets, 1);
+  assert.equal(a.route, 'curve');
+  // Decimals are read, not assumed — a 6-decimal token rendered as 18 is off by
+  // twelve orders of magnitude.
+  assert.equal(b.decimals, 6);
+  assert.equal(b.totalTokens, '1.5');
+  assert.equal(b.route, 'uniswap-v4');
+  assert.equal(b.graduated, true);
+
+  // Two requests for two tokens across two wallets: one for the factory
+  // records, one for everything else.
+  assert.equal(node.calls, 2);
+});
+
+test('the multicall path drops a token the factory attributes to someone else', async () => {
+  const node = multicallNode({
+    head: 250,
+    logs: [launchLog({ token: TOKEN_A, curve: CURVE_A, deployer: DEV, blockNumber: 200 })],
+    world: {
+      [getAddress(TOKEN_A)]: {
+        symbol: 'AYE',
+        decimals: 18,
+        balances: { [getAddress(WALLETS[0].address)]: 3n * 10n ** 18n },
+        // The event said DEV; the factory record says otherwise. The record wins.
+        record: launchedRecord({ token: TOKEN_A, curve: CURVE_A, deployer: STRANGER }),
+      },
+      [getAddress(CURVE_A)]: { graduated: false, ready: false },
+    },
+  });
+
+  const out = await holdings.findSellable(
+    { deployer: DEV, wallets: WALLETS, knownTokens: [] },
+    { provider: node, factoryAddress: FACTORY, multicallAddress: MULTICALL }
+  );
+
+  assert.equal(out.tokens.length, 0);
+  assert.ok(out.warnings.some((w) => /launched it — not offered/.test(w)));
+});
+
+test('a token that reverts on symbol() is still sellable', async () => {
+  // allowFailure is on for a reason: a hostile or unusual ERC-20 that refuses a
+  // metadata call costs itself a label, not the operator their exit.
+  const node = multicallNode({
+    head: 250,
+    logs: [launchLog({ token: TOKEN_A, curve: CURVE_A, deployer: DEV, blockNumber: 200 })],
+    world: {
+      [getAddress(TOKEN_A)]: {
+        symbol: 'AYE',
+        decimals: 18,
+        balances: { [getAddress(WALLETS[0].address)]: 3n * 10n ** 18n },
+        record: launchedRecord({ token: TOKEN_A, curve: CURVE_A, deployer: DEV }),
+      },
+      [getAddress(CURVE_A)]: { graduated: false, ready: false },
+    },
+    revertOn: (target, s) => target === getAddress(TOKEN_A) && s === sel(ERC20_IFACE, 'symbol'),
+  });
+
+  const out = await holdings.findSellable(
+    { deployer: DEV, wallets: WALLETS, knownTokens: [] },
+    { provider: node, factoryAddress: FACTORY, multicallAddress: MULTICALL }
+  );
+
+  assert.equal(out.tokens.length, 1);
+  assert.equal(out.tokens[0].symbol, '???');
+  assert.equal(out.tokens[0].totalTokens, '3.0');
+});
+
+test('tokenHoldings reads every wallet in one request', async () => {
+  const node = multicallNode({
+    world: {
+      [getAddress(TOKEN_A)]: {
+        symbol: 'AYE',
+        decimals: 18,
+        balances: {
+          [getAddress(WALLETS[0].address)]: 7n,
+          [getAddress(WALLETS[1].address)]: 0n,
+        },
+      },
+    },
+  });
+
+  const held = await holdings.tokenHoldings(TOKEN_A, WALLETS, {
+    provider: node,
+    multicallAddress: MULTICALL,
+  });
+
+  assert.deepEqual(
+    held.map((h) => [h.walletId, h.balance]),
+    [
+      ['w1', 7n],
+      ['w2', 0n],
+    ]
+  );
+  assert.equal(node.calls, 1, 'twenty wallets must not be twenty round trips');
 });
 
 // ── quoting a sell ─────────────────────────────────────────────────────────

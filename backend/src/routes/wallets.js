@@ -6,11 +6,16 @@ const { keystoreFor } = require('../wallets/keystore');
 const funding = require('../wallets/funding');
 const { dispersersFor } = require('../store/dispersers');
 const { activityFor, summariseTransfers } = require('../store/activity');
+const { historyFor } = require('../store/history');
 const { BATCH_THRESHOLD } = require('../evm/disperse');
 const { estimate, deploy } = require('../evm/deploy');
 const { provider } = require('../evm/provider');
 const { formatEther } = require('ethers');
 const { requireApiKey } = require('../middleware/auth');
+const { findSellable } = require('../evm/v2/holdings');
+const { prepareSell } = require('../bundle/prepareSell');
+const { fireSell } = require('../bundle/fireSell');
+const { jsonSafe } = require('./launch');
 
 const router = express.Router();
 
@@ -153,6 +158,120 @@ router.post('/sweep', requireApiKey, async (req, res, next) => {
       { ...s, includeTokens, tokenAddress }
     );
     res.json(out);
+  } catch (err) {
+    next(err);
+  }
+});
+
+// ── selling out ───────────────────────────────────────────────────────────
+// Exit 100% of a launched token from every bundle wallet holding it, in one
+// action. See docs/superpowers/specs/2026-08-06-sell-all-design.md — every
+// decision there was made deliberately, with the risk stated.
+
+/**
+ * A sell plan safe to return over HTTP. The signed transactions are stripped:
+ * anyone holding a raw signed sell could broadcast it, so they never leave the
+ * server. Same rule as the launch preflight.
+ */
+function publicSellPlan(plan) {
+  return jsonSafe({
+    ...plan,
+    wallets: plan.wallets.map((w) => ({
+      ...w,
+      approve: { ...w.approve, raw: undefined },
+      sell: { ...w.sell, raw: undefined },
+    })),
+  });
+}
+
+/** Tokens this user launched through the console, for the union in findSellable. */
+function historyTokens(userId) {
+  try {
+    return historyFor(userId)
+      .list(200)
+      .map((e) => e.token)
+      .filter(Boolean);
+  } catch (_err) {
+    // The picker works without history — it is a convenience for launches older
+    // than the log scan window, not a source of authority.
+    return [];
+  }
+}
+
+// GET /api/sellable — what this bundle could exit right now.
+//
+// launched-by-dev INTERSECT held-by-bundle, and the first half is the safety
+// property: a token is NEVER listed because a wallet holds it. Bundle wallets
+// get dusted, and selling an unknown token means approving an unknown contract.
+// See the header of evm/v2/holdings.js for the full reasoning before changing
+// anything here.
+router.get('/sellable', async (req, res, next) => {
+  try {
+    const ks = keystoreFor(req.user.id);
+    res.json(
+      jsonSafe(
+        await findSellable({
+          deployer: ks.devWallet().address,
+          wallets: ks.bundleWallets(),
+          knownTokens: historyTokens(req.user.id),
+        })
+      )
+    );
+  } catch (err) {
+    next(err);
+  }
+});
+
+// POST /api/sell/preflight — build and sign the whole exit, broadcast nothing.
+// Worth running: it is where the ETH estimate comes from, and arming a
+// floor-less irreversible sell without one is not a decision anyone can make.
+router.post('/sell/preflight', requireApiKey, async (req, res, next) => {
+  try {
+    const { token } = req.body || {};
+    const plan = await prepareSell({ token }, { keystore: keystoreFor(req.user.id) });
+    res.json(publicSellPlan(plan));
+  } catch (err) {
+    next(err);
+  }
+});
+
+// POST /api/sell — prepare, then fire. Irreversible and touches every wallet,
+// so it takes an explicit confirm as well as the API key, the same two locks a
+// key export takes.
+router.post('/sell', requireApiKey, async (req, res, next) => {
+  try {
+    const { token, confirm } = req.body || {};
+    if (confirm !== true) {
+      throw new Error('selling is irreversible and has no slippage floor — requires { confirm: true }');
+    }
+
+    const ks = keystoreFor(req.user.id);
+    const plan = await prepareSell({ token }, { keystore: ks });
+    const result = await fireSell(plan);
+
+    // The failures are why anyone comes back to this log, so the per-wallet
+    // results go in whole rather than as a count.
+    const t = result.totals;
+    activityFor(req.user.id).record(
+      'sell',
+      `sold ${plan.symbol} from ${t.sold}/${t.wallets} wallet(s)` +
+        (t.failed ? `, ${t.failed} failed` : '') +
+        (t.ethReceived ? ` — ${t.ethReceived} ETH` : ''),
+      jsonSafe({
+        token: plan.token,
+        symbol: plan.symbol,
+        curve: plan.curve,
+        route: plan.route,
+        dryRun: Boolean(result.simulated),
+        minQuoteOut: '0',
+        totals: t,
+        fill: result.fill,
+        wallets: result.wallets,
+        skipped: result.skipped,
+      })
+    );
+
+    res.json({ plan: publicSellPlan(plan), result: jsonSafe(result) });
   } catch (err) {
     next(err);
   }
