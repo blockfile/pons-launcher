@@ -21,7 +21,10 @@ const BLANK = {
   website: '',
   farcaster: '',
   devBuyEth: '0.05',
-  creatorTaxBps: '0',
+  // 100 bps = 1%. A default of zero means every launch that forgets the field
+  // earns the creator nothing, permanently — creatorTaxBps is immutable once
+  // launched. 1% is the smallest amount that is clearly deliberate.
+  creatorTaxBps: '100',
   buybackEnabled: false,
 };
 
