@@ -34,6 +34,14 @@ function price(v) {
 // The picker's wallet field is a count; tolerate a list in case it is one.
 const walletCount = (t) => (Array.isArray(t?.wallets) ? t.wallets.length : Number(t?.wallets || 0));
 
+// Where a row's sell will actually go. The backend decides this — the operator
+// never picks — so this only names the decision it already made.
+function routeLabel(t) {
+  if (t?.route === 'swap-router') return 'v1 pool — sells through the swap router';
+  if (t?.graduated) return 'graduated — sells into the Uniswap pool';
+  return 'bonding — sells back to the curve';
+}
+
 export default function SellPanel({ explorer, credential, live, reload, report }) {
   const [list, setList] = useState(null);
   const [missing, setMissing] = useState(false);
@@ -190,7 +198,7 @@ export default function SellPanel({ explorer, credential, live, reload, report }
               <th>Token</th>
               <th>Held by bundle</th>
               <th>Wallets</th>
-              <th>Curve</th>
+              <th>Route</th>
             </tr>
           </thead>
           <tbody>
@@ -214,9 +222,7 @@ export default function SellPanel({ explorer, credential, live, reload, report }
                 </td>
                 <td>{amount(t.totalTokens, 2)}</td>
                 <td>{walletCount(t)}</td>
-                <td className="hint">
-                  {t.graduated ? 'graduated — sells into the Uniswap pool' : 'bonding — sells back to the curve'}
-                </td>
+                <td className="hint">{routeLabel(t)}</td>
               </tr>
             ))}
           </tbody>

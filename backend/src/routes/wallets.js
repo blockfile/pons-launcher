@@ -194,13 +194,17 @@ function publicSellPlan(plan) {
  * the alternative, enumerating TokenLaunched over 28.7M blocks, is what hung
  * this route in production. It is still only a hint about WHERE TO LOOK:
  * findSellable re-checks every one of these against the factory.
+ *
+ * `protocol` rides along so a v1 launch is looked up in the v1 registry and a v2
+ * one in v2's. It is a hint and nothing more: entries written before that field
+ * existed carry none, and findSellable asks both registries regardless.
  */
 function historyTokens(userId) {
   try {
     return historyFor(userId)
       .list(200)
-      .map((e) => e.token)
-      .filter(Boolean);
+      .filter((e) => e.token)
+      .map((e) => ({ token: e.token, protocol: e.protocol || null }));
   } catch (_err) {
     // A missing or corrupt history file costs speed, not correctness — the
     // bounded log scan still runs.

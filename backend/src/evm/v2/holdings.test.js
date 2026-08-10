@@ -5,6 +5,7 @@ const assert = require('node:assert');
 const { Interface, ZeroAddress, getAddress } = require('ethers');
 
 const { FACTORY_V2_ABI } = require('./abi');
+const { FACTORY_ABI } = require('../abi');
 const holdings = require('./holdings');
 
 const FACTORY = '0x7eD598BcEf8bd9Edd8C97A195C6d13f40801EC7e';
@@ -18,6 +19,7 @@ const CURVE_A = '0xca11a000000000000000000000000000000000a1';
 const CURVE_B = '0xca11b000000000000000000000000000000000b1';
 
 const iface = new Interface(FACTORY_V2_ABI);
+const v1Iface = new Interface(FACTORY_ABI);
 
 function launchLog({ token, curve, deployer, blockNumber }) {
   const { topics, data } = iface.encodeEventLog('TokenLaunched', [
@@ -79,6 +81,9 @@ function sellableDeps(over = {}) {
       phase: 1,
       exists: true,
     }),
+    // The v1 registry knows nothing unless a test says otherwise. Injected on
+    // every case so no test can reach the network to find that out.
+    describeV1Token: async (token) => ({ token: getAddress(token), protocol: 'v1', exists: false }),
     curveState: async () => ({ graduated: false, readyToGraduate: false }),
     tokenMeta: async (token) => ({
       symbol: token === getAddress(TOKEN_B) ? 'BEE' : 'AYE',
@@ -87,6 +92,28 @@ function sellableDeps(over = {}) {
     balanceOf: async () => 10n ** 18n,
     ...over,
   };
+}
+
+// A v1 launch: the v2 factory has never heard of it, the v1 factory has.
+const V1_TOKEN = '0x86d26b51fd707abd05b04084fbb6c1db3708e7de';
+const WETH = '0x0bd7d308f8e1639fab988df18a8011f41eacad73';
+
+function v1Only(over = {}) {
+  return sellableDeps({
+    describeToken: async (token) => ({ token: getAddress(token), protocol: 'v2', exists: false }),
+    describeV1Token: async (token) => ({
+      token: getAddress(token),
+      protocol: 'v1',
+      deployer: getAddress(DEV),
+      pairToken: getAddress(WETH),
+      poolFee: 10000,
+      dexId: 0,
+      launchConfigId: 0,
+      exists: true,
+    }),
+    tokenMeta: async () => ({ symbol: 'ONE', decimals: 18 }),
+    ...over,
+  });
 }
 
 // ── enumerating a dev wallet's launches ────────────────────────────────────
@@ -282,6 +309,116 @@ test('a token held by a bundle wallet but not launched by the dev is never offer
     out.tokens.map((t) => t.token).sort(),
     [getAddress(TOKEN_A), getAddress(TOKEN_B)].sort()
   );
+});
+
+// ── both protocols are listed ──────────────────────────────────────────────
+
+test('a v1 token from launch history is offered, with the v1 route', async () => {
+  const out = await holdings.findSellable(
+    {
+      deployer: DEV,
+      wallets: WALLETS,
+      knownTokens: [{ token: V1_TOKEN, protocol: 'v1' }],
+    },
+    v1Only({ balanceOf: async () => 72915n * 10n ** 18n })
+  );
+
+  assert.deepEqual(
+    out.tokens.map((t) => t.token),
+    [getAddress(V1_TOKEN)]
+  );
+  const row = out.tokens[0];
+  assert.equal(row.protocol, 'v1');
+  assert.equal(row.route, 'swap-router', 'not a curve, and not uniswap-v4');
+  assert.equal(row.curve, null, 'a v1 launch has no curve — null, not missing');
+  assert.equal(row.graduated, false);
+  assert.equal(row.symbol, 'ONE');
+  assert.equal(row.wallets, 2);
+});
+
+test('a v1 history entry with no protocol field still resolves — the oldest entries have none', async () => {
+  // history.js only started writing `protocol` later, so the earliest rows are
+  // bare addresses. Both registries are asked either way.
+  const out = await holdings.findSellable(
+    { deployer: DEV, wallets: WALLETS, knownTokens: [V1_TOKEN] },
+    v1Only()
+  );
+
+  assert.deepEqual(
+    out.tokens.map((t) => t.protocol),
+    ['v1']
+  );
+});
+
+test('a v1 token the v1 factory says someone else launched is never offered', async () => {
+  // The dusting gate is the same gate on both protocols.
+  const out = await holdings.findSellable(
+    { deployer: DEV, wallets: WALLETS, knownTokens: [{ token: V1_TOKEN, protocol: 'v1' }] },
+    v1Only({
+      describeV1Token: async (token) => ({
+        token: getAddress(token),
+        protocol: 'v1',
+        deployer: getAddress(STRANGER),
+        pairToken: getAddress(WETH),
+        poolFee: 10000,
+        dexId: 0,
+        launchConfigId: 0,
+        exists: true,
+      }),
+    })
+  );
+
+  assert.deepEqual(out.tokens, []);
+});
+
+test('a v1 token no bundle wallet holds is not offered, however it was launched', async () => {
+  const out = await holdings.findSellable(
+    { deployer: DEV, wallets: WALLETS, knownTokens: [{ token: V1_TOKEN, protocol: 'v1' }] },
+    v1Only({ balanceOf: async () => 0n })
+  );
+
+  assert.deepEqual(out.tokens, []);
+});
+
+test('v1 and v2 launches are listed side by side, each with its own route', async () => {
+  const out = await holdings.findSellable(
+    {
+      deployer: DEV,
+      wallets: WALLETS,
+      knownTokens: [{ token: TOKEN_A, protocol: 'v2' }, { token: V1_TOKEN, protocol: 'v1' }],
+    },
+    sellableDeps({
+      describeToken: async (token) =>
+        token === getAddress(V1_TOKEN)
+          ? { token: getAddress(token), protocol: 'v2', exists: false }
+          : {
+              token: getAddress(token),
+              protocol: 'v2',
+              curve: getAddress(CURVE_A),
+              deployer: getAddress(DEV),
+              pairToken: ZeroAddress,
+              phase: 1,
+              exists: true,
+            },
+      describeV1Token: async (token) =>
+        token === getAddress(V1_TOKEN)
+          ? {
+              token: getAddress(token),
+              protocol: 'v1',
+              deployer: getAddress(DEV),
+              pairToken: getAddress(WETH),
+              poolFee: 10000,
+              dexId: 0,
+              launchConfigId: 0,
+              exists: true,
+            }
+          : { token: getAddress(token), protocol: 'v1', exists: false },
+    })
+  );
+
+  const byToken = new Map(out.tokens.map((t) => [t.token, t]));
+  assert.equal(byToken.get(getAddress(TOKEN_A)).route, 'curve');
+  assert.equal(byToken.get(getAddress(V1_TOKEN)).route, 'swap-router');
 });
 
 test('a launched token with no bundle balance is not offered', async () => {
@@ -547,6 +684,7 @@ const CURVE_IFACE = new Interface([
 const sel = (ifc, name) => ifc.getFunction(name).selector;
 
 const MULTICALL = '0xca11bde05977b3631167028862be2a173976ca11';
+const V1_FACTORY = '0xa5aab3f0c6eeadf30ef1d3eb997108e976351feb';
 
 /**
  * A node that answers getLogs and a real aggregate3, from a small world model.
@@ -582,10 +720,20 @@ function multicallNode({ head = 250, logs = [], world = {}, revertOn = () => fal
 
         // getLaunchedToken is asked of the FACTORY, so the record is looked up
         // by the token in the arguments rather than by the call's target.
+        // getLaunchedToken(address) has the SAME selector on both factories —
+        // only the target says which registry is being asked, which is exactly
+        // how findSellable tells the two apart.
         if (s === iface.getFunction('getLaunchedToken').selector) {
           const [asked] = iface.decodeFunctionData('getLaunchedToken', callData);
-          const rec = world[getAddress(asked)]?.record;
-          return rec ? [true, iface.encodeFunctionResult('getLaunchedToken', [rec])] : [false, '0x'];
+          const entry = world[getAddress(asked)] || {};
+          if (key === getAddress(V1_FACTORY)) {
+            return entry.v1record
+              ? [true, v1Iface.encodeFunctionResult('getLaunchedToken', [entry.v1record])]
+              : [false, '0x'];
+          }
+          return entry.record
+            ? [true, iface.encodeFunctionResult('getLaunchedToken', [entry.record])]
+            : [false, '0x'];
         }
 
         const entry = world[key];
@@ -687,6 +835,53 @@ test('the multicall path lists the dev own launches and decodes every field', as
   // Two requests for two tokens across two wallets: one for the factory
   // records, one for everything else.
   assert.equal(node.calls, 2);
+});
+
+/** The 13-field v1 LaunchedToken struct, positionally. */
+const v1Record = ({ token, deployer, exists = true }) => [
+  getAddress(token),
+  getAddress(deployer),
+  getAddress(WETH),
+  ZeroAddress,
+  0n,
+  0n,
+  0n,
+  0n,
+  0n,
+  false,
+  10000,
+  exists,
+  0n,
+];
+
+test('the multicall path asks both registries and routes a v1 launch through the router', async () => {
+  const node = multicallNode({
+    head: 250,
+    world: {
+      [getAddress(V1_TOKEN)]: {
+        symbol: 'ONE',
+        decimals: 18,
+        balances: { [getAddress(WALLETS[0].address)]: 72915n * 10n ** 18n },
+        // Only the v1 factory has a record — the v2 one is asked and says no.
+        v1record: v1Record({ token: V1_TOKEN, deployer: DEV }),
+      },
+    },
+  });
+
+  const out = await holdings.findSellable(
+    { deployer: DEV, wallets: WALLETS, knownTokens: [{ token: V1_TOKEN, protocol: 'v1' }] },
+    { provider: node, factoryAddress: FACTORY, v1FactoryAddress: V1_FACTORY, multicallAddress: MULTICALL }
+  );
+
+  assert.equal(out.tokens.length, 1);
+  assert.equal(out.tokens[0].protocol, 'v1');
+  assert.equal(out.tokens[0].route, 'swap-router');
+  assert.equal(out.tokens[0].symbol, 'ONE');
+  assert.equal(out.tokens[0].curve, null);
+  assert.equal(getAddress(out.tokens[0].pairToken), getAddress(WETH));
+  // Still two requests: both registries ride in the first one.
+  assert.equal(node.calls, 2);
+  assert.equal(node.logCalls, 0, 'history answered it — no scan');
 });
 
 test('the history-first path makes no log call at all', async () => {

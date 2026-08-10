@@ -252,6 +252,50 @@ test('the result is JSON — no BigInt reaches the activity log', async () => {
   assert.doesNotThrow(() => JSON.stringify(res));
 });
 
+// ── the v1 route fires through the same machinery ──────────────────────────
+// Nothing in here is protocol-aware: prepareSell already signed both
+// transactions, so a v1 plan differs only in what those bytes say. These pin
+// that — a v1 exit has to report proceeds and survive a partial failure exactly
+// as a v2 one does, because the operator reads the same table either way.
+
+const v1Plan = {
+  ...plan,
+  protocol: 'v1',
+  route: 'swap-router',
+  curve: null,
+  spender: getAddress('0xcaf681a66d020601342297493863e78c959e5cb2'),
+  // The swap's WETH output is unwrapped to the seller in the same transaction,
+  // so the wallet's native balance is what moves.
+  isNativeQuote: true,
+};
+
+test('a v1 sell reports proceeds and fills the same way a curve sell does', async () => {
+  const node = fakeNode({
+    proceeds: { [A]: parseEther('0.002'), [B]: parseEther('0.0005') },
+  });
+  const res = await fireSell(v1Plan, { provider: node, ...deps() });
+
+  assert.equal(res.route, 'swap-router');
+  assert.equal(res.curve, null);
+  assert.equal(res.totals.sold, 2);
+  assert.equal(res.totalEth, '0.0025');
+  assert.equal(res.fill.best.walletId, 'a');
+  assert.equal(res.fill.worst.walletId, 'b');
+});
+
+test("one v1 wallet's failure does not stop the other 26", async () => {
+  const node = fakeNode({ fail: (raw) => raw === 'SELL_A' });
+  const res = await fireSell(v1Plan, { provider: node, ...deps() });
+
+  const a = res.results.find((w) => w.walletId === 'a');
+  const b = res.results.find((w) => w.walletId === 'b');
+  assert.equal(a.sell.status, 'failed');
+  assert.equal(a.tokensSold, '0.0', 'a wallet whose sell failed keeps its tokens');
+  assert.equal(b.sell.status, 'confirmed');
+  assert.equal(res.totals.sold, 1);
+  assert.equal(res.totals.failed, 1);
+});
+
 test('proceeds are not invented for a non-native quote asset', async () => {
   // The balance-delta trick only measures native ETH. For an ERC-20 pair the
   // proceeds arrive as that token, and reporting an ETH figure would be a lie.

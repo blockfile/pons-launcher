@@ -3,7 +3,7 @@
 const test = require('node:test');
 const assert = require('node:assert');
 
-const { rateFromTick, estimateTokensOut, capCheck } = require('./pricing');
+const { rateFromTick, estimateTokensOut, capCheck, quoteSellOutV1 } = require('./pricing');
 
 const eth = (n) => BigInt(Math.round(n * 1e18));
 
@@ -64,4 +64,59 @@ test('unusable input degrades to zero rather than NaN', () => {
   const r = capCheck({ amountInWei: eth(1), launchConfig: { ...REAL, supply: '0' } });
   assert.equal(r.estBps, 0);
   assert.equal(r.exceedsWallet, false);
+});
+
+// ── quoting a v1 sell ──────────────────────────────────────────────────────
+// Anchored to a live reading rather than to the formula it came from:
+//   token   0x86D26b51fD707abD05b04084fbb6c1DB3708e7De  (1% pool, token1)
+//   pool    sqrtPriceX96 2146001890159706666683605869625172
+//   selling 72,915.416942227609343587 tokens returned 98383459876113 wei from
+//           an eth_call of the real swap with the allowance overridden.
+
+const LIVE_SQRT = 2146001890159706666683605869625172n;
+const LIVE_TOKENS = 72915416942227609343587n;
+const LIVE_ETH_OUT = 98383459876113n; // what the chain actually returned
+
+test('quoteSellOutV1 lands on the live pool reading, a hair above it', () => {
+  const q = quoteSellOutV1({
+    tokensIn: LIVE_TOKENS,
+    sqrtPriceX96: LIVE_SQRT,
+    tokenIsToken0: false,
+    poolFee: 10000,
+  });
+
+  assert.equal(q, 98390581041968n);
+  // ABOVE, never below: it is the spot price, so it cannot see the impact of
+  // the sell itself. A quote that came in UNDER the real fill would be a bug —
+  // the operator would be told to expect less than the pool would give.
+  assert.ok(q > LIVE_ETH_OUT, 'the spot price is a ceiling');
+  const overBps = Number(((q - LIVE_ETH_OUT) * 10000n) / LIVE_ETH_OUT);
+  assert.ok(overBps <= 5, `expected within 5 bps of the live fill, got ${overBps}`);
+});
+
+test('quoteSellOutV1 takes the pool fee off the output', () => {
+  const args = { tokensIn: LIVE_TOKENS, sqrtPriceX96: LIVE_SQRT, tokenIsToken0: false };
+  const gross = quoteSellOutV1({ ...args, poolFee: 0 });
+  const net = quoteSellOutV1({ ...args, poolFee: 10000 });
+  assert.equal(net, gross - gross / 100n, '10000 is one percent, not one bip');
+});
+
+test('quoteSellOutV1 inverts the price when the token is token0', () => {
+  // token0 is priced IN token1, so the same sqrtPrice gives the reciprocal.
+  const asToken1 = quoteSellOutV1({
+    tokensIn: 10n ** 18n,
+    sqrtPriceX96: LIVE_SQRT,
+    tokenIsToken0: false,
+  });
+  const asToken0 = quoteSellOutV1({
+    tokensIn: 10n ** 18n,
+    sqrtPriceX96: LIVE_SQRT,
+    tokenIsToken0: true,
+  });
+  assert.ok(asToken0 > asToken1, 'getting the side wrong is off by the price squared');
+});
+
+test('quoteSellOutV1 is zero for nothing to sell and never negative', () => {
+  assert.equal(quoteSellOutV1({ tokensIn: 0n, sqrtPriceX96: LIVE_SQRT, tokenIsToken0: false }), 0n);
+  assert.equal(quoteSellOutV1({ tokensIn: LIVE_TOKENS, sqrtPriceX96: 0n, tokenIsToken0: false }), 0n);
 });

@@ -83,6 +83,88 @@ async function getConfigs() {
 }
 
 /**
+ * The factory's own record for a launched token. THE AUTHORITY ON WHO LAUNCHED
+ * IT, and the v1 counterpart of v2's getLaunchedToken — the sell path gates on
+ * this and nothing else.
+ *
+ * Deliberately NOT the token's own deployer()/launchFactory() getters: those are
+ * self-reported, and a dusted ERC-20 can claim whatever it likes about itself.
+ * Approving a contract is the whole dusting attack (see evm/v2/holdings.js), so
+ * provenance has to come from a contract we already trust.
+ *
+ * `exists` false means the factory has never heard of it, which is reason enough
+ * to refuse. Shaped like the v2 record so the picker can treat the two alike.
+ */
+async function describeToken(token, runner) {
+  const address = getAddress(token);
+  const rec = await factory(runner).getLaunchedToken(address);
+  if (!rec.exists) return { token: address, protocol: 'v1', exists: false };
+  return {
+    token: address,
+    protocol: 'v1',
+    deployer: getAddress(rec.deployer),
+    // The pool this token actually launched into, per token. Preferred over the
+    // launch/dex config, which can be edited by the factory owner after the
+    // fact — the record cannot.
+    pairToken: getAddress(rec.pairedToken),
+    poolFee: Number(rec.poolFee),
+    dexId: Number(rec.dexId),
+    launchConfigId: Number(rec.launchConfigId),
+    restrictionsEndBlock: rec.restrictionsEndBlock,
+    isToken0: Boolean(rec.isToken0),
+    exists: true,
+  };
+}
+
+/** One dex config, without paying for every other one. */
+async function getDexConfig(id) {
+  const d = await factory().getDexConfig(Number(id));
+  return {
+    id: Number(id),
+    name: d.name,
+    factory: String(d.factory).toLowerCase(),
+    positionManager: String(d.positionManager).toLowerCase(),
+    swapRouter: String(d.swapRouter).toLowerCase(),
+    poolFee: Number(d.poolFee),
+    tickSpacing: Number(d.tickSpacing),
+    enabled: Boolean(d.enabled),
+  };
+}
+
+/** One launch config, without paying for every other one. */
+async function getLaunchConfig(id) {
+  const c = await factory().getLaunchConfig(Number(id));
+  return {
+    id: Number(id),
+    pairToken: String(c.pairToken).toLowerCase(),
+    graduationThreshold: c.graduationThreshold.toString(),
+    initialTick: Number(c.initialTick),
+    supply: c.supply.toString(),
+    maxWalletBps: Number(c.maxWalletBps),
+    maxTxBps: Number(c.maxTxBps),
+    restrictionBlocks: Number(c.restrictionBlocks),
+    reservedFee: Number(c.reservedFee),
+    enabled: Boolean(c.enabled),
+    routerRequiresDeadline: Boolean(c.routerRequiresDeadline),
+  };
+}
+
+/**
+ * The two configs a sell needs, read from the ids the launch record itself
+ * carries rather than from whatever the console currently has selected. A dex
+ * config that has since been disabled is still the one this token trades
+ * through, so `enabled` is not checked here — refusing to sell a token because
+ * its dex was later switched off would strand it.
+ */
+async function sellRoute(record) {
+  const [dexConfig, launchConfig] = await Promise.all([
+    getDexConfig(record.dexId),
+    getLaunchConfig(record.launchConfigId),
+  ]);
+  return { dexConfig, launchConfig };
+}
+
+/**
  * The token address this launch WILL have — known before the launch exists,
  * which is what lets every bundle buy be signed in advance.
  */
@@ -128,6 +210,10 @@ module.exports = {
   factory,
   toTokenParams,
   getConfigs,
+  getDexConfig,
+  getLaunchConfig,
+  describeToken,
+  sellRoute,
   predictTokenAddress,
   buildLaunchTx,
   validate,

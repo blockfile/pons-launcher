@@ -27,15 +27,31 @@
 // calls. The log scan below exists for launches this console did not make, and
 // it is a bounded last resort — read the comment on LOG_WINDOW before touching
 // it, because the unbounded version of it hung /api/sellable in production.
+//
+// BOTH PROTOCOLS ARE LISTED HERE. This file lives under v2/ because that is
+// where the picker was written, but a bundle can hold a v1 launch just as
+// easily, and an operator with 27 wallets in a v1 token needs the same exit. So
+// every candidate is put to BOTH factories — v2's getLaunchedToken and v1's —
+// and whichever one claims it decides the route. That costs nothing: the two
+// reads ride in the same multicall as everything else. The rule is unchanged;
+// only the number of registries that can satisfy it has gone from one to two.
+//
+// The log-scan fallback still only sees v2 launches. It is the last resort for
+// launches this console did not make, and the design already accepts that such
+// launches may not be offered; running a second bounded scan over v1's own
+// TokenLaunched would double the cost of the one path that hung in production.
 
 const { Contract, Interface, getAddress, formatUnits, ZeroAddress } = require('ethers');
 const config = require('../../config');
 const { provider } = require('../provider');
 const { erc20, ERC20_ABI } = require('../erc20');
+const { FACTORY_ABI } = require('../abi');
+const v1Factory = require('../factory');
 const { curve } = require('./curve');
 const { FACTORY_V2_ABI, CURVE_V2_ABI } = require('./abi');
 
 const iface = new Interface(FACTORY_V2_ABI);
+const v1Iface = new Interface(FACTORY_ABI);
 const curveIface = new Interface(CURVE_V2_ABI);
 const erc20Iface = new Interface(ERC20_ABI);
 
@@ -316,9 +332,10 @@ async function launchedByDeployer(deployer, deps = {}) {
 async function describeToken(token, deps = {}) {
   const address = getAddress(token);
   const rec = await factoryContract(deps).getLaunchedToken(address);
-  if (!rec.exists) return { token: address, exists: false };
+  if (!rec.exists) return { token: address, protocol: 'v2', exists: false };
   return {
     token: address,
+    protocol: 'v2',
     curve: getAddress(rec.curve),
     deployer: getAddress(rec.deployer),
     pairToken: getAddress(rec.pairToken),
@@ -465,8 +482,8 @@ async function tokenHoldings(token, wallets, deps = {}) {
  * operator can still reach by launching through the console.
  *
  * The gate does not move: every candidate, whatever its source, is re-checked
- * against the factory's getLaunchedToken before it is listed. History says
- * where to look; the factory says what is true.
+ * against a factory's getLaunchedToken before it is listed — v2's, or v1's for a
+ * v1 launch. History says where to look; the factory says what is true.
  *
  * Amounts come back as human decimal strings, because everything else the
  * console renders (balanceEth and friends) is a decimal string and a raw base
@@ -476,52 +493,96 @@ async function tokenHoldings(token, wallets, deps = {}) {
  * @param {object} input
  * @param {string} input.deployer the dev wallet
  * @param {Array<{id,address}>} input.wallets bundle wallets
- * @param {string[]} [input.knownTokens] tokens from this user's launch history
+ * @param {Array<string|{token:string, protocol?:string}>} [input.knownTokens]
+ *   tokens from this user's launch history. A bare address still works; the
+ *   protocol, when the history entry carries one, only says which factory to ask
+ *   FIRST — a wrong or missing label costs a second read, never a listing.
  */
 async function findSellable({ deployer, wallets = [], knownTokens = [] }, deps = {}) {
   const scan = deps.launchedByDeployer || ((d) => launchedByDeployer(d, deps));
   const describe = deps.describeToken || ((t) => describeToken(t, deps));
+  const describeV1 = deps.describeV1Token || ((t) => v1Factory.describeToken(t, deps.provider));
   const state = deps.curveState || ((c) => curveState(c, deps));
   const meta = deps.tokenMeta || ((t) => tokenMeta(t, deps));
   const budgetMs = deps.scanBudgetMs ?? SCAN_BUDGET_MS;
 
   const dev = getAddress(deployer);
   const warnings = [];
-  const batched = !deps.describeToken && !deps.curveState && !deps.tokenMeta;
+  const batched =
+    !deps.describeToken && !deps.describeV1Token && !deps.curveState && !deps.tokenMeta;
 
   /**
    * Candidates → listable rows. Everything expensive lives here so that it can
    * be run over history alone, and only then over whatever the scan adds.
+   *
+   * @param {Array<{token:string, protocol:?string}>} candidates
    */
-  async function evaluate(tokens) {
-    if (!tokens.length) return [];
+  async function evaluate(candidates) {
+    if (!candidates.length) return [];
+    const tokens = candidates.map((c) => c.token);
+    const hinted = new Map(candidates.map((c) => [c.token, c.protocol || null]));
 
-    // ── round one: who launched each candidate ──────────────────────────────
+    // ── round one: who launched each candidate, per registry ────────────────
+    // Both factories are asked about every candidate. Batched they are one extra
+    // slot each in a request that was going out anyway, and asking both means a
+    // history entry with no `protocol` field — every entry written before that
+    // field existed — is still routed correctly.
     const records = new Map();
+    const claim = (t, v2rec, v1rec) => {
+      // The hint decides only when both answer, which cannot happen with two
+      // separate registries — it is here so a future third protocol cannot
+      // silently reorder this.
+      const order = hinted.get(t) === 'v1' ? [v1rec, v2rec] : [v2rec, v1rec];
+      return order.find((r) => r && r.exists) || { token: t, exists: false };
+    };
+
     if (batched) {
       try {
         const slots = await multicall(
-          tokens.map((t) => ({
-            target: deps.factoryAddress || config.v2FactoryAddress,
-            callData: iface.encodeFunctionData('getLaunchedToken', [t]),
-          })),
+          tokens.flatMap((t) => [
+            {
+              target: deps.factoryAddress || config.v2FactoryAddress,
+              callData: iface.encodeFunctionData('getLaunchedToken', [t]),
+            },
+            {
+              target: deps.v1FactoryAddress || config.factoryAddress,
+              callData: v1Iface.encodeFunctionData('getLaunchedToken', [t]),
+            },
+          ]),
           deps
         );
         tokens.forEach((t, i) => {
-          const rec = decodeOr(iface, 'getLaunchedToken', slots[i]);
+          const v2rec = decodeOr(iface, 'getLaunchedToken', slots[i * 2]);
+          const v1rec = decodeOr(v1Iface, 'getLaunchedToken', slots[i * 2 + 1]);
           records.set(
             t,
-            rec && rec.exists
-              ? {
-                  token: t,
-                  curve: getAddress(rec.curve),
-                  deployer: getAddress(rec.deployer),
-                  pairToken: getAddress(rec.pairToken),
-                  creatorTaxBps: Number(rec.creatorTaxBps),
-                  phase: Number(rec.phase),
-                  exists: true,
-                }
-              : { token: t, exists: false }
+            claim(
+              t,
+              v2rec && v2rec.exists
+                ? {
+                    token: t,
+                    protocol: 'v2',
+                    curve: getAddress(v2rec.curve),
+                    deployer: getAddress(v2rec.deployer),
+                    pairToken: getAddress(v2rec.pairToken),
+                    creatorTaxBps: Number(v2rec.creatorTaxBps),
+                    phase: Number(v2rec.phase),
+                    exists: true,
+                  }
+                : null,
+              v1rec && v1rec.exists
+                ? {
+                    token: t,
+                    protocol: 'v1',
+                    deployer: getAddress(v1rec.deployer),
+                    pairToken: getAddress(v1rec.pairedToken),
+                    poolFee: Number(v1rec.poolFee),
+                    dexId: Number(v1rec.dexId),
+                    launchConfigId: Number(v1rec.launchConfigId),
+                    exists: true,
+                  }
+                : null
+            )
           );
         });
       } catch (_err) {
@@ -530,12 +591,23 @@ async function findSellable({ deployer, wallets = [], knownTokens = [] }, deps =
     }
     for (const t of tokens) {
       if (records.has(t)) continue;
-      try {
-        records.set(t, await describe(t));
-      } catch (err) {
-        warnings.push(`could not read the factory record for ${t}: ${err.message}`);
-        records.set(t, { token: t, exists: false });
+      // Unbatched, each read is a real round trip, so the hint is worth
+      // obeying: ask the registry history says owns it, and only fall through
+      // to the other one when that comes back empty.
+      const lookups = hinted.get(t) === 'v1' ? [describeV1, describe] : [describe, describeV1];
+      let found = { token: t, exists: false };
+      for (const lookup of lookups) {
+        try {
+          const rec = await lookup(t);
+          if (rec && rec.exists) {
+            found = rec;
+            break;
+          }
+        } catch (err) {
+          warnings.push(`could not read the factory record for ${t}: ${err.message}`);
+        }
       }
+      records.set(t, found);
     }
 
     // ── the gate ────────────────────────────────────────────────────────────
@@ -558,6 +630,8 @@ async function findSellable({ deployer, wallets = [], knownTokens = [] }, deps =
     }
 
     // ── round two: metadata, curve state and every balance, in one request ──
+    // The curve reads are v2-only: a v1 launch has no curve, it has a Uniswap v3
+    // pool that exists from the first block, so there is no state to ask about.
     const details = new Map();
     if (batched && mine.length) {
       try {
@@ -565,11 +639,16 @@ async function findSellable({ deployer, wallets = [], knownTokens = [] }, deps =
         for (const r of mine) {
           calls.push({ target: r.token, callData: erc20Iface.encodeFunctionData('symbol', []) });
           calls.push({ target: r.token, callData: erc20Iface.encodeFunctionData('decimals', []) });
-          calls.push({ target: r.curve, callData: curveIface.encodeFunctionData('graduated', []) });
-          calls.push({
-            target: r.curve,
-            callData: curveIface.encodeFunctionData('readyToGraduate', []),
-          });
+          if (r.curve) {
+            calls.push({
+              target: r.curve,
+              callData: curveIface.encodeFunctionData('graduated', []),
+            });
+            calls.push({
+              target: r.curve,
+              callData: curveIface.encodeFunctionData('readyToGraduate', []),
+            });
+          }
           for (const w of wallets) {
             calls.push({
               target: r.token,
@@ -582,8 +661,10 @@ async function findSellable({ deployer, wallets = [], knownTokens = [] }, deps =
         for (const r of mine) {
           const symbol = decodeOr(erc20Iface, 'symbol', slots[i++], '???');
           const decimals = decodeOr(erc20Iface, 'decimals', slots[i++], 18);
-          const graduated = decodeOr(curveIface, 'graduated', slots[i++], false);
-          const readyToGraduate = decodeOr(curveIface, 'readyToGraduate', slots[i++], false);
+          const graduated = r.curve ? decodeOr(curveIface, 'graduated', slots[i++], false) : false;
+          const readyToGraduate = r.curve
+            ? decodeOr(curveIface, 'readyToGraduate', slots[i++], false)
+            : false;
           const held = wallets.map((w) => ({
             walletId: w.id,
             address: getAddress(w.address),
@@ -609,7 +690,9 @@ async function findSellable({ deployer, wallets = [], knownTokens = [] }, deps =
       if (!detail) {
         const [m, curveInfo, held] = await Promise.all([
           meta(token).catch(() => ({ symbol: '???', decimals: 18 })),
-          state(record.curve).catch(() => ({ graduated: false, readyToGraduate: false })),
+          record.curve
+            ? state(record.curve).catch(() => ({ graduated: false, readyToGraduate: false }))
+            : Promise.resolve({ graduated: false, readyToGraduate: false }),
           tokenHoldings(token, wallets, deps),
         ]);
         detail = { ...m, ...curveInfo, held };
@@ -624,14 +707,20 @@ async function findSellable({ deployer, wallets = [], knownTokens = [] }, deps =
         token,
         symbol,
         decimals,
-        curve: record.curve,
+        protocol: record.protocol,
+        // Null rather than absent for v1: the console reads these fields off
+        // every row, and a missing key and a "no curve" answer look identical
+        // to it while meaning very different things.
+        curve: record.curve ?? null,
         pairToken: record.pairToken,
-        phase: record.phase,
+        phase: record.phase ?? null,
+        // v2-curve concepts. A v1 launch never has either, which is why they are
+        // reported false rather than guessed at from the pool.
         graduated,
         readyToGraduate,
-        // One button, but the route is decided by the curve's own state — the
-        // operator never picks.
-        route: graduated ? 'uniswap-v4' : 'curve',
+        // One button, but the route is decided by the token's own registry and
+        // the curve's own state — the operator never picks.
+        route: record.protocol === 'v1' ? 'swap-router' : graduated ? 'uniswap-v4' : 'curve',
         totalTokens: formatUnits(total, decimals),
         totalTokensRaw: total.toString(),
         wallets: holders.length,
@@ -649,12 +738,16 @@ async function findSellable({ deployer, wallets = [], knownTokens = [] }, deps =
   // ── the free source ────────────────────────────────────────────────────────
   const seen = new Set();
   const fromHistory = [];
-  for (const t of knownTokens) {
+  for (const entry of knownTokens) {
     try {
-      const a = getAddress(t);
+      // A bare address or a history row. `protocol` is absent on every entry
+      // written before that field existed, and those are all v1 — but nothing
+      // here depends on that, because both registries are asked either way.
+      const raw = typeof entry === 'string' ? entry : entry && entry.token;
+      const a = getAddress(raw);
       if (seen.has(a.toLowerCase())) continue;
       seen.add(a.toLowerCase());
-      fromHistory.push(a);
+      fromHistory.push({ token: a, protocol: typeof entry === 'string' ? null : entry.protocol });
     } catch (_err) {
       // A malformed address in the history file is not worth failing the list.
     }
@@ -705,7 +798,8 @@ async function findSellable({ deployer, wallets = [], knownTokens = [] }, deps =
       const key = l.token.toLowerCase();
       if (seen.has(key)) continue;
       seen.add(key);
-      fresh.push(getAddress(l.token));
+      // The scan reads v2's TokenLaunched, so every hit is a v2 launch.
+      fresh.push({ token: getAddress(l.token), protocol: 'v2' });
     }
     rows.push(...(await evaluate(fresh)));
   }
