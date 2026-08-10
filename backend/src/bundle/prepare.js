@@ -14,6 +14,7 @@ const { getFees, gasCost } = require('../evm/fees');
 const factory = require('../evm/factory');
 const { buildBuyTx } = require('../evm/router');
 const { capCheck } = require('../evm/pricing');
+const { bundleShare } = require('../../../shared/bundleShare');
 const keystore = require('../wallets/keystore');
 const { spendableFromBalance } = require('../wallets/funding');
 
@@ -137,6 +138,10 @@ async function prepare(input, { keystore: ks = keystore } = {}) {
   const deadline = Math.floor(Date.now() / 1000) + 3600;
 
   const signedBuys = [];
+  // The amounts as they were actually resolved, in the order they fire. "all −
+  // gas" only becomes a number here, so this is the first point at which the
+  // whole bundle's share of supply can be stated.
+  const legs = [];
   for (const w of wallets) {
     const known = knownWallets.get(w.walletId);
     if (!known) throw new Error(`no wallet ${w.walletId}`);
@@ -189,6 +194,7 @@ async function prepare(input, { keystore: ks = keystore } = {}) {
     });
     const signer = ks.signer(known.id, provider);
     const nonce = await provider.getTransactionCount(known.address, 'pending');
+    legs.push({ key: known.id, amountWei: amountIn });
     signedBuys.push({
       walletId: known.id,
       address: known.address,
@@ -201,6 +207,11 @@ async function prepare(input, { keystore: ks = keystore } = {}) {
       ),
     });
   }
+
+  // Exactly what the console showed while these amounts were being typed —
+  // same module, same numbers — now over the amounts that were signed. Still an
+  // estimate: it is the opening tick with no impact term, so it is a ceiling.
+  const share = bundleShare({ protocol: 'v1', launchConfig, devBuyWei, buys: legs });
 
   return {
     token,
@@ -217,6 +228,7 @@ async function prepare(input, { keystore: ks = keystore } = {}) {
     launch: signedLaunch,
     buys: signedBuys,
     totalBuyEth: formatEther(signedBuys.reduce((s, b) => s + parseEther(b.amountEth), 0n)),
+    share,
     warnings,
   };
 }

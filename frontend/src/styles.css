@@ -436,6 +436,20 @@ td input[type='number'] {
   color: var(--dimmer);
 }
 
+/* What a typed amount buys, drawn beside the amount. Grey: it is a figure, not
+   a state, and the palette has no colour for "here is a number". Vermilion is
+   reserved for the one case that is not a number but an outcome — a buy over
+   the launch-window cap does not clamp, it reverts. */
+.share {
+  font: 12px var(--mono);
+  color: var(--dim);
+  font-variant-numeric: tabular-nums;
+}
+.share.over {
+  color: var(--vermilion);
+  font-weight: 600;
+}
+
 /* Selection column. Bundle rows only — the dev wallet is drawn without a
    checkbox at all, so there is nothing here to disable or to mis-click. The
    accent is vermilion because the one action these boxes feed is a delete that
@@ -545,6 +559,14 @@ td input[type='number'] {
   font-size: 15px;
   color: var(--ink);
   font-weight: 600;
+}
+/* The bundle's share of supply, on its own line above the arm switch. Brighter
+   than the ETH figure beside it because it is the one the sizing decision is
+   actually about. */
+.cost .share-total {
+  display: block;
+  color: var(--dim);
+  font-variant-numeric: tabular-nums;
 }
 
 /* ── result ──────────────────────────────────────────────────────────────── */

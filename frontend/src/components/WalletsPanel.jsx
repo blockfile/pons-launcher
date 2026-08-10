@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from 'react';
 import { api, downloadBackup } from '../api.js';
 import Section, { Busy } from './Section.jsx';
 import Modal, { Fact } from './Modal.jsx';
+import Share, { pct, tokens } from './Share.jsx';
 
 // Balances arrive as decimal strings. Six places everywhere, so the column and
 // the dialog show the same number.
@@ -10,8 +11,13 @@ const eth = (v) => Number(v || 0).toFixed(6);
 /**
  * The wallet table. Per-row fund / buy-mode / buy-amount inputs live in `rows`,
  * owned by App, because the Fund and Launch panels both read them.
+ *
+ * `share` is what those amounts would buy, computed by App from the live
+ * factory configs — see shared/bundleShare.js. It is drawn next to the input
+ * that produced it: sizing a bundle used to mean typing a number, launching,
+ * and finding out afterwards.
  */
-export default function WalletsPanel({ wallets, rows, setRow, reload, report }) {
+export default function WalletsPanel({ wallets, rows, setRow, share, reload, report }) {
   const [count, setCount] = useState(5);
   const [showImport, setShowImport] = useState(false);
   const [keys, setKeys] = useState('');
@@ -145,6 +151,19 @@ export default function WalletsPanel({ wallets, rows, setRow, reload, report }) 
     setExporting(format);
   }
 
+  // The share figures, keyed by wallet so a row can find its own. Order is
+  // firing order and on a v2 curve the order IS the price, so this is a lookup
+  // into a sequence, never a per-row calculation.
+  const legs = new Map((share?.buys || []).map((l) => [l.key, l]));
+  // Rows the operator asked to spend the whole balance on. Their real amount is
+  // resolved server-side after gas, so the figures for them are ceilings on top
+  // of a ceiling — said once, under the table, rather than on every row.
+  const allMode = wallets.filter((w) => w.role !== 'dev' && rows[w.id]?.mode === 'all').length;
+  // Wallets with something to buy. A zero-amount leg is kept in the sequence —
+  // it moves nothing, so dropping it would change nothing — but it is not a
+  // wallet that is buying, and counting it as one would misstate the bundle.
+  const buyingCount = (share?.buys || []).filter((b) => b.estBps > 0).length;
+
   // What the delete dialog is asking about, and the figures it has to state.
   const pending = deleting || [];
   const pendingEth = pending.reduce((s, w) => s + Number(w.balanceEth || 0), 0);
@@ -272,13 +291,16 @@ export default function WalletsPanel({ wallets, rows, setRow, reload, report }) 
             <th>Fund (ETH)</th>
             <th>Buy mode</th>
             <th>Buy (ETH)</th>
+            {/* Not "Est. share": on v2 it is not an estimate. The ~ on each
+                figure is what says which one this is. */}
+            <th>Supply share</th>
             <th />
           </tr>
         </thead>
         <tbody>
           {wallets.length === 0 && (
             <tr>
-              <td colSpan="8" className="empty">
+              <td colSpan="9" className="empty">
                 No wallets yet. Generate a dev wallet to start.
               </td>
             </tr>
@@ -347,6 +369,23 @@ export default function WalletsPanel({ wallets, rows, setRow, reload, report }) 
                   )}
                 </td>
                 <td>
+                  {/* The dev row shows the dev buy, which is not typed here at
+                      all — it is set in step 3 and it executes FIRST, inside
+                      the launch transaction. On a curve that matters: it moves
+                      the price every bundle wallet then pays. */}
+                  {isDev ? (
+                    <Share
+                      leg={share?.dev}
+                      exact={share?.exact}
+                      title={`the dev buy, made inside the launch itself and before every bundle buy — ≈${tokens(
+                        share?.dev?.estTokens
+                      )} tokens`}
+                    />
+                  ) : (
+                    <Share leg={legs.get(w.id)} exact={share?.exact} />
+                  )}
+                </td>
+                <td>
                   <Busy
                     busy={now === w.id}
                     className="ghost"
@@ -362,6 +401,79 @@ export default function WalletsPanel({ wallets, rows, setRow, reload, report }) 
           })}
         </tbody>
       </table>
+
+      {/* The bundle total, next to the amounts that make it, and honest about
+          how much it can be trusted. This is the question the operator has been
+          answering by launching and looking afterwards. */}
+      {share && (share.bundle.bps > 0 || share.dev) && (
+        <div className={`notice ${share.over.length || share.graduation?.crosses ? 'danger' : ''}`}>
+          <h3>
+            bundle takes {share.exact ? '' : '≈'}
+            {pct(share.bundle.bps)} of supply
+            {share.dev ? ` · dev buy ${share.exact ? '' : '≈'}${pct(share.dev.estBps)} first` : ''}
+          </h3>
+          <ul>
+            <li>
+              {buyingCount} wallet{buyingCount === 1 ? '' : 's'} · {share.bundle.eth} ETH · ≈
+              {tokens(share.bundle.tokens)} tokens
+              {share.dev
+                ? ` · ${share.total.eth} ETH and ${share.exact ? '' : '≈'}${pct(
+                    share.total.bps
+                  )} counting the dev buy`
+                : ''}
+            </li>
+
+            {/* v1 and v2 are not equally knowable and the panel must not
+                pretend otherwise. One is arithmetic, the other is the best
+                guess available before a pool exists. */}
+            {share.exact ? (
+              <li>
+                Exact — the curve is a constant product against the config's phantom reserve, both
+                fixed before the launch is sent. The dev buy is applied first and each wallet is
+                priced after the ones above it, so the tail is genuinely worse, not rounded down.
+              </li>
+            ) : (
+              <li>
+                Estimate — there is no pool until the launch runs, so this is the config's opening
+                tick with no impact term. Every figure is a CEILING: real fills come in smaller,
+                and smaller the further down the list.
+              </li>
+            )}
+
+            {allMode > 0 && (
+              <li>
+                {allMode} wallet{allMode === 1 ? '' : 's'} on “all − gas” — counted at the whole
+                balance, because the amount is only resolved after gas at preflight.
+              </li>
+            )}
+
+            {/* A buy over the launch-window cap does not clamp: it reverts,
+                spends its gas and buys nothing. */}
+            {share.over.length > 0 && (
+              <li>
+                {share.over.length} wallet{share.over.length === 1 ? '' : 's'} over the{' '}
+                {share.caps.maxWalletBps / 100}% wallet cap or {share.caps.maxTxBps / 100}% per-buy
+                cap — {share.over.length === 1 ? 'that buy REVERTS' : 'those buys REVERT'} inside the
+                restriction window and{' '}
+                {share.over.length === 1 ? 'wastes its gas' : 'waste their gas'}:{' '}
+                {share.over
+                  .slice(0, 4)
+                  .map((id) => wallets.find((w) => w.id === id)?.address || id)
+                  .join(', ')}
+                {share.over.length > 4 ? ` …and ${share.over.length - 4} more` : ''}
+              </li>
+            )}
+
+            {share.graduation?.crosses && (
+              <li>
+                {share.graduation.raisedEth} ETH into the curve reaches the{' '}
+                {share.graduation.thresholdEth} ETH graduation threshold — this bundle graduates the
+                curve on the way in, and a graduated launch cannot be exited through the curve.
+              </li>
+            )}
+          </ul>
+        </div>
+      )}
 
       {chosen.length > 0 && (
         <div className="row" style={{ marginTop: 12 }}>

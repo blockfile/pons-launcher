@@ -1,5 +1,10 @@
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useEffect, useMemo, useState } from 'react';
 import { api, getApiKey, setApiKey } from './api.js';
+// The console and the backend's preflight run the SAME arithmetic, out of one
+// file neither of them owns — see shared/bundleShare.js for why, and
+// vite.config.js for how a CommonJS module gets into this bundle. Default
+// import because that file is CommonJS: the backend requires it directly.
+import bundleShareModule from '../../shared/bundleShare.js';
 import Guide from './components/Guide.jsx';
 import Readiness from './components/Readiness.jsx';
 import WalletsPanel from './components/WalletsPanel.jsx';
@@ -10,6 +15,8 @@ import ResultPanel from './components/ResultPanel.jsx';
 import SellPanel from './components/SellPanel.jsx';
 import HistoryPanel from './components/HistoryPanel.jsx';
 import ActivityPanel from './components/ActivityPanel.jsx';
+
+const { bundleShare } = bundleShareModule;
 
 export default function App() {
   const [health, setHealth] = useState(null);
@@ -25,8 +32,50 @@ export default function App() {
   // Per-wallet fund / buy-mode / buy-amount, keyed by wallet id. Lifted here
   // because both the Fund and Launch panels read the same rows.
   const [rows, setRows] = useState({});
+  // What the launch is shaped like — protocol, the chosen launch config, the
+  // dev buy, the creator tax. It is typed in step 3 but it decides what step 1's
+  // amounts BUY, so LaunchForm pushes it up here the way it already pushes the
+  // logo up for the checklist.
+  const [sizing, setSizing] = useState(null);
 
   const setRow = (id, patch) => setRows((r) => ({ ...r, [id]: { ...r[id], ...patch } }));
+
+  /**
+   * What every bundle amount currently on screen would take of the supply.
+   *
+   * Computed here rather than in either panel because both read it: the wallet
+   * table puts a figure on each row as it is typed, and the arm bar states the
+   * total next to the button. Client-side because it has to answer between
+   * keystrokes — see shared/bundleShare.js, which is the same module preflight
+   * runs, so the live figure and the warning that stops a launch cannot come
+   * from two implementations.
+   *
+   * Every input comes from the live factory configs the panels already fetched.
+   * Nothing here is hardcoded: the owner can change supply, caps, the phantom
+   * reserve or the graduation threshold between one launch and the next, and a
+   * console that remembered last week's numbers would be confidently wrong.
+   */
+  const share = useMemo(() => {
+    if (!sizing?.launchConfig) return null;
+    return bundleShare({
+      protocol: sizing.protocol,
+      launchConfig: sizing.launchConfig,
+      creatorTaxBps: sizing.creatorTaxBps,
+      devBuyEth: sizing.devBuyEth,
+      // Table order is firing order — prepare() walks the same list the same
+      // way — and on a curve the order is the price, so it has to match.
+      buys: wallets
+        .filter((w) => w.role !== 'dev')
+        .map((w) => ({
+          key: w.id,
+          // "all − gas" is resolved server-side from the live balance. The
+          // balance is its ceiling and gas is a rounding error beside a buy,
+          // so the row is shown rather than left blank — flagged as an
+          // approximation in the summary under the table.
+          amountEth: rows[w.id]?.mode === 'all' ? w.balanceEth : rows[w.id]?.buy,
+        })),
+    });
+  }, [sizing, wallets, rows]);
 
   // Strings stay strings so errors read as errors; everything else is a payload
   // for ResultPanel to lay out.
@@ -153,6 +202,7 @@ export default function App() {
           wallets={wallets}
           rows={rows}
           setRow={setRow}
+          share={share}
           reload={loadWallets}
           report={report}
         />
@@ -163,10 +213,12 @@ export default function App() {
           wallets={wallets}
           rows={rows}
           live={live}
+          share={share}
           reload={loadWallets}
           reloadHistory={loadHistory}
           report={report}
           onLogo={setLogo}
+          onSizing={setSizing}
         />
         <ResultPanel output={output} reveal={reveal} />
         {/* After the launch, not part of it: exiting is a later decision, and a

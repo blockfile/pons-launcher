@@ -24,6 +24,7 @@ const { provider } = require('../evm/provider');
 const { getFees, gasCost } = require('../evm/fees');
 const v2 = require('../evm/v2/factory');
 const { buildBuyTx } = require('../evm/v2/curve');
+const { bundleShare } = require('../../../shared/bundleShare');
 const keystore = require('../wallets/keystore');
 const { spendableFromBalance } = require('../wallets/funding');
 
@@ -262,6 +263,39 @@ async function prepareV2(input, { keystore: ks = keystore } = {}) {
     });
   }
 
+  // ── what this bundle actually takes ───────────────────────────────────────
+  // The same module the console runs as the operator types, over the amounts
+  // that were signed. On v2 this is not an estimate: the config fixes the
+  // curve's phantom reserve and supply before the launch, so walking the buys
+  // through it in order — dev buy first, since it is inside the launch
+  // transaction — is what the curve will do.
+  const share = bundleShare({
+    protocol: 'v2',
+    launchConfig,
+    creatorTaxBps: fullParams.creatorTaxBps,
+    devBuyWei: devBuy,
+    buys: buys.map((b) => ({ key: b.walletId, amountWei: b.amountIn })),
+  });
+  const legByWallet = new Map(share.buys.map((l) => [l.key, l]));
+  for (const b of buys) {
+    const leg = legByWallet.get(b.walletId);
+    if (leg) {
+      b.estTokens = leg.estTokens;
+      b.estShareBps = Math.round(leg.estBps);
+    }
+  }
+
+  // Graduating on the way IN is the one state a bundle cannot sell out of
+  // through the curve, so it is a warning rather than a line in the plan.
+  if (share.graduation && share.graduation.crosses) {
+    warnings.push(
+      `this bundle puts ${share.graduation.raisedEth} ETH into the curve, at or over the ` +
+        `${share.graduation.thresholdEth} ETH graduation threshold — the curve graduates on the way ` +
+        'in, and a graduated launch cannot be exited through the curve. Size down or expect to sell ' +
+        'into the Uniswap v4 pool instead.'
+    );
+  }
+
   // A wallet that was dropped for lack of funds is still on the exemption list,
   // which costs nothing but would mislead anyone reading the plan.
   const funded = new Set(buys.map((b) => b.address));
@@ -301,6 +335,7 @@ async function prepareV2(input, { keystore: ks = keystore } = {}) {
     launch: signedLaunch,
     buys,
     totalBuyEth: formatEther(buys.reduce((s, b) => s + BigInt(b.amountIn), 0n)),
+    share,
     // Strings, not the BigInts getFees returns. This object is JSON-encoded
     // twice — once as the preflight response, once into the launch history —
     // and JSON.stringify throws on a BigInt rather than skipping it, so a

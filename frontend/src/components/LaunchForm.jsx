@@ -3,6 +3,7 @@ import { api } from '../api.js';
 import Section, { Busy } from './Section.jsx';
 import LogoField from './LogoField.jsx';
 import Modal, { Fact } from './Modal.jsx';
+import { pct } from './Share.jsx';
 
 // The chain makes a block every ~100ms, but the restriction window is counted
 // in the EVM's own block number, which advances roughly every 16 seconds. So
@@ -38,10 +39,12 @@ export default function LaunchForm({
   wallets,
   rows,
   live,
+  share,
   reload,
   reloadHistory,
   report,
   onLogo,
+  onSizing,
 }) {
   const [f, setF] = useState(BLANK);
   const [protocol, setProtocol] = useState('v1');
@@ -79,6 +82,21 @@ export default function LaunchForm({
   // Config ids are per-factory; carrying v1's selection into v2 would silently
   // pick a different set of terms.
   useEffect(() => setLaunchConfigId(0), [protocol]);
+
+  // The amounts are typed two panels up, but what they BUY is decided here: the
+  // protocol, the config's supply and curve, the dev buy that goes first and the
+  // creator tax that comes off every buy. Pushed up to App, which owns the rows,
+  // so the wallet table can price them as they are typed. `lc` is an element of
+  // the fetched configs array, so its identity is stable and this does not fire
+  // on every render.
+  useEffect(() => {
+    onSizing?.({
+      protocol,
+      launchConfig: lc || null,
+      creatorTaxBps: isV2 ? Number(f.creatorTaxBps || 0) : 0,
+      devBuyEth: f.devBuyEth,
+    });
+  }, [protocol, lc, isV2, f.creatorTaxBps, f.devBuyEth]);
 
   function body() {
     const bundle = wallets
@@ -387,6 +405,16 @@ export default function LaunchForm({
             {buying} wallet{buying === 1 ? '' : 's'} buying
           </b>
           dev buy {f.devBuyEth || 0} ETH
+          {/* The same figure the wallet table draws per row, totalled. It is
+              here as well as up there because this is where the operator arms:
+              the last thing read before the click should be what the bundle
+              actually ends up holding. */}
+          {share && share.bundle.bps > 0 && (
+            <span className="share-total">
+              bundle takes {share.exact ? '' : '≈'}
+              {pct(share.bundle.bps)} of supply
+            </span>
+          )}
         </div>
       </div>
 
@@ -410,6 +438,12 @@ export default function LaunchForm({
           <Fact label="Symbol">{pending?.params.symbol || '—'}</Fact>
           <Fact label="Dev buy">{pending?.devBuyEth || 0} ETH</Fact>
           <Fact label="Bundle wallets">{pending?.wallets.length ?? 0}</Fact>
+          {share && (
+            <Fact label={share.exact ? 'Bundle share' : 'Bundle share (est)'}>
+              {share.exact ? '' : '≈'}
+              {pct(share.bundle.bps)} of supply
+            </Fact>
+          )}
         </div>
       </Modal>
     </Section>

@@ -8,7 +8,7 @@
   "scripts": {
     "start": "node server.js",
     "dev": "node --watch server.js",
-    "test": "node --test",
+    "test": "node --test \"src/**/*.test.js\" \"../shared/*.test.js\"",
     "user:add": "node scripts/user.js add",
     "user:list": "node scripts/user.js list",
     "user:remove": "node scripts/user.js remove",

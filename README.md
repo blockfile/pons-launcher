@@ -58,11 +58,19 @@ rather than built after the launch confirms.
 ```
 backend/    Express API, EVM layer, encrypted keystore, bundle engine  (Node, CommonJS)
 frontend/   React 19 + Vite console                                    (ESM)
+shared/     arithmetic both of them run, and neither owns             (CommonJS)
 deploy/     nginx
 docs/       design spec
 ```
 
 npm workspaces, so one `npm install` at the root covers both.
+
+`shared/` exists for one reason: the console prices a bundle buy as it is typed
+and preflight prices it again before signing, and those two answers must be the
+same answer. It is CommonJS because the backend requires it directly; rolldown
+converts it when it bundles, and a small plugin in `frontend/vite.config.js`
+does the same for the dev server, which serves source modules untouched. Nothing
+in there may import anything — it has to load in a browser.
 
 The frontend pins its native build binaries — rolldown and lightningcss — for
 both Linux and Windows in `optionalDependencies`. npm only records the platform

@@ -1,33 +1,22 @@
 'use strict';
 
-// Estimating how much of a token a bundle buy will receive, so a buy that would
-// breach the launch-window caps can be caught BEFORE it is signed.
+// Pricing a launch: the opening-tick estimate the caps are checked against, and
+// what a v1 pool would pay for a sell.
 //
-// During the restriction window every non-dev address is capped at
-// maxWalletBps of supply, and a buy over it does not clamp — it REVERTS, and
-// the pool's TransferHelper masks the reason as "TF". There is no pool to quote
-// against at signing time, so the estimate comes from the initial tick the
-// launch config pins.
+// THE ESTIMATE ITSELF LIVES IN shared/bundleShare.js, not here. The console
+// runs it on every keystroke while the operator sizes a bundle and this module
+// runs it again at preflight, and the two must be the same arithmetic — a live
+// figure that disagrees with the warning that stops a launch is worse than no
+// live figure. It is re-exported below so every existing caller is unchanged;
+// the comment on the tick's sign, and the launch it is anchored to, went with
+// the maths.
 //
-// On the sign of initialTick: a Uniswap tick is quoted as token1-per-token0,
-// so its sign follows the pool's address ordering rather than the economics.
-// A launchpad always opens with the token cheap against the pair token — a
-// billion-token supply against a fraction of an ETH — so the magnitude is the
-// exchange rate whichever side the token lands on. An earlier version of this
-// file derived the direction from address ordering and got it inverted, which
-// reported 0.00% for a buy that was really 0.11% of supply.
-//
-// Anchored to a real launch: token 0x4aE28f7022F0db76F9B791ff3DEe6bE67B40137F,
-// initialTick -204200, where 0.003 ETH bought 2,186,029 tokens.
-//
-// The estimate ignores the price impact of the bundle's own buys, so it reports
-// slightly MORE tokens than a wallet will really get. That errs toward warning
-// early, which is the safe direction.
+// What stays here is everything that needs the chain: reading the pool a launch
+// created, and quoting a sell against it.
 
 const { Contract, getAddress } = require('ethers');
 const { provider } = require('./provider');
-
-const Q = 1.0001;
+const { rateFromTick, estimateTokensOut, capCheck } = require('../../../shared/bundleShare');
 
 // Q96 squared. A Uniswap v3 pool stores sqrt(price) shifted left 96 bits, so
 // price = (sqrtPriceX96 / 2**96)**2 and the shift comes out as 2**192.
@@ -40,52 +29,6 @@ const V3_POOL_ABI = [
   'function token0() view returns (address)',
   'function slot0() view returns (uint160 sqrtPriceX96, int24 tick, uint16, uint16, uint16, uint8, bool)',
 ];
-
-/**
- * Tokens received per whole pair token at the pool's opening price.
- */
-function rateFromTick(initialTick) {
-  const tick = Math.abs(Number(initialTick));
-  if (!Number.isFinite(tick)) return 0;
-  const rate = Math.pow(Q, tick);
-  return Number.isFinite(rate) && rate > 0 ? rate : 0;
-}
-
-/**
- * Tokens a buy of `amountInWei` native wei receives at the opening price.
- * @returns {number} whole tokens (not wei); 0 on unusable input
- */
-function estimateTokensOut({ amountInWei, initialTick }) {
-  const rate = rateFromTick(initialTick);
-  if (!rate) return 0;
-
-  const amountIn = Number(amountInWei) / 1e18;
-  if (!Number.isFinite(amountIn) || amountIn <= 0) return 0;
-
-  const out = amountIn * rate;
-  return Number.isFinite(out) && out > 0 ? out : 0;
-}
-
-/**
- * Where a buy lands against the launch-window caps.
- * @returns {{estTokens:number, estBps:number, exceedsWallet:boolean, exceedsTx:boolean}}
- */
-function capCheck({ amountInWei, launchConfig }) {
-  const supply = Number(launchConfig.supply) / 1e18;
-  const estTokens = estimateTokensOut({ amountInWei, initialTick: launchConfig.initialTick });
-
-  if (!supply || !estTokens) {
-    return { estTokens: 0, estBps: 0, exceedsWallet: false, exceedsTx: false };
-  }
-
-  const estBps = (estTokens / supply) * 10000;
-  return {
-    estTokens,
-    estBps,
-    exceedsWallet: estBps > Number(launchConfig.maxWalletBps),
-    exceedsTx: estBps > Number(launchConfig.maxTxBps),
-  };
-}
 
 /**
  * The v1 pool a launched token trades in, and its current price. Read from the

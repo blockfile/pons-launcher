@@ -56,8 +56,9 @@ export default function Guide() {
             <dd>
               For roughly 32 seconds after launch, no address other than the dev wallet may take
               more than <code>max wallet</code> of supply. A buy over that does not get trimmed — it{' '}
-              <b>reverts</b>, spending gas and buying nothing. Preflight estimates each wallet's
-              share and warns you before you commit. Keep them under 5% and use more wallets.
+              <b>reverts</b>, spending gas and buying nothing. The wallet table prices each amount
+              as you type it — <code>supply share</code> — and preflight checks the same figure
+              again before you commit. Keep them under 5% and use more wallets.
             </dd>
           </div>
           <div>

@@ -1,5 +1,6 @@
 import { useEffect, useRef } from 'react';
 import Section from './Section.jsx';
+import { pct } from './Share.jsx';
 
 // A plan or a launch result, read at a glance before the raw JSON. Warnings are
 // pulled out of the payload and shown first: buried in 200 lines of JSON, a cap
@@ -91,6 +92,19 @@ export default function ResultPanel({ output, reveal = 0 }) {
                 <span>Dev buy</span>
                 <b>{inner.launch?.devBuyEth}</b>
               </div>
+              {/* The same figure the wallet table drew while these amounts were
+                  typed — the plan carries it because preflight recomputes it
+                  from the amounts it actually signed, which is the first point
+                  an "all − gas" wallet has a real number. */}
+              {inner.share && (
+                <div className="stat">
+                  <span>{inner.share.exact ? 'Supply share' : 'Supply share (est)'}</span>
+                  <b>
+                    {inner.share.exact ? '' : '≈'}
+                    {pct(inner.share.bundle.bps)}
+                  </b>
+                </div>
+              )}
             </div>
           )}
 
