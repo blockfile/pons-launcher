@@ -423,20 +423,32 @@ export default function WalletsPanel({ wallets, rows, setRow, share, reload, rep
                 : ''}
             </li>
 
+            {/* The total is one figure and the rows are ranges, and the
+                difference between those two is not a hedge — it is the only
+                thing about a bundle that is genuinely unknown before it is
+                fired. Say it once, here, rather than per row. */}
+            <li>
+              The total does not depend on the order they land in: the same ETH across more
+              wallets buys the same tokens between them. What the order decides is the SPLIT, so
+              each row is a range — landing first, behind only the dev buy, to landing last,
+              behind the whole rest of the bundle. They are broadcast together and the sequencer
+              picks.
+            </li>
+
             {/* v1 and v2 are not equally knowable and the panel must not
                 pretend otherwise. One is arithmetic, the other is the best
-                guess available before a pool exists. */}
+                reading available before a pool exists. */}
             {share.exact ? (
               <li>
                 Exact — the curve is a constant product against the config's phantom reserve, both
-                fixed before the launch is sent. The dev buy is applied first and each wallet is
-                priced after the ones above it, so the tail is genuinely worse, not rounded down.
+                fixed before the launch is sent, and the dev buy is taken off it first.
               </li>
             ) : (
               <li>
-                Estimate — there is no pool until the launch runs, so this is the config's opening
-                tick with no impact term. Every figure is a CEILING: real fills come in smaller,
-                and smaller the further down the list.
+                Estimate — there is no pool until the launch runs, so this walks the pool the
+                config opens: the whole supply at its initial tick. The bundle's own price impact
+                is in these figures; the pool's 1% fee is not, and a real v3 position is not quite
+                a constant product, so they still read a little HIGH.
               </li>
             )}
 
@@ -460,7 +472,9 @@ export default function WalletsPanel({ wallets, rows, setRow, share, reload, rep
                   .slice(0, 4)
                   .map((id) => wallets.find((w) => w.id === id)?.address || id)
                   .join(', ')}
-                {share.over.length > 4 ? ` …and ${share.over.length - 4} more` : ''}
+                {share.over.length > 4 ? ` …and ${share.over.length - 4} more` : ''}. Measured at
+                the pool's opening price — above the range beside it, and the same yardstick
+                preflight uses. A cap breach reverts, so this one errs early on purpose.
               </li>
             )}
 

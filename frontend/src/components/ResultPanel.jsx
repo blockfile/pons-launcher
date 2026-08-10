@@ -112,10 +112,15 @@ export default function ResultPanel({ output, reveal = 0 }) {
             <div className="notice danger">
               <h3>These buys will revert</h3>
               <ul>
+                {/* This figure is the pool's OPENING price, which is the
+                    yardstick the cap was checked against — deliberately above
+                    the range the wallet table draws beside each row, because a
+                    cap breach reverts and the flag has to err early. Saying
+                    which one it is stops the two reading as a contradiction. */}
                 {overCap.map((b) => (
                   <li key={b.walletId}>
-                    {b.address} — {b.amountEth} ETH ≈ {(b.estShareBps / 100).toFixed(2)}% of supply,
-                    over the cap. Lower the amount.
+                    {b.address} — {b.amountEth} ETH ≈ {(b.estShareBps / 100).toFixed(2)}% of supply
+                    at the opening price, over the cap. Lower the amount.
                   </li>
                 ))}
               </ul>

@@ -5,6 +5,10 @@ const assert = require('node:assert');
 
 const {
   parseEthToWei,
+  estimateTokensOut,
+  capCheck,
+  openingPool,
+  constantProductBuy,
   v2Buy,
   shareV1,
   shareV2,
@@ -87,18 +91,65 @@ test('the curve fee and the creator tax come off the INPUT', () => {
   assert.ok(taxed.tokensOut < withFee.tokensOut, 'the creator tax must cost the buyer tokens');
 });
 
-test('the same ETH buys less the later it lands in the bundle', () => {
+test('the same ETH buys less the later it lands, and where it lands is unknown', () => {
   const buys = Array.from({ length: 3 }, (_, i) => ({ key: `w${i}`, amountEth: '0.2' }));
   const share = shareV2({ launchConfig: V2, buys });
 
-  assert.ok(share.buys[0].estBps > share.buys[1].estBps);
-  assert.ok(share.buys[1].estBps > share.buys[2].estBps);
+  // Three wallets buying the same amount are INTERCHANGEABLE: same range each,
+  // because the sequencer decides which of them lands first, not the table.
+  for (const leg of share.buys) {
+    assert.equal(leg.estBps, share.buys[0].estBps);
+    assert.equal(leg.worstBps, share.buys[0].worstBps);
+  }
+  // And the range is wide enough to matter: landing behind the other 0.4 ETH
+  // costs a fifth of the fill.
+  assert.ok(share.buys[0].worstBps < share.buys[0].estBps * 0.8);
 
-  // Quoting them independently — the mistake this exists to prevent — would
-  // report each wallet at the first one's price and overstate the tail.
-  const independent = share.buys[0].estBps * 3;
-  assert.ok(independent > share.bundle.bps, 'sequential must be worse than independent');
+  // Quoting every wallet at the top of its range — the mistake this exists to
+  // prevent — overstates the bundle, because they cannot all land first. The
+  // bottom of the range understates it for the same reason.
+  assert.ok(share.buys[0].estBps * 3 > share.bundle.bps, 'they cannot all land first');
+  assert.ok(share.buys[0].worstBps * 3 < share.bundle.bps, 'nor can they all land last');
   assert.equal(share.exact, true);
+});
+
+test('a constant product is path-independent: one trade of N equals k trades summing to N', () => {
+  // THIS IS WHY THE BUNDLE TOTAL IS NOT A GUESS. Chopping the same ETH into
+  // more wallets, in any order, leaves the pool in the same place — so the
+  // total needs no range and no hedge, and only the split between the wallets
+  // is undetermined.
+  const curve = {
+    quoteReserve: BigInt(V2.phantomQuote),
+    tokenReserve: BigInt(V2.supply),
+    feeBps: V2.curveFeeBps,
+  };
+  const walk = (amounts, { quoteReserve, tokenReserve, feeBps }) => {
+    let out = 0n;
+    for (const a of amounts) {
+      const r = constantProductBuy({ quoteInWei: eth(a), quoteReserve, tokenReserve, feeBps });
+      quoteReserve = r.quoteReserve;
+      tokenReserve = r.tokenReserve;
+      out += r.tokensOut;
+    }
+    return out;
+  };
+
+  const ragged = ['0.13', '0.02', '0.4', '0.07', '0.1']; // 0.72
+  const single = walk(['0.72'], curve);
+  for (const split of [Array(12).fill('0.06'), ragged, [...ragged].reverse()]) {
+    const total = walk(split, curve);
+    // Not bit-identical: every step floors, so k steps shed a few wei of token
+    // against one. Parts in 1e26 — the property holds, the integer division is
+    // the only thing between them.
+    const drift = total > single ? total - single : single - total;
+    assert.ok(drift < 100n, `${split.length} trades drifted ${drift} wei from one`);
+  }
+
+  // Same on the pool a v1 launch config opens, which is the same arithmetic
+  // with no fee on the input.
+  const v1pool = { ...openingPool(V1), feeBps: 0 };
+  const v1drift = walk(Array(12).fill('0.06'), v1pool) - walk(['0.72'], v1pool);
+  assert.ok(v1drift > -100n && v1drift < 100n, `v1 drifted ${v1drift} wei`);
 });
 
 test('the dev buy is taken off the curve before any bundle wallet', () => {
@@ -150,20 +201,83 @@ test('v2 has no caps to breach', () => {
 
 // ── v1: the opening tick, and the caps that revert ─────────────────────────
 
+test('the v1 estimate still lands on the launch it is anchored to', () => {
+  // 0.003 ETH bought 2,186,029 tokens on the real launch at tick -204200.
+  const share = shareV1({ launchConfig: V1, buys: [{ key: 'w0', amountEth: '0.003' }] });
+  const got = share.buys[0].estTokens;
+  const ratio = got / 2186029;
+  assert.ok(ratio > 1 && ratio < 1.02, `expected ~2,186,029 tokens, got ${got}`);
+
+  // ABOVE the chain, never below. The pool's own 1% fee is not modelled and a
+  // real v3 range position is not a full-range constant product; both take the
+  // fill down from this, so it stays a ceiling — a tighter one than the flat
+  // opening rate, which reads 2,212,948 for the same buy.
+  const flat = estimateTokensOut({ amountInWei: eth('0.003'), initialTick: V1.initialTick });
+  assert.ok(got < flat, 'the impact term has to cost the buyer something');
+  assert.ok(flat / 2186029 > ratio, 'and has to land closer to what the chain paid');
+});
+
 test('a v1 bundle totals the share every wallet takes', () => {
   const buys = Array.from({ length: 27 }, (_, i) => ({ key: `w${i}`, amountEth: '0.00156489' }));
   const share = shareV1({ launchConfig: V1, buys });
 
-  // ~11.5 bps each, and 27 of them.
+  // ~11.5 bps each at the top of the range, and 27 of them.
   assert.ok(share.buys[0].estBps > 5 && share.buys[0].estBps < 20);
-  assert.ok(Math.abs(share.bundle.bps - share.buys[0].estBps * 27) < 0.01);
   assert.equal(share.bundle.eth, '0.042252');
   assert.deepEqual(share.over, []);
 
-  // v1 has no impact term, so the last wallet is quoted the first one's price.
-  // It will not get it — which is why this side is never labelled exact.
+  // 0.042 ETH is small against this pool, so the impact is small — but it is
+  // there, and the total is under the sum of the tops rather than equal to it.
+  assert.ok(share.bundle.bps < share.buys[0].estBps * 27);
+  assert.ok(share.bundle.bps > share.buys[0].worstBps * 27);
+
+  // Two wallets buying the same amount get the same range whatever row they are
+  // on — the table is not the landing order. What they do NOT get is the same
+  // fill, which is why it is a range and not a number.
   assert.equal(share.buys[26].estBps, share.buys[0].estBps);
+  assert.equal(share.buys[26].worstBps, share.buys[0].worstBps);
+  assert.ok(share.buys[0].worstBps < share.buys[0].estBps);
   assert.equal(share.exact, false);
+});
+
+test('twelve wallets buying the same 0.06 ETH are not all quoted the same share', () => {
+  // THE BUG. Every wallet was priced at the opening tick, so twelve wallets
+  // buying 0.06 ETH each all reported 4.43% — wallet 1's price, handed to all
+  // twelve — and 53.1% of supply for a bundle that really takes 34.7%.
+  const buys = Array.from({ length: 12 }, (_, i) => ({ key: `w${i}`, amountEth: '0.06' }));
+  const share = shareV1({ launchConfig: V1, buys });
+
+  assert.equal(share.bundle.eth, '0.720000');
+  assert.ok(share.bundle.bps > 3450 && share.bundle.bps < 3480, `total ${share.bundle.bps} bps`);
+
+  const leg = share.buys[0];
+  assert.ok(leg.estBps > 420 && leg.estBps < 426, `first ${leg.estBps} bps`);
+  assert.ok(leg.worstBps > 192 && leg.worstBps < 197, `last ${leg.worstBps} bps`);
+  // Landing last is worth less than half of landing first at this size. No
+  // single number can stand for that.
+  assert.ok(leg.worstBps < leg.estBps / 2);
+
+  // The flat rate is still what the cap flag measures, and at this size it is
+  // visibly above the top of the range it is drawn beside.
+  assert.ok(Math.abs(leg.capBps - 442.59) < 0.01, `cap yardstick ${leg.capBps} bps`);
+  assert.ok(leg.capBps > leg.estBps);
+});
+
+test('the cap flag still measures the opening price, so the console flags what preflight flags', () => {
+  // preflight calls capCheck itself (bundle/prepare.js) and cannot see this
+  // walk. If the flag moved onto the impact-aware figure, every wallet between
+  // the two would be flagged in one place and not the other — and 0.0705 ETH is
+  // exactly such a wallet: 520 bps at the opening price, 494 with the impact
+  // term, against a 500 bps cap.
+  const share = shareV1({ launchConfig: V1, buys: [{ key: 'w0', amountEth: '0.0705' }] });
+  const cap = capCheck({ amountInWei: eth('0.0705'), launchConfig: V1 });
+
+  assert.equal(share.buys[0].capBps, cap.estBps);
+  assert.equal(share.buys[0].exceedsWallet, true);
+  assert.deepEqual(share.over, ['w0']);
+  // It errs early on purpose: the range beside it is genuinely lower, and
+  // capBps is what lets the table explain the flag rather than contradict it.
+  assert.ok(share.buys[0].estBps < share.buys[0].capBps);
 });
 
 test('a v1 wallet over the 5% cap is named, because that buy reverts', () => {
@@ -188,6 +302,14 @@ test('the v1 dev buy is uncapped and counted apart from the bundle', () => {
   assert.equal(share.dev.exceedsWallet, false);
   assert.deepEqual(share.over, []);
   assert.ok(share.total.bps > share.bundle.bps);
+
+  // It is AHEAD of the bundle now, not merely counted beside it: 0.3 ETH into
+  // the pool is most of a third of the supply, and the wallet behind it buys
+  // what that left. The dev buy itself is not a range — inside the launch
+  // transaction, it cannot land anywhere but first.
+  const alone = shareV1({ launchConfig: V1, buys: [{ key: 'w0', amountEth: '0.001' }] });
+  assert.ok(share.buys[0].estBps < alone.buys[0].estBps, 'the dev buy has to move the price');
+  assert.equal(share.dev.worstBps, share.dev.estBps);
 });
 
 // ── the shape both callers depend on ───────────────────────────────────────

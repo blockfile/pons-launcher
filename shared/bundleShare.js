@@ -17,14 +17,31 @@
 // THE TWO PROTOCOLS ARE NOT EQUALLY KNOWABLE, and every caller has to say which
 // it is showing:
 //
-//   v1 is an ESTIMATE. There is no pool until the launch runs, so the only
-//      price that exists is the tick the launch config pins. It has no impact
-//      term, which makes every v1 figure a CEILING — real fills come in
-//      smaller, and smaller still the further down the bundle a wallet sits.
+//   v1 is an ESTIMATE. There is no pool until the launch runs, so everything
+//      here is derived from the state the launch config opens with — the whole
+//      supply at the config's initial tick. That fixes the price AND the depth,
+//      so the impact of the bundle's own buys is modelled; what is not modelled
+//      is the pool's own fee and the fact that a real v3 position is not a
+//      full-range constant product. Both push a real fill DOWN, so this side
+//      still reads a little high and still carries a ~.
 //   v2 is ARITHMETIC. The curve is a constant product against a phantom
 //      reserve, and the launch config fixes both before the launch is sent, so
-//      walking the buys through it in order is what the curve will do, not a
-//      guess at it.
+//      walking the buys through it is what the curve will do, not a guess at it.
+//
+// WHAT IS KNOWN AND WHAT IS NOT. Both protocols price against a constant
+// product, and on a constant product the tokens out for a given total in are
+// PATH-INDEPENDENT: 0.72 ETH as one trade and 0.72 ETH split twelve ways leave
+// the pool in exactly the same place, in any order. So the bundle TOTAL is one
+// walk with the summed input and it is not hedged.
+//
+// Per wallet is the opposite. fire.js broadcasts every buy at once and the
+// sequencer picks the order, so where a wallet lands is genuinely unknown and
+// it is the only unknown: a wallet gets the most landing first, behind nothing
+// but the dev buy, and the least landing last, behind the whole rest of the
+// bundle. Both ends are computed exactly; the answer is the RANGE between them.
+// A single per-wallet number is a claim about ordering that nobody can make —
+// it is what made twelve wallets buying 0.06 ETH each all report the same
+// 4.43%, which was never true of more than one of them.
 
 const BPS = 10_000n;
 const WEI = 10n ** 18n;
@@ -96,9 +113,16 @@ function toBig(value) {
 // Anchored to a real launch: token 0x4aE28f7022F0db76F9B791ff3DEe6bE67B40137F,
 // initialTick -204200, where 0.003 ETH bought 2,186,029 tokens.
 //
-// The estimate ignores the price impact of the bundle's own buys, so it reports
-// slightly MORE tokens than a wallet will really get. That errs toward warning
-// early, which is the safe direction.
+// estimateTokensOut and capCheck below are the OPENING PRICE with no impact
+// term — the price for an infinitely small buy — and they stay that way. That
+// is the yardstick the cap warning has always used, and preflight calls
+// capCheck directly (bundle/prepare.js) while the console reaches it through
+// shareV1, so moving it would move the warning under one caller and not the
+// other. It reports slightly MORE tokens than a wallet will really get, which
+// errs toward warning early: the safe direction for a cap whose breach REVERTS.
+//
+// The share figures the operator reads are a different question, and they use
+// the impact term — see openingPool.
 
 const Q = 1.0001;
 
@@ -148,6 +172,42 @@ function capCheck({ amountInWei, launchConfig }) {
   };
 }
 
+/**
+ * The pool a v1 launch config opens, as reserves.
+ *
+ * NOTHING NEW IS INVENTED HERE. capCheck reads the opening state for its PRICE
+ * and stops; the same state also fixes the DEPTH. A constant product holding
+ * the whole supply quotes tokens-per-pair-token equal to tokenReserve /
+ * quoteReserve, and the tick says that ratio is `rate`, so the pair-token side
+ * of the pool it opens is supply / rate. Same tick, same supply, same opening
+ * price at zero size — read for size as well as for price.
+ *
+ * STILL AN ESTIMATE, AND STILL A GENEROUS ONE. The real pool is a Uniswap v3
+ * range position rather than a full-range constant product, and its 1% fee is
+ * not modelled. Both take the real fill DOWN from this. What it fixes is the
+ * order of magnitude: on the launch this file is anchored to, 0.003 ETH reads
+ * 1.0% over the chain's 2,186,029 tokens instead of the flat rate's 1.2%, and
+ * the gap widens with size — twelve wallets at 0.06 ETH are 53% of supply at
+ * the flat rate and 35% here. The flat rate was not a slightly high estimate of
+ * a bundle that size, it was the wrong number.
+ *
+ * @returns {{quoteReserve: bigint, tokenReserve: bigint}} zeroed when the
+ *   config cannot be priced at all, so every figure downstream degrades to 0
+ *   rather than to NaN.
+ */
+function openingPool(launchConfig) {
+  const supply = toBig(launchConfig?.supply);
+  const rate = rateFromTick(launchConfig?.initialTick);
+  if (supply <= 0n || !rate) return { quoteReserve: 0n, tokenReserve: 0n };
+
+  // The tick is a float (1.0001^n), so this crosses to BigInt once, here. Every
+  // buy walked against these reserves is exact integer arithmetic from now on.
+  const quoteReserve = BigInt(Math.round(Number(supply) / rate));
+  return quoteReserve > 0n
+    ? { quoteReserve, tokenReserve: supply }
+    : { quoteReserve: 0n, tokenReserve: 0n };
+}
+
 // ── pons v2: the bonding curve ──────────────────────────────────────────────
 //
 // A v2 launch has no pool. The curve holds the whole supply and quotes against
@@ -173,7 +233,13 @@ function capCheck({ amountInWei, launchConfig }) {
 // hair generous and never quietly small.
 
 /**
- * One buy against a v2 curve, and the reserves it leaves behind.
+ * One buy against a constant product, and the reserves it leaves behind.
+ *
+ * BOTH PROTOCOLS COME THROUGH HERE. A constant product is a constant product:
+ * v2 passes the curve's phantom reserve and its fee, v1 passes the reserves
+ * openingPool derives from the tick and no fee (the pool's own fee is not
+ * modelled — see openingPool). Two implementations of x*y=k in one file would
+ * be two chances to get it wrong.
  *
  * @param {object} input
  * @param {bigint|string} input.quoteInWei gross quote sent, fees included
@@ -182,7 +248,7 @@ function capCheck({ amountInWei, launchConfig }) {
  * @param {number} input.feeBps curve fee + creator tax, both on the quote leg
  * @returns {{tokensOut: bigint, netIn: bigint, quoteReserve: bigint, tokenReserve: bigint}}
  */
-function v2Buy({ quoteInWei, quoteReserve, tokenReserve, feeBps = 0 }) {
+function constantProductBuy({ quoteInWei, quoteReserve, tokenReserve, feeBps = 0 }) {
   const q = toBig(quoteInWei);
   let quote = toBig(quoteReserve);
   let tokens = toBig(tokenReserve);
@@ -203,7 +269,59 @@ function v2Buy({ quoteInWei, quoteReserve, tokenReserve, feeBps = 0 }) {
   return { tokensOut, netIn, quoteReserve: quote, tokenReserve: tokens };
 }
 
+// The name the v2 callers and their tests know it by. Same function; the curve
+// was simply the first thing in here that needed it.
+const v2Buy = constantProductBuy;
+
 // ── the bundle ──────────────────────────────────────────────────────────────
+
+/**
+ * What a bundle takes in total, and what each wallet in it can take, against
+ * the pool state the dev buy has already left behind.
+ *
+ * THE TOTAL IS ARITHMETIC, NOT A GUESS. Tokens out for a given total in are
+ * path-independent on a constant product, so one walk with the summed input is
+ * the answer for every possible landing order — the same answer, exactly. It
+ * gets no range and no hedge.
+ *
+ * PER WALLET IS A RANGE, because landing order is the one thing here that is
+ * undetermined: fire.js broadcasts the buys together and the sequencer orders
+ * them. `best` is this wallet first, with only the dev buy ahead of it; `worst`
+ * is it last, with every other wallet in the bundle ahead of it. The rest of
+ * the bundle is applied as ONE trade of (total − this wallet) rather than leg
+ * by leg, which is the same thing for the same reason the total is.
+ *
+ * Note that sum(best) ≥ total ≥ sum(worst): the ends of the ranges are each
+ * wallet's own extreme, and they cannot all land first.
+ */
+function bundleRange({ quoteReserve, tokenReserve, feeBps = 0, weis }) {
+  let totalIn = 0n;
+  for (const wei of weis) totalIn += wei;
+
+  const total = constantProductBuy({ quoteInWei: totalIn, quoteReserve, tokenReserve, feeBps });
+
+  const legs = weis.map((wei) => {
+    const best = constantProductBuy({ quoteInWei: wei, quoteReserve, tokenReserve, feeBps });
+    // Everything except this wallet, ahead of it. For a bundle of one that is
+    // a zero-value buy, which moves nothing — so best and worst coincide, which
+    // is correct: with nobody to be behind, its position is not in doubt.
+    const ahead = constantProductBuy({
+      quoteInWei: totalIn - wei,
+      quoteReserve,
+      tokenReserve,
+      feeBps,
+    });
+    const worst = constantProductBuy({
+      quoteInWei: wei,
+      quoteReserve: ahead.quoteReserve,
+      tokenReserve: ahead.tokenReserve,
+      feeBps,
+    });
+    return { wei, best: best.tokensOut, worst: worst.tokensOut };
+  });
+
+  return { legs, totalIn, totalTokens: total.tokensOut };
+}
 
 /** wei for one leg, whichever way the caller happens to hold the amount. */
 function legWei(leg) {
@@ -225,49 +343,90 @@ function bpsOf(amount, supply) {
 }
 
 /**
- * A v1 bundle, in the order it executes.
+ * A v1 bundle, against the pool the launch config opens.
  *
- * The legs are walked in sequence for the same reason v2's are — the caller
- * shows a running total — but BE CLEAR THAT V1'S PER-WALLET RATE DOES NOT MOVE.
- * The opening tick is all there is before the launch, so this model has no
- * impact term and wallet 20 is quoted the same price as wallet 1. It will not
- * get it. Every v1 figure here is a ceiling.
+ * The bundle total is the pool walked once with the summed ETH — order cannot
+ * change it — and each wallet gets the range between landing first and landing
+ * last. It was quoting one number per wallet, off the opening tick with no
+ * impact term, that had twelve wallets buying 0.06 ETH each all reporting the
+ * same 4.43%: wallet 1's price, handed to all twelve.
+ *
+ * The whole thing is still an ESTIMATE — there is no pool until the launch runs
+ * — and `exact: false` says so. What changed is that it is now an estimate of
+ * the right quantity.
  */
 function shareV1({ launchConfig, devBuyWei, devBuyEth, buys = [] }) {
-  const supplyTokens = Number(launchConfig?.supply || 0) / 1e18;
-  const legs = [];
-  let cumulativeBps = 0;
+  const supply = toBig(launchConfig?.supply);
+  const pool = openingPool(launchConfig);
 
+  // The dev buy is inside the launch transaction, so it is ahead of the entire
+  // bundle and its own figure is not a range — its position is the one thing
+  // about this that is fixed. It moves the price every bundle wallet then pays,
+  // so the bundle is priced from what it leaves behind.
   const dev = legWei({ amountWei: devBuyWei, amountEth: devBuyEth });
-  const devCap = dev > 0n ? capCheck({ amountInWei: dev, launchConfig }) : null;
-  if (devCap) cumulativeBps += devCap.estBps;
+  const devOut = dev > 0n ? constantProductBuy({ quoteInWei: dev, ...pool }) : null;
+  const open = devOut
+    ? { quoteReserve: devOut.quoteReserve, tokenReserve: devOut.tokenReserve }
+    : pool;
 
-  let bundleTokens = 0;
-  let bundleWei = 0n;
-  for (const buy of buys) {
-    const wei = legWei(buy);
+  const weis = buys.map((buy) => legWei(buy));
+  const {
+    legs: ranges,
+    totalIn: bundleWei,
+    totalTokens: bundleTokens,
+  } = bundleRange({ ...open, weis });
+
+  let cursor = open;
+  let cumulative = devOut ? devOut.tokensOut : 0n;
+
+  const legs = buys.map((buy, i) => {
+    const wei = weis[i];
+    // The running total through this row. Path independence again: this is
+    // what the wallets down to and including this one hold BETWEEN them in any
+    // landing order — only the split between them moves.
+    const seq = constantProductBuy({ quoteInWei: wei, ...cursor });
+    cursor = { quoteReserve: seq.quoteReserve, tokenReserve: seq.tokenReserve };
+    cumulative += seq.tokensOut;
+
+    // THE CAP FLAG STAYS ON THE OPENING PRICE. preflight calls capCheck itself
+    // (bundle/prepare.js) and cannot see this walk, so flagging on anything
+    // else here would hand the operator one set of doomed wallets while the
+    // preflight that stops the launch used another. It is the higher figure of
+    // the two, so it warns early rather than late — and it sits above the range
+    // drawn beside it, which is why capBps travels out to the table: a flag has
+    // to be able to say what it was measured against.
     const cap = capCheck({ amountInWei: wei, launchConfig });
-    cumulativeBps += cap.estBps;
-    bundleTokens += cap.estTokens;
-    bundleWei += wei;
-    legs.push({
+
+    return {
       key: buy.key,
       amountEth: formatWei(wei),
-      estTokens: cap.estTokens,
-      estBps: cap.estBps,
-      cumulativeBps,
+      // est* is the TOP of the range — this wallet landing first, behind only
+      // the dev buy. It keeps that name because the plan and the launch history
+      // record one figure per wallet, and "up to" is the only honest one to
+      // record. worst* is the same wallet landing last.
+      estTokens: Number(ranges[i].best) / 1e18,
+      estBps: bpsOf(ranges[i].best, supply),
+      worstTokens: Number(ranges[i].worst) / 1e18,
+      worstBps: bpsOf(ranges[i].worst, supply),
+      cumulativeBps: bpsOf(cumulative, supply),
+      capBps: cap.estBps,
       exceedsWallet: cap.exceedsWallet,
       exceedsTx: cap.exceedsTx,
-    });
-  }
+    };
+  });
 
-  const devLeg = devCap
+  const devTokens = devOut ? devOut.tokensOut : 0n;
+  const devLeg = devOut
     ? {
         key: 'dev',
         amountEth: formatWei(dev),
-        estTokens: devCap.estTokens,
-        estBps: devCap.estBps,
-        cumulativeBps: devCap.estBps,
+        estTokens: Number(devTokens) / 1e18,
+        estBps: bpsOf(devTokens, supply),
+        // Equal ends: not a range, because there is nowhere else it can land.
+        worstTokens: Number(devTokens) / 1e18,
+        worstBps: bpsOf(devTokens, supply),
+        cumulativeBps: bpsOf(devTokens, supply),
+        capBps: bpsOf(devTokens, supply),
         // Never flagged, whatever its size. The dev buy happens inside the
         // launch transaction, before the restriction window applies to
         // anything, so the caps are not its caps — marking it would train the
@@ -277,7 +436,7 @@ function shareV1({ launchConfig, devBuyWei, devBuyEth, buys = [] }) {
       }
     : null;
 
-  const bundleBps = supplyTokens ? (bundleTokens / supplyTokens) * 10000 : 0;
+  const totalTokens = bundleTokens + devTokens;
   return {
     protocol: 'v1',
     // The caller MUST render this differently when it is false. v1 has no pool
@@ -285,11 +444,15 @@ function shareV1({ launchConfig, devBuyWei, devBuyEth, buys = [] }) {
     exact: false,
     dev: devLeg,
     buys: legs,
-    bundle: { eth: formatWei(bundleWei), tokens: bundleTokens, bps: bundleBps },
+    bundle: {
+      eth: formatWei(bundleWei),
+      tokens: Number(bundleTokens) / 1e18,
+      bps: bpsOf(bundleTokens, supply),
+    },
     total: {
       eth: formatWei(bundleWei + dev),
-      tokens: bundleTokens + (devLeg ? devLeg.estTokens : 0),
-      bps: bundleBps + (devLeg ? devLeg.estBps : 0),
+      tokens: Number(totalTokens) / 1e18,
+      bps: bpsOf(totalTokens, supply),
     },
     over: legs.filter((l) => l.exceedsWallet || l.exceedsTx).map((l) => l.key),
     caps: {
@@ -301,12 +464,18 @@ function shareV1({ launchConfig, devBuyWei, devBuyEth, buys = [] }) {
 }
 
 /**
- * A v2 bundle, walked through the curve in the order it executes.
+ * A v2 bundle, walked through the curve.
  *
- * ORDER IS THE POINT. The dev buy goes first because it is inside the launch
- * transaction itself, then each wallet buys a curve the ones before it have
- * already moved, so wallet 20 pays more than wallet 1 for the same ETH. Quoting
- * them independently overstates the tail.
+ * ORDER IS THE POINT, and so is not knowing it. The dev buy goes first because
+ * it is inside the launch transaction itself; after that each wallet buys a
+ * curve the ones that landed before it have already moved, so the same ETH buys
+ * less the later it lands. Which wallet that is, the sequencer decides — hence
+ * a range per wallet and one exact figure for the bundle. Quoting each wallet
+ * independently at the opening price would overstate the tail; quoting it at
+ * its row number would be a guess dressed as arithmetic.
+ *
+ * The curve arithmetic itself is untouched: same constantProductBuy, same fee
+ * on the same leg, same sequential walk for the graduation threshold.
  */
 function shareV2({ launchConfig, creatorTaxBps = 0, devBuyWei, devBuyEth, buys = [] }) {
   const supply = toBig(launchConfig?.supply);
@@ -337,27 +506,39 @@ function shareV2({ launchConfig, creatorTaxBps = 0, devBuyWei, devBuyEth, buys =
   const dev = legWei({ amountWei: devBuyWei, amountEth: devBuyEth });
   const devOut = dev > 0n ? step('dev', dev) : null;
 
+  // The curve the bundle actually meets, once the launch transaction's own dev
+  // buy has been taken off it.
+  const weis = buys.map((buy) => legWei(buy));
+  const {
+    legs: ranges,
+    totalIn: bundleWei,
+    totalTokens: bundleTokens,
+  } = bundleRange({ quoteReserve, tokenReserve, feeBps, weis });
+
   const legs = [];
-  let bundleTokens = 0n;
-  let bundleWei = 0n;
   let cumulative = devOut ? devOut.tokensOut : 0n;
-  for (const buy of buys) {
-    const wei = legWei(buy);
-    const r = step(buy.key, wei);
-    bundleTokens += r.tokensOut;
-    bundleWei += wei;
+  buys.forEach((buy, i) => {
+    // The sequential walk stays because two things are measured along it: the
+    // quote the curve has RAISED, which is what graduation is checked against,
+    // and the running total through a row.
+    const r = step(buy.key, weis[i]);
     cumulative += r.tokensOut;
     legs.push({
       key: buy.key,
-      amountEth: formatWei(wei),
-      estTokens: Number(r.tokensOut) / 1e18,
-      estTokensRaw: r.tokensOut.toString(),
-      estBps: bpsOf(r.tokensOut, supply),
+      amountEth: formatWei(weis[i]),
+      // The top of the range — this wallet landing first, behind only the dev
+      // buy. See shareV1 for why the top keeps the est* name.
+      estTokens: Number(ranges[i].best) / 1e18,
+      estTokensRaw: ranges[i].best.toString(),
+      estBps: bpsOf(ranges[i].best, supply),
+      worstTokens: Number(ranges[i].worst) / 1e18,
+      worstTokensRaw: ranges[i].worst.toString(),
+      worstBps: bpsOf(ranges[i].worst, supply),
       cumulativeBps: bpsOf(cumulative, supply),
       exceedsWallet: false, // v2 has no restriction window and no caps
       exceedsTx: false,
     });
-  }
+  });
 
   const devLeg = devOut
     ? {
@@ -366,6 +547,11 @@ function shareV2({ launchConfig, creatorTaxBps = 0, devBuyWei, devBuyEth, buys =
         estTokens: Number(devOut.tokensOut) / 1e18,
         estTokensRaw: devOut.tokensOut.toString(),
         estBps: bpsOf(devOut.tokensOut, supply),
+        // Equal ends: the dev buy is inside the launch transaction, so there is
+        // nowhere else for it to land.
+        worstTokens: Number(devOut.tokensOut) / 1e18,
+        worstTokensRaw: devOut.tokensOut.toString(),
+        worstBps: bpsOf(devOut.tokensOut, supply),
         cumulativeBps: bpsOf(devOut.tokensOut, supply),
         exceedsWallet: false,
         exceedsTx: false,
@@ -433,6 +619,8 @@ module.exports = {
   rateFromTick,
   estimateTokensOut,
   capCheck,
+  openingPool,
+  constantProductBuy,
   v2Buy,
   shareV1,
   shareV2,
