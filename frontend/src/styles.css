@@ -436,6 +436,26 @@ td input[type='number'] {
   color: var(--dimmer);
 }
 
+/* Selection column. Bundle rows only — the dev wallet is drawn without a
+   checkbox at all, so there is nothing here to disable or to mis-click. The
+   accent is vermilion because the one action these boxes feed is a delete that
+   destroys private keys, and vermilion means irreversible everywhere else. */
+.wallet-list th:first-child,
+.wallet-list td:first-child {
+  width: 1%;
+  white-space: nowrap;
+}
+.wallet-list input[type='checkbox'] {
+  width: 16px;
+  height: 16px;
+  padding: 0;
+  accent-color: var(--vermilion);
+  cursor: pointer;
+}
+.wallet-list input[type='checkbox']:disabled {
+  cursor: not-allowed;
+}
+
 /* ── notices: warnings must be unmissable ────────────────────────────────── */
 
 .notice {

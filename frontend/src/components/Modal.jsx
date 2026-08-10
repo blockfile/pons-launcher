@@ -68,8 +68,11 @@ export default function Modal({
       window.removeEventListener('keydown', onEscape);
       document.body.style.overflow = previous;
       // Put the caret back where it was, so cancelling costs the operator
-      // nothing but the click.
-      if (restore.current instanceof HTMLElement) restore.current.focus();
+      // nothing but the click. preventScroll because focus() otherwise scrolls
+      // its target into view: the button that opened the dialog may be mid-way
+      // through being removed by whatever was just confirmed, and closing a
+      // dialog must never move the page under the next click.
+      if (restore.current instanceof HTMLElement) restore.current.focus({ preventScroll: true });
     };
   }, [open]);
 

@@ -30,7 +30,19 @@ export default function App() {
 
   // Strings stay strings so errors read as errors; everything else is a payload
   // for ResultPanel to lay out.
-  const report = (v) => setOutput(v);
+  //
+  // Reporting and revealing are two different things. ResultPanel scrolls
+  // itself into view when this counter moves, so a panel whose answer is
+  // already on screen where the operator is standing can record the outcome
+  // without dragging the page down to it — deleting wallets one after another
+  // threw the page to the Result panel on every click. Revealing stays the
+  // default: for a fund or a launch, the answer is a screen and a half below
+  // the button that asked for it.
+  const [reveal, setReveal] = useState(0);
+  const report = (v, { reveal: bring = true } = {}) => {
+    setOutput(v);
+    if (bring) setReveal((n) => n + 1);
+  };
 
   const loadWallets = useCallback(async () => setWallets(await api('/wallets')), []);
   const loadHistory = useCallback(async () => setHistory(await api('/launches?limit=15')), []);
@@ -156,7 +168,7 @@ export default function App() {
           report={report}
           onLogo={setLogo}
         />
-        <ResultPanel output={output} />
+        <ResultPanel output={output} reveal={reveal} />
         {/* After the launch, not part of it: exiting is a later decision, and a
             numbered step would imply the sequence is unfinished until it runs. */}
         <SellPanel

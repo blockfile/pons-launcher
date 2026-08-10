@@ -5,7 +5,7 @@ import Section from './Section.jsx';
 // pulled out of the payload and shown first: buried in 200 lines of JSON, a cap
 // breach is invisible, and a cap breach is the difference between a wallet
 // buying and a wallet burning gas for nothing.
-export default function ResultPanel({ output }) {
+export default function ResultPanel({ output, reveal = 0 }) {
   const plan = output && typeof output === 'object' ? output : null;
   const inner = plan?.plan || plan; // /launch nests the plan; /preflight does not
   const result = plan?.result;
@@ -22,6 +22,13 @@ export default function ResultPanel({ output }) {
   // Every button that does something is far above this panel — a fund click at
   // the top of the page put its answer a screen and a half below the fold, so
   // a real error read as "nothing happened". Bring the answer to the operator.
+  //
+  // Keyed on `reveal`, NOT on `output`. This panel sits at the bottom of a long
+  // page, so scrolling to it moves the operator away from whatever they were
+  // doing; that is right for a launch and wrong for a delete, where the answer
+  // is the row that just disappeared and the next click is in the same table.
+  // A caller that wants the outcome recorded but not chased passes
+  // report(x, { reveal: false }) and this effect never runs.
   const box = useRef(null);
   const firstRender = useRef(true);
   useEffect(() => {
@@ -33,7 +40,7 @@ export default function ResultPanel({ output }) {
       behavior: window.matchMedia('(prefers-reduced-motion: reduce)').matches ? 'auto' : 'smooth',
       block: 'nearest',
     });
-  }, [output]);
+  }, [reveal]);
 
   return (
     <div ref={box}>
