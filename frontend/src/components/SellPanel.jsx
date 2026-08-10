@@ -1,16 +1,21 @@
 import { useEffect, useState } from 'react';
+import { LuTriangleAlert } from 'react-icons/lu';
 import { api } from '../api.js';
+import Step from './Step.jsx';
 import { Busy } from './Section.jsx';
 import Modal, { Fact } from './Modal.jsx';
 
 /**
- * Exit a launched token from every bundle wallet at once.
+ * Step 6 — exit a launched token from every bundle wallet at once.
  *
- * A disclosure rather than a numbered step: selling is not part of the launch
- * sequence, and an open panel above the Result would suggest there is something
- * left to do after a launch. It disappears entirely when there is nothing to
- * sell — and when the backend does not serve these routes at all, which is the
- * 404 case below.
+ * It used to be a collapsed disclosure below the Result, on the reasoning that
+ * selling is not part of the launch. That reasoning had a cost: the last thing
+ * an operator does, and the only other thing in this console that is both
+ * irreversible and unpriced, was the one panel a first-time user never found.
+ * It is a numbered step in the order of work, at the end, where it belongs.
+ *
+ * Opening it up also puts the missing-slippage-floor warning permanently on
+ * screen instead of behind a summary nobody expands.
  *
  * The candidate list is chosen by the backend as launched-by-dev INTERSECT
  * held-by-bundle. Never by balance alone: a dusted wallet would otherwise offer
@@ -42,7 +47,7 @@ function routeLabel(t) {
   return 'bonding — sells back to the curve';
 }
 
-export default function SellPanel({ explorer, credential, live, reload, report }) {
+export default function SellPanel({ step, explorer, credential, live, reload, report, onState }) {
   const [list, setList] = useState(null);
   const [missing, setMissing] = useState(false);
   const [error, setError] = useState('');
@@ -79,6 +84,13 @@ export default function SellPanel({ explorer, credential, live, reload, report }
 
   const rows = Array.isArray(list) ? list : [];
   const selected = rows.find((r) => r.token === token) || null;
+
+  // The sequence at the top of the page needs to say whether there is anything
+  // left to sell. It comes from the fetch this panel already made — the step
+  // does not get its own request.
+  useEffect(() => {
+    onState?.(list);
+  }, [list]);
 
   // A token that has been sold out drops off the list; the selection has to
   // drop with it or the buttons would fire at something no wallet holds.
@@ -155,32 +167,38 @@ export default function SellPanel({ explorer, credential, live, reload, report }
     });
   }
 
-  // Nothing to say when the routes are not there. Before a key is entered the
-  // header already says so; repeating it next to every other panel is noise.
-  if (missing) return null;
-  if (error) return credential ? <p className="hint">sell unavailable — {error}</p> : null;
-  if (!list) return null;
+  // The step keeps its place in the sequence whatever the answer is: a numbered
+  // run that ends at 5 because a route 404s teaches the operator that there are
+  // five steps. Before a key is entered the header already says so, so that case
+  // stays quiet rather than repeating the complaint next to every other panel.
+  if (missing)
+    return (
+      <Step {...step}>
+        <p className="hint">This build does not serve the sell routes.</p>
+      </Step>
+    );
+  if (error)
+    return (
+      <Step {...step}>{credential ? <p className="hint">sell unavailable — {error}</p> : null}</Step>
+    );
+  if (!list)
+    return (
+      <Step {...step}>
+        <p className="hint">reading what your bundle still holds…</p>
+      </Step>
+    );
 
   const results = Array.isArray(result?.results) ? result.results : [];
   const sold = results.filter((r) => r.status === 'confirmed').length;
   const blocked = !token || (live && !armed);
 
   return (
-    <details className="disperse-panel sell-panel">
-      <summary>
-        Sell everything
-        <span className="hint" style={{ marginLeft: 8 }}>
-          {rows.length
-            ? `${rows.length} token${rows.length === 1 ? '' : 's'} your bundle still holds`
-            : 'nothing your bundle holds is sellable'}
-        </span>
-      </summary>
-
+    <Step {...step} className="sell-panel">
       <p className="lede">
         Sells 100% of one launched token from every bundle wallet holding it, all broadcast at once.
         Only tokens this dev wallet launched are listed — a token that merely turned up in a wallet
         is never offered, because selling one means approving a contract nobody chose. The proceeds
-        stay in the wallet that sold; use <b>Sweep back to dev</b> in step 2 to consolidate them.
+        stay in the wallet that sold; use <b>Sweep back to dev</b> in step 4 to consolidate them.
       </p>
 
       {rows.length === 0 && (
@@ -247,7 +265,10 @@ export default function SellPanel({ explorer, credential, live, reload, report }
 
       {rows.length > 0 && (
         <div className="notice danger">
-          <h3>No slippage floor</h3>
+          <h3>
+            <LuTriangleAlert aria-hidden="true" />
+            No slippage floor
+          </h3>
           <ul>
             <li>
               Every wallet sells at whatever price it gets. This was chosen deliberately: nothing is
@@ -404,7 +425,10 @@ export default function SellPanel({ explorer, credential, live, reload, report }
         </div>
         {live && (
           <div className="notice danger">
-            <h3>No slippage floor</h3>
+            <h3>
+              <LuTriangleAlert aria-hidden="true" />
+              No slippage floor
+            </h3>
             <ul>
               <li>
                 There is no slippage floor. Every wallet takes whatever price it gets, including a
@@ -414,6 +438,6 @@ export default function SellPanel({ explorer, credential, live, reload, report }
           </div>
         )}
       </Modal>
-    </details>
+    </Step>
   );
 }

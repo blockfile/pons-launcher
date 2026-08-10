@@ -1,9 +1,10 @@
 import { useEffect, useState } from 'react';
 import { api } from '../api.js';
+import Step from './Step.jsx';
 import { Busy } from './Section.jsx';
 
 /**
- * The Disperse contracts funding goes through.
+ * Step 2 — the Disperse contracts funding goes through.
  *
  * Deploying spends real ETH, so the cost is shown before the button is pressed
  * and the button says what it will spend — a deploy control that only says
@@ -11,12 +12,25 @@ import { Busy } from './Section.jsx';
  *
  * There is no restart step. The backend reads this list per funding run, so a
  * contract deployed here is in use on the very next Fund.
+ *
+ * It is a numbered step because it comes second in the order of work and the
+ * step after it is the one that uses it, but it is marked optional rather than
+ * blocking: below the batching threshold individual transfers are cheaper and
+ * are used regardless, so a sequence that refused to continue without one would
+ * be lying about what the backend does.
  */
-export default function DispersersPanel({ explorer, credential, report }) {
+export default function DispersersPanel({ step, explorer, credential, report, onState }) {
   const [state, setState] = useState(null);
   const [count, setCount] = useState(3);
   const [busy, setBusy] = useState('');
   const [error, setError] = useState('');
+
+  // The sequence at the top of the page states how many contracts are in use,
+  // and it can only get that from the one fetch this panel already makes. No
+  // extra request: the answer is handed up as it arrives.
+  useEffect(() => {
+    onState?.(state);
+  }, [state]);
 
   async function load() {
     try {
@@ -53,31 +67,36 @@ export default function DispersersPanel({ explorer, credential, report }) {
     }
   }
 
-  // Before a key is entered the header already says so; repeating it here
-  // would just be noise next to every other panel doing the same.
-  if (error) return credential ? <p className="hint">dispersers unavailable — {error}</p> : null;
-  if (!state) return null;
+  // The step keeps its place in the sequence even when there is nothing to draw
+  // inside it: a numbered run with a hole where step 2 should be is worse than
+  // one that says why it is quiet. Before a key is entered the header already
+  // says so, so that case gets nothing rather than the same complaint repeated
+  // next to every other panel.
+  if (error)
+    return (
+      <Step {...step}>
+        {credential ? <p className="hint">dispersers unavailable — {error}</p> : null}
+      </Step>
+    );
+  if (!state)
+    return (
+      <Step {...step}>
+        <p className="hint">reading the disperser list…</p>
+      </Step>
+    );
 
   const { dispersers, addresses, usingFallback, batchThreshold, quote } = state;
   const each = Number(quote?.costEachEth || 0);
   const active = addresses.length;
 
   return (
-    <details className="disperse-panel">
-      <summary>
-        Disperser contracts
-        <span className="hint" style={{ marginLeft: 8 }}>
-          {active
-            ? `${active} in use — funding ${batchThreshold}+ wallets goes through ${active === 1 ? 'it' : 'them'}`
-            : 'none — funding sends one transfer per wallet'}
-        </span>
-      </summary>
-
+    <Step {...step}>
       <p className="lede">
         Funding many wallets one transfer at a time is many concurrent broadcasts, which is what
         rate limiting hits first. A batch is one transaction instead, and several contracts split
         the run between them so a failure costs only its share. Below {batchThreshold} recipients
-        individual transfers are cheaper and are used regardless.
+        individual transfers are cheaper and are used regardless — which is why this step is
+        optional, and why skipping it costs nothing until the bundle is large.
       </p>
 
       {usingFallback && (
@@ -156,6 +175,6 @@ export default function DispersersPanel({ explorer, credential, report }) {
             : `paid by the dev wallet, balance ${Number(quote?.balanceEth || 0).toFixed(6)} ETH`}
         </span>
       </div>
-    </details>
+    </Step>
   );
 }

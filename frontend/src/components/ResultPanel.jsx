@@ -1,12 +1,17 @@
 import { useEffect, useRef } from 'react';
-import Section from './Section.jsx';
+import Step from './Step.jsx';
 import { pct } from './Share.jsx';
 
 // A plan or a launch result, read at a glance before the raw JSON. Warnings are
 // pulled out of the payload and shown first: buried in 200 lines of JSON, a cap
 // breach is invisible, and a cap breach is the difference between a wallet
 // buying and a wallet burning gas for nothing.
-export default function ResultPanel({ output, reveal = 0 }) {
+//
+// It sits between the launch and the sell because that is where it falls in the
+// order of work — you launch, you read this, and only later do you decide to
+// exit. But it carries an unnumbered node: it is the console's answer, not a
+// step, and a number here would make the sequence read as seven things.
+export default function ResultPanel({ step, output, reveal = 0 }) {
   const plan = output && typeof output === 'object' ? output : null;
   const inner = plan?.plan || plan; // /launch nests the plan; /preflight does not
   const result = plan?.result;
@@ -45,7 +50,7 @@ export default function ResultPanel({ output, reveal = 0 }) {
 
   return (
     <div ref={box}>
-    <Section step="4" title="Result">
+    <Step {...step}>
       {!plan && <pre>{String(output ?? '')}</pre>}
 
       {plan && (
@@ -146,7 +151,7 @@ export default function ResultPanel({ output, reveal = 0 }) {
           </details>
         </>
       )}
-    </Section>
+    </Step>
     </div>
   );
 }

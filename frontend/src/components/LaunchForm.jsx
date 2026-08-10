@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react';
 import { api } from '../api.js';
-import Section, { Busy } from './Section.jsx';
+import Step from './Step.jsx';
+import { Busy } from './Section.jsx';
 import LogoField from './LogoField.jsx';
 import Modal, { Fact } from './Modal.jsx';
 import { pct } from './Share.jsx';
@@ -35,6 +36,7 @@ const BLANK = {
 const MAX_EXEMPTIONS = 32;
 
 export default function LaunchForm({
+  step,
   configs,
   wallets,
   rows,
@@ -191,7 +193,7 @@ export default function LaunchForm({
   const blocked = live && !armed;
 
   return (
-    <Section step="3" title="Launch" done={ready}>
+    <Step {...step}>
       <div className="protocol">
         {['v1', 'v2'].map((p) => (
           <button
@@ -446,6 +448,6 @@ export default function LaunchForm({
           )}
         </div>
       </Modal>
-    </Section>
+    </Step>
   );
 }

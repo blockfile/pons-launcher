@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useMemo, useState } from 'react';
+import { LazyMotion, MotionConfig, domMax } from 'framer-motion';
 import { api, getApiKey, setApiKey } from './api.js';
 // The console and the backend's preflight run the SAME arithmetic, out of one
 // file neither of them owns — see shared/bundleShare.js for why, and
@@ -6,7 +7,8 @@ import { api, getApiKey, setApiKey } from './api.js';
 // import because that file is CommonJS: the backend requires it directly.
 import bundleShareModule from '../../shared/bundleShare.js';
 import Guide from './components/Guide.jsx';
-import Readiness from './components/Readiness.jsx';
+import Sequence from './components/Sequence.jsx';
+import DevWalletPanel from './components/DevWalletPanel.jsx';
 import WalletsPanel from './components/WalletsPanel.jsx';
 import FundPanel from './components/FundPanel.jsx';
 import DispersersPanel from './components/DispersersPanel.jsx';
@@ -17,6 +19,23 @@ import HistoryPanel from './components/HistoryPanel.jsx';
 import ActivityPanel from './components/ActivityPanel.jsx';
 
 const { bundleShare } = bundleShareModule;
+
+const short = (a) => (a ? `${a.slice(0, 8)}…${a.slice(-4)}` : '');
+const plural = (n, one, many = `${one}s`) => `${n} ${n === 1 ? one : many}`;
+
+/**
+ * The animation feature set, declared once for the whole console.
+ *
+ * domMax is the smallest set that still carries layout animation, which the
+ * marker travelling between stations needs — nothing in CSS can move an element
+ * between two different parents. It is also the expensive half of the library:
+ * dropping to domAnimation, and with it the travelling marker, is worth about
+ * 47 kB, and dropping animation altogether about 131 kB. Everything on this page
+ * is legible without a single frame of movement, so that trade is available at
+ * any time; it is spent here on the one thing static styling cannot say, which
+ * is that progress through a procedure is travel and not a jump.
+ */
+const animation = domMax;
 
 export default function App() {
   const [health, setHealth] = useState(null);
@@ -33,10 +52,15 @@ export default function App() {
   // because both the Fund and Launch panels read the same rows.
   const [rows, setRows] = useState({});
   // What the launch is shaped like — protocol, the chosen launch config, the
-  // dev buy, the creator tax. It is typed in step 3 but it decides what step 1's
+  // dev buy, the creator tax. It is typed in step 5 but it decides what step 3's
   // amounts BUY, so LaunchForm pushes it up here the way it already pushes the
-  // logo up for the checklist.
+  // logo up for the sequence.
   const [sizing, setSizing] = useState(null);
+  // What steps 2 and 6 found, handed up by the panels that already fetched it.
+  // The strip at the top of the page states every step's state, and it must not
+  // do that by making the same two requests a second time.
+  const [dispersers, setDispersers] = useState(null);
+  const [sellable, setSellable] = useState(null);
 
   const setRow = (id, patch) => setRows((r) => ({ ...r, [id]: { ...r[id], ...patch } }));
 
@@ -102,7 +126,7 @@ export default function App() {
       await loadWallets();
       setConfigs(await api('/configs'));
       await loadHistory();
-      setOutput('Ready. Run Preflight when the checklist above is complete.');
+      setOutput('Ready. Run Preflight when the sequence above is complete.');
     } catch (err) {
       setOutput(`ERROR: ${err.message}`);
     }
@@ -133,115 +157,304 @@ export default function App() {
   // the deployment has none, the field is not a prompt — it is a lie.
   const needsKey = Boolean(health && health.apiKeyRequired && !health.user);
 
+  /**
+   * The order of work, and where in it the operator is standing.
+   *
+   * Six steps, and the state of each derived from what is actually true right
+   * now rather than from anything this component remembers. Exactly one step is
+   * `now`: the first that is not done and whose predecessor is. Everything after
+   * it is `later` and says which step it is waiting on.
+   *
+   * `later` is a statement about ORDER, not permission. Nothing below is
+   * disabled by it: an operator who wants to generate bundle wallets before a
+   * dev wallet exists is allowed to, and the console's job is to say what the
+   * sequence expects, not to hold the keys hostage to it.
+   *
+   * Step 2 is the exception: the backend uses individual transfers below the
+   * batching threshold regardless, so it is genuinely optional and never makes
+   * a later step wait. Marking it required would be the console lying about the
+   * code underneath it.
+   *
+   * Step 6 has no done state. Selling everything empties the list, which is the
+   * same list you have before you have launched anything, so "done" would be
+   * indistinguishable from "not started".
+   */
+  const steps = useMemo(() => {
+    const dev = wallets.find((w) => w.role === 'dev');
+    const bundle = wallets.filter((w) => w.role === 'bundle');
+    const activeDispersers = dispersers?.addresses?.length ?? 0;
+    const threshold = dispersers?.batchThreshold;
+    const sellCount = Array.isArray(sellable) ? sellable.length : 0;
+    const last = history[0];
+    const launched = history.length > 0;
+
+    const plan = [
+      {
+        n: 1,
+        title: 'Create dev wallet',
+        done: Boolean(dev),
+        detail: dev
+          ? `${short(dev.address)} · ${Number(dev.balanceEth).toFixed(4)} ETH`
+          : 'it signs the launch and pays for everything',
+      },
+      {
+        n: 2,
+        title: 'Deploy disperser contract',
+        optional: true,
+        done: activeDispersers > 0,
+        needs: dev ? 0 : 1,
+        detail: activeDispersers
+          ? `${plural(activeDispersers, 'contract')} in use${threshold ? ` · batches ${threshold}+ recipients` : ''}`
+          : 'without one, funding sends one transfer per wallet',
+      },
+      {
+        n: 3,
+        title: 'Generate bundle wallets',
+        done: bundle.length > 0,
+        detail: bundle.length
+          ? `${plural(bundle.length, 'wallet')} · ${funded} funded`
+          : 'each buys behind the dev buy, capped at 5%',
+      },
+      {
+        n: 4,
+        title: 'Fund bundle wallets',
+        done: funded > 0,
+        detail: bundle.length
+          ? `${funded} of ${bundle.length} hold ETH`
+          : 'ETH out of the dev wallet, one row each',
+      },
+      {
+        n: 5,
+        title: 'Launch + bundle',
+        done: launched,
+        detail: last
+          ? `${last.params?.symbol || short(last.token)} · ${
+              (last.buys || []).filter((b) => b.status === 'confirmed').length
+            }/${(last.buys || []).length} filled${last.dryRun ? ' · dry run' : ''}`
+          : 'the dev buy runs inside the launch itself',
+      },
+      {
+        n: 6,
+        title: 'Sell everything',
+        done: false,
+        detail: sellCount
+          ? `${plural(sellCount, 'token')} your bundle still holds`
+          : 'nothing your bundle holds is sellable yet',
+      },
+    ];
+
+    // The chain of required steps. A step waits on the last required one before
+    // it; `needs` set explicitly wins, which is how the optional step still
+    // says it cannot be paid for before there is a dev wallet.
+    let previousRequired = null;
+    let claimed = false;
+    return plan.map((s) => {
+      const waitsOn = s.needs === 0 ? null : (s.needs ?? previousRequired);
+      const blocked = waitsOn != null && !plan[waitsOn - 1].done;
+      if (!s.optional) previousRequired = s.done ? null : s.n;
+
+      // `done` outranks everything: deleting every bundle wallet after a launch
+      // must not un-launch step 5.
+      let state = 'later';
+      if (s.done) state = 'done';
+      else if (!blocked && !s.optional && !claimed) {
+        state = 'now';
+        claimed = true;
+      }
+
+      return {
+        ...s,
+        id: `step-${s.n}`,
+        state,
+        // A blocked optional step is not "optional" yet — it cannot be run at
+        // all — so it reads as later, and only says optional once it could be
+        // done and is being passed over.
+        chip:
+          state === 'done'
+            ? 'done'
+            : state === 'now'
+              ? 'now'
+              : s.optional && !blocked
+                ? 'optional'
+                : 'later',
+        wait:
+          state === 'later' && blocked
+            ? `Waits on step ${waitsOn} — ${plan[waitsOn - 1].title.toLowerCase()} first.`
+            : state === 'later' && s.optional
+              ? 'Optional. Skipping it costs nothing until the bundle is large enough to batch.'
+              : null,
+      };
+    });
+  }, [wallets, funded, dispersers, sellable, history]);
+
+  // The step whose panel is drawn where, so a panel never has to know its own
+  // number and the order lives in one place — this file, in render order below.
+  const step = (n) => steps[n - 1];
+
   return (
-    <>
-      <header className={`strip ${live ? 'is-live' : ''}`}>
-        <h1 className="mark">
-          pons<b>·</b>launcher
-        </h1>
+    // reducedMotion="user" hands the whole question to the operating system:
+    // every layout and transform animation below is switched off when the
+    // machine asks for it, without each component checking. `strict` refuses
+    // the full motion component outright, so the heavy import cannot creep back
+    // in unnoticed the next time something needs animating.
+    <LazyMotion features={animation} strict>
+      <MotionConfig reducedMotion="user">
+        <header className={`strip ${live ? 'is-live' : ''}`}>
+          <h1 className="mark">
+            pons<b>·</b>launcher
+          </h1>
 
-        {health && (
-          <div className="readout">
-            <span>
-              chain <b>{health.chainId}</b>
-            </span>
-            {health.multiUser && (
+          {health && (
+            <div className="readout">
               <span>
-                signed in as <b>{health.user || 'nobody'}</b>
+                chain <b>{health.chainId}</b>
               </span>
-            )}
+              {health.multiUser && (
+                <span>
+                  signed in as <b>{health.user || 'nobody'}</b>
+                </span>
+              )}
+            </div>
+          )}
+
+          <div className={`mode ${!health ? '' : live ? 'live' : 'dry'}`}>
+            {!health ? 'connecting' : live ? 'live · spends real funds' : 'dry run · broadcasts nothing'}
           </div>
-        )}
 
-        <div className={`mode ${!health ? '' : live ? 'live' : 'dry'}`}>
-          {!health ? 'connecting' : live ? 'live · spends real funds' : 'dry run · broadcasts nothing'}
-        </div>
-
-        {needsKey && (
-          <>
-            <input
-              type="password"
-              placeholder="API key"
-              autoComplete="off"
-              value={key}
-              onChange={(e) => {
-                setKey(e.target.value);
-                setApiKey(e.target.value);
-              }}
-            />
-            {/* A key that survives a refresh needs a way out that is not
-                "close every tab" — a shared screen is the usual reason. */}
-            {key && (
-              <button
-                className="link"
-                title="clear the key from this tab"
-                onClick={() => {
-                  setKey('');
-                  setApiKey('');
+          {needsKey && (
+            <>
+              <input
+                type="password"
+                placeholder="API key"
+                autoComplete="off"
+                value={key}
+                onChange={(e) => {
+                  setKey(e.target.value);
+                  setApiKey(e.target.value);
                 }}
-              >
-                forget
-              </button>
-            )}
-          </>
-        )}
+              />
+              {/* A key that survives a refresh needs a way out that is not
+                  "close every tab" — a shared screen is the usual reason. */}
+              {key && (
+                <button
+                  className="link"
+                  title="clear the key from this tab"
+                  onClick={() => {
+                    setKey('');
+                    setApiKey('');
+                  }}
+                >
+                  forget
+                </button>
+              )}
+            </>
+          )}
 
-        {/* Multi-user deployments proxy through nginx, which overwrites this
-            field's header with the key mapped to your login — if that map is
-            missing an entry, the key you paste here is silently ignored. */}
-        {health && health.multiUser && !health.user && (
-          <div className="hint">not signed in — nginx may be swallowing the key field; ask whoever runs this deployment to check the login map</div>
-        )}
-      </header>
+          {/* Multi-user deployments proxy through nginx, which overwrites this
+              field's header with the key mapped to your login — if that map is
+              missing an entry, the key you paste here is silently ignored. */}
+          {health && health.multiUser && !health.user && (
+            <div className="hint">not signed in — nginx may be swallowing the key field; ask whoever runs this deployment to check the login map</div>
+          )}
+        </header>
 
-      <main>
-        <Readiness wallets={wallets} funded={funded} logo={logo} health={health} apiKey={key} />
-        <Guide />
+        <main>
+          <Sequence
+            steps={steps}
+            notice={
+              !health
+                ? 'Connecting to the server…'
+                : needsKey && !key
+                  ? 'Paste the API key in the top bar — without it the console can neither read nor spend.'
+                  : null
+            }
+          />
+          <Guide />
 
-        <WalletsPanel
-          wallets={wallets}
-          rows={rows}
-          setRow={setRow}
-          share={share}
-          reload={loadWallets}
-          report={report}
-        />
-        <FundPanel wallets={wallets} rows={rows} reload={loadWallets} report={report} />
-        <DispersersPanel explorer={health?.explorer || ''} credential={credential} report={report} />
-        <LaunchForm
-          configs={configs}
-          wallets={wallets}
-          rows={rows}
-          live={live}
-          share={share}
-          reload={loadWallets}
-          reloadHistory={loadHistory}
-          report={report}
-          onLogo={setLogo}
-          onSizing={setSizing}
-        />
-        <ResultPanel output={output} reveal={reveal} />
-        {/* After the launch, not part of it: exiting is a later decision, and a
-            numbered step would imply the sequence is unfinished until it runs. */}
-        <SellPanel
-          explorer={health?.explorer || ''}
-          credential={credential}
-          live={live}
-          reload={loadWallets}
-          report={report}
-        />
-        <HistoryPanel entries={history} explorer={health?.explorer || ''} />
-        {/* `admin` comes from health, which is the server's answer about this
-            caller — it decides whether the user selector is drawn at all. The
-            backend checks it again on every read; this flag draws controls, it
-            does not grant anything. */}
-        <ActivityPanel
-          explorer={health?.explorer || ''}
-          credential={credential}
-          admin={Boolean(health?.admin)}
-          me={health?.user || ''}
-        />
-      </main>
-    </>
+          <DevWalletPanel
+            step={step(1)}
+            wallets={wallets}
+            explorer={health?.explorer || ''}
+            reload={loadWallets}
+            report={report}
+          />
+          <DispersersPanel
+            step={step(2)}
+            explorer={health?.explorer || ''}
+            credential={credential}
+            report={report}
+            onState={setDispersers}
+          />
+          <WalletsPanel
+            step={step(3)}
+            wallets={wallets}
+            rows={rows}
+            setRow={setRow}
+            share={share}
+            reload={loadWallets}
+            report={report}
+          />
+          <FundPanel
+            step={step(4)}
+            wallets={wallets}
+            rows={rows}
+            dispersers={dispersers}
+            reload={loadWallets}
+            report={report}
+          />
+          <LaunchForm
+            step={step(5)}
+            configs={configs}
+            wallets={wallets}
+            rows={rows}
+            live={live}
+            share={share}
+            reload={loadWallets}
+            reloadHistory={loadHistory}
+            report={report}
+            onLogo={setLogo}
+            onSizing={setSizing}
+          />
+          {/* The console's answer, between the launch and the exit because that is
+              where it falls: you launch, you read this, and only later do you
+              decide to sell. Unnumbered — it is a readout, not a seventh step —
+              and never jade, because what lands here is as often a revert as a
+              confirmation. The spine passing through it is the launch's, so it
+              takes its fill from step 5 rather than from its own contents. */}
+          <ResultPanel
+            step={{ id: 'readout', title: 'Result', state: 'readout', railDone: steps[4].state === 'done' }}
+            output={output}
+            reveal={reveal}
+          />
+          <SellPanel
+            step={{ ...step(6), last: true }}
+            explorer={health?.explorer || ''}
+            credential={credential}
+            live={live}
+            reload={loadWallets}
+            report={report}
+            onState={setSellable}
+          />
+
+          {/* Where the sequence stops. Everything below is a record of runs that
+              already happened, and the left edge changes to say so. */}
+          <div className="divider">
+            <span>records</span>
+          </div>
+
+          <HistoryPanel entries={history} explorer={health?.explorer || ''} />
+          {/* `admin` comes from health, which is the server's answer about this
+              caller — it decides whether the user selector is drawn at all. The
+              backend checks it again on every read; this flag draws controls, it
+              does not grant anything. */}
+          <ActivityPanel
+            explorer={health?.explorer || ''}
+            credential={credential}
+            admin={Boolean(health?.admin)}
+            me={health?.user || ''}
+          />
+        </main>
+      </MotionConfig>
+    </LazyMotion>
   );
 }

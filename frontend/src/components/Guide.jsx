@@ -38,9 +38,13 @@ export default function Guide() {
           <div>
             <dt>The order of work</dt>
             <dd>
-              Generate a dev wallet and bundle wallets, send ETH from the dev wallet to the bundle
-              wallets, fill in the token details, then run <b>Preflight</b>. Preflight signs
-              everything and sends nothing, so it is safe to run as often as you like.
+              Six steps, in the order they are laid out down this page:{' '}
+              <b>create the dev wallet</b> and send it ETH, <b>deploy a disperser contract</b> if the
+              bundle is large enough to want batched funding, <b>generate the bundle wallets</b>,{' '}
+              <b>fund them</b> from the dev wallet, <b>launch and bundle</b>, and later{' '}
+              <b>sell everything</b>. The strip at the top says which one you are on. Before the
+              launch, run <b>Preflight</b> — it signs everything and sends nothing, so it is safe to
+              run as often as you like.
             </dd>
           </div>
           <div>
@@ -81,9 +85,9 @@ export default function Guide() {
           <div>
             <dt>Back up your keys</dt>
             <dd>
-              Wallets are generated on the server and encrypted at rest. Download a backup from the
-              wallets panel and store it offline — if the server is lost, unbacked-up keys are gone
-              and so are the funds in them.
+              Wallets are generated on the server and encrypted at rest. Download a backup from step
+              3 and store it offline — if the server is lost, unbacked-up keys are gone and so are
+              the funds in them.
             </dd>
           </div>
         </dl>

@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from 'react';
 import { api, downloadBackup } from '../api.js';
-import Section, { Busy } from './Section.jsx';
+import Step from './Step.jsx';
+import { Busy } from './Section.jsx';
 import Modal, { Fact } from './Modal.jsx';
 import Share, { pct, tokens } from './Share.jsx';
 
@@ -9,15 +10,23 @@ import Share, { pct, tokens } from './Share.jsx';
 const eth = (v) => Number(v || 0).toFixed(6);
 
 /**
- * The wallet table. Per-row fund / buy-mode / buy-amount inputs live in `rows`,
- * owned by App, because the Fund and Launch panels both read them.
+ * Step 3 — the bundle wallets, and the table every later step reads.
+ *
+ * Generating the dev wallet is step 1 and lives in its own panel; this one keeps
+ * the whole wallet inventory, because the table is where the bundle is SIZED and
+ * a bundle is sized against the dev buy sitting at the top of it. The dev row is
+ * therefore still here, read-only apart from its delete.
+ *
+ * Per-row fund / buy-mode / buy-amount inputs live in `rows`, owned by App,
+ * because the Fund (step 4) and Launch (step 5) panels both read them — which is
+ * also why this table sits above both of them.
  *
  * `share` is what those amounts would buy, computed by App from the live
  * factory configs — see shared/bundleShare.js. It is drawn next to the input
  * that produced it: sizing a bundle used to mean typing a number, launching,
  * and finding out afterwards.
  */
-export default function WalletsPanel({ wallets, rows, setRow, share, reload, report }) {
+export default function WalletsPanel({ step, wallets, rows, setRow, share, reload, report }) {
   const [count, setCount] = useState(5);
   const [showImport, setShowImport] = useState(false);
   const [keys, setKeys] = useState('');
@@ -50,8 +59,6 @@ export default function WalletsPanel({ wallets, rows, setRow, share, reload, rep
       setBusy('');
     }
   }
-
-  const hasDev = wallets.some((w) => w.role === 'dev');
 
   // A whitelist, not "everything that is not the dev wallet": a role this
   // console does not know about is never swept into a bulk delete either.
@@ -171,24 +178,15 @@ export default function WalletsPanel({ wallets, rows, setRow, share, reload, rep
   const one = pending.length === 1 ? pending[0] : null;
 
   return (
-    <Section step="1" title="Wallets" done={hasDev && wallets.length > 1}>
+    <Step {...step}>
       <p className="lede">
-        The dev wallet signs the launch, makes the uncapped buy, and funds everything else. Bundle
-        wallets each buy behind it, and each is capped at 5% of supply.
+        Each bundle wallet buys behind the dev buy, and each is capped at 5% of supply inside the
+        restriction window. More wallets is how a bundle gets bigger without any one of them
+        breaching that cap. The table below is where the whole run is sized: what each wallet is
+        funded with in step 4, what it buys in step 5, and what that comes to as a share of supply.
       </p>
 
       <div className="row">
-        <Busy
-          busy={busy === 'dev'}
-          className="ghost"
-          disabled={hasDev}
-          title={hasDev ? 'a dev wallet already exists' : ''}
-          onClick={() =>
-            act('dev', () => api('/wallets/generate', 'POST', { count: 1, role: 'dev', label: 'dev' }))
-          }
-        >
-          Generate dev wallet
-        </Busy>
         <Busy
           busy={busy === 'bundle'}
           className="ghost"
@@ -301,7 +299,8 @@ export default function WalletsPanel({ wallets, rows, setRow, share, reload, rep
           {wallets.length === 0 && (
             <tr>
               <td colSpan="9" className="empty">
-                No wallets yet. Generate a dev wallet to start.
+                No wallets yet. Generate the bundle wallets above — the dev wallet from step 1
+                appears here too.
               </td>
             </tr>
           )}
@@ -370,7 +369,7 @@ export default function WalletsPanel({ wallets, rows, setRow, share, reload, rep
                 </td>
                 <td>
                   {/* The dev row shows the dev buy, which is not typed here at
-                      all — it is set in step 3 and it executes FIRST, inside
+                      all — it is set in step 5 and it executes FIRST, inside
                       the launch transaction. On a curve that matters: it moves
                       the price every bundle wallet then pays. */}
                   {isDev ? (
@@ -639,7 +638,7 @@ export default function WalletsPanel({ wallets, rows, setRow, share, reload, rep
                 </li>
               ) : (
                 <li>
-                  Cancel, run <b>Sweep back to dev</b> in step 2, then delete — it empties{' '}
+                  Cancel, run <b>Sweep back to dev</b> in step 4, then delete — it empties{' '}
                   {one ? 'the wallet' : 'these wallets'} into the dev wallet first.
                 </li>
               )}
@@ -661,10 +660,10 @@ export default function WalletsPanel({ wallets, rows, setRow, share, reload, rep
             "0.000000 ETH" be read as "empty". */}
         <p className="hint">
           Token balances are not in this table and are not counted above. If{' '}
-          {one ? 'this wallet' : 'any of these'} still holds a launched token, sell it in Sell
-          everything first.
+          {one ? 'this wallet' : 'any of these'} still holds a launched token, sell it in step 6
+          first.
         </p>
       </Modal>
-    </Section>
+    </Step>
   );
 }

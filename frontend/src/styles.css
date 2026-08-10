@@ -6,12 +6,18 @@
  * instrument silkscreen — mono panel labels with hairline rules, tabular
  * numerals, and colour that MEANS something rather than decorates:
  *
- *   amber     armed / ready / the primary action
+ *   amber     armed / ready / the primary action / the step you are on
  *   vermilion live, irreversible, or over a cap — never used for anything else
- *   jade      already true on chain, past tense only
+ *   jade      already true, past tense only
  *
  * Nothing else gets a colour. If a thing is neither ready, dangerous, nor
  * confirmed, it is grey.
+ *
+ * The console is also a PROCEDURE — six steps, in one order — so the page is
+ * drawn as one: a hairline down the left edge threading a numbered node per
+ * step, filled jade behind you and marked amber where you are standing. There
+ * is no display typeface; the step numerals are the display type, which is the
+ * right kind of emphasis for a thing whose whole subject is sequence.
  */
 
 :root {
@@ -38,6 +44,12 @@
 
 * {
   box-sizing: border-box;
+}
+
+/* Every station links to its step. Jumping there should read as travel down the
+   procedure, not as a cut — but never against the operator's wishes. */
+html {
+  scroll-behavior: smooth;
 }
 
 body {
@@ -135,6 +147,12 @@ main {
   margin: 0 auto;
   padding: 22px var(--pad) 80px;
   display: grid;
+  /* minmax(0, 1fr), not the implicit auto: a grid column sized to its content
+     is sized to the WIDEST thing in it, and the wallet table is nine columns
+     wide. Without this the whole page grows to the table's natural width on a
+     narrow screen and every panel scrolls sideways with it, instead of the
+     table alone scrolling inside its own box. */
+  grid-template-columns: minmax(0, 1fr);
   gap: 16px;
 }
 
@@ -161,22 +179,6 @@ h2::after {
   flex: 1;
   height: 1px;
   background: var(--rule);
-}
-h2 .step {
-  display: inline-grid;
-  place-items: center;
-  width: 20px;
-  height: 20px;
-  border-radius: 3px;
-  border: 1px solid var(--rule);
-  background: var(--panel-2);
-  color: var(--dimmer);
-  font: 600 11px/1 var(--mono);
-}
-h2.done .step {
-  color: var(--void);
-  background: var(--amber);
-  border-color: var(--amber);
 }
 
 .lede {
@@ -208,6 +210,11 @@ h2.done .step {
 }
 .grid .half {
   grid-column: span 2;
+}
+/* A grid item's floor is its content's min-width, and an input's is wider than
+   a phone. Without this the launch form pushes the page sideways. */
+.grid > * {
+  min-width: 0;
 }
 
 label {
@@ -301,47 +308,268 @@ button:disabled {
   text-transform: none;
 }
 
-/* ── readiness checklist: the one place that reads real state ────────────── */
+/* Explorer links, wherever they turn up. The browser's own link blue is the one
+   colour in this console that means nothing — and a visited-purple address is
+   worse, because it reads as a state the address does not have. */
+.hint a,
+.disperser-list a {
+  color: var(--dim);
+  text-decoration: none;
+  overflow-wrap: anywhere;
+}
+.hint a:hover,
+.disperser-list a:hover {
+  color: var(--amber);
+  text-decoration: underline;
+}
 
-.checklist {
+/* ── the sequence ─────────────────────────────────────────────────────────
+   Six steps, one order. Three states and no fourth: jade for what is behind
+   you, amber for where you are standing, grey for what is still ahead. Grey is
+   a statement about ORDER and not about permission — nothing it marks is
+   disabled — so it is drawn quiet rather than struck out. */
+
+/* The numbered node. Same object in the strip at the top and in the gutter
+   beside each panel, so the figure the operator picks out of the plan is
+   literally the one they scroll to. */
+.node {
+  display: inline-grid;
+  place-items: center;
+  flex: none;
+  width: 30px;
+  height: 30px;
+  border-radius: 3px;
+  border: 1px solid var(--rule);
+  background: var(--panel-2);
+  color: var(--dimmer);
+  font: 600 14px/1 var(--mono);
+  font-variant-numeric: tabular-nums;
+  transition:
+    color 0.25s ease,
+    background-color 0.25s ease,
+    border-color 0.25s ease;
+}
+.node.is-small {
+  width: 24px;
+  height: 24px;
+  font-size: 12px;
+}
+.node.is-now {
+  color: var(--amber);
+  border-color: var(--amber);
+  background: #1b1509;
+}
+.node.is-done {
+  color: var(--void);
+  background: var(--jade);
+  border-color: var(--jade);
+}
+/* The readout is threaded onto the same spine but is not one of the six, so it
+   gets a mark instead of a number and never takes a state colour. */
+.node-dot {
+  width: 5px;
+  height: 5px;
+  border-radius: 1px;
+  background: var(--dimmer);
+}
+
+/* ── the plan, before any of it ──────────────────────────────────────────── */
+
+.plan ol {
   display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(210px, 1fr));
+  /* min() so the track floor gives way on a screen narrower than one station:
+     six 168px columns is a 1000px minimum, which a phone does not have and
+     which would otherwise push the whole page sideways. */
+  grid-template-columns: repeat(auto-fit, minmax(min(168px, 100%), 1fr));
   gap: 1px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
   background: var(--rule-soft);
   border: 1px solid var(--rule);
   border-radius: 6px;
   overflow: hidden;
 }
-.check {
+
+.station {
+  position: relative;
   display: flex;
-  align-items: baseline;
+  align-items: flex-start;
   gap: 10px;
-  padding: 12px 14px;
+  height: 100%;
+  padding: 12px 13px;
   background: var(--panel);
+  text-decoration: none;
+  color: inherit;
 }
-.check i {
-  font: 600 10px/1 var(--mono);
-  font-style: normal;
-  color: var(--dimmer);
-  border: 1px solid var(--rule);
-  border-radius: 2px;
-  padding: 3px 5px;
+.station:hover {
+  background: #151c26;
 }
-.check.ok i {
-  color: var(--void);
-  background: var(--jade);
-  border-color: var(--jade);
+.station:focus-visible {
+  outline: 2px solid var(--amber);
+  outline-offset: -2px;
 }
-.check strong {
+.station-text {
+  min-width: 0;
+}
+.station-text strong {
   display: block;
-  font: 600 12px/1.3 var(--sans);
+  font: 600 12px/1.35 var(--sans);
+  color: var(--dim);
 }
-.check span {
+.station.is-done .station-text strong,
+.station.is-now .station-text strong {
+  color: var(--ink);
+}
+/* Not the --dimmer that hints elsewhere use: this line is the state of the step,
+   which is the whole point of the strip, and it has to be readable at a glance
+   rather than found. The node and the title carry done-versus-later. */
+.station-text span {
+  display: block;
+  margin-top: 2px;
   font: 11px/1.4 var(--mono);
+  color: var(--dim);
+  overflow-wrap: anywhere;
+}
+
+/* "You are here", drawn once and moved between stations rather than drawn six
+   times and hidden five. A marker that jumps reads as a different marker. */
+.station-here {
+  position: absolute;
+  inset: 0;
+  border: 1px solid var(--amber-dim);
+  border-left: 2px solid var(--amber);
+  pointer-events: none;
+}
+
+.plan-notice {
+  margin: 10px 0 0;
+  padding-left: 11px;
+  border-left: 3px solid var(--amber);
+  font: 12px/1.5 var(--mono);
+  color: var(--amber);
+}
+
+/* ── a step, and the spine running through it ────────────────────────────── */
+
+.stage {
+  position: relative;
+  padding-left: 62px;
+  /* Cleared for the sticky instrument strip, so a station link does not land
+     its own heading underneath it. */
+  scroll-margin-top: 70px;
+}
+
+.stage-mark {
+  position: absolute;
+  left: 16px;
+  top: var(--pad);
+  bottom: 0;
+  width: 30px;
+}
+
+/* The hairline down to the next station. It runs past the panel's own edge and
+   across the gap, so the six panels read as one continuous procedure rather
+   than as six cards that happen to be stacked. */
+.stage-rail {
+  position: absolute;
+  left: 15px;
+  top: 38px;
+  bottom: -17px;
+  width: 1px;
+  background: var(--rule);
+}
+.stage-rail-fill {
+  position: absolute;
+  inset: 0;
+  background: var(--jade);
+  opacity: 0.55;
+  transform-origin: top center;
+  /* Empty is the baseline, in CSS rather than in the animation, so a frame
+     rendered before the animation library is live shows a step that is not yet
+     done as not yet done. The opposite default would paint the whole spine
+     green on first paint and correct itself afterwards. */
+  transform: scaleY(0);
+}
+
+.stage h2 {
+  margin-bottom: 12px;
+  min-height: 30px;
+}
+.stage-n {
+  color: var(--dimmer);
+  white-space: nowrap;
+}
+.stage-t {
+  color: var(--ink);
+  letter-spacing: 0.14em;
+}
+.stage.is-later .stage-t {
+  color: var(--dim);
+}
+/* A step still ahead sits back a little. No colour spent on it: it is neither
+   ready, dangerous, nor confirmed, and the palette has nothing for "not yet". */
+.stage.is-later {
+  border-color: var(--rule-soft);
+}
+
+/* The state, at the far end of the label's rule — the place an instrument puts
+   its readout. `order` puts it after the hairline, which as a pseudo-element
+   would otherwise always come last. */
+.chip {
+  order: 1;
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  flex: none;
+  font: 600 10px/1 var(--mono);
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
   color: var(--dimmer);
 }
-.check.ok span {
-  color: var(--dim);
+.chip.is-now {
+  color: var(--amber);
+}
+.chip.is-done {
+  color: var(--jade);
+}
+.chip svg {
+  width: 12px;
+  height: 12px;
+}
+
+/* What a step is waiting for, in place. It says "waits on", never "locked":
+   every control inside stays live, and an operator who knows better than the
+   sequence is not going to be stopped by a caption. */
+.stage-wait {
+  margin: -6px 0 12px;
+  font: 11px/1.45 var(--mono);
+  color: var(--dimmer);
+}
+
+/* Where the sequence stops and the records begin. */
+.divider {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin: 14px 0 -2px;
+  font: 600 10px/1 var(--mono);
+  letter-spacing: 0.18em;
+  text-transform: uppercase;
+  color: var(--dimmer);
+}
+.divider::before,
+.divider::after {
+  content: '';
+  height: 1px;
+  background: var(--rule);
+}
+.divider::before {
+  width: 46px;
+  flex: none;
+}
+.divider::after {
+  flex: 1;
 }
 
 /* ── guide ───────────────────────────────────────────────────────────────── */
@@ -480,11 +708,22 @@ td input[type='number'] {
   margin-top: 12px;
 }
 .notice h3 {
+  display: flex;
+  align-items: center;
+  gap: 7px;
   margin: 0 0 6px;
   font: 600 11px/1 var(--mono);
   letter-spacing: 0.12em;
   text-transform: uppercase;
   color: var(--dim);
+}
+/* The one warning an operator is meant to read at the moment of pressing, not
+   on the way past. It is already vermilion and already first; the mark is there
+   so it is found by the eye before the words are read. */
+.notice h3 svg {
+  flex: none;
+  width: 14px;
+  height: 14px;
 }
 .notice ul {
   margin: 0;
@@ -715,11 +954,54 @@ pre {
     display: block;
     overflow-x: auto;
   }
+
+  /* The spine narrows but never goes away: it is the thing that says these
+     panels are one procedure, and a phone is exactly where a stack of cards
+     stops looking like an order. */
+  .stage {
+    padding-left: 48px;
+  }
+  .stage-mark {
+    left: 12px;
+    width: 24px;
+  }
+  .stage-mark .node {
+    width: 24px;
+    height: 24px;
+    font-size: 12px;
+  }
+  .stage-rail {
+    left: 12px;
+    top: 32px;
+  }
+  .stage h2 {
+    min-height: 24px;
+    flex-wrap: wrap;
+  }
+  .chip {
+    order: 0;
+  }
+}
+
+/* A phone. Two text fields side by side at this width are two fields nobody can
+   read, so the launch form goes to one column. */
+@media (max-width: 560px) {
+  .grid,
+  .grid .half {
+    grid-template-columns: 1fr;
+    grid-column: auto;
+  }
+  input[type='number'] {
+    max-width: none;
+  }
 }
 
 @media (prefers-reduced-motion: reduce) {
   * {
     transition: none !important;
+  }
+  html {
+    scroll-behavior: auto;
   }
 }
 
@@ -804,16 +1086,6 @@ pre {
   padding: 0;
   accent-color: var(--vermilion);
   cursor: pointer;
-}
-.sell-list .hint a,
-.sell-results .hint a {
-  color: var(--dim);
-  text-decoration: none;
-}
-.sell-list .hint a:hover,
-.sell-results .hint a:hover {
-  color: var(--amber);
-  text-decoration: underline;
 }
 .sell-results .fill-ok {
   color: var(--jade);
