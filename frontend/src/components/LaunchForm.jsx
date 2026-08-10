@@ -21,10 +21,11 @@ const BLANK = {
   website: '',
   farcaster: '',
   devBuyEth: '0.05',
-  // 100 bps = 1%. A default of zero means every launch that forgets the field
+  // 50 bps = 0.5%. A default of zero means every launch that forgets the field
   // earns the creator nothing, permanently — creatorTaxBps is immutable once
-  // launched. 1% is the smallest amount that is clearly deliberate.
-  creatorTaxBps: '100',
+  // launched. Traders pay this on top of the config's 1% curve fee, so it is
+  // kept light on purpose.
+  creatorTaxBps: '50',
   buybackEnabled: false,
 };
 
