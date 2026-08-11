@@ -4,7 +4,6 @@ import Step from './Step.jsx';
 import { Busy } from './Section.jsx';
 import Modal, { Fact } from './Modal.jsx';
 import BackupControls from './BackupControls.jsx';
-import RecentlyDeleted from './RecentlyDeleted.jsx';
 
 // Balances arrive as decimal strings. Six places everywhere, so the line under
 // the button and the figure in the dialog are the same number.
@@ -200,10 +199,6 @@ export default function DevWalletPanel({ step, wallets, explorer, reload, report
         </div>
       )}
 
-      {/* Only ever the dev wallet's own archive. A deleted bundle wallet is
-          restored from step 3, where the bundle is. */}
-      <RecentlyDeleted role="dev" wallets={wallets} reload={reload} report={report} />
-
       {/* Nothing in this console can put ETH into the dev wallet — every other
           transfer here moves money out of it or back to it. An operator who
           does not know that reaches step 4 with an empty wallet and a failure
@@ -224,12 +219,12 @@ export default function DevWalletPanel({ step, wallets, explorer, reload, report
         </div>
       )}
 
-      {/* Still vermilion, though the key now survives in the archive. What this
+      {/* Still vermilion, though the key survives in the archive. What this
           dialog warns about has not changed: the wallet every other step spends
           out of leaves the console, and whatever ETH is in it is beyond reach
           until somebody deliberately puts it back. "A second click could undo
-          it" is the test for dropping the colour, and a restore from another
-          affordance is not that. Purge is where irreversible moved to. */}
+          it" is the test for dropping the colour, and the way back is now a
+          shell command on the server — the opposite of a second click. */}
       <Modal
         open={Boolean(deleting)}
         danger
@@ -254,12 +249,24 @@ export default function DevWalletPanel({ step, wallets, explorer, reload, report
         {/* Said plainly, because the alternative is a surprise in the wrong
             direction: an operator deleting an exposed key expects it gone, and
             it is not. It is archived — encrypted exactly as the keystore is,
-            under the same passphrase — and purging is what makes it gone. */}
+            under the same passphrase.
+
+            The archive is not on this console and not on the API at all, so
+            this dialog cannot offer the way back; it names it instead. Pointing
+            at an affordance that is not there would be worse than saying
+            nothing. The cap is stated for the same reason the archiving is: the
+            operator is owed the true version of what a delete does, and at 100
+            deletions the oldest key is destroyed to make room for this one. */}
         <p>
           The key is <b>archived, not destroyed</b>. This wallet leaves the keystore and its key
-          moves to an archive beside it, encrypted the same way under the same passphrase, where it
-          appears under <b>Recently deleted</b> in this step. It stays there until you restore it or
-          purge it — and purging is the one action that erases a key for good.
+          moves to an archive beside it, encrypted the same way under the same passphrase. Nothing
+          in this console can reach it: restoring is{' '}
+          <code>npm run archive:restore</code> on the server, and{' '}
+          <code>npm run archive:purge</code> there is what erases a key for good.
+        </p>
+        <p className="hint">
+          The archive keeps the last 100 deletions per user. Past that, each delete destroys the
+          oldest archived key — the activity log records it by address.
         </p>
 
         {/* The balance is the part that is not merely inconvenient, and on this
@@ -276,8 +283,8 @@ export default function DevWalletPanel({ step, wallets, explorer, reload, report
               <li>
                 <b className="crux">{eth(deleting?.balanceEth)} ETH</b> becomes{' '}
                 <b className="crux">unspendable</b> the moment this wallet is archived, and stays
-                that way until it is restored. Purging the archived key afterwards burns it
-                permanently.
+                that way until it is restored from the server. Purging the archived key there
+                burns it permanently.
               </li>
               <li>
                 Sweep does not rescue it: it moves funds INTO this wallet, not out. Cancel, send the

@@ -12,6 +12,9 @@
     "user:add": "node scripts/user.js add",
     "user:list": "node scripts/user.js list",
     "user:remove": "node scripts/user.js remove",
+    "archive:list": "node scripts/archive.js list",
+    "archive:restore": "node scripts/archive.js restore",
+    "archive:purge": "node scripts/archive.js purge",
     "v2:watch": "node scripts/v2-watch.js",
     "deploy": "node scripts/deploy-contract.js"
   },

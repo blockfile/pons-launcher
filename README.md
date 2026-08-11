@@ -231,6 +231,29 @@ their key (see `deploy/nginx-rhbond.conf`) and nobody has to type one.
 There is no admin: no account can read another's wallets or keys. Recovery of a
 lost key means shell access to the server, not a support request.
 
+## Recovering a deleted wallet
+
+Deleting a wallet in the console does not destroy its key — it moves it to an
+archive beside the keystore, encrypted identically (see **Security** below).
+The archive is reachable **from the server only**. There is no route and no
+console control for it, because it is the recovery path for the wallets an
+attacker holding the API key could delete:
+
+    npm run archive:list                          # addresses, labels, roles, dates
+    npm run archive:list -- --user alice
+    npm run archive:restore -- <id>               # back into the live keystore
+    npm run archive:purge -- <id> --confirm       # destroys the key, for good
+
+`<id>` comes from `archive:list`. Add `--user <name>` to any of them once
+`user:add` has been run; without it they read the `default` archive, and after
+`user:add --adopt` that one is empty — the commands say whose to ask for.
+`KEYSTORE_PASSPHRASE` must be set, as for every other keystore consumer.
+
+`restore` enforces the same refusals the console's import does: an address
+already in the keystore, a second dev wallet, and an archived key that no longer
+derives its own address. **No command here prints key material** — restore the
+wallet first, then export it from the console.
+
 ## API
 
 ```
@@ -241,9 +264,6 @@ GET    /api/wallets             addresses, roles, balances (never keys)
 POST   /api/wallets/generate    { count, label, role }
 POST   /api/wallets/import      { privateKeys[], label, role }
 DELETE /api/wallets/:id         archives the wallet — does NOT destroy the key
-GET    /api/wallets/archive     what was deleted: addresses and dates, never keys
-POST   /api/wallets/archive/:id/restore
-DELETE /api/wallets/archive/:id { confirm: true } — destroys the key for good
 POST   /api/wallets/export      { id, confirm: true } — logged
 POST   /api/wallets/backup      { confirm: true } — every key at once, logged
 POST   /api/fund                { targets: [{ walletId, amountEth }] }
@@ -254,7 +274,9 @@ GET    /api/launches            history
 ```
 
 Signed transactions never leave the server — a raw signed buy could be
-broadcast by anyone holding it.
+broadcast by anyone holding it. There is deliberately no route for the archive
+of deleted wallets: listing, restoring and purging it are `npm run archive:*` on
+the server, so an API key cannot undo, read or finalise a delete.
 
 ## Security
 
@@ -265,8 +287,16 @@ The box is internet-reachable, so treat it that way:
 - Deleting a wallet moves it to `data/wallets.archive[.<user>].keystore.json`,
   encrypted identically under the same passphrase, so a mis-click is
   recoverable. **That file holds real private keys** — back it up and guard it
-  exactly as you do the keystore. `DELETE /api/wallets/archive/:id` is what
-  actually destroys a key
+  exactly as you do the keystore
+- The archive is **server-side only**: no HTTP route lists, restores or purges
+  it, and the console has no control for it. `npm run archive:purge` is what
+  actually destroys a key. A stolen API key can delete a wallet; it cannot read
+  what was deleted, put a revoked key back, or make a delete permanent
+- The archive **keeps 100 wallets per user, newest first, and evicts**. Past
+  that, each delete destroys the oldest archived key — really destroys it, the
+  same as a purge, without anyone asking. Every eviction is written to that
+  user's activity log by address (and to the server log); that line is all that
+  is left of the key. `npm run archive:list` says how close to full it is
 - `API_KEY` on every mutating route; the app binds `127.0.0.1`
 - `deploy/nginx.conf` adds TLS + basic auth and is the only way in
 - `DRY_RUN=false` refuses to start without `KEYSTORE_PASSPHRASE` and `API_KEY`

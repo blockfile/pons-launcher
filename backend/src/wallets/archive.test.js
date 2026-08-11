@@ -7,6 +7,12 @@
 // because these tests are about one property the rest of the suite does not
 // cover: that a deleted key is still there, still encrypted, and still only
 // this user's.
+//
+// And, at the bottom, the one place where that stops being true: the archive is
+// capped, so past MAX_ARCHIVED a delete DESTROYS an older key. Those tests are
+// here rather than beside a route because the destruction happens in the
+// keystore and the routes cannot see it — routes/wallets.archive.test.js covers
+// the log line the operator is left with.
 
 const test = require('node:test');
 const assert = require('node:assert');
@@ -229,6 +235,108 @@ test('archived key material is encrypted at rest exactly as the live keystore is
   // And it round-trips: encrypted at rest, readable by this process.
   assert.equal(ks.restore(w.id).address, w.address);
   assert.equal(ks.exportKey(w.id).privateKey, privateKey);
+});
+
+// ── the cap ────────────────────────────────────────────────────────────────
+// Everything above is about a key surviving a delete. These are about the case
+// where it does not: the archive holds MAX_ARCHIVED wallets, and the delete
+// that overflows it destroys the oldest key outright. That is the operator's
+// decision and it is irreversible, so what is asserted here is not only that
+// the number is right but that the destruction is REPORTED — the return value
+// and the server log are the only things standing between an evicted key and no
+// record of it ever existing.
+
+/** Deterministic, distinct, valid secp256k1 keys — 1, 2, 3… as 32 bytes. */
+const keyFor = (n) => `0x${BigInt(n).toString(16).padStart(64, '0')}`;
+
+test('the archive is capped at 100, and the 101st delete evicts the oldest', () => {
+  const ks = keystore.keystoreFor('capped');
+  assert.equal(keystore.MAX_ARCHIVED, 100);
+
+  const made = ks.importKeys(
+    Array.from({ length: 101 }, (_, i) => keyFor(i + 1)),
+    { role: 'bundle' }
+  );
+
+  // The first hundred fill it exactly, and filling it destroys nothing.
+  for (const w of made.slice(0, 100)) assert.deepEqual(ks.remove(w.id).evicted, []);
+  assert.equal(ks.archived().length, 100);
+
+  const oldest = made[0];
+  const warned = [];
+  const realWarn = console.warn;
+  console.warn = (...a) => warned.push(a.join(' '));
+  let out;
+  try {
+    out = ks.remove(made[100].id);
+  } finally {
+    console.warn = realWarn;
+  }
+
+  // One key destroyed, and it is the one deleted first.
+  assert.equal(out.evicted.length, 1);
+  assert.equal(out.evicted[0].id, oldest.id);
+  assert.equal(out.evicted[0].address, oldest.address);
+  assert.match(out.evicted[0].deletedAt, /^\d{4}-\d\d-\d\dT/);
+  // The report is metadata, like every other view out of this module. An
+  // eviction is not an excuse to hand a key to a caller that never asked.
+  assert.equal(Object.keys(out.evicted[0]).length, 6);
+  assert.equal(out.evicted[0].privateKey, undefined);
+  assert.equal(out.evicted[0].ciphertext, undefined);
+
+  // Never silent. This warning is written at the point of destruction, so it
+  // happens whatever the caller does with the return value.
+  assert.equal(warned.filter((m) => m.includes('ARCHIVED KEY EVICTED')).length, 1);
+  assert.ok(warned.some((m) => m.includes(oldest.address)));
+
+  // Exactly a hundred kept — not 99, not 101.
+  const left = ks.archived();
+  assert.equal(left.length, 100);
+
+  // And the eviction is a real destruction, the same as purge: gone from the
+  // list, unrestorable, and absent from the file on disk.
+  assert.ok(!left.some((e) => e.id === oldest.id));
+  assert.throws(() => ks.restore(oldest.id), /no archived wallet/);
+  const raw = fs.readFileSync(archiveFile('capped'), 'utf8');
+  assert.ok(!raw.includes(oldest.address), 'an evicted wallet leaves no trace in the archive file');
+
+  // The survivors are the last hundred deleted, newest first.
+  assert.deepEqual(
+    left.map((e) => e.address),
+    made.slice(1).map((w) => w.address).reverse()
+  );
+});
+
+test('eviction takes the oldest deletedAt, not merely the last line in the file', () => {
+  const ks = keystore.keystoreFor('shuffled');
+
+  // One real delete, to get a well-formed encrypted record to copy. Nothing
+  // here ever decrypts an evicted entry — the ordering is the whole subject —
+  // so the fillers share its envelope and differ in the fields that decide.
+  const [seed] = ks.importKeys([keyFor(7)], { role: 'bundle' });
+  ks.remove(seed.id);
+  const [record] = readArchive('shuffled').wallets;
+
+  // A full archive whose FILE ORDER is deliberately wrong: the oldest delete
+  // sits in the middle, where trusting the array's tail would miss it.
+  const oldestId = 'filler-50';
+  const store = readArchive('shuffled');
+  store.wallets = Array.from({ length: keystore.MAX_ARCHIVED }, (_, i) => ({
+    ...record,
+    id: `filler-${i}`,
+    address: `0x${String(i).padStart(40, '0')}`,
+    deletedAt: `2026-0${i === 50 ? '1' : '2'}-01T00:00:${String(i % 60).padStart(2, '0')}.000Z`,
+  }));
+  fs.writeFileSync(archiveFile('shuffled'), JSON.stringify(store, null, 2));
+  ks._reset();
+
+  const [extra] = ks.importKeys([keyFor(8)], { role: 'bundle' });
+  const out = ks.remove(extra.id);
+
+  assert.equal(out.evicted.length, 1);
+  assert.equal(out.evicted[0].id, oldestId, 'the oldest deletedAt is what goes');
+  assert.equal(ks.archived().length, keystore.MAX_ARCHIVED);
+  assert.ok(!ks.archived().some((e) => e.id === oldestId));
 });
 
 // Last: this reloads the module graph under a different passphrase, which every

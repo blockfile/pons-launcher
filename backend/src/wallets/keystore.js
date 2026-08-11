@@ -17,6 +17,12 @@
 // other rather than dropping it, so a mis-click is recoverable — see the
 // header on `remove` below for why the archive is a second encrypted store and
 // not an automatic export to disk.
+//
+// The archive is reachable from the SERVER ONLY. No HTTP route lists, restores
+// or purges it; `npm run archive:*` (backend/scripts/archive.js) is the whole
+// of the way in, because the archive is the recovery path for the compromise
+// that would otherwise reach it. It holds MAX_ARCHIVED wallets and no more —
+// read that constant before changing it, the cap destroys keys.
 
 const crypto = require('crypto');
 const fs = require('fs');
@@ -27,6 +33,27 @@ const history = require('../store/history');
 
 const SCRYPT = { N: 16384, r: 8, p: 1, keylen: 32 };
 const VERSION = 1;
+
+/**
+ * How many deleted wallets the archive keeps per user, newest first.
+ *
+ * THIS CAP DESTROYS PRIVATE KEYS, and that is the whole of what is being traded
+ * away. The archive shipped uncapped on purpose: evicting the oldest entry is
+ * not housekeeping, it is the irreversible destruction of a key — the same act
+ * as purge(), without an operator asking for it — and it destroys exactly the
+ * thing the archive exists to protect. An evicted wallet is recoverable only
+ * from a backup already downloaded. The operator has weighed that against an
+ * archive that grows without bound and chosen the cap; this is that decision,
+ * not an oversight.
+ *
+ * What keeps it from being invisible is the eviction record. remove() returns
+ * every entry it dropped and warns to the server log at the point of
+ * destruction, and its callers write each evicted address into the user's
+ * activity log (see the DELETE route in routes/wallets.js). That line may be the
+ * only remaining evidence the key ever existed, so an eviction is never allowed
+ * to pass silently.
+ */
+const MAX_ARCHIVED = 100;
 
 const DEFAULT_ID = 'default';
 const instances = new Map();
@@ -259,6 +286,11 @@ function build(userId) {
    * key exists in both files, which is a duplicate; the other order loses it.
    * An archived entry for the same address is replaced rather than stacked, so
    * delete → restore → delete leaves one entry, not a pile.
+   *
+   * The archive holds MAX_ARCHIVED wallets and no more, so a delete can destroy
+   * an older key to make room for this one. Every evicted entry comes back in
+   * `evicted` — the caller MUST record it; read the comment on MAX_ARCHIVED
+   * before treating that as optional.
    */
   function remove(id) {
     const store = load();
@@ -280,11 +312,32 @@ function build(userId) {
       // the length of this expression, inside the one module allowed to hold it.
       ...bin.encrypt(decrypt(record)),
     });
+
+    // Oldest-first eviction, by deletedAt rather than by position: the cap
+    // decides which keys stop existing, so "the oldest" has to mean the oldest
+    // DELETE and not merely whatever ended up last in the file. The sort is
+    // stable, so entries sharing a timestamp — 101 deletes in the same
+    // millisecond is a scripted cleanup, not a hypothetical — keep insertion
+    // order, and the wallet just archived stays at the front of its own second.
+    archive.wallets.sort((a, b) =>
+      String(b.deletedAt || '').localeCompare(String(a.deletedAt || ''))
+    );
+    const evicted = archive.wallets.slice(MAX_ARCHIVED).map(archiveView);
+    archive.wallets = archive.wallets.slice(0, MAX_ARCHIVED);
+    // Said on the server log at the moment of destruction, independently of
+    // whether the caller remembers to record it: this is a key ceasing to
+    // exist, and it must leave a trace even on a path that forgets.
+    for (const gone of evicted) {
+      console.warn(
+        `[pons-launcher] ARCHIVED KEY EVICTED — ${gone.address} dropped from a full archive ` +
+          `(${MAX_ARCHIVED} max), deleted ${gone.deletedAt}; its private key is destroyed`
+      );
+    }
     bin.persist();
 
     store.wallets = store.wallets.filter((w) => w.id !== id);
     persist();
-    return { removed: id, archived: true, address: record.address };
+    return { removed: id, archived: true, address: record.address, evicted };
   }
 
   /** What has been deleted, newest first. Addresses and dates — never keys. */
@@ -474,6 +527,7 @@ module.exports = {
   keystoreFor,
   adoptLegacy,
   archivePathFor,
+  MAX_ARCHIVED,
   // Bound to the default user so every existing caller keeps working.
   list: (...a) => def().list(...a),
   generate: (...a) => def().generate(...a),

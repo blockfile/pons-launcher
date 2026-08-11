@@ -64,70 +64,49 @@ router.post('/wallets/import', requireApiKey, (req, res, next) => {
   }
 });
 
-// ── the archive ───────────────────────────────────────────────────────────
+// ── the archive is not on this API ────────────────────────────────────────
 // A delete moves the wallet into an archive encrypted exactly as the live
-// keystore is, rather than dropping the key (see keystore.remove). These three
-// routes are the whole of what that buys: see what was deleted, put one back,
-// and — because deleting must still be able to mean destroying — end one for
-// good. Every id is resolved through THE CALLER'S OWN archive, so a guessed id
-// belonging to another user is simply not there.
-
-// GET /api/wallets/archive — what this user has deleted. Addresses and dates
-// only. This route must never learn how to return key material: the archive
-// holds private keys, and /wallets/export is the one door they leave by.
-router.get('/wallets/archive', (req, res, next) => {
-  try {
-    res.json(keystoreFor(req.user.id).archived());
-  } catch (err) {
-    next(err);
-  }
-});
-
-// POST /api/wallets/archive/:id/restore — put a deleted wallet back.
-router.post('/wallets/archive/:id/restore', requireApiKey, (req, res, next) => {
-  try {
-    const back = keystoreFor(req.user.id).restore(req.params.id);
-    activityFor(req.user.id).record('wallets', `restored wallet ${back.address} from the archive`, {
-      address: back.address,
-      role: back.role,
-    });
-    res.json(back);
-  } catch (err) {
-    next(err);
-  }
-});
-
-// DELETE /api/wallets/archive/:id — destroy an archived key for good. The only
-// irreversible wallet route left, so it takes the same explicit confirm a key
-// export takes, on top of the API key.
-router.delete('/wallets/archive/:id', requireApiKey, (req, res, next) => {
-  try {
-    if ((req.body || {}).confirm !== true) {
-      throw new Error('purging destroys the key permanently — requires { confirm: true }');
-    }
-    const out = keystoreFor(req.user.id).purge(req.params.id);
-    console.warn(`[pons-launcher] ARCHIVED KEY PURGED for wallet ${out.address}`);
-    activityFor(req.user.id).record('wallets', `purged wallet ${out.address} — its key is destroyed`, {
-      address: out.address,
-    });
-    res.json(out);
-  } catch (err) {
-    next(err);
-  }
-});
+// keystore is, rather than dropping the key (see keystore.remove). Reading that
+// archive, restoring from it and purging it are SERVER-SIDE ONLY — three
+// `npm run archive:*` commands in backend/scripts/archive.js — and there are
+// deliberately no routes here for them.
+//
+// The archive is the recovery path for a wallet compromise, so it must not be
+// reachable by the credential a compromise is most likely to yield. Whoever
+// holds the API key can already delete wallets; they must not also be able to
+// list what was deleted, put a revoked key back into the live keystore, or
+// destroy the copies that make the deletes survivable. That last one is the
+// point: an attacker who could purge could make a mistaken or malicious delete
+// permanent, and the archive would have bought nothing.
+//
+// Deleting a wallet is still an archive write, and stays on this API — it is
+// what the console's delete does.
 
 // DELETE /api/wallets/:id — remove from the live keystore. The key is not
-// destroyed: it moves to the archive above, and the console says so in the
-// dialog. DELETE /api/wallets/archive/:id is what destroys it.
+// destroyed: it moves to the archive, and the console's dialog says so.
+// `npm run archive:restore` on the server is the way back, and
+// `npm run archive:purge` is what destroys it.
 router.delete('/wallets/:id', requireApiKey, (req, res, next) => {
   try {
     const ks = keystoreFor(req.user.id);
     const out = ks.remove(req.params.id);
     activityFor(req.user.id).record(
       'wallets',
-      `archived wallet ${out.address} — recoverable until purged`,
+      `archived wallet ${out.address} — recoverable from the server until purged`,
       { address: out.address }
     );
+    // The archive is capped, so this delete may have destroyed an OLDER key to
+    // make room — an irreversible loss nobody asked for, on a request that was
+    // about a different wallet. One line per evicted address, because that line
+    // is very likely the only remaining trace the key ever existed. Never fold
+    // these into a count: an address is what an operator can act on.
+    for (const gone of out.evicted || []) {
+      activityFor(req.user.id).record(
+        'wallets',
+        `evicted wallet ${gone.address} from a full archive — its key is destroyed`,
+        { address: gone.address, deletedAt: gone.deletedAt, reason: 'archive full' }
+      );
+    }
     res.json(out);
   } catch (err) {
     next(err);

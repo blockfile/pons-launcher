@@ -5,7 +5,6 @@ import { Busy } from './Section.jsx';
 import Modal, { Fact } from './Modal.jsx';
 import Share, { pct, tokens } from './Share.jsx';
 import BackupControls from './BackupControls.jsx';
-import RecentlyDeleted from './RecentlyDeleted.jsx';
 
 // Balances arrive as decimal strings. Six places everywhere, so the column and
 // the dialog show the same number.
@@ -527,8 +526,8 @@ export default function WalletsPanel({ step, wallets, rows, setRow, share, reloa
           <ul>
             {outcome.every((r) => r.ok) && (
               <li>
-                Out of the keystore, and their keys are in the archive — see <b>Recently deleted</b>{' '}
-                below if any of that was a mistake.
+                Out of the keystore, and their keys are in the archive on the server — if any of
+                that was a mistake, <code>npm run archive:restore</code> there is the way back.
               </li>
             )}
             {outcome
@@ -542,16 +541,13 @@ export default function WalletsPanel({ step, wallets, rows, setRow, share, reloa
         </div>
       )}
 
-      {/* Only ever the bundle's own archive. A deleted dev wallet is restored
-          from step 1, where the dev wallet is. */}
-      <RecentlyDeleted role="bundle" wallets={wallets} reload={reload} report={report} />
-
-      {/* Still vermilion, though the keys now survive in the archive. What this
+      {/* Still vermilion, though the keys survive in the archive. What this
           dialog warns about has not changed: funded wallets go out of reach of
           everything in this console until somebody deliberately puts them back,
           and twelve of them go at once. "A second click could undo it" is the
-          test for dropping the colour, and a restore from another affordance is
-          not that. One dialog for one wallet and for twelve. */}
+          test for dropping the colour, and the way back is now a shell command
+          on the server — the opposite of a second click. One dialog for one
+          wallet and for twelve. */}
       <Modal
         open={pending.length > 0}
         danger
@@ -588,15 +584,25 @@ export default function WalletsPanel({ step, wallets, rows, setRow, share, reloa
         {/* Said plainly, because the alternative is a surprise in the wrong
             direction: an operator deleting an exposed key expects it gone, and
             it is not. It is archived — encrypted exactly as the keystore is,
-            under the same passphrase — and purging is what makes it gone. */}
+            under the same passphrase.
+
+            The archive is not on this console and not on the API at all, so
+            this dialog cannot offer the way back; it names it instead. Pointing
+            at an affordance that is not there would be worse than saying
+            nothing. The cap is stated for the same reason the archiving is: the
+            operator is owed the true version of what a delete does, and at 100
+            deletions the oldest key is destroyed to make room. */}
         <p>
           {one ? 'The key is' : 'The keys are'} <b>archived, not destroyed</b>.{' '}
           {one ? 'This wallet leaves' : 'These wallets leave'} the keystore and{' '}
           {one ? 'its key moves' : 'their keys move'} to an archive beside it, encrypted the same
-          way under the same passphrase, where {one ? 'it appears' : 'they appear'} under{' '}
-          <b>Recently deleted</b> in {one?.role === 'dev' ? 'step 1' : 'this step'}.{' '}
-          {one ? 'It stays' : 'They stay'} there until you restore or purge{' '}
-          {one ? 'it' : 'them'} — and purging is the one action that erases a key for good.
+          way under the same passphrase. Nothing in this console can reach{' '}
+          {one ? 'it' : 'them'}: restoring is <code>npm run archive:restore</code> on the server,
+          and <code>npm run archive:purge</code> there is what erases a key for good.
+        </p>
+        <p className="hint">
+          The archive keeps the last 100 deletions per user. Past that, each delete destroys the
+          oldest archived key — the activity log records it by address.
         </p>
 
         {/* The balance is the part that is not merely inconvenient. An archived
@@ -624,8 +630,8 @@ export default function WalletsPanel({ step, wallets, rows, setRow, share, reloa
                 <b className="crux">{eth(pendingEth)} ETH</b> becomes{' '}
                 <b className="crux">unspendable</b> the moment{' '}
                 {one ? 'this wallet is' : 'these wallets are'} archived, and stays that way until{' '}
-                {one ? 'it is' : 'they are'} restored. Purging the archived{' '}
-                {one ? 'key' : 'keys'} afterwards burns it permanently.
+                {one ? 'it is' : 'they are'} restored from the server. Purging the archived{' '}
+                {one ? 'key' : 'keys'} there burns it permanently.
                 {one?.role !== 'dev' && ' Deleting does not return it to the dev wallet.'}
               </li>
               {/* Sweep pulls funds INTO the dev wallet, so it is no answer for

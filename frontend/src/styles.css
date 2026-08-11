@@ -605,7 +605,13 @@ button:disabled {
   color: var(--dim);
   max-width: 78ch;
 }
-.guide code {
+/* A command or a literal, wherever one is named. The delete dialogs name the
+   two `npm run archive:*` commands — the archive is server-side only, so a
+   dialog can point at a shell command or at nothing at all — and a command an
+   operator is expected to type has to look typeable rather than like prose. */
+.guide code,
+.modal code,
+.notice code {
   font: 12px var(--mono);
   color: var(--ink);
   background: var(--panel-2);
@@ -735,34 +741,11 @@ td input[type='number'] {
   font: 12px var(--mono);
 }
 
-/* ── the archive: what a delete leaves behind ────────────────────────────── */
-
-/* Deleted wallets are not destroyed — the key moves to an encrypted archive
-   beside the keystore — and this is the way back to them. Deliberately small:
-   it is a way out of a mis-click, not a station of the sequence, so it is a
-   link and a count rather than a panel, and it is not drawn at all until there
-   is something in it. No colour: an archive is neither ready, dangerous, nor
-   confirmed. The vermilion is in the purge dialog, where the key actually dies. */
-.archive {
-  display: flex;
-  align-items: center;
-  gap: 10px;
-  flex-wrap: wrap;
-  margin-top: 14px;
-}
-.archive-list {
-  flex-basis: 100%;
-  margin-top: 2px;
-}
-/* Dates sit at hint weight — they are what you check, not what you act on —
-   and must not wrap a timestamp onto two lines beside a one-line address. */
-.archive-list td.hint {
-  white-space: nowrap;
-}
-.archive-list td:last-child {
-  width: 1%;
-  white-space: nowrap;
-}
+/* The archive of deleted wallets had a panel here — a link, a count and a table
+   with Restore and purge on each row. It is gone with the routes behind it: the
+   archive is reachable from the server only (npm run archive:*), so there is
+   nothing left in this console to style. The delete dialogs still say a key is
+   archived rather than destroyed; they name the command instead of a control. */
 
 /* ── notices: warnings must be unmissable ────────────────────────────────── */
 
