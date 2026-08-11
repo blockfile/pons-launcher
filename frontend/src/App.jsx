@@ -104,17 +104,16 @@ export default function App() {
   // Strings stay strings so errors read as errors; everything else is a payload
   // for ResultPanel to lay out.
   //
-  // Reporting and revealing are two different things. ResultPanel scrolls
-  // itself into view when this counter moves, so a panel whose answer is
-  // already on screen where the operator is standing can record the outcome
-  // without dragging the page down to it — deleting wallets one after another
-  // threw the page to the Result panel on every click. Revealing stays the
-  // default: for a fund or a launch, the answer is a screen and a half below
-  // the button that asked for it.
-  const [reveal, setReveal] = useState(0);
-  const report = (v, { reveal: bring = true } = {}) => {
+  // Nothing here moves the viewport. Reporting used to reveal as well — the
+  // readout scrolled itself into view on every answer — and being thrown to the
+  // bottom of the page mid-step is worse than having to look for the answer,
+  // most of all during a launch. So the only thing carried alongside the payload
+  // is WHEN it arrived: the readout puts it in the chip on its own header, which
+  // is how a still panel says it has something new without moving anything.
+  const [reportedAt, setReportedAt] = useState('');
+  const report = (v) => {
     setOutput(v);
-    if (bring) setReveal((n) => n + 1);
+    setReportedAt(new Date().toLocaleTimeString());
   };
 
   const loadWallets = useCallback(async () => setWallets(await api('/wallets')), []);
@@ -420,11 +419,20 @@ export default function App() {
               decide to sell. Unnumbered — it is a readout, not a seventh step —
               and never jade, because what lands here is as often a revert as a
               confirmation. The spine passing through it is the launch's, so it
-              takes its fill from step 5 rather than from its own contents. */}
+              takes its fill from step 5 rather than from its own contents.
+
+              The chip is the whole of the notification: grey, still, and only
+              there once an action has actually answered. It replaces a panel
+              that used to come and find the operator. */}
           <ResultPanel
-            step={{ id: 'readout', title: 'Result', state: 'readout', railDone: steps[4].state === 'done' }}
+            step={{
+              id: 'readout',
+              title: 'Result',
+              state: 'readout',
+              chip: reportedAt ? `updated ${reportedAt}` : null,
+              railDone: steps[4].state === 'done',
+            }}
             output={output}
-            reveal={reveal}
           />
           <SellPanel
             step={{ ...step(6), last: true }}

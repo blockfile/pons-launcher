@@ -130,21 +130,18 @@ export default function WalletsPanel({ step, wallets, rows, setRow, share, reloa
     setOutcome(results);
 
     const failed = results.filter((r) => !r.ok);
-    // Recorded, but without pulling the page down to the Result panel: the
-    // operator deletes several in a row and the table is where the next click
-    // is. The same counts are under the table, so nothing is hidden by this.
-    report(
-      {
-        deleted: results.length - failed.length,
-        failed: failed.length,
-        wallets: results.map((r) => ({
-          address: r.address,
-          status: r.ok ? 'deleted' : 'failed',
-          ...(r.error ? { error: r.error } : {}),
-        })),
-      },
-      { reveal: false }
-    );
+    // Recorded in the readout like everything else. Nothing pulls the page down
+    // to it — the operator deletes several in a row and the table is where the
+    // next click is — and the same counts are drawn under this table anyway.
+    report({
+      deleted: results.length - failed.length,
+      failed: failed.length,
+      wallets: results.map((r) => ({
+        address: r.address,
+        status: r.ok ? 'deleted' : 'failed',
+        ...(r.error ? { error: r.error } : {}),
+      })),
+    });
 
     // The deletes have already happened and are already reported; a refresh
     // that fails must not leave the panel stuck on "working…".

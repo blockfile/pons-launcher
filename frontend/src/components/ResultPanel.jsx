@@ -1,4 +1,3 @@
-import { useEffect, useRef } from 'react';
 import Step from './Step.jsx';
 import { pct } from './Share.jsx';
 
@@ -11,7 +10,16 @@ import { pct } from './Share.jsx';
 // order of work — you launch, you read this, and only later do you decide to
 // exit. But it carries an unnumbered node: it is the console's answer, not a
 // step, and a number here would make the sequence read as seven things.
-export default function ResultPanel({ step, output, reveal = 0 }) {
+//
+// This panel does not move the viewport, and nothing in the console asks it to.
+// It used to scroll itself into view whenever a result landed, on the reasoning
+// that an answer a screen and a half below its button reads as "nothing
+// happened". The cost was worse than the problem: the operator is mid-step, and
+// the page throws them to the bottom — during a launch, a moving viewport is
+// more dangerous than a still one. The answer stays where it is and says WHEN it
+// arrived instead, in the chip on its own header; the panel is permanently in
+// the run, on the same spine as the six steps, so there is nothing to find.
+export default function ResultPanel({ step, output }) {
   const plan = output && typeof output === 'object' ? output : null;
   const inner = plan?.plan || plan; // /launch nests the plan; /preflight does not
   const result = plan?.result;
@@ -25,31 +33,7 @@ export default function ResultPanel({ step, output, reveal = 0 }) {
   // successful action look like nothing had happened at all.
   const summarised = Boolean(result || inner?.token);
 
-  // Every button that does something is far above this panel — a fund click at
-  // the top of the page put its answer a screen and a half below the fold, so
-  // a real error read as "nothing happened". Bring the answer to the operator.
-  //
-  // Keyed on `reveal`, NOT on `output`. This panel sits at the bottom of a long
-  // page, so scrolling to it moves the operator away from whatever they were
-  // doing; that is right for a launch and wrong for a delete, where the answer
-  // is the row that just disappeared and the next click is in the same table.
-  // A caller that wants the outcome recorded but not chased passes
-  // report(x, { reveal: false }) and this effect never runs.
-  const box = useRef(null);
-  const firstRender = useRef(true);
-  useEffect(() => {
-    if (firstRender.current) {
-      firstRender.current = false;
-      return;
-    }
-    box.current?.scrollIntoView({
-      behavior: window.matchMedia('(prefers-reduced-motion: reduce)').matches ? 'auto' : 'smooth',
-      block: 'nearest',
-    });
-  }, [reveal]);
-
   return (
-    <div ref={box}>
     <Step {...step}>
       {!plan && <pre>{String(output ?? '')}</pre>}
 
@@ -152,6 +136,5 @@ export default function ResultPanel({ step, output, reveal = 0 }) {
         </>
       )}
     </Step>
-    </div>
   );
 }
