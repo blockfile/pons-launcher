@@ -64,14 +64,70 @@ router.post('/wallets/import', requireApiKey, (req, res, next) => {
   }
 });
 
+// ── the archive ───────────────────────────────────────────────────────────
+// A delete moves the wallet into an archive encrypted exactly as the live
+// keystore is, rather than dropping the key (see keystore.remove). These three
+// routes are the whole of what that buys: see what was deleted, put one back,
+// and — because deleting must still be able to mean destroying — end one for
+// good. Every id is resolved through THE CALLER'S OWN archive, so a guessed id
+// belonging to another user is simply not there.
+
+// GET /api/wallets/archive — what this user has deleted. Addresses and dates
+// only. This route must never learn how to return key material: the archive
+// holds private keys, and /wallets/export is the one door they leave by.
+router.get('/wallets/archive', (req, res, next) => {
+  try {
+    res.json(keystoreFor(req.user.id).archived());
+  } catch (err) {
+    next(err);
+  }
+});
+
+// POST /api/wallets/archive/:id/restore — put a deleted wallet back.
+router.post('/wallets/archive/:id/restore', requireApiKey, (req, res, next) => {
+  try {
+    const back = keystoreFor(req.user.id).restore(req.params.id);
+    activityFor(req.user.id).record('wallets', `restored wallet ${back.address} from the archive`, {
+      address: back.address,
+      role: back.role,
+    });
+    res.json(back);
+  } catch (err) {
+    next(err);
+  }
+});
+
+// DELETE /api/wallets/archive/:id — destroy an archived key for good. The only
+// irreversible wallet route left, so it takes the same explicit confirm a key
+// export takes, on top of the API key.
+router.delete('/wallets/archive/:id', requireApiKey, (req, res, next) => {
+  try {
+    if ((req.body || {}).confirm !== true) {
+      throw new Error('purging destroys the key permanently — requires { confirm: true }');
+    }
+    const out = keystoreFor(req.user.id).purge(req.params.id);
+    console.warn(`[pons-launcher] ARCHIVED KEY PURGED for wallet ${out.address}`);
+    activityFor(req.user.id).record('wallets', `purged wallet ${out.address} — its key is destroyed`, {
+      address: out.address,
+    });
+    res.json(out);
+  } catch (err) {
+    next(err);
+  }
+});
+
+// DELETE /api/wallets/:id — remove from the live keystore. The key is not
+// destroyed: it moves to the archive above, and the console says so in the
+// dialog. DELETE /api/wallets/archive/:id is what destroys it.
 router.delete('/wallets/:id', requireApiKey, (req, res, next) => {
   try {
     const ks = keystoreFor(req.user.id);
-    const gone = ks.list().find((w) => w.id === req.params.id);
     const out = ks.remove(req.params.id);
-    activityFor(req.user.id).record('wallets', `removed wallet ${gone?.address || req.params.id}`, {
-      address: gone?.address || null,
-    });
+    activityFor(req.user.id).record(
+      'wallets',
+      `archived wallet ${out.address} — recoverable until purged`,
+      { address: out.address }
+    );
     res.json(out);
   } catch (err) {
     next(err);

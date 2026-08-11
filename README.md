@@ -240,8 +240,12 @@ POST   /api/logo                raw PNG/JPEG/WebP body → pins to IPFS, returns
 GET    /api/wallets             addresses, roles, balances (never keys)
 POST   /api/wallets/generate    { count, label, role }
 POST   /api/wallets/import      { privateKeys[], label, role }
-DELETE /api/wallets/:id
+DELETE /api/wallets/:id         archives the wallet — does NOT destroy the key
+GET    /api/wallets/archive     what was deleted: addresses and dates, never keys
+POST   /api/wallets/archive/:id/restore
+DELETE /api/wallets/archive/:id { confirm: true } — destroys the key for good
 POST   /api/wallets/export      { id, confirm: true } — logged
+POST   /api/wallets/backup      { confirm: true } — every key at once, logged
 POST   /api/fund                { targets: [{ walletId, amountEth }] }
 POST   /api/sweep               { includeTokens?, tokenAddress? }
 POST   /api/preflight           signs the bundle, sends nothing
@@ -258,6 +262,11 @@ The box is internet-reachable, so treat it that way:
 
 - Keys are AES-256-GCM encrypted with a scrypt-derived key; the keystore file
   is written `0600` and a wrong passphrase **fails closed**
+- Deleting a wallet moves it to `data/wallets.archive[.<user>].keystore.json`,
+  encrypted identically under the same passphrase, so a mis-click is
+  recoverable. **That file holds real private keys** — back it up and guard it
+  exactly as you do the keystore. `DELETE /api/wallets/archive/:id` is what
+  actually destroys a key
 - `API_KEY` on every mutating route; the app binds `127.0.0.1`
 - `deploy/nginx.conf` adds TLS + basic auth and is the only way in
 - `DRY_RUN=false` refuses to start without `KEYSTORE_PASSPHRASE` and `API_KEY`

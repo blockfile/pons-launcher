@@ -11,6 +11,12 @@
 // same server-wide KEYSTORE_PASSPHRASE (there is no per-user passphrase).
 // Instances are memoised in `instances` so repeated calls for the same user
 // share one in-memory cache instead of re-reading the file every time.
+//
+// Each user has TWO files, not one: the live keystore, and an archive beside
+// it holding what has been deleted. A delete moves the wallet from one to the
+// other rather than dropping it, so a mis-click is recoverable — see the
+// header on `remove` below for why the archive is a second encrypted store and
+// not an automatic export to disk.
 
 const crypto = require('crypto');
 const fs = require('fs');
@@ -48,8 +54,40 @@ function pathFor(userId) {
   return path.join(dir, `wallets.${userId}.keystore.json`);
 }
 
-function build(userId) {
-  const file = pathFor(userId);
+/**
+ * Where a user's ARCHIVE of deleted wallets lives — beside their live keystore,
+ * derived the same way from the same directory so the two never separate.
+ *
+ * 'default' gets a fixed name rather than config.keystorePath, because that
+ * path is the live file itself and there is only one of it. Same shape as
+ * store/activity.js's pathFor, and the same rule applies: userId is validated
+ * at creation and never taken from a request, so this does not re-sanitise.
+ */
+function archivePathFor(userId) {
+  const dir = path.dirname(config.keystorePath);
+  return path.join(
+    dir,
+    userId === DEFAULT_ID ? 'wallets.archive.keystore.json' : `wallets.archive.${userId}.keystore.json`
+  );
+}
+
+/**
+ * One encrypted file: the load/persist/encrypt/decrypt machinery, and nothing
+ * about wallets.
+ *
+ * Extracted so the archive is not a second implementation of the security
+ * posture but LITERALLY THE SAME CODE — same AES-256-GCM, same scrypt
+ * parameters, same passphrase, same 0600 file mode, same fail-closed GCM tag.
+ * An archive encrypted a little differently from the keystore would be a
+ * weakening dressed as a feature; there is only one way to encrypt here.
+ *
+ * Each vault carries its own random salt, so a record cannot be moved between
+ * files as ciphertext — it is decrypted out of one and re-encrypted into the
+ * other. That is deliberate: the archive stays readable when the live keystore
+ * is deleted and recreated, which is exactly the situation a mistaken delete
+ * tends to be part of.
+ */
+function vault(file) {
   let cache = null; // { version, kdf, wallets: [...] }
   let derivedKey = null; // Buffer, memoised per (passphrase, salt)
 
@@ -112,6 +150,25 @@ function build(userId) {
     }
   }
 
+  function reset() {
+    cache = null;
+    derivedKey = null;
+  }
+
+  return { load, persist, encrypt, decrypt, reset };
+}
+
+function build(userId) {
+  const live = vault(pathFor(userId));
+  // Untouched until something is deleted or the archive is read, so the second
+  // scrypt derivation is never paid for on the ordinary path.
+  const bin = vault(archivePathFor(userId));
+
+  const load = live.load;
+  const persist = live.persist;
+  const encrypt = live.encrypt;
+  const decrypt = live.decrypt;
+
   function publicView(w) {
     return { id: w.id, address: w.address, label: w.label, role: w.role, createdAt: w.createdAt };
   }
@@ -172,13 +229,132 @@ function build(userId) {
       });
   }
 
+  /** An archived entry as anyone outside this module may see it. No key. */
+  function archiveView(w) {
+    return {
+      id: w.id,
+      address: w.address,
+      label: w.label,
+      role: w.role,
+      createdAt: w.createdAt,
+      deletedAt: w.deletedAt,
+    };
+  }
+
+  /**
+   * Delete a wallet — by moving it to the archive, not by dropping the key.
+   *
+   * The operator has twice been one click from destroying a funded wallet, and
+   * the keystore holds private keys and no mnemonics, so a delete used to be
+   * final unless a backup had already been downloaded. The obvious fix — write
+   * the key out to a file on the way past — would create a SECOND, PLAINTEXT
+   * KEYSTORE on the same disk, which is a worse problem than the one it solves.
+   *
+   * So the key moves into a second file encrypted exactly as the first: same
+   * cipher, same KDF, same passphrase, same 0600 mode (see `vault`). The
+   * security posture is unchanged — an attacker who can read the archive could
+   * already read the keystore — and a mistaken delete is recoverable.
+   *
+   * Archive first, then drop from the live store. If the second write fails the
+   * key exists in both files, which is a duplicate; the other order loses it.
+   * An archived entry for the same address is replaced rather than stacked, so
+   * delete → restore → delete leaves one entry, not a pile.
+   */
   function remove(id) {
     const store = load();
-    const before = store.wallets.length;
+    const record = store.wallets.find((w) => w.id === id);
+    if (!record) throw new Error(`no wallet ${id}`);
+
+    const archive = bin.load();
+    archive.wallets = archive.wallets.filter(
+      (w) => w.address.toLowerCase() !== record.address.toLowerCase()
+    );
+    archive.wallets.unshift({
+      id: record.id,
+      address: record.address,
+      label: record.label,
+      role: record.role,
+      createdAt: record.createdAt,
+      deletedAt: new Date().toISOString(),
+      // Re-encrypted under the archive's own salt. Plaintext exists only for
+      // the length of this expression, inside the one module allowed to hold it.
+      ...bin.encrypt(decrypt(record)),
+    });
+    bin.persist();
+
     store.wallets = store.wallets.filter((w) => w.id !== id);
-    if (store.wallets.length === before) throw new Error(`no wallet ${id}`);
     persist();
-    return { removed: id };
+    return { removed: id, archived: true, address: record.address };
+  }
+
+  /** What has been deleted, newest first. Addresses and dates — never keys. */
+  function archived() {
+    return bin.load().wallets.map(archiveView);
+  }
+
+  /**
+   * Put an archived wallet back into the live keystore.
+   *
+   * The live store's rules are the live store's rules: an address already
+   * present is refused, and a dev wallet is refused when one already exists,
+   * because the keystore permits exactly one and two would silently make "the
+   * dev wallet" ambiguous. Restoring keeps the original id and createdAt, so a
+   * restored wallet is the same wallet to the activity log and to anything
+   * holding its id — only `deletedAt` is dropped, because it is no longer true.
+   */
+  function restore(id) {
+    const archive = bin.load();
+    const record = archive.wallets.find((w) => w.id === id);
+    if (!record) throw new Error(`no archived wallet ${id}`);
+
+    const store = load();
+    if (store.wallets.some((w) => w.address.toLowerCase() === record.address.toLowerCase())) {
+      throw new Error(`wallet ${record.address} is already in the keystore`);
+    }
+    if (record.role === 'dev' && store.wallets.some((w) => w.role === 'dev')) {
+      throw new Error('a dev wallet already exists — delete it first');
+    }
+
+    const key = bin.decrypt(record);
+    // The archive is a recovery path, so it checks rather than assumes: a key
+    // that no longer derives the address it is filed under would restore a
+    // wallet the operator cannot actually spend from.
+    if (getAddress(new Wallet(key).address) !== getAddress(record.address)) {
+      throw new Error(`archived key for ${record.address} does not match its address`);
+    }
+
+    const restored = {
+      id: record.id,
+      address: record.address,
+      label: record.label,
+      role: record.role,
+      createdAt: record.createdAt,
+      ...encrypt(key),
+    };
+    // Live first, archive second — same reasoning as remove(), in reverse.
+    store.wallets.push(restored);
+    persist();
+
+    archive.wallets = archive.wallets.filter((w) => w.id !== id);
+    bin.persist();
+    return publicView(restored);
+  }
+
+  /**
+   * Destroy an archived key for good.
+   *
+   * Deleting has to be able to mean deleting. An operator removing a
+   * compromised key expects it gone, and an archive that quietly kept it would
+   * be a surprise in the wrong direction — so this is the one call that makes
+   * "gone" true, and the console says plainly that a delete only archives.
+   */
+  function purge(id) {
+    const archive = bin.load();
+    const record = archive.wallets.find((w) => w.id === id);
+    if (!record) throw new Error(`no archived wallet ${id}`);
+    archive.wallets = archive.wallets.filter((w) => w.id !== id);
+    bin.persist();
+    return { purged: id, address: record.address };
   }
 
   /** A signer for `id`. Plaintext keys exist only inside this call's stack. */
@@ -221,13 +397,27 @@ function build(userId) {
     return load().wallets.filter((w) => w.role === 'bundle').map(publicView);
   }
 
-  /** Test seam — drops the in-memory cache and derived key. */
+  /** Test seam — drops the in-memory cache and derived key of both files. */
   function _reset() {
-    cache = null;
-    derivedKey = null;
+    live.reset();
+    bin.reset();
   }
 
-  return { list, generate, importKeys, remove, signer, exportKey, exportAll, devWallet, bundleWallets, _reset };
+  return {
+    list,
+    generate,
+    importKeys,
+    remove,
+    archived,
+    restore,
+    purge,
+    signer,
+    exportKey,
+    exportAll,
+    devWallet,
+    bundleWallets,
+    _reset,
+  };
 }
 
 function keystoreFor(userId = DEFAULT_ID) {
@@ -257,6 +447,13 @@ function adoptLegacy(userId) {
   fs.renameSync(from, to);
   instances.clear();
 
+  // The archive travels with the keystore it belongs to, or the adopting user
+  // inherits the wallets without the ability to undo a delete of them — and the
+  // stranded file would still hold the previous occupant's keys.
+  const binFrom = archivePathFor(DEFAULT_ID);
+  const binTo = archivePathFor(userId);
+  if (fs.existsSync(binFrom) && !fs.existsSync(binTo)) fs.renameSync(binFrom, binTo);
+
   // Best effort: --adopt should mean the user's whole prior footprint, not
   // just the wallets. The wallets have already moved by this point, so if
   // history's target happens to exist, we leave history behind rather than
@@ -276,11 +473,15 @@ const def = () => keystoreFor(DEFAULT_ID);
 module.exports = {
   keystoreFor,
   adoptLegacy,
+  archivePathFor,
   // Bound to the default user so every existing caller keeps working.
   list: (...a) => def().list(...a),
   generate: (...a) => def().generate(...a),
   importKeys: (...a) => def().importKeys(...a),
   remove: (...a) => def().remove(...a),
+  archived: (...a) => def().archived(...a),
+  restore: (...a) => def().restore(...a),
+  purge: (...a) => def().purge(...a),
   signer: (...a) => def().signer(...a),
   exportKey: (...a) => def().exportKey(...a),
   exportAll: (...a) => def().exportAll(...a),

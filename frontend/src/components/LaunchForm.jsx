@@ -45,7 +45,7 @@ export default function LaunchForm({
   reload,
   reloadHistory,
   report,
-  onLogo,
+  onDraft,
   onSizing,
 }) {
   const [f, setF] = useState(BLANK);
@@ -63,10 +63,7 @@ export default function LaunchForm({
   const [pending, setPending] = useState(null);
 
   const set = (k) => (e) => setF((prev) => ({ ...prev, [k]: e.target.value }));
-  const setLogo = (logo) => {
-    setF((prev) => ({ ...prev, logo }));
-    onLogo?.(logo);
-  };
+  const setLogo = (logo) => setF((prev) => ({ ...prev, logo }));
 
   const isV2 = protocol === 'v2';
   const active = isV2 ? v2 : configs;
@@ -99,6 +96,20 @@ export default function LaunchForm({
       devBuyEth: f.devBuyEth,
     });
   }, [protocol, lc, isV2, f.creatorTaxBps, f.devBuyEth]);
+
+  /**
+   * The three facts this step cannot be armed without, pushed up to App.
+   *
+   * They are also the three the sequence header states about step 5, and the
+   * only ones a step drawn a page above the form has any way of knowing. It is
+   * the same arrangement as onSizing above: the panel that owns a value hands
+   * it up rather than App reaching down for it. `ready` below is these three
+   * plus "no upload still in flight", which is this panel's business and not
+   * the header's.
+   */
+  useEffect(() => {
+    onDraft?.({ name: f.name.trim(), symbol: f.symbol.trim(), logo: f.logo });
+  }, [onDraft, f.name, f.symbol, f.logo]);
 
   function body() {
     const bundle = wallets

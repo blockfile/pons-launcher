@@ -707,7 +707,8 @@ td input[type='number'] {
 /* Selection column. Bundle rows only — the dev wallet is drawn without a
    checkbox at all, so there is nothing here to disable or to mis-click. The
    accent is vermilion because the one action these boxes feed is a delete that
-   destroys private keys, and vermilion means irreversible everywhere else. */
+   takes private keys out of the keystore, and vermilion means irreversible
+   everywhere else. */
 .wallet-list th:first-child,
 .wallet-list td:first-child {
   width: 1%;
@@ -722,6 +723,45 @@ td input[type='number'] {
 }
 .wallet-list input[type='checkbox']:disabled {
   cursor: not-allowed;
+}
+
+/* One private key, pasted into the step that owns the wallet it becomes. Given
+   the room a 64-character string needs: a key in a default-width field is a
+   key you cannot check you pasted whole. Monospace for the same reason — it is
+   masked, but a length and a shape still read. */
+.key-field {
+  flex: 1;
+  min-width: 300px;
+  font: 12px var(--mono);
+}
+
+/* ── the archive: what a delete leaves behind ────────────────────────────── */
+
+/* Deleted wallets are not destroyed — the key moves to an encrypted archive
+   beside the keystore — and this is the way back to them. Deliberately small:
+   it is a way out of a mis-click, not a station of the sequence, so it is a
+   link and a count rather than a panel, and it is not drawn at all until there
+   is something in it. No colour: an archive is neither ready, dangerous, nor
+   confirmed. The vermilion is in the purge dialog, where the key actually dies. */
+.archive {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+  margin-top: 14px;
+}
+.archive-list {
+  flex-basis: 100%;
+  margin-top: 2px;
+}
+/* Dates sit at hint weight — they are what you check, not what you act on —
+   and must not wrap a timestamp onto two lines beside a one-line address. */
+.archive-list td.hint {
+  white-space: nowrap;
+}
+.archive-list td:last-child {
+  width: 1%;
+  white-space: nowrap;
 }
 
 /* ── notices: warnings must be unmissable ────────────────────────────────── */

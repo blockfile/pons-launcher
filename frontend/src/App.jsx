@@ -22,6 +22,16 @@ const { bundleShare } = bundleShareModule;
 
 const short = (a) => (a ? `${a.slice(0, 8)}…${a.slice(-4)}` : '');
 const plural = (n, one, many = `${one}s`) => `${n} ${n === 1 ? one : many}`;
+const andList = (xs) =>
+  xs.length < 2 ? xs.join('') : `${xs.slice(0, -1).join(', ')} and ${xs[xs.length - 1]}`;
+
+// What a launch cannot be armed without, in the order step 5 asks for it, and
+// how the sequence names each one when it is not there yet.
+const DRAFT_FIELDS = [
+  ['name', 'a name'],
+  ['symbol', 'a symbol'],
+  ['logo', 'a logo'],
+];
 
 /**
  * The animation feature set, declared once for the whole console.
@@ -47,7 +57,12 @@ export default function App() {
   // finds the field already filled and every panel below already entitled to
   // read — see the note in api.js for why sessionStorage and not localStorage.
   const [key, setKey] = useState(getApiKey);
-  const [logo, setLogo] = useState('');
+  // The three facts step 5 cannot be armed without — name, symbol and a logo
+  // pinned to IPFS — handed up by LaunchForm as they are typed. They used to be
+  // a row on the checklist above the console; when the six steps replaced it,
+  // the logo half of this survived as state with a writer and no reader. Step 5
+  // states them now, which is where an operator looks for them.
+  const [draft, setDraft] = useState(null);
   // Per-wallet fund / buy-mode / buy-amount, keyed by wallet id. Lifted here
   // because both the Fund and Launch panels read the same rows.
   const [rows, setRows] = useState({});
@@ -186,6 +201,11 @@ export default function App() {
     const sellCount = Array.isArray(sellable) ? sellable.length : 0;
     const last = history[0];
     const launched = history.length > 0;
+    // What step 5 is still missing, in the order the form asks for it. `done`
+    // stays "has launched" — a filled-in form is not a launch — so this rides
+    // on the detail line, which is where every other step says what it is
+    // waiting for.
+    const missing = DRAFT_FIELDS.filter(([k]) => !draft?.[k]).map(([, label]) => label);
 
     const plan = [
       {
@@ -230,7 +250,14 @@ export default function App() {
           ? `${last.params?.symbol || short(last.token)} · ${
               (last.buys || []).filter((b) => b.status === 'confirmed').length
             }/${(last.buys || []).length} filled${last.dryRun ? ' · dry run' : ''}`
-          : 'the dev buy runs inside the launch itself',
+          : // Nothing typed yet is not a shortfall — it is the state every run
+            // starts in — so the step says what it is for rather than listing
+            // three things the operator has not had a chance to do.
+            missing.length === DRAFT_FIELDS.length
+            ? 'the dev buy runs inside the launch itself'
+            : missing.length
+              ? `still needs ${andList(missing)}`
+              : 'name, symbol and logo ready',
       },
       {
         n: 6,
@@ -284,7 +311,7 @@ export default function App() {
               : null,
       };
     });
-  }, [wallets, funded, dispersers, sellable, history]);
+  }, [wallets, funded, dispersers, sellable, history, draft]);
 
   // The step whose panel is drawn where, so a panel never has to know its own
   // number and the order lives in one place — this file, in render order below.
@@ -411,7 +438,7 @@ export default function App() {
             reload={loadWallets}
             reloadHistory={loadHistory}
             report={report}
-            onLogo={setLogo}
+            onDraft={setDraft}
             onSizing={setSizing}
           />
           {/* The console's answer, between the launch and the exit because that is

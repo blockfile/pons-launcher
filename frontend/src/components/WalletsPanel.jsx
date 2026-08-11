@@ -1,9 +1,11 @@
 import { useEffect, useRef, useState } from 'react';
-import { api, downloadBackup } from '../api.js';
+import { api } from '../api.js';
 import Step from './Step.jsx';
 import { Busy } from './Section.jsx';
 import Modal, { Fact } from './Modal.jsx';
 import Share, { pct, tokens } from './Share.jsx';
+import BackupControls from './BackupControls.jsx';
+import RecentlyDeleted from './RecentlyDeleted.jsx';
 
 // Balances arrive as decimal strings. Six places everywhere, so the column and
 // the dialog show the same number.
@@ -25,17 +27,18 @@ const eth = (v) => Number(v || 0).toFixed(6);
  * factory configs — see shared/bundleShare.js. It is drawn next to the input
  * that produced it: sizing a bundle used to mean typing a number, launching,
  * and finding out afterwards.
+ *
+ * Importing here is bundle keys and only bundle keys. It used to carry a role
+ * dropdown with `dev` in it, which put "replace the dev key" inside a panel
+ * titled for bundle wallets — a step away from the dev wallet it was replacing,
+ * and a step away from the delete that made room for it. Both halves of that
+ * rotation are in step 1 now.
  */
 export default function WalletsPanel({ step, wallets, rows, setRow, share, reload, report }) {
   const [count, setCount] = useState(5);
   const [showImport, setShowImport] = useState(false);
   const [keys, setKeys] = useState('');
-  const [importRole, setImportRole] = useState('bundle');
   const [busy, setBusy] = useState('');
-  // 'json' | 'csv' while the export confirmation is open, '' otherwise, plus
-  // whatever has been typed into it so far.
-  const [exporting, setExporting] = useState('');
-  const [typed, setTyped] = useState('');
   // Ticked wallet ids. Only ever bundle wallets reach a delete — see `chosen`.
   const [picked, setPicked] = useState(() => new Set());
   // The wallets the delete confirmation is asking about, frozen at the moment
@@ -149,12 +152,6 @@ export default function WalletsPanel({ step, wallets, rows, setRow, share, reloa
     setBusy('');
   }
 
-  // Opens the typed confirmation. Nothing is exported from here.
-  function backup(format) {
-    setTyped('');
-    setExporting(format);
-  }
-
   // The share figures, keyed by wallet so a row can find its own. Order is
   // firing order and on a v2 curve the order IS the price, so this is a lookup
   // into a sequence, never a per-row calculation.
@@ -208,7 +205,7 @@ export default function WalletsPanel({ step, wallets, rows, setRow, share, reloa
           title="how many"
         />
         <button className="ghost" onClick={() => setShowImport((v) => !v)}>
-          Import keys
+          Import bundle keys
         </button>
         <Busy
           busy={busy === 'reload'}
@@ -220,38 +217,30 @@ export default function WalletsPanel({ step, wallets, rows, setRow, share, reloa
 
         <span className="spacer" />
 
-        <Busy
-          busy={busy === 'backup'}
-          className="ghost"
-          disabled={!wallets.length}
-          onClick={() => backup('json')}
-        >
-          Download backup
-        </Busy>
-        <button className="link" disabled={!wallets.length} onClick={() => backup('csv')}>
-          as CSV
-        </button>
+        {/* The same control, and the same typed confirmation, as the one beside
+            the dev wallet's delete in step 1 — one component, drawn in both
+            places, because both delete dialogs name a backup as the thing that
+            makes the delete survivable. */}
+        <BackupControls wallets={wallets} report={report} />
       </div>
 
+      {/* No role here. These are bundle keys: the dev key is imported in step 1,
+          beside the dev wallet it replaces and the delete that made room. */}
       {showImport && (
         <div className="row">
           <textarea
             rows="3"
-            placeholder="private keys, one per line"
+            placeholder="bundle wallet private keys, one per line"
             value={keys}
             onChange={(e) => setKeys(e.target.value)}
           />
-          <select value={importRole} onChange={(e) => setImportRole(e.target.value)}>
-            <option value="bundle">bundle</option>
-            <option value="dev">dev</option>
-          </select>
           <Busy
             busy={busy === 'import'}
             onClick={() =>
               act('import', async () => {
                 const made = await api('/wallets/import', 'POST', {
                   privateKeys: keys.split('\n'),
-                  role: importRole,
+                  role: 'bundle',
                 });
                 setKeys('');
                 return made;
@@ -536,7 +525,12 @@ export default function WalletsPanel({ step, wallets, rows, setRow, share, reloa
             {outcome.some((r) => !r.ok) ? ` · ${outcome.filter((r) => !r.ok).length} failed` : ''}
           </h3>
           <ul>
-            {outcome.every((r) => r.ok) && <li>Their keys are gone from the keystore.</li>}
+            {outcome.every((r) => r.ok) && (
+              <li>
+                Out of the keystore, and their keys are in the archive — see <b>Recently deleted</b>{' '}
+                below if any of that was a mistake.
+              </li>
+            )}
             {outcome
               .filter((r) => !r.ok)
               .map((r) => (
@@ -548,39 +542,16 @@ export default function WalletsPanel({ step, wallets, rows, setRow, share, reloa
         </div>
       )}
 
-      {/* Typed confirmation, not a click-through: this hands over every key the
-          console holds, and a mis-click should not be enough to do it. */}
-      <Modal
-        open={Boolean(exporting)}
-        danger
-        title={`This downloads the PRIVATE KEY of all ${wallets.length} wallets.`}
-        question={null}
-        confirmLabel={exporting === 'csv' ? 'Download CSV' : 'Download'}
-        confirmDisabled={typed !== 'EXPORT'}
-        onConfirm={() => {
-          const format = exporting;
-          setExporting('');
-          act('backup', () => downloadBackup(format));
-        }}
-        onCancel={() => setExporting('')}
-      >
-        <p>Anyone who opens that file can spend every one of them.</p>
-        <label className="modal-type">
-          Type EXPORT to continue.
-          <input
-            data-autofocus
-            value={typed}
-            autoComplete="off"
-            spellCheck="false"
-            onChange={(e) => setTyped(e.target.value)}
-          />
-        </label>
-      </Modal>
+      {/* Only ever the bundle's own archive. A deleted dev wallet is restored
+          from step 1, where the dev wallet is. */}
+      <RecentlyDeleted role="bundle" wallets={wallets} reload={reload} report={report} />
 
-      {/* Deleting a wallet erases its key, so it carries the vermilion: there
-          is no undo and no second copy unless a backup was taken. One dialog
-          for one wallet and for twelve — a funded wallet is burned just as
-          completely either way, and one warning is one thing to keep right. */}
+      {/* Still vermilion, though the keys now survive in the archive. What this
+          dialog warns about has not changed: funded wallets go out of reach of
+          everything in this console until somebody deliberately puts them back,
+          and twelve of them go at once. "A second click could undo it" is the
+          test for dropping the colour, and a restore from another affordance is
+          not that. One dialog for one wallet and for twelve. */}
       <Modal
         open={pending.length > 0}
         danger
@@ -614,19 +585,26 @@ export default function WalletsPanel({ step, wallets, rows, setRow, share, reloa
           )}
         </div>
 
+        {/* Said plainly, because the alternative is a surprise in the wrong
+            direction: an operator deleting an exposed key expects it gone, and
+            it is not. It is archived — encrypted exactly as the keystore is,
+            under the same passphrase — and purging is what makes it gone. */}
         <p>
-          {one ? 'Its private key is' : 'Their private keys are'} destroyed — erased from the
-          keystore, which holds raw keys and no mnemonic, so nothing here can regenerate{' '}
-          {one ? 'it' : 'them'}. Afterwards {one ? 'this wallet is' : 'these wallets are'}{' '}
-          recoverable only from a backup already downloaded.
+          {one ? 'The key is' : 'The keys are'} <b>archived, not destroyed</b>.{' '}
+          {one ? 'This wallet leaves' : 'These wallets leave'} the keystore and{' '}
+          {one ? 'its key moves' : 'their keys move'} to an archive beside it, encrypted the same
+          way under the same passphrase, where {one ? 'it appears' : 'they appear'} under{' '}
+          <b>Recently deleted</b> in {one?.role === 'dev' ? 'step 1' : 'this step'}.{' '}
+          {one ? 'It stays' : 'They stay'} there until you restore or purge{' '}
+          {one ? 'it' : 'them'} — and purging is the one action that erases a key for good.
         </p>
 
-        {/* The balance is the part that is not merely inconvenient. A key that
-            no longer exists is a wallet nobody can ever spend from, so whatever
-            sits in it is burned — not returned to the dev wallet, not reachable
-            by re-importing anything. Sweep is one step below and takes seconds,
-            so the dialog names it rather than leaving the operator to remember
-            it after the fact. */}
+        {/* The balance is the part that is not merely inconvenient. An archived
+            wallet is one nothing in this console can sign for — funding,
+            launching and sell-all all read the live keystore — so the balance is
+            out of reach until it is restored, and gone for good if it is purged.
+            Sweep is one step below and takes seconds, so the dialog names it
+            rather than leaving the operator to remember it after the fact. */}
         {pendingFunded.length > 0 && (
           <div className="notice danger">
             <h3>
@@ -637,14 +615,17 @@ export default function WalletsPanel({ step, wallets, rows, setRow, share, reloa
                 : `${pendingFunded.length} of these wallets hold ETH`}
             </h3>
             <ul>
-              {/* Two words carry this dialog: how much, and that it does not
-                  come back. Everything around them is procedure — where the
-                  ETH does not go, what to run instead — and procedure read at
-                  the same weight as the amount is how an operator confirms a
-                  funded delete having seen only the shape of a warning. */}
+              {/* Two words carry this dialog: how much, and that it stops being
+                  spendable. Everything around them is procedure — where the ETH
+                  does not go, what to run instead — and procedure read at the
+                  same weight as the amount is how an operator confirms a funded
+                  delete having seen only the shape of a warning. */}
               <li>
-                <b className="crux">{eth(pendingEth)} ETH</b> goes with the keys and is{' '}
-                <b className="crux">burned permanently</b>.
+                <b className="crux">{eth(pendingEth)} ETH</b> becomes{' '}
+                <b className="crux">unspendable</b> the moment{' '}
+                {one ? 'this wallet is' : 'these wallets are'} archived, and stays that way until{' '}
+                {one ? 'it is' : 'they are'} restored. Purging the archived{' '}
+                {one ? 'key' : 'keys'} afterwards burns it permanently.
                 {one?.role !== 'dev' && ' Deleting does not return it to the dev wallet.'}
               </li>
               {/* Sweep pulls funds INTO the dev wallet, so it is no answer for
@@ -676,12 +657,27 @@ export default function WalletsPanel({ step, wallets, rows, setRow, share, reloa
 
         {/* The wallet list carries a native balance and nothing else, so this
             dialog can only ever speak for ETH. It says so rather than letting
-            "0.000000 ETH" be read as "empty". */}
-        <p className="hint">
-          Token balances are not in this table and are not counted above. If{' '}
-          {one ? 'this wallet' : 'any of these'} still holds a launched token, sell it in step 6
-          first.
-        </p>
+            "0.000000 ETH" be read as "empty".
+
+            Step 6 is only an answer for a BUNDLE wallet. findSellable is called
+            with ks.bundleWallets(), filtered to role === 'bundle', so sell-all
+            has never touched the dev wallet and never will — telling an operator
+            about to delete it to "sell it in step 6 first" sent them to a panel
+            that would list nothing of theirs. The dev row's × opens this same
+            dialog, so the branch has to be here. */}
+        {one?.role === 'dev' ? (
+          <p className="hint">
+            Token balances are not in this table and are not counted above. Step 6 sells what the
+            bundle wallets hold and never touches this one — a launched token sitting here has to be
+            moved out the same way as the ETH.
+          </p>
+        ) : (
+          <p className="hint">
+            Token balances are not in this table and are not counted above. If{' '}
+            {one ? 'this wallet' : 'any of these'} still holds a launched token, sell it in step 6
+            first.
+          </p>
+        )}
       </Modal>
     </Step>
   );
