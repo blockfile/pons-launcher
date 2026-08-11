@@ -84,6 +84,14 @@ export default function Share({ leg, exact, title }) {
     >
       {exact ? '' : '≈'}
       {pctRange(worstBps, leg.estBps)}
+      {/* The consequence, in the cell the eye is already on. The figure has
+          been vermilion for a while, but a colour only says "wrong" — it
+          cannot say WHICH wrong, and the difference here is not "this buy is
+          large" but "this buy does not happen and pays gas anyway". That was
+          stated in a tooltip nobody hovers and in a notice below the table,
+          both of which are somewhere else. One word, no new colour: it takes
+          the vermilion the figure above it already has. */}
+      {over && <b className="reverts">reverts · gas wasted</b>}
     </span>
   );
 }

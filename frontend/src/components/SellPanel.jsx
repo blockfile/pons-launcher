@@ -270,10 +270,15 @@ export default function SellPanel({ step, explorer, credential, live, reload, re
             No slippage floor
           </h3>
           <ul>
+            {/* The notice already carries the colour; this carries the weight.
+                What the operator has to leave with is the first sentence — the
+                two after it explain why it is that way, and explanation read
+                at the same brightness as the fact is how the fact gets
+                skimmed. */}
             <li>
-              Every wallet sells at whatever price it gets. This was chosen deliberately: nothing is
-              left holding tokens. A sell into a drained curve, or behind someone faster, can return
-              close to nothing and still succeed.
+              <b className="crux">Every wallet sells at whatever price it gets.</b> This was chosen
+              deliberately: nothing is left holding tokens. A sell into a drained curve, or behind
+              someone faster, can return close to nothing and still succeed.
             </li>
             <li>
               All wallets broadcast together, so the tail fills worse than the head. The spread is

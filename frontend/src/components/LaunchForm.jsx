@@ -290,8 +290,15 @@ export default function LaunchForm({
               value={f.creatorTaxBps}
               onChange={set('creatorTaxBps')}
             />
+            {/* The only number on this page that can never be corrected. It
+                was a clause in the middle of the dimmest line in the console,
+                which is the wrong place for a decision nothing can revisit —
+                so the phrase leads the hint and carries the vermilion, because
+                immutable is what irreversible means when it is a figure in a
+                text input rather than a button. */}
             <span className="hint">
-              Your cut of every trade, immutable once launched. Max {v2?.maxCreatorTaxBps ?? 1000} bps.
+              <b className="forever">Immutable once launched</b> — your cut of every trade, fixed by
+              this launch and never editable again. Max {v2?.maxCreatorTaxBps ?? 1000} bps.
             </span>
           </label>
         ) : (
@@ -413,8 +420,12 @@ export default function LaunchForm({
               actually ends up holding. */}
           {share && share.bundle.bps > 0 && (
             <span className="share-total">
-              bundle takes {share.exact ? '' : '≈'}
-              {pct(share.bundle.bps)} of supply
+              bundle takes{' '}
+              <b className="tally">
+                {share.exact ? '' : '≈'}
+                {pct(share.bundle.bps)}
+              </b>{' '}
+              of supply
             </span>
           )}
         </div>

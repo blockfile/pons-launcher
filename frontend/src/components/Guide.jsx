@@ -1,12 +1,18 @@
 import { useState } from 'react';
 
 // What a first-time operator has to know before spending anything, and what a
-// returning one keeps getting wrong. Collapsed once read — the state lives in
-// localStorage because it is a preference, not data.
+// returning one keeps getting wrong. The state lives in localStorage because it
+// is a preference, not data.
+//
+// Closed by default. Open, it puts most of a screen of prose between the plan
+// and step 1, so the first thing the console showed a first-timer was reading
+// rather than the first thing to do — and the sequence above it already answers
+// "what now". It stays open only for someone who has opened it and not closed
+// it again, which is the one person the prose is for.
 const KEY = 'pons-guide-open';
 
 export default function Guide() {
-  const [open, setOpen] = useState(() => localStorage.getItem(KEY) !== 'no');
+  const [open, setOpen] = useState(() => localStorage.getItem(KEY) === 'yes');
 
   function toggle() {
     setOpen((v) => {

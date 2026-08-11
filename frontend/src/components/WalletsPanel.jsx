@@ -403,10 +403,26 @@ export default function WalletsPanel({ step, wallets, rows, setRow, share, reloa
           answering by launching and looking afterwards. */}
       {share && (share.bundle.bps > 0 || share.dev) && (
         <div className={`notice ${share.over.length || share.graduation?.crosses ? 'danger' : ''}`}>
+          {/* The figure the whole run is sized against, and until now one
+              silkscreen label among the several in this box. It is given size
+              and weight rather than a colour: every colour in this console
+              names a state, and "this is the one that decides the launch" is
+              not a state. The dev buy stays at label size beside it — it is
+              context for this number, not a second headline.
+
+              Wrapped in one span because this h3 is a flex row: an element
+              child of it becomes a flex item, and the figure would be laid out
+              beside the words rather than inside the sentence. */}
           <h3>
-            bundle takes {share.exact ? '' : '≈'}
-            {pct(share.bundle.bps)} of supply
-            {share.dev ? ` · dev buy ${share.exact ? '' : '≈'}${pct(share.dev.estBps)} first` : ''}
+            <span>
+              bundle takes{' '}
+              <b className="tally">
+                {share.exact ? '' : '≈'}
+                {pct(share.bundle.bps)}
+              </b>{' '}
+              of supply
+              {share.dev ? ` · dev buy ${share.exact ? '' : '≈'}${pct(share.dev.estBps)} first` : ''}
+            </span>
           </h3>
           <ul>
             <li>
@@ -621,8 +637,14 @@ export default function WalletsPanel({ step, wallets, rows, setRow, share, reloa
                 : `${pendingFunded.length} of these wallets hold ETH`}
             </h3>
             <ul>
+              {/* Two words carry this dialog: how much, and that it does not
+                  come back. Everything around them is procedure — where the
+                  ETH does not go, what to run instead — and procedure read at
+                  the same weight as the amount is how an operator confirms a
+                  funded delete having seen only the shape of a warning. */}
               <li>
-                {eth(pendingEth)} ETH goes with the keys and is gone for good.
+                <b className="crux">{eth(pendingEth)} ETH</b> goes with the keys and is{' '}
+                <b className="crux">burned permanently</b>.
                 {one?.role !== 'dev' && ' Deleting does not return it to the dev wallet.'}
               </li>
               {/* Sweep pulls funds INTO the dev wallet, so it is no answer for

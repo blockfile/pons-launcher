@@ -153,8 +153,15 @@ export default function DispersersPanel({ step, explorer, credential, report, on
           />
         </label>
 
+        {/* Ghost, not the amber primary. This step is optional and usually
+            blocked — on a fresh console there is not yet a dev wallet to pay
+            for it — and a filled amber button that names a price was the
+            loudest control on the page before step 1 had been done at all.
+            Nothing about the control changes: same handler, same enabled
+            state, same label with the same quote in it. */}
         <Busy
           busy={busy === 'deploy'}
+          className="ghost"
           disabled={!(Number(count) >= 1)}
           onClick={() =>
             act('deploy', () =>
