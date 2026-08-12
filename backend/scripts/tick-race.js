@@ -238,9 +238,15 @@ async function ladder(wallet, nonce, count, fees) {
           'so the front of the block is reachable without pre-submitting and without\n' +
           'burning nonces on reverts. The loss is somewhere else in the fire path.'
       : `PRE-SUBMISSION REQUIRED — a packet takes ~${median} RPC blocks (~${Math.round(
-          median * 70
-        )}ms) to be\nincluded, so nothing sent in reaction to the tick can be early in the block.\n` +
-          `The sniper is ahead because its packets were already queued. Matching it needs\n` +
-          `a pre-signed ladder about ${median} deep per wallet, whose early rungs revert.`
+          median * 100
+        )}ms) to be\nincluded, so a buy sent on seeing the tick lands ~${Math.round(
+          median * 100
+        )}ms into the block and the\nsniper, whose packets were already queued, is ahead of it by about that much.\n\n` +
+          `That gap sets the PRICE you enter at, not whether you get in — the legal block\n` +
+          `is ~150 RPC blocks wide and all 32 buys land inside it comfortably.\n\n` +
+          `Ladder depth is NOT this number. To always have a packet in flight you must\n` +
+          `cover the tick's jitter (run \`npm run latency\` for it — measured at ~4.5s), so\n` +
+          `depth is jitter / send-interval, and every rung before the tick reverts and\n` +
+          `burns a nonce. Price that against what ${Math.round(median * 100)}ms of head start is worth first.`
   );
 })();
