@@ -16,41 +16,41 @@
 // TransferHelper masked the reason as the useless string "TF".
 //
 // So the buys wait for block.number to tick past the launch, then fire at once
-// over an already-warm connection pool. That is the earliest legal moment, and
-// it is still inside the restriction window where every other address is capped
-// at maxWalletBps. Pre-signed transactions do not expire, so the wait is free.
+// over an already-warm connection pool. That is the earliest legal moment —
+// the ban is `block.number == launchBlock`, a strict equality, so launchBlock+1
+// is legal and still inside the restriction window where every other address is
+// capped at maxWalletBps. Pre-signed transactions do not expire, so the wait is
+// free. See blockwait.js for the verified source that proves it.
+//
+// TIMING. Two launches were lost to competitors by about one RPC block — ~100ms
+// — between block.number ticking and our first buy reaching the wire. Every
+// stage below is timed against a monotonic clock and reported in `timing` on
+// the result, so the next launch can say where those milliseconds went instead
+// of guessing: how late we noticed the tick, how long we then took to
+// broadcast, and whether the connection pool was still warm when it mattered.
 
 const config = require('../config');
-const { provider, warmPool } = require('../evm/provider');
+const { provider, warmPool, poolStats } = require('../evm/provider');
 const { evmBlockNumber } = require('../evm/blocknumber');
 const { rpcMessage } = require('../evm/errors');
+const { monotonic, ms, summary } = require('../evm/timing');
+const { waitForNextBlock } = require('./blockwait');
 
-const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+const sleep = (delay) => new Promise((r) => setTimeout(r, delay));
 
 /**
- * Block until the chain's own block.number moves past `launchBlock`.
+ * Milliseconds from the moment the tick was observed to `pick` of `offsets`,
+ * where the offsets are measured from the start of the burst.
  *
- * Returns how long it waited, or null when the wait was skipped or the block
- * number could not be read — a bundle that fires late is worth far more than a
- * bundle that does not fire at all, so this never throws.
+ * null when there was no observed tick to measure from — a skipped wait, an
+ * unreadable block number, or a wait that timed out — because in those cases
+ * the number would be an invitation to compare against a baseline that does not
+ * exist.
  */
-async function waitForNextBlock(launchBlock, { rpc, readBlock, pause, pollMs, waitMs }) {
-  const started = Date.now();
-  while (Date.now() - started < waitMs) {
-    let now;
-    try {
-      now = await readBlock(rpc);
-    } catch (err) {
-      console.warn(`[pons-launcher] could not read block.number: ${rpcMessage(err)}`);
-      return null;
-    }
-    if (now > launchBlock) return Date.now() - started;
-    await pause(pollMs);
-  }
-  console.warn(
-    `[pons-launcher] block.number did not pass ${launchBlock} within ${waitMs}ms — firing anyway`
-  );
-  return Date.now() - started;
+function sinceTick(wait, burstAt, offsets, pick) {
+  const known = offsets.filter((v) => v !== null);
+  if (!wait || wait.observedTickMs === null || !known.length) return null;
+  return ms(burstAt + pick(...known) - wait.observedTickMs);
 }
 
 /**
@@ -61,6 +61,13 @@ async function waitForNextBlock(launchBlock, { rpc, readBlock, pause, pollMs, wa
 async function fire(plan, deps = {}) {
   const rpc = deps.provider || provider;
   const dryRun = deps.dryRun ?? config.dryRun;
+
+  // One monotonic origin for the whole launch. Every *Ms below is milliseconds
+  // since this instant, so any two of them can be subtracted directly.
+  const now = deps.now || monotonic;
+  const origin = now();
+  const at = () => now() - origin;
+  const sockets = deps.poolStats || poolStats;
 
   if (dryRun) {
     return {
@@ -83,6 +90,7 @@ async function fire(plan, deps = {}) {
   //    front-run — the pool does not exist until it lands — so spending time
   //    ahead of it is free, and it buys a much tighter bundle behind it.
   const warm = deps.warmPool || warmPool;
+  const warmStartedMs = at();
   if (plan.buys.length) {
     try {
       await warm(plan.buys.length, rpc);
@@ -91,6 +99,10 @@ async function fire(plan, deps = {}) {
       console.warn(`[pons-launcher] connection warm-up failed: ${err.message}`);
     }
   }
+  const warmDoneMs = at();
+  // Proof, not assumption: how many idle sockets the warm-up actually left in
+  // the pool. Compared against the count taken just before the burst below.
+  const socketsAfterWarm = sockets();
 
   // 2. The launch. Read block.number first: the launch will execute in this
   //    block, and that is the block the buys must NOT land in.
@@ -99,29 +111,41 @@ async function fire(plan, deps = {}) {
   const shouldWait = deps.waitForLaunchBlock ?? config.waitForLaunchBlock;
 
   let launchBlock = null;
+  // This read is also the earliest observation that still saw the launch block,
+  // so it bounds how early the tick could have happened when the wait is short.
+  let staleSince = null;
   if (shouldWait && plan.buys.length) {
+    const issuedMs = at();
     try {
       launchBlock = await readBlock(rpc);
+      const returnedMs = at();
+      staleSince = { issuedMs, returnedMs, rttMs: returnedMs - issuedMs };
     } catch (err) {
       console.warn(`[pons-launcher] could not read block.number before launching: ${rpcMessage(err)}`);
     }
   }
 
+  const launchIssuedMs = at();
   const launchResp = await rpc.broadcastTransaction(plan.launch.raw);
+  const launchAckMs = at();
 
   // 3. Hold the buys until the block ticks over. Every buy fired inside the
   //    launch block reverts with LaunchBlockBuyBlocked, so this wait is what
   //    makes the difference between a bundle that fills and one that burns gas.
-  let waitedMs = null;
+  let wait = null;
   if (launchBlock !== null) {
-    waitedMs = await waitForNextBlock(launchBlock, {
+    wait = await waitForNextBlock(launchBlock, {
       rpc,
       readBlock,
       pause,
-      pollMs: config.launchBlockPollMs,
-      waitMs: config.launchBlockWaitMs,
+      now,
+      originMs: origin,
+      staleSince,
+      pollMs: deps.pollMs ?? config.launchBlockPollMs,
+      waitMs: deps.waitMs ?? config.launchBlockWaitMs,
     });
   }
+  const waitedMs = wait ? wait.waitedMs : null;
 
   // 4. Every buy at once, over sockets that are already open.
   //
@@ -129,22 +153,32 @@ async function fire(plan, deps = {}) {
   // burst began. On a real launch the bundle spread across three RPC blocks —
   // wider than the polling error — and without this there is no way to tell
   // whether that spread is ours (the burst) or the sequencer's (inclusion).
-  const burstAt = Date.now();
+  //
+  // `issuedMs` is new alongside it: the gap between issuing a broadcast and it
+  // being accepted is a round trip, but the gap between the burst starting and
+  // a broadcast being ISSUED is ours — event-loop time, or ethers serialising
+  // behind a socket that has to be re-opened. Only the second kind is fixable
+  // from here, so the two are measured apart.
+  const socketsBeforeBurst = sockets();
+  const burstAt = at();
   const sentMs = new Array(plan.buys.length).fill(null);
+  const issuedMs = new Array(plan.buys.length).fill(null);
   const broadcasts = await Promise.allSettled(
-    plan.buys.map((b, i) =>
-      rpc.broadcastTransaction(b.raw).then(
+    plan.buys.map((b, i) => {
+      issuedMs[i] = ms(at() - burstAt);
+      return rpc.broadcastTransaction(b.raw).then(
         (r) => {
-          sentMs[i] = Date.now() - burstAt;
+          sentMs[i] = ms(at() - burstAt);
           return r;
         },
         (err) => {
-          sentMs[i] = Date.now() - burstAt;
+          sentMs[i] = ms(at() - burstAt);
           throw err;
         }
-      )
-    )
+      );
+    })
   );
+  const burstDoneMs = at();
 
   const buys = plan.buys.map((b, i) => {
     const r = broadcasts[i];
@@ -156,6 +190,7 @@ async function fire(plan, deps = {}) {
           hash: r.value.hash,
           status: 'sent',
           sentMs: sentMs[i],
+          issuedMs: issuedMs[i],
         }
       : {
           walletId: b.walletId,
@@ -164,6 +199,7 @@ async function fire(plan, deps = {}) {
           hash: null,
           status: 'rejected',
           sentMs: sentMs[i],
+          issuedMs: issuedMs[i],
           error: rpcMessage(r.reason),
         };
   });
@@ -208,6 +244,45 @@ async function fire(plan, deps = {}) {
     sameBlock: launchReceipt
       ? buys.filter((b) => b.block === launchReceipt.blockNumber).length
       : 0,
+
+    // Where the milliseconds went. Everything above is unchanged; this is
+    // additive, and it exists because losing a launch by ~100ms twice is not
+    // something that can be fixed from a burstMs alone.
+    //
+    // The headline number is `tickToWireMs`: from the instant we learned
+    // block.number had ticked to the instant the first buy left this process.
+    // That is the only part of the gap this code controls. `wait.detectionLagMs`
+    // is the part BEFORE it — how long the tick had already been true while we
+    // were still between polls — and the two together are our lateness.
+    timing: {
+      startedAt: new Date(deps.epochNow ? deps.epochNow() : Date.now()).toISOString(),
+      warm: { startedMs: ms(warmStartedMs), doneMs: ms(warmDoneMs), tookMs: ms(warmDoneMs - warmStartedMs) },
+      launchBlockRead: staleSince
+        ? { issuedMs: ms(staleSince.issuedMs), returnedMs: ms(staleSince.returnedMs), rttMs: ms(staleSince.rttMs) }
+        : null,
+      launchBroadcast: {
+        issuedMs: ms(launchIssuedMs),
+        ackMs: ms(launchAckMs),
+        rttMs: ms(launchAckMs - launchIssuedMs),
+      },
+      wait,
+      burst: {
+        startedMs: ms(burstAt),
+        doneMs: ms(burstDoneMs),
+        // Issuing is ours; acking is the network's. Split so the next change
+        // can be aimed at whichever one is actually costing the block.
+        issued: summary(issuedMs.filter((v) => v !== null)),
+        acked: summary(sentMs.filter((v) => v !== null)),
+      },
+      // Tick observed → first buy on the wire. This is the recoverable part.
+      tickToWireMs: sinceTick(wait, burstAt, issuedMs, Math.min),
+      // Tick observed → last buy acknowledged, i.e. the whole tail.
+      tickToLastAckMs: sinceTick(wait, burstAt, sentMs, Math.max),
+      // warmPool's claim, checked. If `beforeBurst.free` has collapsed relative
+      // to `afterWarm.free`, the pool went cold during the wait and the burst
+      // paid handshakes it was supposed to have avoided.
+      sockets: { afterWarm: socketsAfterWarm, beforeBurst: socketsBeforeBurst },
+    },
   };
 }
 

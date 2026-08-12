@@ -20,7 +20,8 @@
     "archive:list": "npm run archive:list --workspace backend --",
     "archive:restore": "npm run archive:restore --workspace backend --",
     "archive:purge": "npm run archive:purge --workspace backend --",
-    "v2:watch": "npm run v2:watch --workspace backend --"
+    "v2:watch": "npm run v2:watch --workspace backend --",
+    "latency": "npm run latency --workspace backend --"
   },
   "engines": {
     "node": ">=20"

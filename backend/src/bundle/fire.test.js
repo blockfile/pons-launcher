@@ -223,6 +223,128 @@ test('counts the buys that landed in the launch block', async () => {
   assert.equal(res.sameBlock, 1);
 });
 
+// ── timing ─────────────────────────────────────────────────────────────────
+// Two launches were lost by about one RPC block between block.number ticking
+// and the first buy reaching the wire. These pin the instrumentation that says
+// where that time went, all of it on an injected clock so nothing waits.
+
+test('reports where the milliseconds went, from the tick to the wire', async () => {
+  let t = 0;
+  const rpc = fakeProvider();
+  const res = await fire(plan, {
+    provider: rpc,
+    dryRun: false,
+    now: () => t,
+    // Two polls in the launch block, then the tick.
+    evmBlockNumber: async () => {
+      t += 6; // the read costs a round trip
+      return t >= 120 ? 101n : 100n;
+    },
+    sleep: async (delay) => {
+      t += delay;
+    },
+    warmPool: async () => {
+      t += 12;
+    },
+    poolStats: () => ({ free: 2, active: 0 }),
+    pollMs: 50,
+  });
+
+  const { timing } = res;
+  assert.equal(timing.warm.tookMs, 12, 'the warm-up is timed');
+  assert.equal(timing.launchBlockRead.rttMs, 6, 'the pre-launch read is timed');
+  assert.ok(timing.launchBroadcast.issuedMs >= timing.launchBlockRead.returnedMs);
+  assert.equal(timing.wait.reason, 'ticked');
+  assert.ok(timing.wait.pollCount >= 1);
+  assert.ok(timing.wait.detectionLagMs !== null, 'how late we noticed the tick');
+
+  // The headline: tick observed → first buy out of this process. It is the only
+  // part of the gap this code owns, so it must be reported on its own.
+  assert.equal(typeof timing.tickToWireMs, 'number');
+  assert.ok(timing.tickToWireMs >= 0);
+  assert.ok(timing.tickToLastAckMs >= timing.tickToWireMs);
+});
+
+test('separates the time we cost from the time the network costs', async () => {
+  let t = 0;
+  const rpc = {
+    async broadcastTransaction(raw) {
+      t += 30; // a round trip to the sequencer
+      return { hash: `hash:${raw}`, async wait() { return { status: 1, blockNumber: 10 }; } };
+    },
+    async waitForTransaction() {
+      return { status: 1, blockNumber: 10 };
+    },
+  };
+
+  const res = await fire(plan, {
+    provider: rpc,
+    dryRun: false,
+    waitForLaunchBlock: false,
+    warmPool: async () => {},
+    now: () => t,
+  });
+
+  // Issuing is ours, acking is the wire's. A fix aimed at the wrong one is
+  // wasted, so the two are never reported as a single number.
+  for (const b of res.buys) {
+    assert.equal(typeof b.issuedMs, 'number');
+    assert.ok(b.issuedMs <= b.sentMs, 'a buy cannot be acknowledged before it was issued');
+  }
+  assert.ok(res.timing.burst.issued.max <= res.timing.burst.acked.max);
+  assert.equal(res.timing.burst.acked.n, plan.buys.length);
+});
+
+test('checks whether the pool was still warm when the burst went out', async () => {
+  // warmPool opens sockets before the launch, but the burst does not go out
+  // until block.number ticks — up to sixteen seconds later. Whether those
+  // sockets survived is a measurement, not an assumption.
+  const rpc = fakeProvider();
+  const counts = [{ free: 32, active: 0 }, { free: 1, active: 0 }];
+  let call = 0;
+  const res = await fire(plan, {
+    provider: rpc,
+    dryRun: false,
+    waitForLaunchBlock: false,
+    warmPool: async () => {},
+    poolStats: () => counts[Math.min(call++, counts.length - 1)],
+  });
+
+  assert.deepEqual(res.timing.sockets.afterWarm, { free: 32, active: 0 });
+  assert.deepEqual(res.timing.sockets.beforeBurst, { free: 1, active: 0 });
+});
+
+test('says it does not know rather than reporting a lateness it cannot measure', async () => {
+  const rpc = fakeProvider();
+  const res = await fire(plan, {
+    provider: rpc,
+    dryRun: false,
+    evmBlockNumber: async () => {
+      throw new Error('multicall missing');
+    },
+    sleep: async () => {},
+    warmPool: async () => {},
+  });
+
+  assert.equal(res.timing.wait, null, 'no launch block was read, so there was no wait to time');
+  assert.equal(res.timing.tickToWireMs, null);
+  assert.equal(res.timing.tickToLastAckMs, null);
+});
+
+test('the whole result survives being written to the launch history', async () => {
+  // The wait carries bigint block numbers internally. One escaping into the
+  // result would throw on JSON.stringify and take the launch response with it.
+  const rpc = fakeProvider();
+  const res = await fire(plan, {
+    provider: rpc,
+    dryRun: false,
+    evmBlockNumber: blockTicker([100n, 101n]),
+    sleep: async () => {},
+    warmPool: async () => {},
+  });
+  assert.doesNotThrow(() => JSON.stringify(res));
+});
+
 test('dry run broadcasts nothing at all', async () => {
   const rpc = fakeProvider();
   const res = await fire(plan, { provider: rpc, dryRun: true });

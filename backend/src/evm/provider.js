@@ -126,4 +126,30 @@ async function warmPool(count, rpc = provider) {
   );
 }
 
-module.exports = { provider, RetryJsonRpcProvider, warmPool, keepAlive, isRateLimited, isTransient };
+/**
+ * How many pooled sockets exist right now: `free` are idle and reusable by the
+ * next request without a handshake, `active` are mid-request.
+ *
+ * warmPool's whole claim is that the broadcast burst reuses the sockets it
+ * opened. That claim was never checked. It is worth checking, because the
+ * sockets are warmed BEFORE the launch and the burst does not go out until
+ * block.number ticks — up to sixteen seconds later — and an idle socket can be
+ * closed by the far end in that time. Sampling `free` after the warm-up and
+ * again immediately before the burst turns "the pool is warm" from an
+ * assumption into a number in the launch record.
+ */
+function poolStats(agent = keepAlive) {
+  const count = (map) =>
+    Object.values(map || {}).reduce((n, arr) => n + (Array.isArray(arr) ? arr.length : 0), 0);
+  return { free: count(agent && agent.freeSockets), active: count(agent && agent.sockets) };
+}
+
+module.exports = {
+  provider,
+  RetryJsonRpcProvider,
+  warmPool,
+  poolStats,
+  keepAlive,
+  isRateLimited,
+  isTransient,
+};
