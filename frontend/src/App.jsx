@@ -425,6 +425,8 @@ export default function App() {
               explorer={health?.explorer || ''}
               credential={credential}
               report={report}
+              wallets={wallets}
+              history={history}
             />
           )}
 
