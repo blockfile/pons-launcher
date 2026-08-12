@@ -311,6 +311,140 @@ test('a token held by a bundle wallet but not launched by the dev is never offer
   );
 });
 
+// ── a rotated dev wallet does not orphan its launches ──────────────────────
+//
+// The factory records the wallet that launched a token and never updates it, so
+// comparing that record against the CURRENT dev wallet made every rotation
+// destroy the exit for everything launched before it. In production eight of the
+// operator's own tokens were refused this way, one of them holding a 32-wallet
+// bundle's supply, with the log line blaming the factory. `owners` is the fix:
+// the live keystore UNION the deleted-wallet archive.
+//
+// The dusting defence is the reason this is a set and not a balance check, so
+// the stranger case is asserted right beside the archived-wallet case — the two
+// are the same gate, and a change that offers a dusted token must break a test.
+
+// The operator's real previous dev wallets, from the production log lines this
+// was found in.
+const OLD_DEV = '0xdF5263Cd48223251CA296Db55Fb68B7c3181E7BE';
+const OLD_DEV_2 = '0x1ada673A3721138aba3D2b187c6703e61F97C8ee';
+
+/** The picker's deps with TOKEN_A recorded as launched by `by`. */
+function launchedBy(by) {
+  return sellableDeps({
+    describeToken: async (token) => ({
+      token: getAddress(token),
+      curve: getAddress(CURVE_A),
+      deployer: getAddress(by),
+      pairToken: ZeroAddress,
+      phase: 1,
+      exists: true,
+    }),
+    // Nothing here may fall through to a scan — the gate is the whole subject.
+    launchedByDeployer: async () => ({ launches: [], scannedFrom: 0, scannedTo: 250, complete: true }),
+  });
+}
+
+test('a token launched by a wallet now in the deleted archive is still offered', async () => {
+  const out = await holdings.findSellable(
+    {
+      deployer: DEV,
+      wallets: WALLETS,
+      knownTokens: [TOKEN_A],
+      // What keystore.ownedAddresses() returns after a rotation: today's dev
+      // wallet, the bundle, and the previous dev wallets sitting in the archive.
+      owners: [DEV, ...WALLETS.map((w) => w.address), OLD_DEV, OLD_DEV_2],
+    },
+    launchedBy(OLD_DEV)
+  );
+
+  assert.deepEqual(
+    out.tokens.map((t) => t.token),
+    [getAddress(TOKEN_A)],
+    'a previous dev wallet is still this account'
+  );
+  assert.deepEqual(out.warnings, []);
+  // The current dev wallet is still what the row is reported against — the
+  // rotation changed who signs, not whose list this is.
+  assert.equal(out.deployer, getAddress(DEV));
+});
+
+test('a token launched by a stranger is refused however long the owner list is', async () => {
+  // THE DUSTING DEFENCE. Widening the gate to "any wallet we hold or have held"
+  // must not widen it to "any wallet at all": an airdropped token's deployer is
+  // in neither the keystore nor the archive, and every bundle wallet holds a
+  // pile of it.
+  const out = await holdings.findSellable(
+    {
+      deployer: DEV,
+      wallets: WALLETS,
+      knownTokens: [TOKEN_A],
+      owners: [DEV, ...WALLETS.map((w) => w.address), OLD_DEV, OLD_DEV_2],
+    },
+    launchedBy(STRANGER)
+  );
+
+  assert.deepEqual(out.tokens, [], 'a dusted token is never offered');
+  assert.ok(
+    out.warnings.some((w) => /not a wallet this account holds or has held — not offered/.test(w))
+  );
+});
+
+test('a token launched by the current dev wallet is offered with the owner list in place', async () => {
+  const out = await holdings.findSellable(
+    {
+      deployer: DEV,
+      wallets: WALLETS,
+      knownTokens: [TOKEN_A],
+      owners: [DEV, OLD_DEV],
+    },
+    launchedBy(DEV)
+  );
+
+  assert.deepEqual(
+    out.tokens.map((t) => t.token),
+    [getAddress(TOKEN_A)]
+  );
+});
+
+test('the current dev wallet counts even when the owner list omits it', async () => {
+  // A caller passing no owners — every existing one — must get exactly the old
+  // behaviour, not an empty gate that refuses the operator everything.
+  const out = await holdings.findSellable(
+    { deployer: DEV, wallets: WALLETS, knownTokens: [TOKEN_A] },
+    launchedBy(DEV)
+  );
+
+  assert.deepEqual(
+    out.tokens.map((t) => t.token),
+    [getAddress(TOKEN_A)]
+  );
+});
+
+test('one account archive never makes another account token sellable', async () => {
+  // Isolation is structural — `owners` is one user's keystore and one user's
+  // archive — but the property is worth asserting where the gate is, because it
+  // is the one that stops "or has held" from meaning "or anyone has held".
+  const deps = launchedBy(OLD_DEV);
+
+  const mine = await holdings.findSellable(
+    { deployer: DEV, wallets: WALLETS, knownTokens: [TOKEN_A], owners: [DEV, OLD_DEV] },
+    deps
+  );
+  const theirs = await holdings.findSellable(
+    // Another user: their own dev wallet, their own archive. OLD_DEV is not in
+    // it, so the same token on the same chain is not theirs to sell.
+    { deployer: STRANGER, wallets: WALLETS, knownTokens: [TOKEN_A], owners: [STRANGER, OLD_DEV_2] },
+    deps
+  );
+
+  assert.deepEqual(mine.tokens.map((t) => t.token), [getAddress(TOKEN_A)]);
+  assert.deepEqual(theirs.tokens, []);
+  assert.ok(
+    theirs.warnings.some((w) => /not a wallet this account holds or has held/.test(w))
+  );
+});
+
 // ── both protocols are listed ──────────────────────────────────────────────
 
 test('a v1 token from launch history is offered, with the v1 route', async () => {
@@ -607,7 +741,18 @@ test('a history entry the factory attributes to another wallet is excluded even 
     out.tokens.map((t) => t.token),
     [getAddress(TOKEN_A)]
   );
-  assert.ok(out.warnings.some((w) => /launched it — not offered/.test(w)));
+  // The refusal names the reason it is actually refused for: the deployer is
+  // nobody this account has ever been. It must not read as the factory
+  // contradicting the history file, which is what it used to say — and what sent
+  // the operator looking for a corrupt history instead of a rotated wallet.
+  assert.ok(
+    out.warnings.some((w) =>
+      /was launched by 0x9999.+which is not a wallet this account holds or has held — not offered/.test(
+        w
+      )
+    )
+  );
+  assert.ok(!out.warnings.some((w) => /launch history but the factory says/.test(w)));
 });
 
 test('graduation is read once per token and reported on the row', async () => {
@@ -967,7 +1112,9 @@ test('the multicall path drops a token the factory attributes to someone else', 
   );
 
   assert.equal(out.tokens.length, 0);
-  assert.ok(out.warnings.some((w) => /launched it — not offered/.test(w)));
+  assert.ok(
+    out.warnings.some((w) => /not a wallet this account holds or has held — not offered/.test(w))
+  );
 });
 
 test('a token that reverts on symbol() is still sellable', async () => {

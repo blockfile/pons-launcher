@@ -346,6 +346,44 @@ function build(userId) {
   }
 
   /**
+   * Every address this account holds OR HAS HELD — the live keystore plus the
+   * archive, deduplicated, checksummed.
+   *
+   * This exists for the sell gate, which asks "did a wallet of ours launch this
+   * token?" against the factory's recorded deployer. The live keystore alone is
+   * the wrong answer to that question: rotating the dev wallet does not un-launch
+   * the tokens it deployed, and comparing against the current dev wallet only
+   * orphaned eight of the operator's own tokens — the factory still names the
+   * rotated-away wallet, forever. The archive is where a rotated wallet lives
+   * (see `remove`), so the union of the two is the honest membership test.
+   *
+   * IT IS A MEMBERSHIP TEST AND NOT A WEAKENING. Nothing is listed because a
+   * wallet holds it; the deployer must still be one of these addresses, and a
+   * dusted token's deployer is a stranger who appears in neither file.
+   *
+   * The archive is capped (MAX_ARCHIVED) and evicts, so a wallet rotated away
+   * long ago can be gone from here. That token then stays unlisted and the
+   * caller says so — a narrower answer, never a wrong one. Restoring the wallet
+   * (`npm run archive:restore`) or re-importing its key puts it back in range.
+   *
+   * Metadata only, like every other view out of this module: addresses, no keys,
+   * and no decryption — so it costs no scrypt derivation on the archive's salt.
+   */
+  function ownedAddresses() {
+    const seen = new Map(); // lowercase → checksummed, first spelling wins
+    for (const w of [...load().wallets, ...bin.load().wallets]) {
+      try {
+        const a = getAddress(w.address);
+        if (!seen.has(a.toLowerCase())) seen.set(a.toLowerCase(), a);
+      } catch (_err) {
+        // A malformed address in either file narrows the gate; it never widens
+        // it, and it must not take the whole list down with it.
+      }
+    }
+    return [...seen.values()];
+  }
+
+  /**
    * Put an archived wallet back into the live keystore.
    *
    * The live store's rules are the live store's rules: an address already
@@ -462,6 +500,7 @@ function build(userId) {
     importKeys,
     remove,
     archived,
+    ownedAddresses,
     restore,
     purge,
     signer,
@@ -534,6 +573,7 @@ module.exports = {
   importKeys: (...a) => def().importKeys(...a),
   remove: (...a) => def().remove(...a),
   archived: (...a) => def().archived(...a),
+  ownedAddresses: (...a) => def().ownedAddresses(...a),
   restore: (...a) => def().restore(...a),
   purge: (...a) => def().purge(...a),
   signer: (...a) => def().signer(...a),

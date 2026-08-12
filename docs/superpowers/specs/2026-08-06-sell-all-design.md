@@ -50,9 +50,29 @@ picks — the curve's own state decides.
 ```
 candidates = history  (and only if that yields nothing sellable:
               TokenLaunched(deployer = devWallet), bounded scan)
-launches   = candidates where factory.getLaunchedToken(t).deployer == devWallet
+launches   = candidates where factory.getLaunchedToken(t).deployer IN ours
+             (ours = live keystore UNION deleted-wallet archive)
 sellable   = launches where SUM(bundle wallet balances) > 0
 ```
+
+**Amended 2026-08-12, after the gate refused the operator their own tokens.**
+The line above read `.deployer == devWallet`. The factory records the wallet
+that launched a token and never updates it, so rotating the dev wallet orphaned
+every launch made before the rotation — eight tokens at once, one of them
+holding a 32-wallet bundle's supply, each refused in the log as "the factory
+says `0xdF5263Cd…`/`0x1ada673A…` launched it" when both of those were the
+operator's own previous dev wallets.
+
+`ours` is now the live keystore UNION the deleted-wallet archive
+(`keystore.ownedAddresses()`), the archive being exactly where a rotated-away
+wallet lives. **The gate did not move and this is not a balance check:** the
+recorded deployer must still be an address this account holds or has held, so a
+dusted token — whose deployer is a stranger, present in neither file — is
+refused precisely as before. The archive is capped at 100 and evicts, so a
+wallet rotated away long ago can drop out of `ours`; that token then stays
+unlisted and the warning says so plainly, which is a narrower answer rather than
+a wrong one. Both gates use the set — the picker and `prepareSell` — because a
+token the list offers and the sell refuses is the same bug with an extra step.
 
 **Amended 2026-08-06, after a production hang.** The original spec said
 `TokenLaunched UNION history`, with the log scan run first and unconditionally.
@@ -119,8 +139,8 @@ including failures. The failures are why anyone returns to that log.
 - The action is irreversible and touches every wallet, so it takes the same Arm
   switch the launch button has, and a confirm naming the token and the wallet
   count.
-- Approvals only ever go to the curve or router for a token the dev wallet
-  launched.
+- Approvals only ever go to the curve or router for a token a wallet of this
+  account's launched — see the 2026-08-12 amendment above.
 - A wallet whose sell fails keeps its tokens; the others are unaffected. One
   wallet's failure never aborts the run.
 - Nothing is signed at fire time.
@@ -129,7 +149,9 @@ including failures. The failures are why anyone returns to that log.
 
 Unit, no chain, with injected fakes:
 
-- the candidate list excludes a held token the dev wallet did not launch
+- the candidate list excludes a held token no wallet of this account's launched
+- a token launched by a rotated-away wallet, now in the archive, IS offered —
+  and one launched by a stranger still is not, however long the owner list is
 - a token with zero bundle balance is not offered
 - graduated and bonding tokens route to different builders
 - approve and sell get consecutive nonces from the same wallet

@@ -2,7 +2,7 @@
 
 // Finding what a bundle can actually sell.
 //
-// THE SELECTION RULE IS `launched-by-dev INTERSECT held-by-bundle`, AND THE
+// THE SELECTION RULE IS `launched-by-us INTERSECT held-by-bundle`, AND THE
 // FIRST HALF IS THE SAFETY PROPERTY. Do not "improve" this by listing whatever
 // the wallets happen to hold.
 //
@@ -18,8 +18,26 @@
 // has nothing to offer, the factory's own TokenLaunched events filtered on the
 // indexed `deployer` — and EVERY candidate is then re-checked against the
 // factory's getLaunchedToken record. A token gets into the list only if the
-// factory says this dev wallet launched it. History says WHERE TO LOOK; it is
-// never proof of provenance. Balances only ever narrow the set; never widen it.
+// factory's recorded deployer is an address THIS ACCOUNT HOLDS OR HAS HELD.
+// History says WHERE TO LOOK; it is never proof of provenance. Balances only
+// ever narrow the set; never widen it.
+//
+// "OR HAS HELD" IS LOAD-BEARING AND IT IS NOT A LOOSENING. The gate used to
+// compare against the CURRENT dev wallet alone, which quietly made rotating that
+// wallet destroy the exit for everything launched before the rotation: the
+// factory's record still names the old deployer, forever, so eight of the
+// operator's own tokens — one of them holding a 32-wallet bundle's supply —
+// were refused with "the factory says <their own previous wallet> launched it".
+// The membership set is now the live keystore UNION the deleted-wallet archive
+// (wallets/keystore.js ownedAddresses), which is exactly where a rotated-away
+// wallet lives. A dusted token still fails it, because its deployer is a
+// stranger's address and is in neither file — which is the property the whole
+// gate exists for, and holdings.test.js asserts it.
+//
+// The archive is capped and evicts, so a wallet rotated away long ago may be
+// gone from the set. Such a token stays unlisted and the warning says plainly
+// that the deployer is not a wallet this account holds or has held — the fix is
+// to restore or re-import that wallet, not to widen the gate.
 //
 // HISTORY IS READ FIRST BECAUSE IT IS FREE AND ALMOST ALWAYS RIGHT.
 // data/launches.<user>.json records every launch made through this console,
@@ -129,6 +147,30 @@ function decodeOr(ifc, name, slot, fallback = null) {
   } catch (_err) {
     return fallback;
   }
+}
+
+/**
+ * The addresses that count as "us" when the factory names a deployer, as a set
+ * of lowercased strings.
+ *
+ * One definition of ownership, used by the picker here and by the sell gate in
+ * bundle/prepareSell.js, so the list and the sell can never disagree about whose
+ * token it is — a token offered by one and refused by the other is a worse bug
+ * than either gate alone.
+ *
+ * Anything unparseable is dropped rather than thrown on: a junk entry must never
+ * widen this set, and it must not take the whole list down either.
+ */
+function ownerSet(addresses = []) {
+  const set = new Set();
+  for (const a of addresses) {
+    try {
+      set.add(getAddress(a).toLowerCase());
+    } catch (_err) {
+      // not an address — it cannot be a deployer of ours
+    }
+  }
+  return set;
 }
 
 function factoryContract(deps = {}) {
@@ -485,20 +527,30 @@ async function tokenHoldings(token, wallets, deps = {}) {
  * against a factory's getLaunchedToken before it is listed — v2's, or v1's for a
  * v1 launch. History says where to look; the factory says what is true.
  *
+ * What the factory says is then matched against `owners`: every address this
+ * account holds or has held, not merely the wallet that happens to be the dev
+ * wallet today. See the file header for why that is the correct reading of the
+ * rule rather than a relaxation of it.
+ *
  * Amounts come back as human decimal strings, because everything else the
  * console renders (balanceEth and friends) is a decimal string and a raw base
  * unit shows up as 1e24-scale nonsense. The base units are kept alongside under
  * *Raw for anything that needs to do arithmetic.
  *
  * @param {object} input
- * @param {string} input.deployer the dev wallet
+ * @param {string} input.deployer the CURRENT dev wallet. It is what the log scan
+ *   filters on, and it is always a member of the owner set.
  * @param {Array<{id,address}>} input.wallets bundle wallets
  * @param {Array<string|{token:string, protocol?:string}>} [input.knownTokens]
  *   tokens from this user's launch history. A bare address still works; the
  *   protocol, when the history entry carries one, only says which factory to ask
  *   FIRST — a wrong or missing label costs a second read, never a listing.
+ * @param {Array<string>} [input.owners] every address this account holds or has
+ *   held — keystore.ownedAddresses(). A recorded deployer must be one of these
+ *   for the token to be listed. Defaults to `deployer` alone, which is the old
+ *   behaviour and is only right for an account that has never rotated a wallet.
  */
-async function findSellable({ deployer, wallets = [], knownTokens = [] }, deps = {}) {
+async function findSellable({ deployer, wallets = [], knownTokens = [], owners = [] }, deps = {}) {
   const scan = deps.launchedByDeployer || ((d) => launchedByDeployer(d, deps));
   const describe = deps.describeToken || ((t) => describeToken(t, deps));
   const describeV1 = deps.describeV1Token || ((t) => v1Factory.describeToken(t, deps.provider));
@@ -507,6 +559,10 @@ async function findSellable({ deployer, wallets = [], knownTokens = [] }, deps =
   const budgetMs = deps.scanBudgetMs ?? SCAN_BUDGET_MS;
 
   const dev = getAddress(deployer);
+  // The current dev wallet is always ours, whatever the caller passed — a caller
+  // that supplies no owner list gets exactly the old behaviour rather than an
+  // empty gate that refuses everything.
+  const mineAddresses = ownerSet([dev, ...owners]);
   const warnings = [];
   const batched =
     !deps.describeToken && !deps.describeV1Token && !deps.curveState && !deps.tokenMeta;
@@ -611,18 +667,25 @@ async function findSellable({ deployer, wallets = [], knownTokens = [] }, deps =
     }
 
     // ── the gate ────────────────────────────────────────────────────────────
-    // A token the factory does not know, or says someone else launched, never
+    // A token the factory does not know, or says a stranger launched, never
     // reaches a balance check — let alone an approval. This applies to history
     // exactly as it applies to the scan: a local file naming a token is not
-    // evidence that this dev wallet launched it.
+    // evidence that a wallet of ours launched it.
+    //
+    // "A stranger" means an address outside `mineAddresses`, NOT merely one that
+    // is not the current dev wallet. A previous dev wallet is still ours and the
+    // factory will name it forever; see the file header.
     const mine = [];
     for (const t of tokens) {
       const record = records.get(t);
       if (!record || !record.exists) continue;
-      if (getAddress(record.deployer) !== dev) {
+      if (!mineAddresses.has(getAddress(record.deployer).toLowerCase())) {
+        // Said as what it is — an address we do not recognise — rather than as
+        // the factory contradicting history, which it never does. The archive is
+        // capped, so an old enough rotated wallet lands here honestly.
         warnings.push(
-          `${t} is in this account launch history but the factory says ${record.deployer} ` +
-            'launched it — not offered'
+          `${t} was launched by ${record.deployer}, which is not a wallet this account holds ` +
+            'or has held — not offered'
         );
         continue;
       }
@@ -756,6 +819,12 @@ async function findSellable({ deployer, wallets = [], knownTokens = [] }, deps =
   const rows = fromHistory.length ? await evaluate(fromHistory) : [];
 
   // ── the paid one, only if the free one came back empty ─────────────────────
+  // Scanned for the CURRENT dev wallet only, even though the gate now accepts
+  // any wallet this account has held. One bounded scan is already the most
+  // expensive thing this file does; running it once per archived wallet would
+  // multiply the one path that hung in production by up to MAX_ARCHIVED. A
+  // rotated wallet's launches are in this account's history file, which is read
+  // above for free and is the source that actually answers this case.
   let scanned = { from: null, to: null, complete: true, ran: false };
   if (!rows.length) {
     // The scan bounds itself, but a single stalled getLogs is outside its
@@ -824,6 +893,7 @@ module.exports = {
   tokenMeta,
   tokenHoldings,
   findSellable,
+  ownerSet,
   withDeadline,
   LOG_WINDOW,
   MAX_WINDOWS,

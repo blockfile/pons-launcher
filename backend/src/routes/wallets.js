@@ -257,11 +257,13 @@ const SELLABLE_TIMEOUT_MS = 30_000;
 
 // GET /api/sellable — what this bundle could exit right now.
 //
-// launched-by-dev INTERSECT held-by-bundle, and the first half is the safety
+// launched-by-us INTERSECT held-by-bundle, and the first half is the safety
 // property: a token is NEVER listed because a wallet holds it. Bundle wallets
 // get dusted, and selling an unknown token means approving an unknown contract.
-// See the header of evm/v2/holdings.js for the full reasoning before changing
-// anything here.
+// "Us" is every wallet this account holds or has held, not only today's dev
+// wallet: the factory records the deployer of the day and never updates it, so
+// a rotation would otherwise orphan every earlier launch. See the header of
+// evm/v2/holdings.js for the full reasoning before changing anything here.
 // The console renders this as a plain list, so the list is what it gets. The
 // scan's own diagnostics go to the server log rather than into the array —
 // there is nowhere in a row to put "the scan was partial", and inventing a
@@ -274,6 +276,11 @@ router.get('/sellable', async (req, res, next) => {
         deployer: ks.devWallet().address,
         wallets: ks.bundleWallets(),
         knownTokens: historyTokens(req.user.id),
+        // Every wallet this account holds or has held, so rotating the dev
+        // wallet does not orphan everything launched before the rotation — the
+        // factory names the deployer of the day forever. Per-user by
+        // construction: this is THIS user's keystore and THIS user's archive.
+        owners: ks.ownedAddresses(),
       }),
       SELLABLE_TIMEOUT_MS,
       {

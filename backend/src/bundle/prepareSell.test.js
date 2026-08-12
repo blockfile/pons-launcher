@@ -29,13 +29,19 @@ const routerIface = new Interface([
   'function unwrapWETH9(uint256 amountMinimum, address recipient) payable',
 ]);
 
-function fakeKeystore(wallets = [W1, W2]) {
+// `owned` is what keystore.ownedAddresses() returns: the live wallets plus
+// anything in the deleted-wallet archive. Defaults to the live set alone — an
+// account that has never rotated a wallet — so the gate's dusting cases below
+// are unaffected by the widening.
+function fakeKeystore(wallets = [W1, W2], owned = null) {
   const signed = [];
+  const live = [{ id: 'dev', address: getAddress(DEV), role: 'dev' }, ...wallets];
   return {
     signed,
     devWallet: () => ({ id: 'dev', address: getAddress(DEV), role: 'dev' }),
     bundleWallets: () => wallets,
-    list: () => [{ id: 'dev', address: getAddress(DEV), role: 'dev' }, ...wallets],
+    list: () => live,
+    ownedAddresses: () => owned || live.map((w) => getAddress(w.address)),
     signer: (id) => ({
       async signTransaction(tx) {
         signed.push({ id, tx });
@@ -120,6 +126,43 @@ function v1Deps(over = {}) {
   });
 }
 
+// A previous dev wallet, rotated away and now sitting in this account's
+// deleted-wallet archive. The factory still records it as the deployer of
+// everything it launched, and always will.
+const OLD_DEV = '0xdF5263Cd48223251CA296Db55Fb68B7c3181E7BE';
+
+test('a token launched by a rotated-away dev wallet can still be sold', async () => {
+  // The picker offering a token the sell gate then refuses is the bug with an
+  // extra step, so this gate takes the same owner set the picker does.
+  const ks = fakeKeystore([W1, W2], [
+    getAddress(DEV),
+    getAddress(W1.address),
+    getAddress(W2.address),
+    getAddress(OLD_DEV),
+  ]);
+  const plan = await prepareSell(
+    { token: TOKEN },
+    deps({
+      keystore: ks,
+      describeToken: async () => ({
+        token: getAddress(TOKEN),
+        curve: getAddress(CURVE),
+        deployer: getAddress(OLD_DEV),
+        pairToken: ZeroAddress,
+        creatorTaxBps: 0,
+        phase: 1,
+        exists: true,
+      }),
+    })
+  );
+
+  assert.equal(plan.walletCount, 2);
+  assert.equal(plan.token, getAddress(TOKEN));
+  // The bundle wallets still hold and still sell — the rotation changed which
+  // wallet launched it, never which wallets own the supply.
+  assert.deepEqual(plan.wallets.map((w) => w.walletId), ['w1', 'w2']);
+});
+
 test('a token the dev wallet did not launch is refused before anything is signed', async () => {
   const ks = fakeKeystore();
   await assert.rejects(
@@ -138,7 +181,7 @@ test('a token the dev wallet did not launch is refused before anything is signed
           }),
         })
       ),
-    /was not launched by this dev wallet/
+    /was not launched by a wallet this account holds or has held/
   );
   assert.equal(ks.signed.length, 0, 'nothing may be signed for a token we did not launch');
 });
@@ -174,7 +217,7 @@ test('a v1 token the v1 factory says someone else launched is refused before any
           }),
         })
       ),
-    /was not launched by this dev wallet/
+    /was not launched by a wallet this account holds or has held/
   );
   assert.equal(ks.signed.length, 0, 'the v1 gate is the same gate — nothing may be signed');
 });

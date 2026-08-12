@@ -196,8 +196,9 @@ export default function SellPanel({ step, explorer, credential, live, reload, re
     <Step {...step} className="sell-panel">
       <p className="lede">
         Sells 100% of one launched token from every bundle wallet holding it, all broadcast at once.
-        Only tokens this dev wallet launched are listed — a token that merely turned up in a wallet
-        is never offered, because selling one means approving a contract nobody chose. The proceeds
+        Only tokens launched by a wallet of yours are listed — including dev wallets you have since
+        rotated away — and a token that merely turned up in a wallet is never offered, because
+        selling one means approving a contract nobody chose. The proceeds
         stay in the wallet that sold; use <b>Sweep back to dev</b> in step 4 to consolidate them.
       </p>
 

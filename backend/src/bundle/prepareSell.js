@@ -17,10 +17,12 @@
 //      return near zero and still succeed. DO NOT ADD A FLOOR. A floor turns a
 //      guaranteed exit into a maybe-exit, which is the opposite of the feature.
 //
-//   2. THE TOKEN MUST BE ONE THIS DEV WALLET LAUNCHED. Checked here again
-//      against the factory's own record, not just at the picker. Preparing a
-//      sell means signing an approval, and an approval to a hostile ERC-20 is
-//      the whole dusting attack — see the header of evm/v2/holdings.js.
+//   2. THE TOKEN MUST BE ONE A WALLET OF OURS LAUNCHED — the live keystore or
+//      the deleted-wallet archive, which is where a rotated-away dev wallet
+//      lives. Checked here again against the factory's own record, not just at
+//      the picker. Preparing a sell means signing an approval, and an approval
+//      to a hostile ERC-20 is the whole dusting attack — see the header of
+//      evm/v2/holdings.js, including why "or has held" does not weaken this.
 //
 //   3. THE APPROVAL IS FOR EXACTLY THE BALANCE. No infinite allowance, so a
 //      wallet reused for a later launch carries no lingering permission to a
@@ -123,7 +125,16 @@ async function prepareSell({ token }, deps = {}) {
   // A factory's own record, not the picker's word for it. Everything after this
   // point signs an approval, so this is the gate that stops a dusted contract
   // from being approved by every funded wallet at once. Two registries now, one
-  // rule: the token has to be in one of them, and it has to name this dev wallet.
+  // rule: the token has to be in one of them, and it has to name a wallet of
+  // ours.
+  //
+  // "A wallet of ours" is the same set the picker uses — the live keystore plus
+  // the deleted-wallet archive (keystore.ownedAddresses), shared through
+  // holdings.ownerSet so the two can never disagree. It is deliberately not "the
+  // current dev wallet": the factory records the wallet that launched the token
+  // and never updates it, so comparing against today's dev wallet made rotating
+  // that wallet refuse the operator's own tokens here as well as in the list.
+  // A dusted token is refused exactly as before — its deployer is a stranger.
   let record = await describe(address);
   if (!record.exists) record = await describeV1(address);
   if (!record.exists) {
@@ -131,10 +142,11 @@ async function prepareSell({ token }, deps = {}) {
       `${address} is not a pons launch — neither the v1 nor the v2 factory has a record of it`
     );
   }
-  if (getAddress(record.deployer) !== getAddress(dev.address)) {
+  const ours = holdings.ownerSet([dev.address, ...ks.ownedAddresses()]);
+  if (!ours.has(getAddress(record.deployer).toLowerCase())) {
     throw new Error(
-      `${address} was not launched by this dev wallet — the factory says ${record.deployer} ` +
-        'launched it. Refusing to approve a contract we did not create.'
+      `${address} was not launched by a wallet this account holds or has held — the factory says ` +
+        `${record.deployer} launched it. Refusing to approve a contract we did not create.`
     );
   }
 

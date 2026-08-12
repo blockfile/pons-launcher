@@ -187,6 +187,67 @@ test('one user can never see or restore another user archived wallet', () => {
   assert.ok(!fs.readFileSync(archiveFile('alice'), 'utf8').includes(bw.address));
 });
 
+// ── who this account is, for the sell gate ─────────────────────────────────
+//
+// The factory records the wallet that launched a token and never updates it, so
+// "is this token ours?" cannot be asked of the current dev wallet alone —
+// rotating it made the picker refuse eight of the operator's own tokens. The
+// answer is the live keystore UNION this archive, which is exactly where a
+// rotated-away wallet ends up. See evm/v2/holdings.js.
+
+test('ownedAddresses is the live keystore plus the archive, deduplicated', () => {
+  const ks = keystore.keystoreFor('owner');
+  const [dev] = ks.generate(1, { role: 'dev' });
+  const [b1, b2] = ks.generate(2, { role: 'bundle' });
+
+  assert.deepEqual(
+    [...ks.ownedAddresses()].sort(),
+    [dev.address, b1.address, b2.address].sort(),
+    'the live keystore, while nothing has been deleted'
+  );
+
+  // The rotation this exists for: the dev wallet is deleted and replaced, and
+  // the old one has to keep counting or its launches become unsellable.
+  ks.remove(dev.id);
+  const [newDev] = ks.generate(1, { role: 'dev' });
+  const after = ks.ownedAddresses();
+  assert.ok(after.includes(newDev.address), 'the wallet signing today');
+  assert.ok(after.includes(dev.address), 'and the one that actually launched the tokens');
+  assert.equal(after.length, 4);
+
+  // No keys, ever — this is a membership test, not a way to read the archive.
+  assert.ok(after.every((a) => /^0x[0-9a-fA-F]{40}$/.test(a)));
+
+  // Restoring must not double-count: one address, whichever file it is in.
+  ks.remove(newDev.id);
+  ks.restore(dev.id);
+  const restored = ks.ownedAddresses();
+  assert.equal(new Set(restored).size, restored.length);
+  assert.equal(restored.length, 4);
+
+  // And a purge is a real destruction here too: the address stops being ours,
+  // so a token it launched stops being offered. Narrower, never wrong.
+  ks.purge(newDev.id);
+  assert.ok(!ks.ownedAddresses().includes(newDev.address));
+});
+
+test('one account archive never widens another account owned set', () => {
+  const ann = keystore.keystoreFor('ann');
+  const ben = keystore.keystoreFor('ben');
+
+  const [aDev] = ann.generate(1, { role: 'dev' });
+  ann.remove(aDev.id);
+  ann.generate(1, { role: 'dev' });
+  const [bDev] = ben.generate(1, { role: 'dev' });
+
+  // Ann rotated; her old dev wallet is hers and nobody else's. Ben's owned set
+  // is the only thing gating Ben's sells, so this is what stops "or has held"
+  // from meaning "or anyone has held".
+  assert.ok(ann.ownedAddresses().includes(aDev.address));
+  assert.ok(!ben.ownedAddresses().includes(aDev.address));
+  assert.ok(!ann.ownedAddresses().includes(bDev.address));
+});
+
 test('the archive lives beside the keystore, one file per user', () => {
   assert.equal(path.dirname(archiveFile('alice')), dir);
   assert.equal(path.basename(archiveFile('alice')), 'wallets.archive.alice.keystore.json');
@@ -305,6 +366,22 @@ test('the archive is capped at 100, and the 101st delete evicts the oldest', () 
     left.map((e) => e.address),
     made.slice(1).map((w) => w.address).reverse()
   );
+});
+
+test('an evicted wallet stops counting as ours, and nothing pretends otherwise', () => {
+  // The honest edge of the sell gate. A dev wallet rotated away long enough ago
+  // can be evicted from the full archive, and once it is, the account has no
+  // record of ever holding it — so a token it launched is no longer offered.
+  // That is a narrower list, not a wrong one; the operator's route back is to
+  // re-import the key (or restore it before the cap reaches it), which is what
+  // the refusal message points at.
+  const ks = keystore.keystoreFor('capped'); // already overflowed, above
+  const evicted = new Wallet(keyFor(1)).address; // the first delete, the one destroyed
+  const survivor = new Wallet(keyFor(2)).address;
+
+  const owned = ks.ownedAddresses();
+  assert.ok(!owned.includes(evicted), 'a destroyed key is not a wallet this account holds');
+  assert.ok(owned.includes(survivor), 'everything still archived is still ours');
 });
 
 test('eviction takes the oldest deletedAt, not merely the last line in the file', () => {
