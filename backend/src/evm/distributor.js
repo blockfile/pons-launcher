@@ -33,8 +33,12 @@ const { provider } = require('./provider');
 const { getConfigs } = require('./factory');
 
 const DISTRIBUTOR_ABI = [
+  'function launchAndDistribute(address factory, (string name, string symbol, string logo, string description, (string twitter, string telegram, string discord, string website, string farcaster) socials, address feeWallet) params, uint256 launchConfigId, uint256 dexId, bytes32 salt, address[] wallets, uint16[] shares) payable returns (address token, uint256 supply)',
   'function buyAndDistribute(address router, address weth, address token, uint24 poolFee, uint256 minOut, address[] wallets, uint16[] shares) payable returns (uint256 amountOut)',
+  'function sweep(address token) returns (uint256)',
+  'function launcherOf(address token) view returns (address)',
   'function TOTAL_BPS() view returns (uint256)',
+  'event Launched(address indexed token, address indexed launcher, uint256 devBuy, uint256 recipients)',
   'event Distributed(address indexed token, uint256 amountIn, uint256 amountOut, uint256 recipients)',
 ];
 
@@ -158,6 +162,74 @@ function buildTriggerTx({ distributor, router, weth, token, poolFee, minOut, wal
   };
 }
 
+/**
+ * Build the atomic launch: launch, take the whole initial buy, fan it out.
+ *
+ * The value sent is the launch fee PLUS the dev buy — the factory takes its
+ * fee and treats the remainder as the initial buy, so there is no separate
+ * amount to pass. The contract spends its entire balance, which is msg.value
+ * plus anything pre-staged, so capital can arrive from several wallets without
+ * any one of them ever holding the full sum.
+ *
+ * feeWallet is forced to zero here and the contract refuses a non-zero one.
+ * With it set the factory makes THAT address the initial-buy recipient, the
+ * supply never reaches the contract, and the fan-out would distribute nothing
+ * — after the launch fee has already been spent.
+ */
+function buildLaunchTx({
+  distributor,
+  factory,
+  params,
+  launchConfigId = 0,
+  dexId = 0,
+  salt,
+  wallets,
+  shares,
+  valueWei,
+}) {
+  const tokenParams = {
+    name: params.name,
+    symbol: params.symbol,
+    logo: params.logo || '',
+    description: params.description || '',
+    socials: {
+      twitter: params.socials?.twitter || '',
+      telegram: params.socials?.telegram || '',
+      discord: params.socials?.discord || '',
+      website: params.socials?.website || '',
+      farcaster: params.socials?.farcaster || '',
+    },
+    feeWallet: '0x0000000000000000000000000000000000000000',
+  };
+
+  return {
+    to: distributor,
+    data: iface.encodeFunctionData('launchAndDistribute', [
+      factory,
+      tokenParams,
+      launchConfigId,
+      dexId,
+      salt,
+      wallets,
+      shares,
+    ]),
+    value: valueWei,
+  };
+}
+
+/** The token address out of a mined atomic launch. */
+function launchedTokenFrom(receipt) {
+  for (const log of receipt?.logs || []) {
+    try {
+      const parsed = iface.parseLog(log);
+      if (parsed?.name === 'Launched') return parsed.args.token;
+    } catch (_err) {
+      /* not ours */
+    }
+  }
+  return null;
+}
+
 /** Pull the amountOut back out of a mined trigger. */
 function amountOutFrom(receipt) {
   for (const log of receipt?.logs || []) {
@@ -179,5 +251,7 @@ module.exports = {
   dexParams,
   quoteTrigger,
   buildTriggerTx,
+  buildLaunchTx,
+  launchedTokenFrom,
   amountOutFrom,
 };

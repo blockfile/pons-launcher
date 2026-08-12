@@ -14,18 +14,21 @@
 // it, and buys after they have sold it back.
 
 const express = require('express');
-const { formatEther, parseEther } = require('ethers');
+const { formatEther, parseEther, hexlify, randomBytes } = require('ethers');
 const config = require('../config');
 const { provider } = require('../evm/provider');
 const { keystoreFor } = require('../wallets/keystore');
 const { distributorFor } = require('../store/distributors');
 const { activityFor } = require('../store/activity');
 const { deploy, estimate } = require('../evm/deploy');
+const { getConfigs } = require('../evm/factory');
 const { requireApiKey } = require('../middleware/auth');
 const {
   dexParams,
   quoteTrigger,
   buildTriggerTx,
+  buildLaunchTx,
+  launchedTokenFrom,
   amountOutFrom,
   sharesFromWeights,
   equalShares,
@@ -154,6 +157,79 @@ router.post('/distributor/quote', requireApiKey, async (req, res, next) => {
       ok: q.ok,
       reason: q.reason,
       amountOut: q.amountOut.toString(),
+      wallets: chosen.map((w, i) => ({ id: w.id, address: w.address, shareBps: shares[i] })),
+    });
+  } catch (err) {
+    next(err);
+  }
+});
+
+// POST /api/distributor/launch — the atomic path. Launch, take the whole
+// initial buy, and fan it across the bundle wallets, all in one transaction.
+//
+// This is the one the evidence supports. Across 242,815 launches, taking
+// 60-90% of supply through the atomic buy lost 0.08% of float to snipers;
+// taking the same share through a post-launch bundle lost 3.06%. Nothing can
+// precede it — the token does not exist until this call runs — so there is no
+// race to lose and no timing to get right.
+router.post('/distributor/launch', requireApiKey, async (req, res, next) => {
+  try {
+    const { params, devBuyEth, launchConfigId = 0, dexId = 0, confirm } = req.body || {};
+    if (confirm !== true) throw new Error('this spends ETH — requires { confirm: true }');
+    if (!params?.name || !params?.symbol) throw new Error('name and symbol are required');
+    if (!(Number(devBuyEth) > 0)) throw new Error('devBuyEth must be positive — that is the point');
+    if (config.dryRun) throw new Error('DRY_RUN is on — nothing would be sent');
+
+    const record = distributorFor(req.user.id).get();
+    if (!record) throw new Error('no distributor deployed — deploy one first');
+
+    const ks = keystoreFor(req.user.id);
+    const dev = ks.devWallet();
+    const signer = ks.signer(dev.id, provider);
+    const { wallets, shares, chosen } = resolveRecipients(ks, req.body);
+
+    const { launchFee } = await getConfigs();
+    const value = parseEther(String(devBuyEth)) + BigInt(launchFee);
+    const salt = hexlify(randomBytes(32));
+
+    const tx = buildLaunchTx({
+      distributor: record.address,
+      factory: config.factoryAddress,
+      params,
+      launchConfigId: Number(launchConfigId),
+      dexId: Number(dexId),
+      salt,
+      wallets,
+      shares,
+      valueWei: value,
+    });
+
+    // Simulated before it is sent, always. A launch that reverts has still
+    // spent the fee, and the one mistake this path allows — a non-zero
+    // feeWallet, which would send the supply somewhere else and leave nothing
+    // to distribute — is only visible here.
+    try {
+      await provider.call({ ...tx, from: dev.address });
+    } catch (err) {
+      throw new Error(`simulation failed, refusing to send — ${(err.shortMessage || err.message).slice(0, 200)}`);
+    }
+
+    const sent = await signer.sendTransaction(tx);
+    const receipt = await sent.wait(1);
+    const token = launchedTokenFrom(receipt);
+
+    activityFor(req.user.id).record(
+      'deploy',
+      `v2 atomic launch: ${params.symbol} with a ${devBuyEth} ETH buy split ${chosen.length} ways`,
+      { contracts: token ? [{ address: token, txHash: sent.hash }] : [] }
+    );
+
+    res.json({
+      hash: sent.hash,
+      status: receipt.status,
+      blockNumber: receipt.blockNumber,
+      token,
+      devBuyEth: String(devBuyEth),
       wallets: chosen.map((w, i) => ({ id: w.id, address: w.address, shareBps: shares[i] })),
     });
   } catch (err) {
