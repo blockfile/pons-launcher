@@ -5,3 +5,6 @@ data/
 dist/
 logs/
 .superpowers/
+
+# Playwright MCP session artifacts
+.playwright-mcp/
