@@ -5,6 +5,7 @@ const config = require('../config');
 const { keystoreFor } = require('../wallets/keystore');
 const funding = require('../wallets/funding');
 const { dispersersFor } = require('../store/dispersers');
+const { distributorFor } = require('../store/distributors');
 const { activityFor, viewFor, summariseTransfers } = require('../store/activity');
 const users = require('../users/users');
 const { historyFor } = require('../store/history');
@@ -280,7 +281,16 @@ router.get('/sellable', async (req, res, next) => {
         // wallet does not orphan everything launched before the rotation — the
         // factory names the deployer of the day forever. Per-user by
         // construction: this is THIS user's keystore and THIS user's archive.
-        owners: ks.ownedAddresses(),
+        //
+        // The v2 distributor belongs here for the same reason and is easy to
+        // miss: on that path the CONTRACT calls launchToken, so the factory
+        // records the contract as deployer and no keystore wallet matches.
+        // Without this line every atomic launch would be invisible to the sell
+        // panel — launched fine, then unsellable. It is this user's own
+        // contract, so it widens the set by exactly one address they control.
+        owners: [...ks.ownedAddresses(), distributorFor(req.user.id).get()?.address].filter(
+          Boolean
+        ),
       }),
       SELLABLE_TIMEOUT_MS,
       {
