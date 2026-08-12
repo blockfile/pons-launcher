@@ -426,7 +426,7 @@ export default function App() {
               credential={credential}
               report={report}
               wallets={wallets}
-              history={history}
+              configs={configs}
             />
           )}
 
