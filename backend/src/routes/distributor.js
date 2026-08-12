@@ -1,6 +1,6 @@
 'use strict';
 
-// The v2 bundler: launch quiet, wait, then buy once through a contract.
+// The v2 bundler: take the supply inside the launch transaction itself.
 //
 // SEPARATE FROM THE V1 PATH BY DESIGN. Nothing in here touches routes/launch.js
 // or bundle/prepare.js — the v1 flow (dev buy + a bundle racing for the tick)
@@ -8,10 +8,20 @@
 // different strategies against the same factory, not two versions of one, so
 // sharing code between them would only make each harder to reason about.
 //
-// The strategy is documented at the top of evm/distributor.js. The short form:
-// v1 races the snipers for the open block and loses by ~300ms; this declines
-// the race entirely, lets them take a position into a pool with nothing behind
-// it, and buys after they have sold it back.
+// v1 races the snipers for the first legal block and loses it by ~300ms. This
+// declines the race: the factory's initial buy runs INSIDE launchToken, where
+// every other pool buy reverts, and the distributor fans it out before the
+// transaction ends. Nothing can precede it, so there is nothing to be late for.
+//
+// THREE ROLES, DELIBERATELY SEPARATE:
+//   dev wallet      deploys the contract and signs the launch. Pays gas and the
+//                   launch fee, never the buy, never holds supply.
+//   funding wallet  stages the buy by sending ETH to the contract. Can be any
+//                   address, or several — both spending paths read the whole
+//                   balance, so no single wallet ever holds the full amount.
+//   bundle wallets  receive the supply. They never buy, so they never need ETH
+//                   before a launch — which is also what removes the disperser
+//                   fingerprint that used to announce a launch 8-22 min early.
 
 const express = require('express');
 const { formatEther, parseEther, hexlify, randomBytes } = require('ethers');
@@ -269,10 +279,9 @@ router.post('/distributor/launch', requireApiKey, async (req, res, next) => {
 // POST /api/distributor/trigger — buy once and fan out. Spends real ETH.
 router.post('/distributor/trigger', requireApiKey, async (req, res, next) => {
   try {
-    const { token, amountEth, slippageBps = 1500, confirm } = req.body || {};
+    const { token, amountEth = 0, slippageBps = 1500, confirm } = req.body || {};
     if (confirm !== true) throw new Error('this spends ETH — requires { confirm: true }');
     if (!token) throw new Error('token is required');
-    if (!(Number(amountEth) > 0)) throw new Error('amountEth must be positive');
     if (config.dryRun) throw new Error('DRY_RUN is on — nothing would be sent');
 
     const record = distributorFor(req.user.id).get();
@@ -282,6 +291,14 @@ router.post('/distributor/trigger', requireApiKey, async (req, res, next) => {
     const dev = ks.devWallet();
     const signer = ks.signer(dev.id, provider);
     const { wallets, shares, chosen } = resolveRecipients(ks, req.body);
+
+    // Same role split as the launch: the contract spends its WHOLE balance, so
+    // the ETH can be staged by a funding wallet and the dev wallet need only
+    // pay gas. Passing amountEth still works and simply adds to what is there.
+    const held = await provider.getBalance(record.address);
+    if (held + parseEther(String(amountEth || 0)) === 0n) {
+      throw new Error('the distributor holds nothing and this call adds nothing — stage ETH first');
+    }
 
     // Quote first, always. It is one eth_call and it is the difference between
     // a clean revert and spending gas to find out the window has not lifted.

@@ -100,7 +100,6 @@ interface ISwapRouter {
 contract BundleDistributor {
     error NoRecipients();
     error LengthMismatch(uint256 recipients, uint256 shares);
-    error NoValue();
     error SharesMustSumToBps(uint256 got);
     error TransferFailed(address to, uint256 amount);
 
@@ -271,17 +270,24 @@ contract BundleDistributor {
     ) external payable returns (uint256 amountOut) {
         if (wallets.length == 0) revert NoRecipients();
         if (wallets.length != shares.length) revert LengthMismatch(wallets.length, shares.length);
-        if (msg.value == 0) revert NoValue();
 
         uint256 sum;
         for (uint256 i; i < shares.length; ++i) sum += shares[i];
         if (sum != TOTAL_BPS) revert SharesMustSumToBps(sum);
 
+        // Spends the WHOLE balance, exactly as launchAndDistribute does, so the
+        // capital can be staged here by a funding wallet and the caller need
+        // only pay gas. Passing value still works — it lands in the balance
+        // before this line reads it — so either funding route is available and
+        // they compose.
+        uint256 spend = address(this).balance;
+        if (spend == 0) revert NothingToSpend();
+
         // The router spends WETH, not native ETH, so wrap and approve here
-        // rather than expecting the caller to hold WETH. Approving exactly
-        // msg.value leaves no standing allowance behind.
-        IWETH(weth).deposit{value: msg.value}();
-        IWETH(weth).approve(router, msg.value);
+        // rather than expecting the caller to hold WETH. Approving exactly what
+        // is being spent leaves no standing allowance behind.
+        IWETH(weth).deposit{value: spend}();
+        IWETH(weth).approve(router, spend);
 
         amountOut = ISwapRouter(router).exactInputSingle(
             ISwapRouter.ExactInputSingleParams({
@@ -289,7 +295,7 @@ contract BundleDistributor {
                 tokenOut: token,
                 fee: poolFee,
                 recipient: address(this),
-                amountIn: msg.value,
+                amountIn: spend,
                 amountOutMinimum: minOut,
                 sqrtPriceLimitX96: 0
             })
@@ -301,6 +307,6 @@ contract BundleDistributor {
         // transfers is exactly amountOut regardless of rounding.
         _fanOut(token, amountOut, wallets, shares);
 
-        emit Distributed(token, msg.value, amountOut, wallets.length);
+        emit Distributed(token, spend, amountOut, wallets.length);
     }
 }
