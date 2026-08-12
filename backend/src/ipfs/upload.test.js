@@ -32,15 +32,14 @@ const responds = (body, status = 200) => () => ({
 });
 
 test('assertUploadable accepts exactly the three types pons accepts', () => {
-  for (const t of ['image/png', 'image/jpeg', 'image/webp']) {
+  for (const t of ['image/png', 'image/jpeg', 'image/webp', 'image/gif']) {
     assert.equal(assertUploadable(t, 10), t);
   }
   assert.equal(assertUploadable('IMAGE/PNG; charset=binary', 10), 'image/png');
 });
 
 test('assertUploadable rejects gif, non-images, empty and oversize', () => {
-  assert.throws(() => assertUploadable('image/gif', 10), /PNG, JPEG or WebP/);
-  assert.throws(() => assertUploadable('text/html', 10), /PNG, JPEG or WebP/);
+  assert.throws(() => assertUploadable('text/html', 10), /PNG, JPEG, WebP or GIF/);
   assert.throws(() => assertUploadable('image/png', 0), /empty/);
   assert.throws(() => assertUploadable('image/png', 5 * 1024 * 1024 + 1), /smaller than 5 MB/);
 });

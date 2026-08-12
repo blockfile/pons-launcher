@@ -4,7 +4,11 @@ import { uploadLogo } from '../api.js';
 // Mirrors ponsfamily's own create form: the same accepted types, the same 5 MB
 // ceiling and the same acknowledgement before the picker unlocks. Checked here
 // too so an oversized file fails instantly instead of after a round trip.
-const ACCEPT = ['image/png', 'image/jpeg', 'image/webp'];
+// GIF is allowed but not endorsed: it pins and launches fine, and the logo is
+// written into the token permanently, but whether pons' own site, GMGN and the
+// explorers animate it or show one frame is up to each of them. Test on a
+// throwaway launch before spending a real one on it.
+const ACCEPT = ['image/png', 'image/jpeg', 'image/webp', 'image/gif'];
 const MAX_BYTES = 5 * 1024 * 1024;
 
 export default function LogoField({ value, onChange, onUploading }) {
@@ -53,7 +57,7 @@ export default function LogoField({ value, onChange, onUploading }) {
 
     setError('');
     onChange('');
-    if (!ACCEPT.includes(file.type)) return fail('Use a PNG, JPEG or WebP image.');
+    if (!ACCEPT.includes(file.type)) return fail('Use a PNG, JPEG, WebP or GIF image.');
     if (!file.size) return fail('The image is empty.');
     if (file.size > MAX_BYTES) return fail('Images must be smaller than 5 MB.');
 
@@ -101,7 +105,7 @@ export default function LogoField({ value, onChange, onUploading }) {
             {busy ? 'Uploading image…' : confirmed ? (value ? 'Replace image' : 'Choose image') : 'Confirm public upload first'}
           </button>
           <span className="hint">
-            {error ? <span className="logoError">{error}</span> : value || `${fileName || 'PNG, JPEG or WebP'} · 5 MB max`}
+            {error ? <span className="logoError">{error}</span> : value || `${fileName || 'PNG, JPEG, WebP or GIF'} · 5 MB max`}
           </span>
         </span>
         {value && !busy && (

@@ -13,6 +13,7 @@ const ACCEPTED = new Map([
   ['image/png', 'png'],
   ['image/jpeg', 'jpg'],
   ['image/webp', 'webp'],
+  ['image/gif', 'gif'],
 ]);
 const MAX_BYTES = 5 * 1024 * 1024;
 const IPFS_URI = /^ipfs:\/\/[A-Za-z0-9]+(\/[A-Za-z0-9._-]+)*$/;
@@ -26,7 +27,7 @@ function assertUploadable(mime, size) {
     .split(';')[0]
     .trim()
     .toLowerCase();
-  if (!ACCEPTED.has(type)) throw new Error('Use a PNG, JPEG or WebP image.');
+  if (!ACCEPTED.has(type)) throw new Error('Use a PNG, JPEG, WebP or GIF image.');
   if (!size) throw new Error('The image is empty.');
   if (size > MAX_BYTES) throw new Error('Images must be smaller than 5 MB.');
   return type;
