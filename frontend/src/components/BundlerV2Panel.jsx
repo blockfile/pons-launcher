@@ -43,6 +43,9 @@ export default function BundlerV2Panel({
   const [error, setError] = useState('');
   const [busy, setBusy] = useState('');
   const [launched, setLaunched] = useState(null);
+  const [triggered, setTriggered] = useState(null);
+  const [topUp, setTopUp] = useState('0.5');
+  const [quote, setQuote] = useState(null);
 
   const [form, setForm] = useState({
     name: '',
@@ -88,6 +91,7 @@ export default function BundlerV2Panel({
 
   const distributor = state?.distributor || null;
   const deployQuote = state?.quote || null;
+  const staged = state?.stagedEth || '0';
   const dev = wallets.find((w) => w.role === 'dev');
   const bundle = wallets.filter((w) => w.role === 'bundle');
 
@@ -96,17 +100,18 @@ export default function BundlerV2Panel({
   // it lives outside both.
   const projection = useMemo(() => {
     const cfg = configs?.launchConfigs?.find((c) => c.enabled) || configs?.launchConfigs?.[0];
-    if (!cfg || !(Number(devBuy) > 0)) return null;
+    const spend = Number(staged) + Number(devBuy || 0);
+    if (!cfg || !(spend > 0)) return null;
     const pool = openingPool(cfg);
     if (!pool.quoteReserve) return null;
     const r = constantProductBuy({
-      quoteInWei: parseEthToWei(devBuy),
+      quoteInWei: parseEthToWei(String(spend)),
       ...pool,
       feeBps: 100,
     });
     const share = (Number(r.tokensOut) / Number(BigInt(cfg.supply))) * 100;
     return { share, each: bundle.length ? share / bundle.length : 0 };
-  }, [configs, devBuy, bundle.length]);
+  }, [configs, devBuy, staged, bundle.length]);
 
   const ready = form.name && form.symbol && bundle.length > 0 && distributor;
 
@@ -118,7 +123,7 @@ export default function BundlerV2Panel({
         done: Boolean(dev),
         detail: dev
           ? `${short(dev.address)} · ${Number(dev.balanceEth).toFixed(4)} ETH`
-          : 'it deploys the contract and pays for the whole buy',
+          : 'it deploys the contract and signs the launch — it never carries the buy',
       },
       {
         n: 2,
@@ -136,6 +141,15 @@ export default function BundlerV2Panel({
       },
       {
         n: 4,
+        title: 'Stage the buy',
+        done: Number(staged) > 0,
+        detail:
+          Number(staged) > 0
+            ? `${Number(staged).toFixed(4)} ETH held by the contract`
+            : 'send ETH to the contract from your funding wallet',
+      },
+      {
+        n: 5,
         title: 'Launch and distribute',
         done: Boolean(launched),
         detail: launched
@@ -143,6 +157,15 @@ export default function BundlerV2Panel({
           : projection
             ? `${devBuy} ETH takes about ${projection.share.toFixed(1)}% of supply`
             : 'one transaction: launch, buy, split',
+      },
+      {
+        n: 6,
+        title: 'Buy more, on your timing',
+        optional: true,
+        done: Boolean(triggered),
+        detail: triggered
+          ? `${(Number(triggered.amountOut) / 1e18).toLocaleString()} tokens added`
+          : 'a second buy through the contract, whenever you choose',
       },
     ];
 
@@ -169,7 +192,7 @@ export default function BundlerV2Panel({
             : null,
       };
     });
-  }, [dev, distributor, bundle.length, launched, projection, devBuy, form.symbol]);
+  }, [dev, distributor, bundle.length, staged, launched, triggered, projection, devBuy, form.symbol]);
 
   const step = (n) => steps[n - 1];
 
@@ -189,9 +212,10 @@ export default function BundlerV2Panel({
 
       <Step {...step(1)}>
         <p className="lede">
-          Shared with the V1 tab — create or import it there. Here it deploys the distributor and
-          pays for the launch, but it never holds the supply: the tokens go straight to the bundle
-          wallets inside the same transaction.
+          Shared with the V1 tab — create or import it there. On this path its whole job is to
+          deploy the distributor and sign the launch. It never holds the buy and never holds the
+          supply: the ETH is staged in the contract by a separate funding wallet, and the tokens go
+          straight to the bundle wallets inside the same transaction.
         </p>
       </Step>
 
@@ -263,7 +287,47 @@ export default function BundlerV2Panel({
         </p>
       </Step>
 
-      <Step {...step(4)} last>
+
+      <Step {...step(4)}>
+        <p className="lede">
+          The contract spends its <strong>whole balance</strong> when it launches, so the buy is
+          staged here beforehand — from your funding wallet, from several wallets, or from an
+          exchange. The dev wallet never has to hold it, and whoever funds is not whoever launches.
+        </p>
+
+        {distributor && (
+          <div className="notice">
+            <h3>send the buy to this address</h3>
+            <ul>
+              <li>
+                <a href={`${explorer}/address/${distributor.address}`} target="_blank" rel="noreferrer">
+                  {distributor.address}
+                </a>
+              </li>
+              <li>
+                currently holding <strong>{Number(staged).toFixed(4)} ETH</strong>
+                {Number(staged) > 0 ? ' — all of it goes into the launch buy' : ''}
+              </li>
+              <li>
+                anything you add on the launch itself is added to this, so either route works
+              </li>
+            </ul>
+          </div>
+        )}
+
+        <div className="row">
+          <span className="hint">balances refresh when this panel reloads</span>
+          <span className="spacer" />
+          <Busy busy={busy === 'refresh'} className="ghost" onClick={() => act('refresh', async () => {
+            const s2 = await api('/distributor');
+            return `distributor holds ${Number(s2.stagedEth || 0).toFixed(4)} ETH`;
+          })}>
+            Refresh balance
+          </Busy>
+        </div>
+      </Step>
+
+      <Step {...step(5)}>
         <p className="lede">
           Everything below happens in one transaction. The dev buy is not a separate step and it is
           not optional — it is the mechanism. It executes inside the launch, exempt from the 5% cap,
@@ -403,6 +467,62 @@ export default function BundlerV2Panel({
             </ul>
           </div>
         )}
+      </Step>
+
+      <Step {...step(6)} last>
+        <p className="lede">
+          A second buy through the same contract, on your timing. This one is an ordinary pool buy,
+          so it is <em>not</em> protected the way the launch buy is — anyone can trade ahead of it.
+          Use it to add to a position, not to establish one.
+        </p>
+
+        <div className="row">
+          <label className="hint">
+            spend
+            <input
+              type="number"
+              step="0.01"
+              min="0"
+              value={topUp}
+              onChange={(e) => { setTopUp(e.target.value); setQuote(null); }}
+              style={{ width: 90, marginLeft: 6 }}
+            />
+            {' ETH'}
+          </label>
+          <span className="spacer" />
+          <Busy
+            busy={busy === 'quote'}
+            className="ghost"
+            disabled={!launched?.token || !(Number(topUp) > 0)}
+            onClick={() => act('quote', async () => {
+              const q = await api('/distributor/quote', 'POST', { token: launched.token, amountEth: Number(topUp) });
+              setQuote(q);
+              return q.ok
+                ? `quote: ${(Number(q.amountOut) / 1e18).toLocaleString()} tokens`
+                : `NOT READY — ${q.reason}`;
+            })}
+          >
+            Quote it
+          </Busy>
+          <Busy
+            busy={busy === 'trigger'}
+            disabled={!quote?.ok}
+            onClick={() => act('trigger', async () => {
+              const out = await api('/distributor/trigger', 'POST', {
+                token: launched.token, amountEth: Number(topUp), confirm: true,
+              });
+              setTriggered(out.status === 1 ? out : null);
+              setQuote(null);
+              return out.status === 1
+                ? `added ${(Number(out.amountOut) / 1e18).toLocaleString()} tokens in block ${out.blockNumber}`
+                : `reverted — ${out.hash}`;
+            })}
+          >
+            Buy more
+          </Busy>
+        </div>
+
+        {!launched?.token && <p className="hint">launch first — this buys the token from step 5</p>}
       </Step>
     </>
   );

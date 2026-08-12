@@ -82,7 +82,20 @@ router.get('/distributor', requireApiKey, async (req, res, next) => {
       quote = { error: err.message };
     }
 
-    res.json({ distributor: record, dex, quote });
+    // What the contract is already holding. The launch spends its whole
+    // balance, so this is capital that can arrive from ANY wallet — the dev
+    // wallet never has to hold the buy, and the funding wallet never has to be
+    // the one that launches.
+    let staged = null;
+    if (record) {
+      try {
+        staged = formatEther(await provider.getBalance(record.address));
+      } catch (_err) {
+        staged = null;
+      }
+    }
+
+    res.json({ distributor: record, dex, quote, stagedEth: staged });
   } catch (err) {
     next(err);
   }
@@ -174,10 +187,9 @@ router.post('/distributor/quote', requireApiKey, async (req, res, next) => {
 // race to lose and no timing to get right.
 router.post('/distributor/launch', requireApiKey, async (req, res, next) => {
   try {
-    const { params, devBuyEth, launchConfigId = 0, dexId = 0, confirm } = req.body || {};
+    const { params, devBuyEth = 0, launchConfigId = 0, dexId = 0, confirm } = req.body || {};
     if (confirm !== true) throw new Error('this spends ETH — requires { confirm: true }');
     if (!params?.name || !params?.symbol) throw new Error('name and symbol are required');
-    if (!(Number(devBuyEth) > 0)) throw new Error('devBuyEth must be positive — that is the point');
     if (config.dryRun) throw new Error('DRY_RUN is on — nothing would be sent');
 
     const record = distributorFor(req.user.id).get();
@@ -189,7 +201,24 @@ router.post('/distributor/launch', requireApiKey, async (req, res, next) => {
     const { wallets, shares, chosen } = resolveRecipients(ks, req.body);
 
     const { launchFee } = await getConfigs();
-    const value = parseEther(String(devBuyEth)) + BigInt(launchFee);
+    const addedNow = parseEther(String(devBuyEth || 0));
+
+    // THE DEV WALLET DOES NOT HAVE TO CARRY THE BUY. The contract spends its
+    // whole balance, so the capital can be staged there beforehand from any
+    // wallet — or several — and this call adds nothing but the launch fee. That
+    // separation is the point: whoever funds is not whoever launches, and no
+    // single address ever holds the full amount.
+    const staged = await provider.getBalance(record.address);
+    const total = staged + addedNow;
+    if (total <= BigInt(launchFee)) {
+      throw new Error(
+        `the distributor holds ${formatEther(staged)} ETH and this call adds ${formatEther(addedNow)} — ` +
+          `that leaves nothing for the buy after the ${formatEther(launchFee)} launch fee. ` +
+          'Send ETH to the contract first, or pass devBuyEth.'
+      );
+    }
+
+    const value = addedNow + BigInt(launchFee);
     const salt = hexlify(randomBytes(32));
 
     const tx = buildLaunchTx({
