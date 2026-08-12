@@ -17,6 +17,7 @@ import ResultPanel from './components/ResultPanel.jsx';
 import SellPanel from './components/SellPanel.jsx';
 import HistoryPanel from './components/HistoryPanel.jsx';
 import ActivityPanel from './components/ActivityPanel.jsx';
+import BundlerV2Panel from './components/BundlerV2Panel.jsx';
 
 const { bundleShare } = bundleShareModule;
 
@@ -48,6 +49,10 @@ const DRAFT_FIELDS = [
 const animation = domMax;
 
 export default function App() {
+  // Which strategy is on screen. Not persisted: v1 is the one that has been
+  // used for every launch to date, so a reload lands on it rather than on
+  // whatever was open last.
+  const [mode, setMode] = useState('v1');
   const [health, setHealth] = useState(null);
   const [wallets, setWallets] = useState([]);
   const [configs, setConfigs] = useState(null);
@@ -385,6 +390,45 @@ export default function App() {
         </header>
 
         <main>
+          {/* Two strategies against the same factory, not two versions of one.
+              V1 arms a bundle and fires it the moment trading opens; V2 launches
+              with no dev buy and buys once, later, through a contract. Their
+              steps do not line up and the mistake that ruins each is different,
+              so they get separate tabs rather than a shared sequence with a
+              mode switch — a control that is correct in one and dangerous in the
+              other is worse than two screens. */}
+          <div className="row" style={{ marginBottom: 12 }}>
+            <button
+              type="button"
+              className={mode === 'v1' ? '' : 'ghost'}
+              onClick={() => setMode('v1')}
+            >
+              V1 bundler
+            </button>
+            <button
+              type="button"
+              className={mode === 'v2' ? '' : 'ghost'}
+              onClick={() => setMode('v2')}
+            >
+              V2 bundler
+            </button>
+            <span className="spacer" />
+            <span className="hint">
+              {mode === 'v1'
+                ? 'dev buy, then a bundle at the open block'
+                : 'no dev buy, then one contract buy after the snipers exit'}
+            </span>
+          </div>
+
+          {mode === 'v2' && (
+            <BundlerV2Panel
+              explorer={health?.explorer || ''}
+              credential={credential}
+              report={report}
+            />
+          )}
+
+          <div hidden={mode !== 'v1'}>
           <Sequence
             steps={steps}
             notice={
@@ -471,8 +515,12 @@ export default function App() {
             onState={setSellable}
           />
 
+          </div>
+
           {/* Where the sequence stops. Everything below is a record of runs that
-              already happened, and the left edge changes to say so. */}
+              already happened, and the left edge changes to say so. Outside the
+              tab: the history and the activity log are the same records whichever
+              strategy produced them. */}
           <div className="divider">
             <span>records</span>
           </div>

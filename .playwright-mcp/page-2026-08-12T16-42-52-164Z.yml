@@ -1,0 +1,99 @@
+- generic [active] [ref=f18e1]:
+  - generic [ref=f18e2]:
+    - generic [ref=f18e3]:
+      - generic [ref=f18e6]:
+        - link [ref=f18e8] [cursor=pointer]:
+          - /url: /
+        - generic [ref=f18e12]:
+          - menubar [ref=f18e13]:
+            - menuitem "Analytics" [ref=f18e14] [cursor=pointer]
+            - menuitem "Defi" [ref=f18e18] [cursor=pointer]
+            - menuitem "Leaderboard" [ref=f18e22] [cursor=pointer]
+            - menuitem "Blockchain" [ref=f18e26] [cursor=pointer]
+            - menuitem "Resources" [ref=f18e30] [cursor=pointer]
+            - menuitem "API" [ref=f18e34] [cursor=pointer]
+            - menuitem [ref=f18e38] [cursor=pointer]:
+              - link "Sign in" [ref=f18e39]:
+                - /url: /user/signin?returnUrl=%2Faccount%2F5tzFkiKscXHK5ZXCGbXZxdw7gTjjD1mBwuoFbhUvuAi9
+            - menuitem [ref=f18e40]:
+              - button [ref=f18e41] [cursor=pointer]:
+                - button [ref=f18e42]:
+                  - img "solLogo" [ref=f18e43]
+          - generic [ref=f18e44]:
+            - button "Theme select" [ref=f18e45] [cursor=pointer]
+            - button "Site Settings" [ref=f18e53] [cursor=pointer]
+      - generic [ref=f18e57]:
+        - generic [ref=f18e66]:
+          - textbox "Search transactions, blocks, programs and tokens" [ref=f18e67]
+          - button "Search" [ref=f18e69] [cursor=pointer]
+        - region "Notifications (F8)":
+          - list
+      - generic [ref=f18e144]:
+        - generic [ref=f18e145]:
+          - link "Twitter" [ref=f18e147] [cursor=pointer]:
+            - /url: https://twitter.com/solscanofficial
+          - generic [ref=f18e152] [cursor=pointer]: Back to Top
+        - generic [ref=f18e156]:
+          - generic [ref=f18e158]:
+            - generic [ref=f18e159]:
+              - img "solLogo" [ref=f18e161]
+              - generic [ref=f18e162]: Powered by Solscan
+            - generic [ref=f18e163]: Solscan is the leading Block Explorer and Search, API & Analytics Platform for Solana blockchain.
+          - generic [ref=f18e165]:
+            - generic [ref=f18e166]: Company
+            - link "About Us" [ref=f18e167] [cursor=pointer]:
+              - /url: /aboutus
+            - link "Branding" [ref=f18e169] [cursor=pointer]:
+              - /url: /branding
+            - link "Contact Us" [ref=f18e171] [cursor=pointer]:
+              - /url: /contactus
+            - link "Terms of Service" [ref=f18e173] [cursor=pointer]:
+              - /url: /terms-of-service
+            - link "DMCA Copyright" [ref=f18e175] [cursor=pointer]:
+              - /url: /terms-of-service/dmca-copyright
+            - link "Privacy Policy" [ref=f18e177] [cursor=pointer]:
+              - /url: /privacy-policy
+            - link "Bug Bounty" [ref=f18e179] [cursor=pointer]:
+              - /url: /bugbounty
+          - generic [ref=f18e182]:
+            - generic [ref=f18e183]: Community
+            - link "API Docs" [ref=f18e184] [cursor=pointer]:
+              - /url: https://pro-api.solscan.io/pro-api-docs/v2.0
+            - link "Solscan Docs" [ref=f18e186] [cursor=pointer]:
+              - /url: https://docs.solscan.io/
+            - link "Knowledge Base" [ref=f18e188] [cursor=pointer]:
+              - /url: https://info.solscan.io
+          - generic [ref=f18e191]:
+            - generic [ref=f18e192]: Products & Services
+            - link "Advertise" [ref=f18e193] [cursor=pointer]:
+              - /url: /contactusadvertise
+            - link "Explorer as a Service (EaaS)" [ref=f18e195] [cursor=pointer]:
+              - /url: /eaas
+            - link "API Plans" [ref=f18e197] [cursor=pointer]:
+              - /url: /apis
+            - link "Priority Support" [ref=f18e199] [cursor=pointer]:
+              - /url: /priority-support
+            - link "Token Update" [ref=f18e201] [cursor=pointer]:
+              - /url: /token-update
+        - generic [ref=f18e203]:
+          - generic [ref=f18e204]: Solscan @2026
+          - generic [ref=f18e205]:
+            - generic [ref=f18e206]: "Donations:"
+            - link "View details for D27DgiipBR5dRdij2L6NQ27xwyiLK5Q2DsEM5ML5EuLK" [ref=f18e209] [cursor=pointer]:
+              - /url: /account/D27DgiipBR5dRdij2L6NQ27xwyiLK5Q2DsEM5ML5EuLK
+              - text: D27DgiipBR5dRdij2L6NQ27xwyiLK5Q2DsEM5M
+              - generic [ref=f18e210]: ...
+              - text: L5EuLK
+      - generic [ref=f18e214]:
+        - generic [ref=f18e215]:
+          - text: This website uses cookies to improve your experience. By continuing to use this website, you agree to its
+          - link "Terms" [ref=f18e218] [cursor=pointer]:
+            - /url: /terms-of-service
+          - text: and
+          - link "Privacy Policy" [ref=f18e219] [cursor=pointer]:
+            - /url: /privacy-policy
+          - text: .
+        - button "Got it!" [ref=f18e220] [cursor=pointer]
+    - region "Notifications (F8)":
+      - list
+  - alert [ref=f18e221]

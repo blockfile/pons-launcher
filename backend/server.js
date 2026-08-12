@@ -10,6 +10,10 @@ const users = require('./src/users/users');
 const { identify } = require('./src/middleware/auth');
 const walletRoutes = require('./src/routes/wallets');
 const launchRoutes = require('./src/routes/launch');
+// The v2 bundler lives on its own router. It shares the factory and the
+// keystore with v1 and nothing else — see routes/distributor.js for why the
+// two strategies are kept apart rather than merged.
+const distributorRoutes = require('./src/routes/distributor');
 const { rpcMessage } = require('./src/evm/errors');
 
 const app = express();
@@ -52,6 +56,7 @@ app.get('/api/health', (req, res) => {
 app.use('/api', identify);
 app.use('/api', walletRoutes);
 app.use('/api', launchRoutes);
+app.use('/api', distributorRoutes);
 
 app.use((req, res) => {
   if (req.path.startsWith('/api/')) return res.status(404).json({ error: 'not found' });
