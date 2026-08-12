@@ -25,23 +25,64 @@
 // launchBlock + 1 is therefore the earliest legal moment, and releasing on
 // `now > launchBlock` is exactly right. Nothing here may release sooner.
 //
-// WHY THE TIMING EXISTS. block.number on this chain is L1-derived and advances
+// WHY THE POLLS OVERLAP. block.number on this chain is L1-derived and advances
 // about every 16 seconds, while RPC blocks arrive about ten a second. Two
-// launches were lost to competitors who fired at the tick while our bundle
-// went out one RPC block later — about 100ms. The loop below cannot be judged
-// without knowing how much of that gap was spent not yet knowing the block had
-// ticked, so every poll is timed and the estimate is reported.
+// launches were lost to competitors who fired at the tick while our bundle went
+// out one RPC block later — about 100ms.
+//
+// The first version of this loop read block.number, waited for the answer, and
+// only THEN slept the poll interval. Its period was therefore `pollMs + rtt`,
+// not `pollMs`: the round trip sat inside the interval and was charged twice.
+// Working it through — a poll issued at I observes the chain around I + rtt/2
+// and is known at I + rtt, and the tick falls uniformly between two issues:
+//
+//   sequential, period p + r   expected lateness  (p + r)/2 + r/2  =  p/2 + r
+//   overlapped,  period p      expected lateness   p/2      + r/2
+//
+// So the reads now go out on a fixed cadence regardless of what is still in
+// flight, and the wait ends on the first ANSWER that shows the tick rather than
+// on the next scheduled poll after it. With a 25ms cadence and a 20ms read that
+// is ~45ms of lateness down to ~22ms — a fifth of a lost RPC block, recovered
+// without asking the chain anything it was not already being asked.
+//
+// WHAT IS DELIBERATELY NOT DONE: firing predictively. The tick is regular
+// enough to extrapolate, but a bundle broadcast one tick early does not arrive
+// early — it reverts LaunchBlockBuyBlocked, all of it, which has already cost
+// this operator a whole bundle once. Everything here still waits for the chain
+// to SAY the block moved. Prediction is only ever allowed to decide when to
+// ask, never when to fire.
+//
+// Every poll is timed and the lateness estimated, so the next launch reports
+// whether this actually worked rather than assuming it.
 
 const { monotonic, ms, summary } = require('../evm/timing');
 const { rpcMessage } = require('../evm/errors');
 
 const sleep = (delay) => new Promise((r) => setTimeout(r, delay));
 
-// A launch that waits the full 16 seconds at a 50ms poll makes ~320 reads.
-// Keeping every one of them would put 320 records into launches.json per
-// launch for no benefit: the only polls that carry information are the ones
-// around the tick. Keep the tail.
+// A launch that waits the full 16 seconds at a 25ms cadence makes ~640 reads.
+// Keeping every one of them would put 640 records into launches.json per launch
+// for no benefit: the only polls that carry information are the ones around the
+// tick. Keep the tail.
 const KEEP_POLLS = 20;
+
+// Overlapping polls need a ceiling, or an RPC that stops answering turns a
+// fixed cadence into an unbounded pile of open requests. Four also bounds how
+// many pooled sockets the wait is holding when the burst starts — see the
+// headroom fire.js warms on top of one socket per buy.
+const MAX_IN_FLIGHT = 4;
+
+// How many reads in a row may fail before the wait gives up and lets the caller
+// broadcast blind.
+//
+// It used to be one. That was the dangerous default: giving up means firing
+// without knowing the block ticked, and if it has not, all 32 buys revert. The
+// provider already retries a transient read four times with backoff before it
+// ever fails here, so twenty-five consecutive failures is not a blip — it is an
+// endpoint that has stopped answering. Short of that, keep asking; the wait
+// budget is the real backstop, and by the time it expires the block has ticked
+// several times over and the buys are legal anyway.
+const MAX_CONSECUTIVE_ERRORS = 25;
 
 /**
  * Block until the chain's own block.number moves past `launchBlock`.
@@ -74,10 +115,18 @@ async function waitForNextBlock(launchBlock, deps) {
   const origin = deps.originMs === undefined ? now() : deps.originMs;
   const at = () => now() - origin;
 
+  const maxInFlight = deps.maxInFlight ?? MAX_IN_FLIGHT;
+  const maxErrors = deps.maxConsecutiveErrors ?? MAX_CONSECUTIVE_ERRORS;
+
   const started = at();
   const polls = [];
   const rtts = [];
   let pollCount = 0;
+  let inFlight = 0;
+  let skipped = 0;
+  let errors = 0;
+  let consecutiveErrors = 0;
+  let lastError = null;
   // The most recent observation that still saw the launch block. It is the
   // lower bound on when the tick could have happened, so it is what turns "we
   // noticed at T" into "we were N milliseconds late".
@@ -100,6 +149,11 @@ async function waitForNextBlock(launchBlock, deps) {
     // Only the tail is kept; pollRtt covers every poll, including dropped ones.
     polls: polls.map((p) => ({ ...p, block: p.block === null ? null : p.block.toString() })),
     pollRtt: summary(rtts),
+    // Polls the cadence wanted to issue but could not, because too many were
+    // still unanswered. A large number here means the round trip is longer than
+    // the interval and the cadence is really being set by maxInFlight.
+    skipped,
+    errors,
     // When the tick-observing poll came back — the instant we first knew.
     observedTickMs: null,
     // The window the tick actually fell in, and our best estimate of how much
@@ -130,36 +184,83 @@ async function waitForNextBlock(launchBlock, deps) {
     };
   };
 
-  while (at() - started < waitMs) {
+  // Settled by the first ANSWER that shows the tick, not by the next scheduled
+  // poll after it. The scheduling loop races its sleep against this, so the
+  // moment the winning read lands the loop stops sleeping and returns — the
+  // whole point of overlapping the polls is lost if the answer then sits in a
+  // queue for the rest of an interval.
+  let tick = null;
+  let wake;
+  const woken = new Promise((resolve) => {
+    wake = resolve;
+  });
+
+  const issue = () => {
     const issuedMs = at();
-    let block;
+    inFlight += 1;
+    // A readBlock that throws synchronously rather than rejecting would escape
+    // the scheduling loop and reject the whole wait — which fire() would see as
+    // a failed launch. Nothing here is allowed to fail that way.
+    let pending;
     try {
-      block = await readBlock(rpc);
+      pending = Promise.resolve(readBlock(rpc));
     } catch (err) {
-      const returnedMs = at();
-      record({ issuedMs: ms(issuedMs), returnedMs: ms(returnedMs), rttMs: ms(returnedMs - issuedMs), block: null });
-      console.warn(`[pons-launcher] could not read block.number: ${rpcMessage(err)}`);
+      pending = Promise.reject(err);
+    }
+    pending.then(
+      (block) => {
+        inFlight -= 1;
+        // A read that comes back after the wait has already ended tells us
+        // nothing we can act on, and recording it would corrupt the timings.
+        if (tick) return;
+        consecutiveErrors = 0;
+        const returnedMs = at();
+        const poll = { issuedMs: ms(issuedMs), returnedMs: ms(returnedMs), rttMs: ms(returnedMs - issuedMs), block };
+        record(poll);
+        if (block > launchBlock) {
+          tick = poll;
+          wake();
+          return;
+        }
+        // Under overlap the answers can arrive out of order. The tightest lower
+        // bound on the tick is the LATEST-issued read that still saw the old
+        // block, whenever it happens to have come back.
+        if (!lastStale || poll.issuedMs > lastStale.issuedMs) lastStale = poll;
+      },
+      (err) => {
+        inFlight -= 1;
+        if (tick) return;
+        errors += 1;
+        consecutiveErrors += 1;
+        lastError = err;
+        const returnedMs = at();
+        record({ issuedMs: ms(issuedMs), returnedMs: ms(returnedMs), rttMs: ms(returnedMs - issuedMs), block: null });
+        if (consecutiveErrors >= maxErrors) wake();
+      }
+    );
+  };
+
+  while (!tick && at() - started < waitMs) {
+    if (consecutiveErrors >= maxErrors) {
+      console.warn(
+        `[pons-launcher] block.number unreadable ${consecutiveErrors} times running` +
+          ` (${rpcMessage(lastError)}) — giving up the wait`
+      );
       return report({ reason: 'unreadable' });
     }
-    const returnedMs = at();
-    const poll = {
-      issuedMs: ms(issuedMs),
-      returnedMs: ms(returnedMs),
-      rttMs: ms(returnedMs - issuedMs),
-      block,
-    };
-    record(poll);
+    if (inFlight < maxInFlight) issue();
+    else skipped += 1;
+    // Whichever comes first: the next slot in the cadence, or the answer.
+    await Promise.race([pause(pollMs), woken]);
+  }
 
-    if (block > launchBlock) {
-      return report({
-        waitedMs: ms(returnedMs - started),
-        observedTickMs: ms(returnedMs),
-        reason: 'ticked',
-        ...estimate(poll),
-      });
-    }
-    lastStale = poll;
-    await pause(pollMs);
+  if (tick) {
+    return report({
+      waitedMs: ms(tick.returnedMs - started),
+      observedTickMs: tick.returnedMs,
+      reason: 'ticked',
+      ...estimate(tick),
+    });
   }
 
   console.warn(
@@ -168,4 +269,4 @@ async function waitForNextBlock(launchBlock, deps) {
   return report({ waitedMs: ms(at() - started), reason: 'timeout' });
 }
 
-module.exports = { waitForNextBlock, KEEP_POLLS };
+module.exports = { waitForNextBlock, KEEP_POLLS, MAX_IN_FLIGHT, MAX_CONSECUTIVE_ERRORS };

@@ -3,38 +3,75 @@
 const test = require('node:test');
 const assert = require('node:assert');
 
-const { waitForNextBlock, KEEP_POLLS } = require('./blockwait');
+const { waitForNextBlock, KEEP_POLLS, MAX_IN_FLIGHT } = require('./blockwait');
 
 const LAUNCH = 100n;
 
+// Lets every pending microtask run without any real time passing. setImmediate
+// fires after the microtask queue drains, so a read whose virtual deadline has
+// just been reached has actually delivered its answer by the time this resolves.
+const flush = () => new Promise((r) => setImmediate(r));
+
 /**
- * A chain on a fake clock. Nothing here waits: `pause` and the read latency
- * both move a counter, so a sixteen-second block costs the test microseconds.
+ * A chain on a virtual clock, with reads that genuinely overlap.
  *
- * The read models the thing that actually makes detection hard — a read issued
- * at T does not observe the chain at T, it observes it somewhere inside its own
- * round trip. Taking the midpoint is what the estimator assumes, so modelling it
- * here is what makes the estimate testable at all.
+ * Nothing here waits: time only moves when the code under test sleeps, so a
+ * sixteen-second block costs the test microseconds. But a read no longer
+ * consumes the caller's time — it is queued to resolve once the virtual clock
+ * reaches its deadline, which is what makes concurrent polls modellable at all.
+ *
+ * The read observes the chain at issue + rtt/2 and answers at issue + rtt. That
+ * midpoint is exactly what the estimator assumes, so modelling it is what makes
+ * the lateness estimate testable rather than merely plausible.
  */
-function fakeChain({ rttMs = 6, tickAtMs = 500, failAfter = null } = {}) {
+function fakeChain({ rttMs = 6, tickAtMs = 500, failAfter = null, rttFor = null } = {}) {
   let t = 0;
   let reads = 0;
+  let peakInFlight = 0;
+  let inFlight = 0;
+  const queue = [];
+
+  // Flushing after each answer matters: the code under test reads the clock
+  // inside its own .then, so the clock has to still say the answer's deadline
+  // when that runs. Jumping straight to `target` would time every read as if it
+  // had arrived at the end of the interval.
+  const advanceTo = async (target) => {
+    for (;;) {
+      queue.sort((a, b) => a.at - b.at);
+      if (!queue.length || queue[0].at > target) break;
+      const next = queue.shift();
+      t = Math.max(t, next.at);
+      inFlight -= 1;
+      next.fire();
+      await flush();
+    }
+    t = Math.max(t, target);
+  };
+
   return {
     now: () => t,
     at: () => t,
     reads: () => reads,
+    peakInFlight: () => peakInFlight,
     pause: async (delay) => {
-      t += delay;
+      await advanceTo(t + delay);
+      await flush();
     },
-    readBlock: async () => {
-      reads += 1;
-      if (failAfter !== null && reads > failAfter) {
-        t += rttMs;
-        throw new Error('multicall unreachable');
-      }
-      const observedAt = t + rttMs / 2;
-      t += rttMs;
-      return observedAt >= tickAtMs ? LAUNCH + 1n : LAUNCH;
+    readBlock: () => {
+      const n = (reads += 1);
+      const rtt = rttFor ? rttFor(n) : rttMs;
+      const issuedAt = t;
+      inFlight += 1;
+      peakInFlight = Math.max(peakInFlight, inFlight);
+      return new Promise((resolve, reject) => {
+        queue.push({
+          at: issuedAt + rtt,
+          fire: () => {
+            if (failAfter !== null && n > failAfter) return reject(new Error('multicall unreachable'));
+            resolve(issuedAt + rtt / 2 >= tickAtMs ? LAUNCH + 1n : LAUNCH);
+          },
+        });
+      });
     },
   };
 }
@@ -109,13 +146,79 @@ test('the estimate of how late we noticed brackets the real tick', async () => {
   }
 });
 
-test('the uncertainty window is the poll interval plus a round trip', async () => {
-  // Sequential polling cannot resolve the tick more finely than one interval
-  // plus the round trip it waits out first. Pinning that here is what makes any
-  // later change to the poll schedule provable rather than plausible.
-  const chain = fakeChain({ rttMs: 10, tickAtMs: 1000 });
-  const res = await run(chain, { pollMs: 50 });
-  assert.equal(res.tickWindowMs, 60, 'pollMs 50 + rtt 10');
+test('the uncertainty window is the poll interval, not the interval plus a round trip', async () => {
+  // This is the whole Phase 2 change, stated as a number. A sequential poller
+  // cannot issue a read until the last one answered, so it resolves the tick no
+  // finer than pollMs + rtt. Overlapping the reads puts the round trip outside
+  // the period, and the window collapses to the interval alone.
+  for (const rttMs of [10, 40, 90]) {
+    const chain = fakeChain({ rttMs, tickAtMs: 1000 });
+    const res = await run(chain, { pollMs: 50 });
+    assert.equal(
+      res.tickWindowMs,
+      50,
+      `a ${rttMs}ms read must not widen a 50ms cadence — that was the bug`
+    );
+  }
+});
+
+test('a read slower than the interval does not stall the cadence', async () => {
+  // A 200ms read against a 25ms cadence. Sequentially that is one read every
+  // 225ms and a 225ms blind spot around the tick; overlapped, the reads pile up
+  // until the in-flight ceiling throttles them to one per 50ms.
+  const chain = fakeChain({ rttMs: 200, tickAtMs: 2000 });
+  const res = await run(chain, { pollMs: 25 });
+
+  assert.ok(chain.peakInFlight() > 1, 'reads must actually be concurrent');
+  assert.equal(
+    chain.peakInFlight(),
+    MAX_IN_FLIGHT,
+    `in-flight reads must stop at the ceiling, saw ${chain.peakInFlight()}`
+  );
+  assert.ok(res.skipped > 0, 'polls the ceiling refused are counted, not hidden');
+  assert.ok(
+    res.tickWindowMs < 225,
+    `a sequential poller would be blind for 225ms; this was ${res.tickWindowMs}ms`
+  );
+});
+
+test('the in-flight ceiling is what bounds sockets held at the tick', async () => {
+  // fire.js warms MAX_IN_FLIGHT sockets on top of one per buy on the strength
+  // of this. If the ceiling stopped binding, the burst would find the pool
+  // short at exactly the wrong moment.
+  const chain = fakeChain({ rttMs: 5000, tickAtMs: 20000 });
+  await run(chain, { pollMs: 1, waitMs: 3000 });
+  assert.equal(chain.peakInFlight(), MAX_IN_FLIGHT);
+});
+
+test('the wait ends on the answer, not on the next scheduled poll', async () => {
+  // Overlapping is pointless if the winning answer then waits out the rest of
+  // an interval in a queue. The tick must be reported at the instant the read
+  // that saw it came back.
+  const chain = fakeChain({ rttMs: 30, tickAtMs: 200 });
+  const res = await run(chain, { pollMs: 25 });
+
+  const winner = res.polls[res.polls.length - 1];
+  assert.equal(res.observedTickMs, winner.returnedMs);
+  assert.equal(chain.at(), winner.returnedMs, 'the loop returned on the answer itself');
+});
+
+test('a stale answer arriving late never masquerades as the tick', async () => {
+  // Out-of-order answers are the hazard overlapping introduces. A read issued
+  // early and answered slowly still saw the old block, and must only ever be
+  // used as a lower bound — never as a reason to keep waiting past the tick,
+  // and never as the tick itself.
+  const chain = fakeChain({
+    tickAtMs: 60,
+    // The first read crawls; later ones are quick and overtake it.
+    rttFor: (n) => (n === 1 ? 500 : 5),
+  });
+  const res = await run(chain, { pollMs: 25 });
+
+  assert.equal(res.reason, 'ticked');
+  const winner = res.polls[res.polls.length - 1];
+  assert.equal(winner.block, String(LAUNCH + 1n));
+  assert.ok(chain.at() < 500, 'the slow read must not have held the bundle back');
 });
 
 test('a launch-block read taken before the wait tightens the first-poll estimate', async () => {
@@ -158,14 +261,64 @@ test('keeps the polls around the tick and counts the rest', async () => {
   );
 });
 
-test('an unreadable block number gives up rather than throwing', async () => {
-  // A bundle that fires late beats a launch that dies here.
+test('one failed read does not abandon the wait', async () => {
+  // Giving up means firing without knowing the block ticked, and if it has not
+  // then all 32 buys revert. A single blip must never be allowed to cause that.
+  const chain = fakeChain({ rttMs: 5, tickAtMs: 400, failAfter: null });
+  let reads = 0;
+  const res = await waitForNextBlock(LAUNCH, {
+    rpc: {},
+    readBlock: () => {
+      if (++reads === 1) return Promise.reject(new Error('transient'));
+      return chain.readBlock();
+    },
+    pause: chain.pause,
+    now: chain.now,
+    originMs: 0,
+    pollMs: 25,
+    waitMs: 90000,
+  });
+
+  assert.equal(res.reason, 'ticked', 'a blip must not turn into a blind fire');
+  assert.equal(res.errors, 1);
+});
+
+test('an endpoint that has stopped answering gives up rather than throwing', async () => {
+  // Persistent failure is different from a blip. The provider already retries
+  // each read four times with backoff before it fails here, so this many in a
+  // row is an endpoint that is gone.
   const chain = fakeChain({ failAfter: 0 });
-  const res = await run(chain);
+  const res = await run(chain, { maxConsecutiveErrors: 5 });
   assert.equal(res.reason, 'unreadable');
   assert.equal(res.waitedMs, null);
   assert.equal(res.observedTickMs, null);
-  assert.equal(res.pollCount, 1, 'the failed read is still recorded');
+  assert.equal(res.errors, 5, 'every failure is counted');
+  assert.ok(res.pollCount >= 5, 'the failed reads are still recorded');
+});
+
+test('a run of failures that recovers is forgiven, not accumulated', async () => {
+  // The counter has to be consecutive. Counting failures cumulatively would let
+  // a flaky-but-working endpoint trip the give-up on an otherwise fine launch.
+  const chain = fakeChain({ rttMs: 5, tickAtMs: 2000 });
+  let reads = 0;
+  const res = await waitForNextBlock(LAUNCH, {
+    rpc: {},
+    readBlock: () => {
+      reads += 1;
+      // Fails three in every four, forever — but never four in a row.
+      if (reads % 4) return Promise.reject(new Error('flaky'));
+      return chain.readBlock();
+    },
+    pause: chain.pause,
+    now: chain.now,
+    originMs: 0,
+    pollMs: 25,
+    waitMs: 90000,
+    maxConsecutiveErrors: 4,
+  });
+
+  assert.equal(res.reason, 'ticked');
+  assert.ok(res.errors > 4, `expected many forgiven failures, saw ${res.errors}`);
 });
 
 test('a tick that never comes stops waiting and says so', async () => {

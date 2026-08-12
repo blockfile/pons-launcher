@@ -15,10 +15,12 @@ const config = require('../config');
 const keepAlive = new https.Agent({
   keepAlive: true,
   keepAliveMsecs: 10000,
-  // One socket per bundle wallet, with room to spare. The bundle is capped by
-  // wallet count, not by this.
-  maxSockets: 64,
-  maxFreeSockets: 64,
+  // One socket per bundle wallet, plus headroom for the block.number reads that
+  // are still in flight when the burst starts — those hold sockets too, and a
+  // ceiling of exactly one-per-wallet would make the last buys queue behind
+  // them. The bundle is capped by wallet count, not by this.
+  maxSockets: 96,
+  maxFreeSockets: 96,
 });
 if (/^https:/i.test(config.rpcUrl)) {
   FetchRequest.registerGetUrl(FetchRequest.createGetUrlFunc({ agent: keepAlive }));

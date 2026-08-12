@@ -16,11 +16,14 @@
 // runs. This script measures them, and then says which one is costing the
 // block, so the fix is aimed at the right thing.
 //
-//   npm run latency                    default: 30 samples, 3 ticks
+//   npm run latency                    default: 30 samples, 3 ticks (~1 minute)
 //   npm run latency -- --samples 100   more samples, tighter percentiles
 //   npm run latency -- --ticks 5       watch more ticks (each costs ~16s)
 //   npm run latency -- --ticks 0       skip the tick watch entirely (fast)
-//   npm run latency -- --poll 25       model a different poll interval
+//   npm run latency -- --poll 10       model a different poll cadence
+//
+// N ticks measure N-1 intervals, so --ticks 3 is the smallest run that says
+// anything about jitter.
 //
 // NOTHING HERE BROADCASTS A TRANSACTION. The send path is measured with a
 // payload that cannot decode as a transaction, so the request travels the exact
@@ -171,51 +174,66 @@ async function main() {
         console.log(`  NOTE: block.number jumped by ${jumps.join(', ')} — the cadence is not 1:1.`);
       }
     } else {
-      console.log('  not enough ticks observed to measure an interval — try --ticks 3 again.');
+      // N ticks give N-1 intervals, so one tick measures nothing.
+      console.log(
+        `  ${tickInfo.ticks.length} tick observed — an interval needs two. Re-run with --ticks 3.`
+      );
     }
     console.log('');
   }
 
   // ── verdict ──────────────────────────────────────────────────────────────
-  // Detection lateness has two parts. The poll interval contributes half of
-  // itself on average, because the tick lands uniformly between two polls. The
-  // round trip contributes all of itself, because the answer is already stale
-  // by the time it arrives.
+  // Lateness noticing the tick has two parts, and which one dominates decides
+  // which lever is worth pulling.
   //
-  // The sequential poll loop is the case worth naming: it sleeps the interval
-  // AFTER waiting out the round trip, so its effective period is interval + rtt,
-  // and the round trip is charged twice over.
+  //   the poll interval  contributes half of itself, because the tick lands
+  //                      uniformly somewhere between two polls
+  //   the round trip     contributes half of itself, because a read issued at I
+  //                      observes the chain around I + rtt/2 and is known at
+  //                      I + rtt
+  //
+  // That second figure is rtt/2 only because the reads now overlap. The old
+  // sequential loop slept the interval AFTER waiting out the round trip, so its
+  // period was interval + rtt and the round trip was charged twice over. Both
+  // numbers are printed, because the difference between them is what the change
+  // to blockwait.js was worth on THIS box.
   const rtt = read.median;
   if (rtt === null) {
     console.log('verdict: the block.number read never answered — fix connectivity first.');
     return;
   }
   const fromPoll = POLL_MS / 2;
-  const fromNetwork = rtt;
-  const sequentialPeriod = POLL_MS + rtt;
-  const detection = ms(sequentialPeriod / 2 + rtt / 2);
+  const fromNetwork = rtt / 2;
+  const sequential = ms((POLL_MS + rtt) / 2 + rtt / 2);
+  const detection = ms(fromPoll + fromNetwork);
   const broadcast = send.median ?? rtt;
 
   console.log('verdict');
-  console.log(`  a sequential poll loop at ${POLL_MS}ms with a ${rtt}ms read repeats every`);
-  console.log(`  ${ms(sequentialPeriod)}ms, not ${POLL_MS}ms — the round trip is inside the period.`);
+  console.log(`  polls overlap on a ${POLL_MS}ms cadence, so the round trip is outside the`);
+  console.log(`  period. Sequentially it would have been ${ms(POLL_MS + rtt)}ms.`);
   console.log('');
-  console.log(`  expected lateness noticing the tick   ~${detection}ms`);
+  console.log(`  expected lateness noticing the tick    ~${detection}ms  (was ~${sequential}ms)`);
   console.log(`  expected time to get a buy on the wire ~${ms(broadcast)}ms`);
-  console.log(`  expected total behind the tick        ~${ms(detection + broadcast)}ms`);
+  console.log(`  expected total behind the tick         ~${ms(detection + broadcast)}ms`);
+  console.log('');
+  console.log(`  of which the poll interval costs ~${ms(fromPoll)}ms and the network ~${ms(fromNetwork)}ms.`);
   console.log('');
 
   if (fromPoll > fromNetwork * 1.5) {
-    console.log(`  DOMINATED BY THE POLL INTERVAL (${POLL_MS}ms poll vs ${rtt}ms read).`);
-    console.log('  Tightening LAUNCH_BLOCK_POLL_MS is the lever that matters here.');
+    console.log(`  DOMINATED BY THE POLL INTERVAL (${POLL_MS}ms cadence vs a ${rtt}ms read).`);
+    console.log(`  Lowering LAUNCH_BLOCK_POLL_MS is the lever here. It costs one read per`);
+    console.log(`  interval for up to 16s — at ${POLL_MS}ms that is ~${Math.round(16000 / POLL_MS)} reads per launch, so`);
+    console.log('  watch for rate-limit errors in the launch record before going lower.');
   } else if (fromNetwork > fromPoll * 1.5) {
-    console.log(`  DOMINATED BY THE NETWORK (${rtt}ms read vs a ${POLL_MS}ms poll).`);
-    console.log('  Tightening the poll interval will not buy much: the answer is already');
-    console.log('  stale when it arrives. A closer RPC endpoint is the lever that matters.');
+    console.log(`  DOMINATED BY THE NETWORK (${rtt}ms read vs a ${POLL_MS}ms cadence).`);
+    console.log('  Lowering the poll interval will not buy much: the answer is already');
+    console.log('  stale when it arrives, and no client-side change can undo that. A closer');
+    console.log('  RPC endpoint — ideally one in the same region as the sequencer — is the');
+    console.log('  only lever with real headroom left.');
   } else {
-    console.log(`  BOTH MATTER ABOUT EQUALLY (${rtt}ms read, ${POLL_MS}ms poll).`);
-    console.log('  Overlapping the polls removes the round trip from the poll period;');
-    console.log('  after that, the poll interval is the only remaining lever here.');
+    console.log(`  BOTH MATTER ABOUT EQUALLY (${rtt}ms read, ${POLL_MS}ms cadence).`);
+    console.log(`  Halving the cadence would save ~${ms(fromPoll / 2)}ms; a closer endpoint would save`);
+    console.log('  the network half. Neither alone closes a 100ms gap.');
   }
 
   if (send.p95 !== null && read.p95 !== null && send.p95 > read.p95 * 2) {

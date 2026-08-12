@@ -74,11 +74,17 @@ const config = {
   // wait for block.number to tick past the launch, then fire instantly.
   waitForLaunchBlock: bool(process.env.WAIT_FOR_LAUNCH_BLOCK, true),
   // How often to ask whether it has ticked, and how long to keep asking.
-  // 50ms against a 6ms read is ~320 sequential reads across a 16s block —
-  // comfortably inside the rate limits, and it caps how late the bundle can
-  // be to the tick. A competitor spamming a buy every block detects the tick
-  // instantly, so this is the number that decides whether they are ahead.
-  launchBlockPollMs: num(process.env.LAUNCH_BLOCK_POLL_MS, 50),
+  //
+  // This is now a true cadence: the reads overlap, so the interval is the whole
+  // period rather than the period minus a round trip (see bundle/blockwait.js).
+  // 25ms is ~640 reads across a full 16s block and ~320 across the average
+  // wait — the same budget the old 50ms sequential poll was already spending,
+  // because that one could not issue a read until the previous had answered.
+  //
+  // Lower is better for the race and worse for the rate limiter, and which one
+  // binds depends entirely on the round trip from the box this runs on:
+  // `npm run latency` measures it and says which.
+  launchBlockPollMs: num(process.env.LAUNCH_BLOCK_POLL_MS, 25),
   launchBlockWaitMs: num(process.env.LAUNCH_BLOCK_WAIT_MS, 90000),
 
   keystorePassphrase: process.env.KEYSTORE_PASSPHRASE || null,

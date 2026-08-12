@@ -34,7 +34,7 @@ const { provider, warmPool, poolStats } = require('../evm/provider');
 const { evmBlockNumber } = require('../evm/blocknumber');
 const { rpcMessage } = require('../evm/errors');
 const { monotonic, ms, summary } = require('../evm/timing');
-const { waitForNextBlock } = require('./blockwait');
+const { waitForNextBlock, MAX_IN_FLIGHT } = require('./blockwait');
 
 const sleep = (delay) => new Promise((r) => setTimeout(r, delay));
 
@@ -89,11 +89,17 @@ async function fire(plan, deps = {}) {
   //    here, before the launch, where nothing is racing yet. A launch cannot be
   //    front-run — the pool does not exist until it lands — so spending time
   //    ahead of it is free, and it buys a much tighter bundle behind it.
+  //    One per buy is no longer enough. The wait below keeps up to
+  //    MAX_IN_FLIGHT reads of block.number open at any instant, and at the tick
+  //    those reads are still holding their sockets — so a pool warmed to
+  //    exactly buys.length leaves the last few buys of the burst opening fresh
+  //    connections at precisely the moment being optimised. Warm the headroom.
   const warm = deps.warmPool || warmPool;
+  const warmCount = plan.buys.length + MAX_IN_FLIGHT;
   const warmStartedMs = at();
   if (plan.buys.length) {
     try {
-      await warm(plan.buys.length, rpc);
+      await warm(warmCount, rpc);
     } catch (err) {
       // A warm-up is an optimisation. Never let it stop a launch.
       console.warn(`[pons-launcher] connection warm-up failed: ${err.message}`);

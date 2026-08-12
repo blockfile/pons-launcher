@@ -4,6 +4,7 @@ const test = require('node:test');
 const assert = require('node:assert');
 
 const { fire } = require('./fire');
+const { MAX_IN_FLIGHT } = require('./blockwait');
 
 function fakeProvider({ failOn = [], blockOf = () => 10 } = {}) {
   const order = [];
@@ -168,7 +169,9 @@ test('warms the connection pool before anything is broadcast', async () => {
 
   // One socket per buy, opened before the burst rather than during it: a cold
   // pool costs a TLS handshake per transaction at the worst possible moment.
-  assert.equal(warmedWith, plan.buys.length);
+  // Plus headroom for the block.number reads still in flight at the tick —
+  // without it the last buys of the burst queue behind the polls.
+  assert.equal(warmedWith, plan.buys.length + MAX_IN_FLIGHT);
   assert.equal(rpc.order[0], 'WARM', 'the pool must be warm before the launch goes out');
 });
 
@@ -197,8 +200,9 @@ test('a dry run does not open sockets it will never use', async () => {
 test('broadcasts the launch before any buy', async () => {
   const rpc = fakeProvider();
   await fire(plan, { provider: rpc, dryRun: false });
-  // The default warm-up ran for real against the fake: one socket per buy.
-  assert.equal(rpc.warmed.length, plan.buys.length);
+  // The default warm-up ran for real against the fake: one socket per buy,
+  // plus the headroom the overlapping block.number reads occupy.
+  assert.equal(rpc.warmed.length, plan.buys.length + MAX_IN_FLIGHT);
   assert.equal(rpc.order[0], 'LAUNCH', 'the launch must go out first');
   assert.deepEqual(rpc.order.slice(1).sort(), ['BUY_A', 'BUY_B']);
 });
