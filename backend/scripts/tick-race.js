@@ -125,6 +125,28 @@ async function ladder(wallet, nonce, count, fees) {
   const start = monotonic();
   let last = await evmBlockNumber();
 
+  // The head has to be sampled from the SAME provider that broadcasts, and
+  // recorded per packet, or the comparison is meaningless: this RPC is load
+  // balanced across nodes at different heights, and a head read from one node
+  // can sit tens of blocks ahead of where another node is including. The first
+  // run of this script compared landings against a single head read at tick
+  // time and produced packets landing 26 blocks BEFORE they were sent.
+  //
+  // Polled in the background so reading it at broadcast time costs nothing on
+  // the path being measured.
+  let head = await provider.getBlockNumber();
+  let sending = true;
+  const heads = (async () => {
+    while (sending) {
+      try {
+        head = await provider.getBlockNumber();
+      } catch {
+        /* a dropped poll is not the measurement */
+      }
+      await sleep(40);
+    }
+  })();
+
   const watch = (async () => {
     while (tickAt === null) {
       try {
@@ -144,14 +166,17 @@ async function ladder(wallet, nonce, count, fees) {
   const sent = [];
   for (let i = 0; i < COUNT; i++) {
     const at = ms(monotonic() - start);
+    const headAtSend = head;
     try {
       const res = await provider.broadcastTransaction(signed[i]);
-      sent.push({ i, at, hash: res.hash });
+      sent.push({ i, at, headAtSend, hash: res.hash });
     } catch (err) {
-      sent.push({ i, at, error: err.shortMessage || err.message });
+      sent.push({ i, at, headAtSend, error: err.shortMessage || err.message });
     }
     await sleep(SPACING_MS);
   }
+  sending = false;
+  await heads;
 
   // Give the watcher a moment to catch a tick that landed near the end, then
   // stop waiting on it either way — a run that straddled no tick is a result,
@@ -179,33 +204,43 @@ async function ladder(wallet, nonce, count, fees) {
   }
 
   console.log(`tick to block.number ${tickAt} seen at +${tickSeenMs}ms, rpc head ${tickHead}\n`);
-  console.log('  #   sent(ms)   rpc block   idx   vs tick');
+  console.log('  #   sent(ms)   head@send   rpc block   idx   lag');
   for (const r of rows) {
-    const delta = r.block === null ? '' : r.block - tickHead;
+    const lag = r.block === null ? null : r.block - r.headAtSend;
     console.log(
-      `  ${String(r.i).padStart(2)} ${String(r.at).padStart(9)}   ${String(r.block ?? 'dropped').padStart(9)}   ${String(r.index ?? '-').padStart(3)}   ${
-        r.block === null ? '' : delta >= 0 ? `+${delta}` : String(delta)
-      }`
+      `  ${String(r.i).padStart(2)} ${String(r.at).padStart(9)}   ${String(r.headAtSend).padStart(9)}   ${String(
+        r.block ?? 'dropped'
+      ).padStart(9)}   ${String(r.index ?? '-').padStart(3)}   ${lag === null ? '' : `+${lag}`}`
     );
   }
 
-  const landed = rows.filter((r) => r.block !== null && r.block >= tickHead);
-  if (!landed.length) {
-    console.log('\nnothing landed at or after the tick — the ladder ran out too early.');
+  // THE number. How many RPC blocks pass between handing a signed transaction
+  // to the RPC and it being included — measured against the head that same
+  // provider reported a moment before the send.
+  const lags = rows.filter((r) => r.block !== null).map((r) => r.block - r.headAtSend);
+  if (!lags.length) {
+    console.log('\nnothing landed — cannot measure inclusion lag.');
     return;
   }
-  const first = landed[0];
-  const gap = first.block - tickHead;
+  const sorted = [...lags].sort((a, b) => a - b);
+  const median = sorted[Math.floor(sorted.length / 2)];
+  const best = sorted[0];
   console.log(
-    `\nfirst packet at or after the tick landed ${gap} RPC block(s) past it (tx index ${first.index}).`
+    `\ninclusion lag: best ${best} blocks, median ${median}, worst ${sorted[sorted.length - 1]}`
   );
+
+  // A launch is lost or won inside one EVM block, which is ~150 RPC blocks
+  // wide. What matters is whether the lag is small enough that a packet sent
+  // just after the tick still lands near the front of it.
   console.log(
-    gap <= 1
-      ? 'REACHABLE — in-flight submission does put us at the front. The bundle\n' +
-          'cannot use it as-is only because a reverted buy burns the nonce, so the\n' +
-          'next question is whether that is worth engineering around.'
-      : 'OUT OF REACH FROM THIS BOX — we are arriving late even with a packet already\n' +
-          'in flight, so the loss is network position, not bundle logic. Copying the\n' +
-          "sniper's strategy would not have won these launches."
+    best <= 2
+      ? 'REACTION IS ENOUGH — a buy sent on seeing the tick lands almost immediately,\n' +
+          'so the front of the block is reachable without pre-submitting and without\n' +
+          'burning nonces on reverts. The loss is somewhere else in the fire path.'
+      : `PRE-SUBMISSION REQUIRED — a packet takes ~${median} RPC blocks (~${Math.round(
+          median * 70
+        )}ms) to be\nincluded, so nothing sent in reaction to the tick can be early in the block.\n` +
+          `The sniper is ahead because its packets were already queued. Matching it needs\n` +
+          `a pre-signed ladder about ${median} deep per wallet, whose early rungs revert.`
   );
 })();
