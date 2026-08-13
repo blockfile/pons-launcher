@@ -143,6 +143,17 @@ const CURVE_V2_ABI = [
 // The factory refuses a list longer than this (MAX_SNIPE_TAX_EXEMPTIONS).
 const MAX_SNIPE_TAX_EXEMPTIONS = 32;
 
+// ...BUT THE FORWARDER ALLOWS ONE FEWER, and the difference is a revert rather
+// than a truncation. launchAndBuy appends its own buy recipient to the list
+// before passing it on, so a caller-supplied 32 becomes 33 at the factory and
+// fails. Probed against the live contracts: factory-direct takes 32 and
+// reverts at 33; launchAndBuy takes 31 and reverts at 32.
+//
+// This is the cap that matters for a bundle, because launchAndBuy is the only
+// path with an atomic dev buy. A launcher written to the documented 32 reverts
+// on exactly the configuration an operator is most likely to want.
+const MAX_EXEMPTIONS_VIA_FORWARDER = MAX_SNIPE_TAX_EXEMPTIONS - 1;
+
 module.exports = {
   SOCIALS,
   TOKEN_PARAMS_V2,
@@ -155,4 +166,5 @@ module.exports = {
   MEME_HOOK_V2_ABI,
   CURVE_V2_ABI,
   MAX_SNIPE_TAX_EXEMPTIONS,
+  MAX_EXEMPTIONS_VIA_FORWARDER,
 };

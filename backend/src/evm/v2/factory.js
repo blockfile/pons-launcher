@@ -28,6 +28,7 @@ const {
   FORWARDER_V2_ABI,
   MEME_HOOK_V2_ABI,
   MAX_SNIPE_TAX_EXEMPTIONS,
+  MAX_EXEMPTIONS_VIA_FORWARDER,
 } = require('./abi');
 
 function factory(runner = provider) {
@@ -260,7 +261,7 @@ async function buildLaunchAndBuyTx({
   value,
   forwarderAddress,
 }) {
-  assertExemptions(exemptions);
+  assertExemptions(exemptions, true);
   const address = forwarderAddress || (await wiring()).forwarder;
   const fwd = new Contract(address, FORWARDER_V2_ABI, provider);
   return fwd.launchAndBuy.populateTransaction(
@@ -275,11 +276,21 @@ async function buildLaunchAndBuyTx({
   );
 }
 
-function assertExemptions(exemptions) {
-  if (exemptions.length > MAX_SNIPE_TAX_EXEMPTIONS) {
+/**
+ * @param {boolean} viaForwarder launchAndBuy appends the buy recipient itself,
+ *   so the caller's share of the list is one shorter than the factory's limit.
+ */
+function assertExemptions(exemptions, viaForwarder = false) {
+  const limit = viaForwarder ? MAX_EXEMPTIONS_VIA_FORWARDER : MAX_SNIPE_TAX_EXEMPTIONS;
+  if (exemptions.length > limit) {
     throw new Error(
-      `${exemptions.length} exemptions requested but the factory allows ${MAX_SNIPE_TAX_EXEMPTIONS} — ` +
-        'the launch would revert ExemptionListTooLong'
+      `${exemptions.length} exemptions requested but ${
+        viaForwarder ? 'launchAndBuy allows' : 'the factory allows'
+      } ${limit}${
+        viaForwarder
+          ? ' — it appends the buy recipient itself, so its limit is one below the factory limit'
+          : ''
+      } — the launch would revert ExemptionListTooLong`
     );
   }
 }
