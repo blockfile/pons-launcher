@@ -203,13 +203,7 @@ export default function LaunchForm({
   const buying = wallets.filter(
     (w) => w.role === 'bundle' && (rows[w.id]?.mode === 'all' || Number(rows[w.id]?.buy) > 0)
   ).length;
-  // Which limit applies depends on whether there is a dev buy, because that is
-  // what routes the launch through the forwarder.
-  const hasDevBuy = Number(f.devBuyEth || 0) > 0;
-  const exemptionLimit = hasDevBuy
-    ? active?.maxExemptionsWithDevBuy ?? MAX_EXEMPTIONS_WITH_DEV_BUY
-    : active?.maxExemptions ?? MAX_EXEMPTIONS;
-  const ready = Boolean(f.name.trim() && f.symbol.trim() && f.logo) && !uploading;
+  const ready =Boolean(f.name.trim() && f.symbol.trim() && f.logo) && !uploading;
   const blocked = live && !armed;
 
   return (
