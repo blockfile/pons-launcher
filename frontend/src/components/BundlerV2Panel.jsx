@@ -130,28 +130,63 @@ export default function BundlerV2Panel({
       return `imported ${added.length} ${role} wallet(s)`;
     });
 
-  /** One key field, shared by whichever role is mid-import. */
-  const importBox = (role, label) =>
-    importing === role && (
-      <div className="row">
-        <label className="hint" style={{ flex: 1 }}>
-          {label}
+  /**
+   * One key field, shared by whichever role is mid-import.
+   *
+   * The shape is checked here before the round trip. A private key is 64 hex
+   * characters with an optional 0x — an address is 40, and pasting one of those
+   * by mistake is the commonest way to get a bare 400 back from the server with
+   * nothing useful in it.
+   */
+  const keyShapeError = (raw) => {
+    const parts = String(raw).trim().split(/[s,]+/).filter(Boolean);
+    if (!parts.length) return 'paste a key first';
+    for (const k of parts) {
+      const hex = k.startsWith('0x') || k.startsWith('0X') ? k.slice(2) : k;
+      if (hex.length === 40) return 'that looks like an ADDRESS, not a private key';
+      if (hex.length !== 64) return `a private key is 64 hex characters — this one has ${hex.length}`;
+      if (!/^[0-9a-fA-F]+$/.test(hex)) return 'that contains characters that are not hex';
+    }
+    return null;
+  };
+
+  const importBox = (role, label) => {
+    if (importing !== role) return null;
+    const shape = keys.trim() ? keyShapeError(keys) : null;
+    return (
+      <div style={{ padding: '4px 0' }}>
+        <div className="hint" style={{ marginBottom: 4 }}>{label}</div>
+        <div className="row" style={{ alignItems: 'center', gap: 8 }}>
           <input
             type="password"
             value={keys}
             onChange={(e) => setKeys(e.target.value)}
             placeholder="0x… private key"
-            style={{ width: '100%', marginLeft: 6 }}
+            style={{ flex: 1, minWidth: 0 }}
           />
-        </label>
-        <Busy busy={busy === `import-${role}`} className="ghost" disabled={!keys.trim()} onClick={() => imp(role)}>
-          Import
-        </Busy>
-        <button type="button" className="ghost" onClick={() => { setImporting(''); setKeys(''); }}>
-          cancel
-        </button>
+          <Busy
+            busy={busy === `import-${role}`}
+            className="ghost"
+            disabled={!keys.trim() || Boolean(shape)}
+            onClick={() => imp(role)}
+          >
+            Import
+          </Busy>
+          <button
+            type="button"
+            className="ghost"
+            onClick={() => {
+              setImporting('');
+              setKeys('');
+            }}
+          >
+            cancel
+          </button>
+        </div>
+        {shape && <p className="hint" style={{ marginTop: 4 }}>{shape}</p>}
       </div>
     );
+  };
 
   // What the dev buy actually takes, on the pool the config opens. Same
   // arithmetic the backend preflight runs — see shared/bundleShare.js for why
