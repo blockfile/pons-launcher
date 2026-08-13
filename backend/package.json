@@ -16,6 +16,7 @@
     "archive:restore": "node scripts/archive.js restore",
     "archive:purge": "node scripts/archive.js purge",
     "v2:watch": "node scripts/v2-watch.js",
+    "v2:simulate": "node scripts/v2-simulate.js",
     "latency": "node scripts/latency.js",
     "tick-race": "node scripts/tick-race.js",
     "deploy": "node scripts/deploy-contract.js",
