@@ -112,8 +112,11 @@ export default function LaunchForm({
   }, [onDraft, f.name, f.symbol, f.logo]);
 
   function body() {
+    // A WHITELIST, and on this line it decides whose money is spent. The
+    // keystore also holds v2dev, v2funding and v2bundle roles; "not the dev
+    // wallet" would arm a launch with wallets belonging to a different flow.
     const bundle = wallets
-      .filter((w) => w.role !== 'dev')
+      .filter((w) => w.role === 'bundle')
       .map((w) => ({
         walletId: w.id,
         mode: rows[w.id]?.mode ?? 'fixed',
@@ -198,8 +201,14 @@ export default function LaunchForm({
   }
 
   const buying = wallets.filter(
-    (w) => w.role !== 'dev' && (rows[w.id]?.mode === 'all' || Number(rows[w.id]?.buy) > 0)
+    (w) => w.role === 'bundle' && (rows[w.id]?.mode === 'all' || Number(rows[w.id]?.buy) > 0)
   ).length;
+  // Which limit applies depends on whether there is a dev buy, because that is
+  // what routes the launch through the forwarder.
+  const hasDevBuy = Number(f.devBuyEth || 0) > 0;
+  const exemptionLimit = hasDevBuy
+    ? active?.maxExemptionsWithDevBuy ?? MAX_EXEMPTIONS_WITH_DEV_BUY
+    : active?.maxExemptions ?? MAX_EXEMPTIONS;
   const ready = Boolean(f.name.trim() && f.symbol.trim() && f.logo) && !uploading;
   const blocked = live && !armed;
 

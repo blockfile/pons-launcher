@@ -33,8 +33,12 @@ export default function FundPanel({ step, wallets, rows, dispersers, reload, rep
     }
   }
 
+  // A WHITELIST. "Everything that is not the dev wallet" used to be the same
+  // set and is not any more: the keystore also holds v2dev, v2funding and
+  // v2bundle roles, and funding those from here would move real ETH into
+  // wallets this panel is not about.
   const targets = wallets
-    .filter((w) => w.role !== 'dev')
+    .filter((w) => w.role === 'bundle')
     .map((w) => ({ walletId: w.id, amountEth: rows[w.id]?.fund }))
     .filter((t) => Number(t.amountEth) > 0);
 

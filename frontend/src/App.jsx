@@ -110,7 +110,7 @@ export default function App() {
       // Table order is firing order — prepare() walks the same list the same
       // way — and on a curve the order is the price, so it has to match.
       buys: wallets
-        .filter((w) => w.role !== 'dev')
+        .filter((w) => w.role === 'bundle')
         .map((w) => ({
           key: w.id,
           // "all − gas" is resolved server-side from the live balance. The
@@ -161,7 +161,7 @@ export default function App() {
   }, [loadAll, key]);
 
   const live = Boolean(health && !health.dryRun);
-  const funded = wallets.filter((w) => w.role !== 'dev' && Number(w.balanceEth) > 0).length;
+  const funded = wallets.filter((w) => w.role === 'bundle' && Number(w.balanceEth) > 0).length;
 
   // Whether this console may read at all, and what it re-reads on. It is not
   // the key: a deployment that injects the key at nginx (the map block in
