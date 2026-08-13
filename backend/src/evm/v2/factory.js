@@ -76,7 +76,12 @@ async function getConfigs() {
     maxCreatorTaxBps: Number(maxCreatorTaxBps),
     snipeTaxStartBps: Number(snipeTaxStartBps),
     snipeTaxSeconds: Number(snipeTaxSeconds),
+    // Both, because they differ and the console shows one to the operator.
+    // launchAndBuy appends its own buy recipient, so a bundle sent with a dev
+    // buy gets one fewer than the factory's limit — reporting only 32 would
+    // have the console invite a launch that reverts.
     maxExemptions: MAX_SNIPE_TAX_EXEMPTIONS,
+    maxExemptionsWithDevBuy: MAX_EXEMPTIONS_VIA_FORWARDER,
     launchConfigs,
   };
 }
