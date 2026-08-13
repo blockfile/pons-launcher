@@ -13,6 +13,9 @@ const v2factory = require('../evm/v2/factory');
 const { prepareV2 } = require('../bundle/prepareV2');
 const { fireV2 } = require('../bundle/fireV2');
 const { ethPriceUsd } = require('../ethPrice');
+const { getFees } = require('../evm/fees');
+const { formatEther } = require('ethers');
+const { APPROVE_GAS, SELL_GAS } = require('../bundle/prepareSell');
 
 const router = express.Router();
 
@@ -82,6 +85,26 @@ router.get('/eth-price', async (req, res) => {
     res.json(await ethPriceUsd());
   } catch (err) {
     res.status(503).json({ error: err.message });
+  }
+});
+
+// GET /api/gas — what a buy and a sell cost right now, in ETH, so the console can
+// size a "reserve gas for N sells" fund without knowing the gas limits (those
+// live here). Fees carry the same +25% headroom a launch uses, so the reserve
+// errs high rather than leaving a wallet unable to sell.
+router.get('/gas', async (req, res, next) => {
+  try {
+    const fees = await getFees(25);
+    const perGas = fees.maxFeePerGas ?? fees.gasPrice ?? 0n;
+    const buyGasWei = BigInt(config.buyGasLimit) * perGas;
+    const sellGasWei = (APPROVE_GAS + SELL_GAS) * perGas;
+    res.json({
+      maxFeePerGasWei: perGas.toString(),
+      buyGasEth: formatEther(buyGasWei),
+      sellGasEth: formatEther(sellGasWei),
+    });
+  } catch (err) {
+    next(err);
   }
 });
 

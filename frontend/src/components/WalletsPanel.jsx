@@ -57,6 +57,10 @@ export default function WalletsPanel({ step, wallets, rows, setRow, share, reloa
   const [ethPrice, setEthPrice] = useState(1888);
   const [priceLive, setPriceLive] = useState(null); // { usd, source, stale }
   const manualRef = useRef(false);
+  // "Distribute a total across the bundle" — the amount typed at the top of the
+  // table, and the live gas cost of a buy/sell so the fund reserve is exact.
+  const [totalBuy, setTotalBuy] = useState('');
+  const [gas, setGas] = useState(null); // { buyGasEth, sellGasEth }
 
   useEffect(() => {
     let alive = true;
@@ -76,6 +80,17 @@ export default function WalletsPanel({ step, wallets, rows, setRow, share, reloa
     return () => {
       alive = false;
       clearInterval(t);
+    };
+  }, []);
+
+  // The current cost of a buy and a sell, used only to size the fund reserve.
+  useEffect(() => {
+    let alive = true;
+    api('/gas')
+      .then((g) => alive && setGas(g))
+      .catch(() => {});
+    return () => {
+      alive = false;
     };
   }, []);
   // Ticked wallet ids. Only ever bundle wallets reach a delete — see `chosen`.
@@ -105,6 +120,50 @@ export default function WalletsPanel({ step, wallets, rows, setRow, share, reloa
   // A whitelist, not "everything that is not the dev wallet": a role this
   // console does not know about is never swept into a bulk delete either.
   const bundle = wallets.filter((w) => w.role === 'bundle');
+
+  // How many sells each wallet keeps gas for, deliberately generous — a wallet
+  // stuck holding tokens it cannot sell is worse than a slightly larger fund.
+  const SELL_RESERVE = 10;
+
+  // Split the typed total across the bundle wallets into a random, jittered
+  // spread — no two the same, so the buys read as organic rather than a pattern
+  // — and fill each row's Buy and Fund. Moves NO ETH: it only writes the table
+  // fields the operator was going to type by hand. Both fields stay editable.
+  async function distribute() {
+    const total = Number(totalBuy);
+    if (!(total > 0)) return report('enter a total buy amount first');
+    if (!bundle.length) return report('generate bundle wallets first');
+
+    // Sizing the fund needs the gas cost; fetch it now if the initial load
+    // failed, and only fall back to no reserve if the chain is unreachable.
+    let g = gas;
+    if (!g) {
+      try {
+        g = await api('/gas');
+        setGas(g);
+      } catch {
+        g = { buyGasEth: '0', sellGasEth: '0' };
+      }
+    }
+    const reserve = Number(g.buyGasEth || 0) + SELL_RESERVE * Number(g.sellGasEth || 0);
+
+    // ±30% jitter around equal, normalised to the exact total; the rounding
+    // drift is pushed onto the last wallet so the sum is exactly what was typed.
+    const weights = bundle.map(() => 1 + (Math.random() - 0.5) * 0.6);
+    const wsum = weights.reduce((a, b) => a + b, 0);
+    const amounts = bundle.map((_, i) => Math.round((weights[i] / wsum) * total * 1e6) / 1e6);
+    const drift = Math.round((total - amounts.reduce((a, b) => a + b, 0)) * 1e6) / 1e6;
+    amounts[amounts.length - 1] = Math.round((amounts[amounts.length - 1] + drift) * 1e6) / 1e6;
+
+    bundle.forEach((w, i) => {
+      const buy = amounts[i];
+      setRow(w.id, { mode: 'fixed', buy: String(buy), fund: (buy + reserve).toFixed(6) });
+    });
+    report(
+      `distributed ${total} ETH across ${bundle.length} wallets — each funded for its buy plus gas for ` +
+        `${SELL_RESERVE} sells. Nothing was sent; edit any row, then Fund and launch as usual.`
+    );
+  }
 
   // The delete list is derived from the bundle wallets and intersected with the
   // ticks, never read out of the tick set directly. The dev wallet signs every
@@ -290,6 +349,31 @@ export default function WalletsPanel({ step, wallets, rows, setRow, share, reloa
           >
             Import
           </Busy>
+        </div>
+      )}
+
+      {bundle.length > 0 && (
+        <div className="row distribute" style={{ marginBottom: 10, alignItems: 'center' }}>
+          <label className="hint" style={{ flexDirection: 'row', alignItems: 'center', gap: 6 }}>
+            Total buy
+            <input
+              type="number"
+              min="0"
+              step="0.01"
+              placeholder="0.5"
+              value={totalBuy}
+              onChange={(e) => setTotalBuy(e.target.value)}
+              style={{ width: 90 }}
+            />
+            ETH
+          </label>
+          <Busy disabled={!(Number(totalBuy) > 0)} onClick={distribute}>
+            Distribute across {bundle.length} wallet{bundle.length === 1 ? '' : 's'}
+          </Busy>
+          <span className="hint">
+            random split · each funded for its buy + gas for {SELL_RESERVE} sells · fields stay editable ·
+            moves no ETH
+          </span>
         </div>
       )}
 
