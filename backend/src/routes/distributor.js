@@ -24,7 +24,7 @@
 //                   fingerprint that used to announce a launch 8-22 min early.
 
 const express = require('express');
-const { formatEther, parseEther, hexlify, randomBytes } = require('ethers');
+const { Contract, formatEther, parseEther, hexlify, randomBytes } = require('ethers');
 const config = require('../config');
 const { provider } = require('../evm/provider');
 const { keystoreFor } = require('../wallets/keystore');
@@ -34,6 +34,7 @@ const { deploy, estimate } = require('../evm/deploy');
 const { getConfigs } = require('../evm/factory');
 const { requireApiKey } = require('../middleware/auth');
 const {
+  DISTRIBUTOR_ABI,
   dexParams,
   quoteTrigger,
   buildTriggerTx,
@@ -263,6 +264,40 @@ router.post('/distributor/stage', requireApiKey, async (req, res, next) => {
       stagedEth: formatEther(staged),
       from: funder.address,
     });
+  } catch (err) {
+    next(err);
+  }
+});
+
+// POST /api/distributor/withdraw — take the staged ETH back out.
+//
+// The counterpart to staging. Without it a staged balance can only leave by
+// launching or buying, so a factory that stops accepting launches strands the
+// capital behind a lossy round trip through some token.
+router.post('/distributor/withdraw', requireApiKey, async (req, res, next) => {
+  try {
+    if (req.body?.confirm !== true) throw new Error('this moves ETH — requires { confirm: true }');
+    if (config.dryRun) throw new Error('DRY_RUN is on — nothing would be sent');
+
+    const record = distributorFor(req.user.id).get();
+    if (!record) throw new Error('no distributor recorded');
+
+    const ks = keystoreFor(req.user.id);
+    const signer = ks.signer(v2Signer(ks).id, provider);
+    // Back to the funder by default: it is where the stage came from, and the
+    // signer is meant to hold gas and nothing else.
+    const to = req.body?.to || ks.walletWithRole('v2funding')?.address || v2Signer(ks).address;
+
+    const before = await provider.getBalance(record.address);
+    if (before === 0n) throw new Error('the distributor holds no ETH');
+
+    const c = new Contract(record.address, DISTRIBUTOR_ABI, signer);
+    const tx = await c.withdraw(to);
+    const receipt = await tx.wait(1);
+    activityFor(req.user.id).record('fund', `withdrew ${formatEther(before)} ETH from the distributor`, {
+      results: [{ address: to, hash: tx.hash }],
+    });
+    res.json({ hash: tx.hash, status: receipt.status, withdrewEth: formatEther(before), to });
   } catch (err) {
     next(err);
   }

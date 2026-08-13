@@ -36,12 +36,15 @@ pragma solidity ^0.8.24;
  * safe: it reverts inside the pool as `TF`, which is the v3 TransferHelper
  * masking the token's real reason. Wait for the window.
  *
- * NO OWNER, NO ADMIN, NOTHING TO RESCUE — the same rule Disperse.sol follows.
- * The caller supplies the ETH, names the recipients, and either the whole call
- * succeeds or it reverts. The contract holds no balance and no token between
- * transactions, so there is nothing for a privileged function to recover and
- * nobody who has to be trusted with one. Anyone may call it; doing so spends
- * their own ETH and distributes to wallets they chose, which is not an attack.
+ * IT HAS AN OWNER, AND THAT IS A CHANGE OF MIND WORTH RECORDING. Disperse.sol
+ * has none, correctly: it never holds a balance between transactions, so there
+ * is nothing for a privileged function to recover and nobody to trust. This
+ * contract started the same way and stopped being the same way the moment it
+ * gained receive() and a staged balance — with both spend paths reading
+ * address(this).balance and neither restricted, ANY caller could have named
+ * their own wallets as recipients and taken the stage. Staging is worth
+ * keeping, so spending is owner-only and withdraw() exists to undo a stage.
+ * The owner is immutable and cannot be transferred; redeploying is cheap.
  */
 
 interface IERC20 {
@@ -106,6 +109,8 @@ contract BundleDistributor {
     error FeeWalletMustBeZero();
     error NothingToSpend();
     error NotBeneficiary(address token, address caller);
+    error NotOwner(address caller);
+    error WithdrawFailed(address to, uint256 amount);
 
     /// Shares are in basis points and must sum to exactly this.
     uint256 public constant TOTAL_BPS = 10_000;
@@ -122,6 +127,47 @@ contract BundleDistributor {
      */
     mapping(address => address) public launcherOf;
 
+    /**
+     * Whoever deployed this, and the only address that may spend its balance.
+     *
+     * THE ORIGINAL DESIGN HAD NO OWNER, and that was correct while the contract
+     * only held funds inside a single transaction: the caller supplied the ETH,
+     * named the recipients, and either the whole call succeeded or it reverted,
+     * so there was nothing for anyone to take. Adding receive() and staging
+     * changed that and the access rules were not revisited — with both spend
+     * paths reading address(this).balance and neither restricted, ANY caller
+     * could have named their own wallets as recipients and taken a staged
+     * balance. The staging is worth keeping, so the owner is the price of it.
+     *
+     * Deliberately immutable and with no transfer: an owner that can be handed
+     * on is a second thing to get wrong, and redeploying is cheap.
+     */
+    address public immutable owner;
+
+    modifier onlyOwner() {
+        if (msg.sender != owner) revert NotOwner(msg.sender);
+        _;
+    }
+
+    constructor() {
+        owner = msg.sender;
+    }
+
+    /**
+     * Take the ETH back out.
+     *
+     * The other half of what staging needs. Without it a staged balance can
+     * only leave by launching or buying, so a launch that becomes impossible —
+     * the factory being switched off, say — would strand the capital with no
+     * way to reach it but a lossy round trip through some token.
+     */
+    function withdraw(address to) external onlyOwner returns (uint256 amount) {
+        amount = address(this).balance;
+        if (amount == 0) return 0;
+        (bool sent, ) = to.call{value: amount}('');
+        if (!sent) revert WithdrawFailed(to, amount);
+    }
+
     event Launched(address indexed token, address indexed launcher, uint256 devBuy, uint256 recipients);
     event Distributed(address indexed token, uint256 amountIn, uint256 amountOut, uint256 recipients);
     event Staged(address indexed from, uint256 amount, uint256 balance);
@@ -135,9 +181,9 @@ contract BundleDistributor {
      * this function a bare `send` to the contract reverts, so the one action
      * the flow depends on would be the one action that could not be performed.
      *
-     * Nothing is trusted here: the balance can only leave through launch or
-     * buy, both of which spend it all and fan the proceeds to the recipients
-     * the caller names. Anyone may fund it; doing so is a gift, not an attack.
+     * Anyone may fund it — that part is safe, because funding is a gift. What
+     * is NOT safe is spending, which is why both spend paths and withdraw() are
+     * owner-only. Send only to a contract whose owner() you have checked.
      */
     receive() external payable {
         emit Staged(msg.sender, msg.value, address(this).balance);
@@ -191,7 +237,7 @@ contract BundleDistributor {
         bytes32 salt,
         address[] calldata wallets,
         uint16[] calldata shares
-    ) external payable returns (address token, uint256 supply) {
+    ) external payable onlyOwner returns (address token, uint256 supply) {
         if (wallets.length == 0) revert NoRecipients();
         if (wallets.length != shares.length) revert LengthMismatch(wallets.length, shares.length);
         // Not a style preference. With feeWallet set, the factory makes IT the
@@ -285,7 +331,7 @@ contract BundleDistributor {
         uint256 minOut,
         address[] calldata wallets,
         uint16[] calldata shares
-    ) external payable returns (uint256 amountOut) {
+    ) external payable onlyOwner returns (uint256 amountOut) {
         if (wallets.length == 0) revert NoRecipients();
         if (wallets.length != shares.length) revert LengthMismatch(wallets.length, shares.length);
 

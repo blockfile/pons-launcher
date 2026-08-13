@@ -713,6 +713,20 @@ export default function BundlerV2Panel({
             Stage it
           </Busy>
           <Busy
+            busy={busy === 'withdraw'}
+            className="ghost"
+            disabled={!distributor || !(Number(staged) > 0)}
+            title="send the staged ETH back to the funding wallet"
+            onClick={() =>
+              act('withdraw', async () => {
+                const out = await api('/distributor/withdraw', 'POST', { confirm: true });
+                return `withdrew ${Number(out.withdrewEth).toFixed(4)} ETH to ${out.to}`;
+              })
+            }
+          >
+            Withdraw
+          </Busy>
+          <Busy
             busy={busy === 'refresh'}
             className="ghost"
             onClick={() =>

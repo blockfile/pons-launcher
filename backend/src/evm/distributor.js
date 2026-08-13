@@ -36,6 +36,8 @@ const DISTRIBUTOR_ABI = [
   'function launchAndDistribute(address factory, (string name, string symbol, string logo, string description, (string twitter, string telegram, string discord, string website, string farcaster) socials, address feeWallet) params, uint256 launchConfigId, uint256 dexId, bytes32 salt, address[] wallets, uint16[] shares) payable returns (address token, uint256 supply)',
   'function buyAndDistribute(address router, address weth, address token, uint24 poolFee, uint256 minOut, address[] wallets, uint16[] shares) payable returns (uint256 amountOut)',
   'function sweep(address token) returns (uint256)',
+  'function withdraw(address to) returns (uint256)',
+  'function owner() view returns (address)',
   'function launcherOf(address token) view returns (address)',
   'function TOTAL_BPS() view returns (uint256)',
   'event Launched(address indexed token, address indexed launcher, uint256 devBuy, uint256 recipients)',
@@ -50,6 +52,8 @@ const DISTRIBUTOR_ABI = [
   'error FeeWalletMustBeZero()',
   'error NothingToSpend()',
   'error NotBeneficiary(address token, address caller)',
+  'error NotOwner(address caller)',
+  'error WithdrawFailed(address to, uint256 amount)',
 ];
 
 const POOL_ABI = [
