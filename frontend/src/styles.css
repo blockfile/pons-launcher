@@ -302,6 +302,16 @@ button.ghost {
 .distribute input {
   font: inherit;
 }
+/* The funding requirement, given the full width of the box so it reads as the
+   headline number the operator tops the dev wallet up to. */
+.distribute-fund {
+  flex-basis: 100%;
+  margin-top: 2px;
+  font-size: 13px;
+}
+.distribute-fund b {
+  color: var(--amber);
+}
 button.ghost:hover:not(:disabled) {
   border-color: var(--dimmer);
   filter: none;

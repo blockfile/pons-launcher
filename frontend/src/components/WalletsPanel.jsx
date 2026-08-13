@@ -125,6 +125,13 @@ export default function WalletsPanel({ step, wallets, rows, setRow, share, reloa
   // stuck holding tokens it cannot sell is worse than a slightly larger fund.
   const SELL_RESERVE = 10;
 
+  // What the dev wallet must hold to fund every buy: the total buy plus each
+  // wallet's gas reserve. Shown live so a shortfall is a number seen up front
+  // rather than a third of the bundle silently skipped at preflight for lack of
+  // funds. The dev buy and the launch fee are on top of this and set elsewhere.
+  const reservePerWallet = Number(gas?.buyGasEth || 0) + SELL_RESERVE * Number(gas?.sellGasEth || 0);
+  const fundNeeded = Number(totalBuy) > 0 ? Number(totalBuy) + bundle.length * reservePerWallet : 0;
+
   // Split the typed total across the bundle wallets into a random, jittered
   // spread — no two the same, so the buys read as organic rather than a pattern
   // — and fill each row's Buy and Fund. Moves NO ETH: it only writes the table
@@ -377,6 +384,16 @@ export default function WalletsPanel({ step, wallets, rows, setRow, share, reloa
             random split · each funded for its buy + gas for {SELL_RESERVE} sells · fields stay editable ·
             moves no ETH
           </span>
+          {fundNeeded > 0 && (
+            <div className="distribute-fund">
+              Dev wallet needs ≈ <b>{fundNeeded.toFixed(4)} ETH</b> to fund all {bundle.length} buys
+              <span className="hint">
+                {' '}
+                ({Number(totalBuy).toFixed(4)} buys + {(bundle.length * reservePerWallet).toFixed(4)} gas
+                reserve) — your dev buy and the launch fee are on top. Underfunded wallets are skipped.
+              </span>
+            </div>
+          )}
         </div>
       )}
 
