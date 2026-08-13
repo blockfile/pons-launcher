@@ -220,7 +220,17 @@ function build(userId) {
     const wallet = new Wallet(privateKey);
     const store = load();
     if (store.wallets.some((w) => w.address.toLowerCase() === wallet.address.toLowerCase())) {
-      throw new Error(`wallet ${wallet.address} is already in the keystore`);
+      // Naming the role it already holds is the difference between a usable
+      // error and a dead end: the commonest way to hit this is importing an
+      // existing v1 wallet as a v2 one, and the answer is that v2 needs its
+      // own — which the bare message did not say.
+      const held = store.wallets.find(
+        (w) => w.address.toLowerCase() === wallet.address.toLowerCase()
+      );
+      throw new Error(
+        `wallet ${wallet.address} is already in the keystore as a "${held.role}" wallet. ` +
+          'A wallet can hold only one role — import a different key, or create a new one.'
+      );
     }
     // Only one dev wallet: it is the launch signer and the funding source, and
     // two of them would silently make "the dev wallet" ambiguous.

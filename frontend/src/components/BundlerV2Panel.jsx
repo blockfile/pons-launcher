@@ -77,13 +77,19 @@ export default function BundlerV2Panel({
 
   async function act(name, fn) {
     setBusy(name);
+    setNote(null);
     try {
       const out = await fn();
+      // Both, deliberately: report() feeds the shared readout and the activity
+      // log, but that panel lives inside the V1-only block and is hidden here,
+      // so this tab needs its own line or an error has nowhere to appear.
       report(out);
+      if (typeof out === 'string') setNote({ ok: true, text: out });
       await load();
       return out;
     } catch (err) {
       report(`ERROR: ${err.message}`);
+      setNote({ ok: false, text: err.message });
       return null;
     } finally {
       setBusy('');
@@ -104,6 +110,7 @@ export default function BundlerV2Panel({
   // funded, aged, or carried over from another tool — is often the one an
   // operator actually wants here, and a console that can only generate forces
   // a needless transfer to get funds where they were already going.
+  const [note, setNote] = useState(null);
   const [importing, setImporting] = useState('');
   const [keys, setKeys] = useState('');
 
@@ -264,6 +271,15 @@ export default function BundlerV2Panel({
         }
       />
 
+      {note && (
+        <div className={`notice ${note.ok ? '' : 'warn'}`}>
+          <h3>{note.ok ? 'done' : 'that did not work'}</h3>
+          <ul>
+            <li>{note.text}</li>
+          </ul>
+        </div>
+      )}
+
       <Step {...step(1)}>
         <p className="lede">
           V2 uses its own wallets — none of these are the V1 dev or bundle wallets, and no button
@@ -301,6 +317,11 @@ export default function BundlerV2Panel({
                 )}
               </td>
             </tr>
+            {importing === 'v2dev' && (
+              <tr>
+                <td colSpan={4}>{importBox('v2dev', 'signer private key')}</td>
+              </tr>
+            )}
             <tr>
               <td className="hint">funder</td>
               <td>
@@ -328,11 +349,13 @@ export default function BundlerV2Panel({
                 )}
               </td>
             </tr>
+            {importing === 'v2funding' && (
+              <tr>
+                <td colSpan={4}>{importBox('v2funding', 'funder private key')}</td>
+              </tr>
+            )}
           </tbody>
         </table>
-
-        {importBox('v2dev', 'signer private key')}
-        {importBox('v2funding', 'funder private key')}
 
         <p className="hint">
           Fund the signer with a little ETH for gas, and the funder with whatever the launch will
