@@ -49,9 +49,10 @@ const DRAFT_FIELDS = [
 const animation = domMax;
 
 export default function App() {
-  // Which strategy is on screen. Not persisted: v1 is the one that has been
-  // used for every launch to date, so a reload lands on it rather than on
-  // whatever was open last.
+  // The v2 bundler tab is hidden — see the note in the render below for why.
+  // A constant rather than state: while it is off there is no second tab to
+  // switch to, and a switcher with one destination is furniture.
+  const SHOW_V2_BUNDLER = false;
   const [mode, setMode] = useState('v1');
   const [health, setHealth] = useState(null);
   const [wallets, setWallets] = useState([]);
@@ -390,48 +391,63 @@ export default function App() {
         </header>
 
         <main>
-          {/* Two strategies against the same factory, not two versions of one.
-              V1 arms a bundle and fires it the moment trading opens; V2 launches
-              with no dev buy and buys once, later, through a contract. Their
-              steps do not line up and the mistake that ruins each is different,
-              so they get separate tabs rather than a shared sequence with a
-              mode switch — a control that is correct in one and dangerous in the
-              other is worse than two screens. */}
-          <div className="row" style={{ marginBottom: 12 }}>
-            <button
-              type="button"
-              className={mode === 'v1' ? '' : 'ghost'}
-              onClick={() => setMode('v1')}
-            >
-              V1 bundler
-            </button>
-            <button
-              type="button"
-              className={mode === 'v2' ? '' : 'ghost'}
-              onClick={() => setMode('v2')}
-            >
-              V2 bundler
-            </button>
-            <span className="spacer" />
-            <span className="hint">
-              {mode === 'v1'
-                ? 'dev buy, then a bundle at the open block'
-                : 'no dev buy, then one contract buy after the snipers exit'}
-            </span>
-          </div>
+          {/* THE V2 BUNDLER TAB IS HIDDEN, and the reason is not that it is
+              unfinished. It targets the pons v1 factory, whose owner set
+              launchEnabled to false on 2026-08-12 at 19:42 UTC — 22 seconds
+              after the last launch landed — on both v1 factories, and has
+              never once toggled that flag back in either contract's history.
+              The whitelist is provably empty: not one WhitelistedLauncherUpdated
+              event has ever been emitted, the constructor never writes the
+              mapping, and neither contract is a proxy. So there is no address
+              that can launch on v1, and nothing behind this tab can work.
 
-          {mode === 'v2' && (
-            <BundlerV2Panel
-              explorer={health?.explorer || ''}
-              credential={credential}
-              report={report}
-              wallets={wallets}
-              configs={configs}
-              reload={loadWallets}
-            />
+              Pons v2 is where launches go now, and it is already reachable —
+              the protocol selector inside the launch form below switches the
+              whole flow to /v2/*. It needs no tab of its own.
+
+              Left mounted rather than deleted: if v1 ever reopens, restoring
+              this is flipping SHOW_V2_BUNDLER, and the strategy behind it is
+              still the right one for that factory. Delete it once v2 is the
+              only thing anyone launches on. */}
+          {SHOW_V2_BUNDLER && (
+            <>
+              <div className="row" style={{ marginBottom: 12 }}>
+                <button
+                  type="button"
+                  className={mode === 'v1' ? '' : 'ghost'}
+                  onClick={() => setMode('v1')}
+                >
+                  V1 bundler
+                </button>
+                <button
+                  type="button"
+                  className={mode === 'v2' ? '' : 'ghost'}
+                  onClick={() => setMode('v2')}
+                >
+                  V2 bundler
+                </button>
+                <span className="spacer" />
+                <span className="hint">
+                  {mode === 'v1'
+                    ? 'dev buy, then a bundle at the open block'
+                    : 'no dev buy, then one contract buy after the snipers exit'}
+                </span>
+              </div>
+
+              {mode === 'v2' && (
+                <BundlerV2Panel
+                  explorer={health?.explorer || ''}
+                  credential={credential}
+                  report={report}
+                  wallets={wallets}
+                  configs={configs}
+                  reload={loadWallets}
+                />
+              )}
+            </>
           )}
 
-          <div hidden={mode !== 'v1'}>
+          <div hidden={SHOW_V2_BUNDLER && mode !== 'v1'}>
           <Sequence
             steps={steps}
             notice={
