@@ -277,6 +277,31 @@ button.ghost {
   border-color: var(--rule);
   font-weight: 500;
 }
+/* The auto-fill tool above the wallet table. Given a bordered box with an accent
+   stripe so it is found without being hunted for — but the stripe is the only
+   amber here; the button inside is ghost, because this writes fields, it does
+   not spend. */
+.distribute {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 10px;
+  margin: 0 0 12px;
+  padding: 10px 12px;
+  border: 1px solid var(--rule);
+  border-left: 3px solid var(--amber);
+  border-radius: 4px;
+  background: var(--panel-2);
+}
+.distribute-title {
+  font: 600 11px/1 var(--mono);
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  color: var(--amber);
+}
+.distribute input {
+  font: inherit;
+}
 button.ghost:hover:not(:disabled) {
   border-color: var(--dimmer);
   filter: none;

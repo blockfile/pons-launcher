@@ -353,8 +353,9 @@ export default function WalletsPanel({ step, wallets, rows, setRow, share, reloa
       )}
 
       {bundle.length > 0 && (
-        <div className="row distribute" style={{ marginBottom: 10, alignItems: 'center' }}>
-          <label className="hint" style={{ flexDirection: 'row', alignItems: 'center', gap: 6 }}>
+        <div className="distribute">
+          <b className="distribute-title">Auto-fill buys</b>
+          <label style={{ display: 'flex', flexDirection: 'row', alignItems: 'center', gap: 6 }}>
             Total buy
             <input
               type="number"
@@ -367,7 +368,9 @@ export default function WalletsPanel({ step, wallets, rows, setRow, share, reloa
             />
             ETH
           </label>
-          <Busy disabled={!(Number(totalBuy) > 0)} onClick={distribute}>
+          {/* Deliberately NOT the amber default: amber in this console means a
+              spend, and this only writes fields. Ghost, like Generate/Import. */}
+          <Busy className="ghost" disabled={!(Number(totalBuy) > 0)} onClick={distribute}>
             Distribute across {bundle.length} wallet{bundle.length === 1 ? '' : 's'}
           </Busy>
           <span className="hint">
