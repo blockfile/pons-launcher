@@ -12,6 +12,7 @@ const { uploadImage, ACCEPTED, MAX_BYTES } = require('../ipfs/upload');
 const v2factory = require('../evm/v2/factory');
 const { prepareV2 } = require('../bundle/prepareV2');
 const { fireV2 } = require('../bundle/fireV2');
+const { ethPriceUsd } = require('../ethPrice');
 
 const router = express.Router();
 
@@ -46,6 +47,17 @@ function jsonSafe(value) {
 
 // GET /api/configs — launch configs, dex configs and the current launch fee,
 // read live from the factory rather than hardcoded.
+// The native token's live USD price, for the market-cap dollar figures. A price
+// outage is a 503 the console treats as "keep the typed value", never a launch
+// blocker — so it is deliberately outside the try/catch that would 400 it.
+router.get('/eth-price', async (req, res) => {
+  try {
+    res.json(await ethPriceUsd());
+  } catch (err) {
+    res.status(503).json({ error: err.message });
+  }
+});
+
 router.get('/configs', async (req, res, next) => {
   try {
     const configs = await factory.getConfigs();

@@ -50,9 +50,34 @@ export default function WalletsPanel({ step, wallets, rows, setRow, share, reloa
   const [keys, setKeys] = useState('');
   const [busy, setBusy] = useState('');
   // The native token's USD price, for showing a predicted market cap the way an
-  // operator reads it ("15k MC"). No price feed exists on this chain, so it is
-  // typed; the ETH figure beside it is the exact one.
+  // operator reads it ("15k MC"). Fetched live from the backend (which asks an
+  // exchange server-side); auto-filled but editable. `manualRef` records that
+  // the operator overrode it, so the next live tick does not clobber the value
+  // they typed.
   const [ethPrice, setEthPrice] = useState(1888);
+  const [priceLive, setPriceLive] = useState(null); // { usd, source, stale }
+  const manualRef = useRef(false);
+
+  useEffect(() => {
+    let alive = true;
+    const load = async () => {
+      try {
+        const p = await api('/eth-price');
+        if (!alive) return;
+        setPriceLive(p);
+        if (!manualRef.current) setEthPrice(Number(p.usd).toFixed(2));
+      } catch {
+        // Price source down — keep whatever is in the field. The dollar figure
+        // is advisory; a launch never depends on it.
+      }
+    };
+    load();
+    const t = setInterval(load, 60_000);
+    return () => {
+      alive = false;
+      clearInterval(t);
+    };
+  }, []);
   // Ticked wallet ids. Only ever bundle wallets reach a delete — see `chosen`.
   const [picked, setPicked] = useState(() => new Set());
   // The wallets the delete confirmation is asking about, frozen at the moment
@@ -469,10 +494,33 @@ export default function WalletsPanel({ step, wallets, rows, setRow, share, reloa
                 value={ethPrice}
                 min="0"
                 step="1"
-                onChange={(e) => setEthPrice(e.target.value)}
+                onChange={(e) => {
+                  manualRef.current = true;
+                  setEthPrice(e.target.value);
+                }}
                 style={{ width: 90 }}
               />
-              <span>— sets the dollar figures; the ETH figures are exact</span>
+              {priceLive ? (
+                manualRef.current && Number(ethPrice).toFixed(2) !== Number(priceLive.usd).toFixed(2) ? (
+                  <button
+                    type="button"
+                    className="link"
+                    title={`live ${priceLive.source}${priceLive.stale ? ' (stale)' : ''} price`}
+                    onClick={() => {
+                      manualRef.current = false;
+                      setEthPrice(Number(priceLive.usd).toFixed(2));
+                    }}
+                  >
+                    ↻ use live ${Number(priceLive.usd).toFixed(2)}
+                  </button>
+                ) : (
+                  <span title={`from ${priceLive.source}, refreshes each minute`}>
+                    {priceLive.stale ? 'last known' : 'live'} · {priceLive.source}
+                  </span>
+                )
+              ) : (
+                <span>— sets the dollar figures; the ETH figures are exact</span>
+              )}
             </label>
           )}
           <ul>
