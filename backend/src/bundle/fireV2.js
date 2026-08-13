@@ -35,6 +35,31 @@ const { waitForReceipt } = require('../evm/receipt');
 // — both are gated on the launch landing, which shifts with it.
 const RECHECK_MS = 250;
 
+// Is a failed estimate a DEFINITIVE revert (abort the bundle) or a transient
+// error (proceed — the bundle must not wait on a flaky node)? Two independent
+// signals mean revert, and the check errs toward catching a revert:
+//
+//   1. ethers classifies an execution revert as CALL_EXCEPTION — including a
+//      BARE revert()/require() that carries no data at all. Checking only for
+//      revert-data bytes (as this once did) let those through as "transient".
+//   2. Revert data can surface in any of several slots depending on the node
+//      and the ethers path. This reads the SAME slots explainRevert reads, so
+//      the gate can never wave through a revert the decoder would have named.
+//
+// A network/timeout/rate-limit error is neither CALL_EXCEPTION nor carries
+// revert data, so it proceeds — the fire-time check is defense in depth behind
+// prepareV2's hard estimate, not the sole guard.
+function isDefiniteRevert(err) {
+  if (err && err.code === 'CALL_EXCEPTION') return true;
+  const data =
+    err?.data ||
+    err?.info?.error?.data ||
+    err?.error?.data ||
+    err?.revert?.data ||
+    (typeof err?.value === 'string' && err.value.startsWith('0x') ? err.value : null);
+  return typeof data === 'string' && data.startsWith('0x') && data.length >= 10;
+}
+
 async function recheckLaunch(rpc, tx, explain, { timeoutMs = RECHECK_MS } = {}) {
   // A provider that cannot estimate simply skips the extra check — the bundle is
   // never held up for a capability the node does not offer.
@@ -46,15 +71,7 @@ async function recheckLaunch(rpc, tx, explain, { timeoutMs = RECHECK_MS } = {}) 
   const check = rpc
     .estimateGas(tx)
     .then(() => ({ ok: true }))
-    .catch((err) => {
-      // A revert carries revert data; a transient/network error does not. Only a
-      // definitive revert is allowed to stop the bundle.
-      const data = err?.data || err?.info?.error?.data || err?.error?.data;
-      if (typeof data === 'string' && data.startsWith('0x') && data.length >= 10) {
-        return { ok: false, reason: explain(err) };
-      }
-      return { ok: true, transient: true };
-    });
+    .catch((err) => (isDefiniteRevert(err) ? { ok: false, reason: explain(err) } : { ok: true, transient: true }));
   const result = await Promise.race([check, timeout]);
   clearTimeout(timer);
   return result;

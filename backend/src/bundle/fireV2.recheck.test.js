@@ -39,6 +39,29 @@ test('PROCEEDS on a transient/network error (no revert data)', async () => {
   assert.equal(r.ok, true, 'a network blip must not block the bundle');
 });
 
+test('ABORTS on a bare revert with NO data (CALL_EXCEPTION)', async () => {
+  // A revert()/require() with no message carries no data; only the ethers code
+  // marks it as a revert. This used to slip through as "transient".
+  const rpc = {
+    estimateGas: async () => {
+      const e = new Error('execution reverted');
+      e.code = 'CALL_EXCEPTION';
+      e.data = '0x';
+      throw e;
+    },
+  };
+  const r = await recheckLaunch(rpc, TX, explain);
+  assert.equal(r.ok, false, 'a bare revert must stop the bundle');
+});
+
+test('ABORTS when revert data hides in .revert.data or .value', async () => {
+  for (const err of [{ revert: { data: '0x021c0d43' } }, { value: '0x021c0d43' }]) {
+    const rpc = { estimateGas: async () => { throw err; } };
+    const r = await recheckLaunch(rpc, TX, explain);
+    assert.equal(r.ok, false, `revert data in ${JSON.stringify(err)} must abort`);
+  }
+});
+
 test('NEVER blocks the bundle: a slow node times out and proceeds', async () => {
   // estimateGas that never resolves — the timeout must win.
   const rpc = { estimateGas: () => new Promise(() => {}) };

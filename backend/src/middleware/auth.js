@@ -43,4 +43,18 @@ function requireApiKey(req, res, next) {
   return res.status(401).json({ error: 'invalid or missing API key' });
 }
 
-module.exports = { identify, requireApiKey, DEFAULT_USER };
+/**
+ * Fail CLOSED when no authentication is configured at all. requireApiKey lets a
+ * single-tenant deployment with no API_KEY through — fine for local dev, but the
+ * routes that put PLAINTEXT PRIVATE KEYS on the wire must never be reachable
+ * without a credential, in any mode (DRY_RUN skips the boot gate that would
+ * otherwise force a key). Chain this AFTER requireApiKey on export/backup.
+ */
+function requireAuthConfigured(req, res, next) {
+  if (users.enabled() || config.apiKey) return next();
+  return res
+    .status(403)
+    .json({ error: 'set API_KEY (or create a user) before exporting keys — refusing to serve keys with no auth configured' });
+}
+
+module.exports = { identify, requireApiKey, requireAuthConfigured, DEFAULT_USER };

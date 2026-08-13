@@ -25,7 +25,14 @@ const SOURCES = [
 ];
 
 const TTL_MS = 60_000;
+// Do not attempt the exchanges more than once per this window, no matter the
+// request rate. Without it, an unauthenticated GET /api/eth-price during a
+// price-source outage (cache cold, both sources failing) would fire up to two
+// outbound fetches PER request — an amplification vector that could exhaust the
+// socket pool and get the server IP rate-limited by the exchanges.
+const ATTEMPT_TTL_MS = 15_000;
 let cache = { usd: null, source: null, at: 0 };
+let lastAttemptAt = 0;
 
 /**
  * @returns {Promise<{usd:number, source:string, at:number, stale?:boolean}>}
@@ -33,6 +40,14 @@ let cache = { usd: null, source: null, at: 0 };
  */
 async function ethPriceUsd({ now = Date.now, fetchImpl = fetch } = {}) {
   if (cache.usd && now() - cache.at < TTL_MS) return { ...cache };
+
+  // Negative cache: if we tried recently and are still here (no fresh price),
+  // serve the stale value or fail WITHOUT another round of outbound fetches.
+  if (now() - lastAttemptAt < ATTEMPT_TTL_MS) {
+    if (cache.usd) return { ...cache, stale: true };
+    throw new Error('no price source reachable (checked recently)');
+  }
+  lastAttemptAt = now();
 
   for (const s of SOURCES) {
     try {
@@ -56,6 +71,7 @@ async function ethPriceUsd({ now = Date.now, fetchImpl = fetch } = {}) {
 // Test-only reset so a suite does not inherit a warm cache.
 function _resetCache() {
   cache = { usd: null, source: null, at: 0 };
+  lastAttemptAt = 0;
 }
 
 module.exports = { ethPriceUsd, _resetCache };

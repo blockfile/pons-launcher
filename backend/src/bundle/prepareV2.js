@@ -102,8 +102,18 @@ async function prepareV2(input, deps = {}) {
   // chain work, so a foreign wallet id fails as "no wallet" rather than being
   // used. Same guarantee as v1.
   const known = new Map(ks.list().map((w) => [w.id, w]));
+  const seenWallet = new Set();
   for (const w of wallets) {
     if (!known.has(w.walletId)) throw new Error(`no wallet ${w.walletId}`);
+    // A duplicate id, or the dev wallet listed as a buyer, would sign two
+    // transactions against the SAME pending nonce — one silently rejected at
+    // fire time, or (for the dev) a buy colliding with the launch itself. Reject
+    // it here rather than under-fill the bundle without saying so.
+    if (seenWallet.has(w.walletId)) throw new Error(`wallet ${w.walletId} is listed twice`);
+    if (known.get(w.walletId).address.toLowerCase() === dev.address.toLowerCase()) {
+      throw new Error('the dev wallet cannot also be a bundle buyer — its buy would collide with the launch');
+    }
+    seenWallet.add(w.walletId);
   }
 
   const gate = await v2mod.preflightGate({ launcher: dev.address, pairToken: pair });
@@ -372,7 +382,10 @@ async function prepareV2(input, deps = {}) {
       startBps: cfgs.snipeTaxStartBps,
       seconds: cfgs.snipeTaxSeconds,
       exemptions,
-      max: v2mod.MAX_SNIPE_TAX_EXEMPTIONS,
+      // The cap that actually applies to THIS launch: the forwarder path (any
+      // dev buy) allows one fewer than the factory, and reporting the factory's
+      // 32 here would contradict the limit the plan was built against.
+      max: exemptionLimit,
     },
     launch: signedLaunch,
     buys,

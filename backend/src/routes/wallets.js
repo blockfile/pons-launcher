@@ -13,7 +13,7 @@ const { BATCH_THRESHOLD } = require('../evm/disperse');
 const { estimate, deploy } = require('../evm/deploy');
 const { provider } = require('../evm/provider');
 const { formatEther } = require('ethers');
-const { requireApiKey } = require('../middleware/auth');
+const { requireApiKey, requireAuthConfigured } = require('../middleware/auth');
 const { findSellable, withDeadline } = require('../evm/v2/holdings');
 const { prepareSell } = require('../bundle/prepareSell');
 const { fireSell } = require('../bundle/fireSell');
@@ -22,7 +22,7 @@ const { jsonSafe } = require('./launch');
 const router = express.Router();
 
 // GET /api/wallets — addresses, roles and balances. Never key material.
-router.get('/wallets', async (req, res, next) => {
+router.get('/wallets', requireApiKey, async (req, res, next) => {
   try {
     const ks = keystoreFor(req.user.id);
     res.json(await funding.balances({ keystore: ks }));
@@ -137,7 +137,7 @@ router.delete('/wallets/:id', requireApiKey, (req, res, next) => {
 
 // Deliberate key export — requires the API key AND an explicit confirm flag,
 // because this is the one route that puts a private key on the wire.
-router.post('/wallets/export', requireApiKey, (req, res, next) => {
+router.post('/wallets/export', requireApiKey, requireAuthConfigured, (req, res, next) => {
   try {
     const ks = keystoreFor(req.user.id);
     const { id, confirm } = req.body || {};
@@ -157,7 +157,7 @@ router.post('/wallets/export', requireApiKey, (req, res, next) => {
 // POST /api/wallets/backup — every key at once, for an offline backup. Same
 // two locks as the single export, and logged the same way: whoever holds the
 // file this produces controls every wallet in it.
-router.post('/wallets/backup', requireApiKey, (req, res, next) => {
+router.post('/wallets/backup', requireApiKey, requireAuthConfigured, (req, res, next) => {
   try {
     const ks = keystoreFor(req.user.id);
     if ((req.body || {}).confirm !== true) throw new Error('backup requires { confirm: true }');
@@ -190,6 +190,10 @@ router.post('/fund', requireApiKey, async (req, res, next) => {
     const ks = keystoreFor(req.user.id);
     const { targets } = req.body || {};
     if (!Array.isArray(targets) || !targets.length) throw new Error('targets[] is required');
+    // Bound the work before it starts: disperse does an O(n) keystore lookup per
+    // target, so an unbounded list is O(n²) CPU on the request path. A real
+    // bundle is tens of wallets; 500 is far above that and far below abusive.
+    if (targets.length > 500) throw new Error(`targets[] is capped at 500 (got ${targets.length})`);
     const out = await funding.disperse(targets, { keystore: ks, userId: req.user.id });
     const s = summariseTransfers(out);
     activityFor(req.user.id).record(
@@ -290,7 +294,7 @@ const SELLABLE_TIMEOUT_MS = 30_000;
 // scan's own diagnostics go to the server log rather than into the array —
 // there is nowhere in a row to put "the scan was partial", and inventing a
 // wrapper object would leave the picker rendering nothing at all.
-router.get('/sellable', async (req, res, next) => {
+router.get('/sellable', requireApiKey, async (req, res, next) => {
   try {
     const ks = keystoreFor(req.user.id);
     const out = await withDeadline(
@@ -400,7 +404,7 @@ router.post('/sell', requireApiKey, async (req, res, next) => {
 
 // GET /api/dispersers — what this user funds through, and what it would cost
 // to deploy one more.
-router.get('/dispersers', async (req, res, next) => {
+router.get('/dispersers', requireApiKey, async (req, res, next) => {
   try {
     const store = dispersersFor(req.user.id);
     const out = {
@@ -484,7 +488,7 @@ router.delete('/dispersers/:address', requireApiKey, (req, res, next) => {
 // their own log, exactly as if they had not passed it. That is not laziness:
 // an error would tell a caller holding a stolen key that admins exist here and
 // let them enumerate who. See the header of store/activity.js.
-router.get('/activity', (req, res, next) => {
+router.get('/activity', requireApiKey, (req, res, next) => {
   try {
     const { limit = 100, kind = null, user = null } = req.query;
     res.json(viewFor(req.user.id, { user, limit: Number(limit), kind }).entries);

@@ -48,6 +48,20 @@ test('serves a STALE cached price rather than nothing when all sources are down'
   assert.equal(p.stale, true);
 });
 
+test('negative cache: during an outage it does not refetch on every call', async () => {
+  _resetCache();
+  let calls = 0;
+  const down = async () => {
+    calls++;
+    throw new Error('down');
+  };
+  let t = 1_000_000;
+  await assert.rejects(() => ethPriceUsd({ fetchImpl: down, now: () => t }));
+  const afterFirst = calls; // both sources tried once
+  await assert.rejects(() => ethPriceUsd({ fetchImpl: down, now: () => t + 5_000 }));
+  assert.equal(calls, afterFirst, 'a call within the attempt window must not fetch again');
+});
+
 test('throws when no source is reachable and there is no cache', async () => {
   _resetCache();
   await assert.rejects(
