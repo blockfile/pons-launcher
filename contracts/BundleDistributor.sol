@@ -124,6 +124,24 @@ contract BundleDistributor {
 
     event Launched(address indexed token, address indexed launcher, uint256 devBuy, uint256 recipients);
     event Distributed(address indexed token, uint256 amountIn, uint256 amountOut, uint256 recipients);
+    event Staged(address indexed from, uint256 amount, uint256 balance);
+
+    /**
+     * Accept a plain ETH transfer.
+     *
+     * REQUIRED, not a convenience. Both spending paths read
+     * `address(this).balance`, which is the whole point of the design — the
+     * funding wallet stages the buy here and the signer only pays gas. Without
+     * this function a bare `send` to the contract reverts, so the one action
+     * the flow depends on would be the one action that could not be performed.
+     *
+     * Nothing is trusted here: the balance can only leave through launch or
+     * buy, both of which spend it all and fan the proceeds to the recipients
+     * the caller names. Anyone may fund it; doing so is a gift, not an attack.
+     */
+    receive() external payable {
+        emit Staged(msg.sender, msg.value, address(this).balance);
+    }
 
     /**
      * Launch a token, take the whole atomic buy, and split it — one transaction.

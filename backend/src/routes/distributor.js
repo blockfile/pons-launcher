@@ -214,6 +214,59 @@ router.post('/distributor/quote', requireApiKey, async (req, res, next) => {
   }
 });
 
+// POST /api/distributor/stage — move ETH from the v2 funding wallet into the
+// contract, ready for the launch to spend.
+//
+// The contract also accepts a plain transfer from anywhere, which is the point
+// of staging: capital can arrive from an exchange or from several wallets and
+// no single address ever holds the whole amount. This route is the convenience
+// for the common case, where the funder is a wallet this keystore already has.
+router.post('/distributor/stage', requireApiKey, async (req, res, next) => {
+  try {
+    const { amountEth, confirm } = req.body || {};
+    if (confirm !== true) throw new Error('this moves ETH — requires { confirm: true }');
+    if (!(Number(amountEth) > 0)) throw new Error('amountEth must be positive');
+    if (config.dryRun) throw new Error('DRY_RUN is on — nothing would be sent');
+
+    const record = distributorFor(req.user.id).get();
+    if (!record) throw new Error('no distributor deployed — deploy one first');
+
+    const ks = keystoreFor(req.user.id);
+    const funder = ks.walletWithRole('v2funding');
+    if (!funder) throw new Error('no v2 funding wallet — create one on the V2 tab first');
+
+    const value = parseEther(String(amountEth));
+    const balance = await provider.getBalance(funder.address);
+    // Named, not just refused: "insufficient funds" from the node says nothing
+    // about which wallet or how short it is, and the funder is easy to confuse
+    // with the signer when both are new.
+    if (balance <= value) {
+      throw new Error(
+        `the funding wallet holds ${formatEther(balance)} ETH and this would send ${amountEth} — ` +
+          'it also needs gas left over. Fund it first, or send less.'
+      );
+    }
+
+    const signer = ks.signer(funder.id, provider);
+    const tx = await signer.sendTransaction({ to: record.address, value });
+    const receipt = await tx.wait(1);
+    const staged = await provider.getBalance(record.address);
+
+    activityFor(req.user.id).record('fund', `staged ${amountEth} ETH into the distributor`, {
+      results: [{ address: record.address, hash: tx.hash }],
+    });
+
+    res.json({
+      hash: tx.hash,
+      status: receipt.status,
+      stagedEth: formatEther(staged),
+      from: funder.address,
+    });
+  } catch (err) {
+    next(err);
+  }
+});
+
 // POST /api/distributor/launch — the atomic path. Launch, take the whole
 // initial buy, and fan it across the bundle wallets, all in one transaction.
 //

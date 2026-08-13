@@ -117,6 +117,7 @@ export default function BundlerV2Panel({
   // moved out of the live keystore, and the count next to the second click is
   // the last chance to notice it says thirty and not three.
   const [armed, setArmed] = useState(false);
+  const [stageAmt, setStageAmt] = useState('3.5');
   const [keys, setKeys] = useState('');
 
   const gen = (role, n = 1) =>
@@ -677,15 +678,61 @@ export default function BundlerV2Panel({
         )}
 
         <div className="row">
-          <span className="hint">balances refresh when this panel reloads</span>
+          <label className="hint">
+            send
+            <input
+              type="number"
+              step="0.1"
+              min="0"
+              value={stageAmt}
+              onChange={(e) => setStageAmt(e.target.value)}
+              style={{ width: 90, marginLeft: 6 }}
+            />
+            {' ETH from the funder'}
+          </label>
           <span className="spacer" />
-          <Busy busy={busy === 'refresh'} className="ghost" onClick={() => act('refresh', async () => {
-            const s2 = await api('/distributor');
-            return `distributor holds ${Number(s2.stagedEth || 0).toFixed(4)} ETH`;
-          })}>
-            Refresh balance
+          <Busy
+            busy={busy === 'stage'}
+            className="ghost"
+            disabled={!funder || !distributor || !(Number(stageAmt) > 0)}
+            onClick={() =>
+              act('stage', async () => {
+                const out = await api('/distributor/stage', 'POST', {
+                  amountEth: Number(stageAmt),
+                  confirm: true,
+                });
+                return `staged — the contract now holds ${Number(out.stagedEth).toFixed(4)} ETH`;
+              })
+            }
+          >
+            Stage it
+          </Busy>
+          <Busy
+            busy={busy === 'refresh'}
+            className="ghost"
+            onClick={() =>
+              act('refresh', async () => {
+                const s2 = await api('/distributor');
+                return `distributor holds ${Number(s2.stagedEth || 0).toFixed(4)} ETH`;
+              })
+            }
+          >
+            Refresh
           </Busy>
         </div>
+
+        {!funder && (
+          <p className="hint">
+            no funding wallet yet — create one in step 1, or send ETH to the address above from
+            anywhere.
+          </p>
+        )}
+        {funder && (
+          <p className="hint">
+            funder {funder.address} holds {Number(funder.balanceEth || 0).toFixed(4)} ETH. Sending
+            from elsewhere works too — the contract accepts a plain transfer from any address.
+          </p>
+        )}
       </Step>
 
       <Step {...step(5)}>
