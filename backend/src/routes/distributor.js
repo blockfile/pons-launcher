@@ -46,19 +46,46 @@ const {
 
 const router = express.Router();
 
-/** Resolve the wallets a trigger will pay out to, and their shares. */
+/**
+ * The wallet that signs on this path — v2's own, never v1's dev wallet.
+ *
+ * It pays gas and the launch fee and nothing else: the buy is staged in the
+ * contract by the v2 funding wallet, and the supply goes to the v2 bundle
+ * wallets. Three roles, three addresses, none of them shared with v1.
+ */
+function v2Signer(ks) {
+  const signer = ks.walletWithRole('v2dev');
+  if (!signer) {
+    throw new Error('no v2 dev wallet — generate one on the V2 tab first');
+  }
+  return signer;
+}
+
+/**
+ * Resolve the wallets a buy will pay out to, and their shares.
+ *
+ * v2bundle ONLY. These are not v1's bundle wallets and must never be: the two
+ * strategies fund and spend differently, and an operator who cannot tell from
+ * the screen which set a button is about to move is one click from mixing them.
+ *
+ * An earlier version filtered on `w.isDev`, which publicView does not set — so
+ * it silently returned every wallet in the keystore, dev included. Filtering on
+ * the role is both correct and the thing that keeps the tabs separate.
+ */
 function resolveRecipients(ks, body) {
   const ids = Array.isArray(body?.walletIds) ? body.walletIds : [];
-  const known = ks.list();
+  const known = ks.walletsWithRole('v2bundle');
   const chosen = ids.length
     ? ids.map((id) => {
         const w = known.find((k) => k.id === id);
-        if (!w) throw new Error(`no wallet ${id}`);
+        if (!w) throw new Error(`no v2 bundle wallet ${id}`);
         return w;
       })
-    : known.filter((w) => !w.isDev);
+    : known;
 
-  if (!chosen.length) throw new Error('no bundle wallets to distribute to');
+  if (!chosen.length) {
+    throw new Error('no v2 bundle wallets — generate them on the V2 tab first');
+  }
 
   const weights = Array.isArray(body?.weights) && body.weights.length === chosen.length
     ? body.weights
@@ -81,7 +108,7 @@ router.get('/distributor', requireApiKey, async (req, res, next) => {
     let quote = null;
     try {
       const ks = keystoreFor(req.user.id);
-      const signer = ks.signer(ks.devWallet().id, provider);
+      const signer = ks.signer(v2Signer(ks).id, provider);
       const e = await estimate('BundleDistributor', 1, signer);
       quote = {
         costEth: formatEther(e.each),
@@ -120,7 +147,7 @@ router.post('/distributor/deploy', requireApiKey, async (req, res, next) => {
     if (config.dryRun) throw new Error('DRY_RUN is on — nothing would be deployed');
 
     const ks = keystoreFor(req.user.id);
-    const signer = ks.signer(ks.devWallet().id, provider);
+    const signer = ks.signer(v2Signer(ks).id, provider);
     const [deployed] = await deploy('BundleDistributor', 1, signer);
 
     const record = distributorFor(req.user.id).set(deployed.address, {
@@ -164,7 +191,7 @@ router.post('/distributor/quote', requireApiKey, async (req, res, next) => {
     if (!record) throw new Error('no distributor deployed — deploy one first');
 
     const ks = keystoreFor(req.user.id);
-    const dev = ks.devWallet();
+    const dev = v2Signer(ks);
     const { wallets, shares, chosen } = resolveRecipients(ks, req.body);
 
     const q = await quoteTrigger({
@@ -206,7 +233,7 @@ router.post('/distributor/launch', requireApiKey, async (req, res, next) => {
     if (!record) throw new Error('no distributor deployed — deploy one first');
 
     const ks = keystoreFor(req.user.id);
-    const dev = ks.devWallet();
+    const dev = v2Signer(ks);
     const signer = ks.signer(dev.id, provider);
     const { wallets, shares, chosen } = resolveRecipients(ks, req.body);
 
@@ -288,7 +315,7 @@ router.post('/distributor/trigger', requireApiKey, async (req, res, next) => {
     if (!record) throw new Error('no distributor deployed — deploy one first');
 
     const ks = keystoreFor(req.user.id);
-    const dev = ks.devWallet();
+    const dev = v2Signer(ks);
     const signer = ks.signer(dev.id, provider);
     const { wallets, shares, chosen } = resolveRecipients(ks, req.body);
 

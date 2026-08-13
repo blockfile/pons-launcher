@@ -158,7 +158,9 @@ export default function WalletsPanel({ step, wallets, rows, setRow, share, reloa
   // Rows the operator asked to spend the whole balance on. Their real amount is
   // resolved server-side after gas, so the figures for them are ceilings on top
   // of a ceiling — said once, under the table, rather than on every row.
-  const allMode = wallets.filter((w) => w.role !== 'dev' && rows[w.id]?.mode === 'all').length;
+  // Whitelist, for the reason given above `bundle` — and now literally: the V2
+  // roles exist, and "not the dev wallet" would count them here.
+  const allMode = wallets.filter((w) => w.role === 'bundle' && rows[w.id]?.mode === 'all').length;
   // Wallets with something to buy. A zero-amount leg is kept in the sequence —
   // it moves nothing, so dropping it would change nothing — but it is not a
   // wallet that is buying, and counting it as one would misstate the bundle.

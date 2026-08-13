@@ -427,6 +427,7 @@ export default function App() {
               report={report}
               wallets={wallets}
               configs={configs}
+              reload={loadWallets}
             />
           )}
 

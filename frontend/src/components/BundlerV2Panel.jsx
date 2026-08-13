@@ -38,6 +38,7 @@ export default function BundlerV2Panel({
   report,
   wallets = [],
   configs = null,
+  reload,
 }) {
   const [state, setState] = useState(null);
   const [error, setError] = useState('');
@@ -92,8 +93,20 @@ export default function BundlerV2Panel({
   const distributor = state?.distributor || null;
   const deployQuote = state?.quote || null;
   const staged = state?.stagedEth || '0';
-  const dev = wallets.find((w) => w.role === 'dev');
-  const bundle = wallets.filter((w) => w.role === 'bundle');
+  // v2's OWN wallets. Nothing here reads v1's dev or bundle roles: the two
+  // strategies fund and spend differently, and a screen that cannot say which
+  // set a button is about to move is one click from mixing them.
+  const dev = wallets.find((w) => w.role === 'v2dev');
+  const funder = wallets.find((w) => w.role === 'v2funding');
+  const bundle = wallets.filter((w) => w.role === 'v2bundle');
+  const [count, setCount] = useState(30);
+
+  const gen = (role, n = 1) =>
+    act(role, async () => {
+      const made = await api('/wallets/generate', 'POST', { count: n, role });
+      await reload?.();
+      return `generated ${made.length} ${role} wallet(s)`;
+    });
 
   // What the dev buy actually takes, on the pool the config opens. Same
   // arithmetic the backend preflight runs — see shared/bundleShare.js for why
@@ -119,11 +132,14 @@ export default function BundlerV2Panel({
     const plan = [
       {
         n: 1,
-        title: 'Create dev wallet',
-        done: Boolean(dev),
-        detail: dev
-          ? `${short(dev.address)} · ${Number(dev.balanceEth).toFixed(4)} ETH`
-          : 'it deploys the contract and signs the launch — it never carries the buy',
+        title: 'Create the V2 wallets',
+        done: Boolean(dev) && Boolean(funder),
+        detail:
+          dev && funder
+            ? `signer ${short(dev.address)} · funder ${short(funder.address)}`
+            : dev
+              ? 'signer ready — still needs a funding wallet'
+              : 'a signer and a funder, both V2-only',
       },
       {
         n: 2,
@@ -133,7 +149,7 @@ export default function BundlerV2Panel({
       },
       {
         n: 3,
-        title: 'Generate bundle wallets',
+        title: 'Generate V2 bundle wallets',
         done: bundle.length > 0,
         detail: bundle.length
           ? `${plural(bundle.length, 'wallet')} · no funding needed`
@@ -192,7 +208,7 @@ export default function BundlerV2Panel({
             : null,
       };
     });
-  }, [dev, distributor, bundle.length, staged, launched, triggered, projection, devBuy, form.symbol]);
+  }, [dev, funder, distributor, bundle.length, staged, launched, triggered, projection, devBuy, form.symbol]);
 
   const step = (n) => steps[n - 1];
 
@@ -212,10 +228,64 @@ export default function BundlerV2Panel({
 
       <Step {...step(1)}>
         <p className="lede">
-          Shared with the V1 tab — create or import it there. On this path its whole job is to
-          deploy the distributor and sign the launch. It never holds the buy and never holds the
-          supply: the ETH is staged in the contract by a separate funding wallet, and the tokens go
-          straight to the bundle wallets inside the same transaction.
+          V2 uses its own wallets — none of these are the V1 dev or bundle wallets, and no button
+          on this tab can move them. Three roles, kept apart on purpose: a <strong>signer</strong>
+          that only pays gas and the launch fee, a <strong>funder</strong> that holds the buy, and
+          the bundle wallets that receive the supply.
+        </p>
+
+        <table className="disperser-list">
+          <tbody>
+            <tr>
+              <td className="hint">signer</td>
+              <td>
+                {dev ? (
+                  <a href={`${explorer}/address/${dev.address}`} target="_blank" rel="noreferrer">
+                    {dev.address}
+                  </a>
+                ) : (
+                  <span className="hint">not created</span>
+                )}
+              </td>
+              <td className="hint">
+                {dev ? `${Number(dev.balanceEth || 0).toFixed(4)} ETH — gas only` : ''}
+              </td>
+              <td>
+                {!dev && (
+                  <Busy busy={busy === 'v2dev'} className="ghost" onClick={() => gen('v2dev')}>
+                    Create signer
+                  </Busy>
+                )}
+              </td>
+            </tr>
+            <tr>
+              <td className="hint">funder</td>
+              <td>
+                {funder ? (
+                  <a href={`${explorer}/address/${funder.address}`} target="_blank" rel="noreferrer">
+                    {funder.address}
+                  </a>
+                ) : (
+                  <span className="hint">not created</span>
+                )}
+              </td>
+              <td className="hint">
+                {funder ? `${Number(funder.balanceEth || 0).toFixed(4)} ETH — stages the buy` : ''}
+              </td>
+              <td>
+                {!funder && (
+                  <Busy busy={busy === 'v2funding'} className="ghost" onClick={() => gen('v2funding')}>
+                    Create funder
+                  </Busy>
+                )}
+              </td>
+            </tr>
+          </tbody>
+        </table>
+
+        <p className="hint">
+          Fund the signer with a little ETH for gas, and the funder with whatever the launch will
+          spend. Both are ordinary keystore wallets — they back up and archive like every other.
         </p>
       </Step>
 
@@ -276,17 +346,42 @@ export default function BundlerV2Panel({
 
       <Step {...step(3)}>
         <p className="lede">
-          Generate them on the V1 tab as usual — but <strong>do not fund them</strong>. On this path
-          they never buy, so none of them needs ETH. That also means no disperser run, which is what
-          currently announces a launch eight to twenty-two minutes before it happens.
+          These receive the supply and never buy it, so <strong>they need no ETH at all</strong>
+          {' '}before a launch. That is what removes the disperser run — the thing that currently
+          announces a launch eight to twenty-two minutes before it happens.
         </p>
+
+        <div className="row">
+          <label className="hint">
+            generate
+            <input
+              type="number"
+              min="1"
+              max="100"
+              value={count}
+              onChange={(e) => setCount(e.target.value)}
+              style={{ width: 70, marginLeft: 6 }}
+            />
+          </label>
+          <span className="spacer" />
+          <span className="hint">
+            {bundle.length ? `${plural(bundle.length, 'V2 bundle wallet')} so far` : 'none yet'}
+          </span>
+          <Busy
+            busy={busy === 'v2bundle'}
+            className="ghost"
+            disabled={!(Number(count) >= 1)}
+            onClick={() => gen('v2bundle', Number(count))}
+          >
+            Create {count} bundle wallets
+          </Busy>
+        </div>
+
         <p className="hint">
-          {bundle.length
-            ? `${plural(bundle.length, 'wallet')} will share the supply equally. They need gas only later, when you sell.`
-            : 'no bundle wallets yet'}
+          They need gas only later, when you sell — funding them then leaks nothing, because the
+          launch is already over.
         </p>
       </Step>
-
 
       <Step {...step(4)}>
         <p className="lede">

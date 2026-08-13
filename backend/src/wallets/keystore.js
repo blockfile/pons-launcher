@@ -56,6 +56,11 @@ const VERSION = 1;
 const MAX_ARCHIVED = 100;
 
 const DEFAULT_ID = 'default';
+
+// v1 uses dev + bundle. v2 uses its own three so the strategies never share a
+// wallet — see the note above devWallet().
+const ROLES = new Set(['dev', 'bundle', 'v2dev', 'v2funding', 'v2bundle']);
+const SINGLETON_ROLES = new Set(['dev', 'v2dev', 'v2funding']);
 const instances = new Map();
 // Same alphabet as users.slug() (backend/src/users/users.js). Duplicated
 // rather than imported: this module deliberately consumes nothing from the
@@ -478,7 +483,15 @@ function build(userId) {
     }));
   }
 
-  function devWallet() {
+  // The roles a wallet can hold. 'dev' and 'bundle' are v1's and are unchanged.
+// The three v2 roles exist so the two strategies never share a wallet: the
+// tabs were reading the same set, which made every v2 screen say "shared with
+// V1" and left an operator unsure which wallets a button was about to spend.
+//
+// Keeping them in one keystore rather than two is deliberate — the encryption,
+// the archive and the backup all keep working for v2 wallets with no second
+// implementation to keep in step. The separation is by role, not by file.
+function devWallet() {
     const dev = load().wallets.find((w) => w.role === 'dev');
     if (!dev) throw new Error('no dev wallet in the keystore — generate or import one first');
     return publicView(dev);
@@ -486,6 +499,17 @@ function build(userId) {
 
   function bundleWallets() {
     return load().wallets.filter((w) => w.role === 'bundle').map(publicView);
+  }
+
+  /** The single wallet holding a given singleton role, or null. */
+  function walletWithRole(role) {
+    const found = load().wallets.find((w) => w.role === role);
+    return found ? publicView(found) : null;
+  }
+
+  /** Every wallet holding a given role. */
+  function walletsWithRole(role) {
+    return load().wallets.filter((w) => w.role === role).map(publicView);
   }
 
   /** Test seam — drops the in-memory cache and derived key of both files. */
@@ -508,6 +532,8 @@ function build(userId) {
     exportAll,
     devWallet,
     bundleWallets,
+    walletWithRole,
+    walletsWithRole,
     _reset,
   };
 }
