@@ -99,7 +99,10 @@ const REVERT_HINTS = {
   LaunchFeeNotPaid: 'the value sent was below the launch fee',
   LaunchConfigDisabled: 'launch config 0 is disabled on this factory',
   DexDisabled: 'dex config 0 is disabled on this factory',
-  NotWhitelisted: 'this factory is gated and the distributor is not on its list',
+  NotWhitelisted:
+    'the factory has launchEnabled OFF, so only whitelisted addresses may launch. ' +
+    'Note the caller is the DISTRIBUTOR CONTRACT, not your dev wallet — a whitelist ' +
+    'entry would have to name the contract address.',
   PoolAlreadyExists: 'that salt has been used — retry, a fresh one is drawn each time',
   TokenDeploymentFailed: 'CREATE2 failed — almost always a salt already used',
 };
