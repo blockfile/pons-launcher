@@ -111,12 +111,19 @@ async function prepareV2(input, { keystore: ks = keystore } = {}) {
 
   // ── who is exempt from the opening tax ────────────────────────────────────
   // The dev and the creator fee recipient are exempted by the factory itself.
-  // Everyone else has to be declared here, and the list is capped at 32.
+  // Everyone else has to be declared here.
+  //
+  // THE CAP DEPENDS ON HOW THE LAUNCH IS SENT. launchAndBuy appends its own buy
+  // recipient before handing the list to the factory, so its share is one below
+  // the factory's 32 — checking 32 here would let a 32-wallet bundle pass
+  // preflight and revert at fire time, after the fee is spent.
   const exemptions = wallets.map((w) => getAddress(known.get(w.walletId).address));
-  if (exemptions.length > v2.MAX_SNIPE_TAX_EXEMPTIONS) {
+  const exemptionLimit =
+    devBuy > 0n ? v2.MAX_EXEMPTIONS_VIA_FORWARDER : v2.MAX_SNIPE_TAX_EXEMPTIONS;
+  if (exemptions.length > exemptionLimit) {
     throw new Error(
-      `${exemptions.length} bundle wallets, but the factory exempts at most ` +
-        `${v2.MAX_SNIPE_TAX_EXEMPTIONS} — the rest would pay the ${cfgs.snipeTaxStartBps / 100}% opening tax`
+      `${exemptions.length} bundle wallets, but this launch path exempts at most ` +
+        `${exemptionLimit} — the rest would pay the ${cfgs.snipeTaxStartBps / 100}% opening tax`
     );
   }
 
