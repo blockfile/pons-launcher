@@ -8,3 +8,4 @@ logs/
 
 # Playwright MCP session artifacts
 .playwright-mcp/
+verify-bongocat.standard.json
