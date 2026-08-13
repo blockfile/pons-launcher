@@ -18,7 +18,8 @@
     "v2:watch": "node scripts/v2-watch.js",
     "latency": "node scripts/latency.js",
     "tick-race": "node scripts/tick-race.js",
-    "deploy": "node scripts/deploy-contract.js"
+    "deploy": "node scripts/deploy-contract.js",
+    "rescue": "node scripts/rescue-distributor.js"
   },
   "engines": {
     "node": ">=20"
