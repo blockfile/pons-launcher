@@ -79,7 +79,16 @@ async function estimateLaunchGasOrThrow(
  * @param {Array<{walletId, mode, amountEth}>} input.wallets bundle buyers
  * @returns {Promise<object>} a plan in which EVERYTHING is signed
  */
-async function prepareV2(input, { keystore: ks = keystore } = {}) {
+async function prepareV2(input, deps = {}) {
+  // Dependencies are injectable so the sign-nothing guarantee can be exercised
+  // end to end in tests without a chain. Defaults are the real modules, so
+  // production behaviour is unchanged.
+  const {
+    keystore: ks = keystore,
+    v2: v2mod = v2,
+    getFees: getFeesFn = getFees,
+    provider: prov = provider,
+  } = deps;
   const { params, launchConfigId, pairToken = ZeroAddress, wallets = [], devBuyEth = 0 } = input;
 
   if (!params || !params.name || !params.symbol) throw new Error('name and symbol are required');
@@ -97,10 +106,10 @@ async function prepareV2(input, { keystore: ks = keystore } = {}) {
     if (!known.has(w.walletId)) throw new Error(`no wallet ${w.walletId}`);
   }
 
-  const gate = await v2.preflightGate({ launcher: dev.address, pairToken: pair });
+  const gate = await v2mod.preflightGate({ launcher: dev.address, pairToken: pair });
   for (const problem of gate.problems) warnings.push(problem);
 
-  const cfgs = await v2.getConfigs();
+  const cfgs = await v2mod.getConfigs();
   const launchConfig = cfgs.launchConfigs.find((c) => c.id === Number(launchConfigId));
   if (!launchConfig) throw new Error(`no launch config ${launchConfigId}`);
   if (!launchConfig.enabled) throw new Error(`launch config ${launchConfigId} is disabled`);
@@ -132,10 +141,10 @@ async function prepareV2(input, { keystore: ks = keystore } = {}) {
     // it is non-zero, and pinning it turns an owner tweaking an unrelated fee
     // between preflight and launch into a reverted launch.
     expectedEconomics: `0x${'00'.repeat(32)}`,
-    salt: params.salt || v2.newSalt(),
+    salt: params.salt || v2mod.newSalt(),
   };
 
-  const fees = await getFees(FEE_BUMP_PCT);
+  const fees = await getFeesFn(FEE_BUMP_PCT);
   const chainId = BigInt(config.chainId);
   const launchFee = BigInt(cfgs.launchFee);
   const devBuy = parseEther(String(devBuyEth || 0));
@@ -150,7 +159,7 @@ async function prepareV2(input, { keystore: ks = keystore } = {}) {
   // preflight and revert at fire time, after the fee is spent.
   const exemptions = wallets.map((w) => getAddress(known.get(w.walletId).address));
   const exemptionLimit =
-    devBuy > 0n ? v2.MAX_EXEMPTIONS_VIA_FORWARDER : v2.MAX_SNIPE_TAX_EXEMPTIONS;
+    devBuy > 0n ? v2mod.MAX_EXEMPTIONS_VIA_FORWARDER : v2mod.MAX_SNIPE_TAX_EXEMPTIONS;
   if (exemptions.length > exemptionLimit) {
     throw new Error(
       `${exemptions.length} bundle wallets, but this launch path exempts at most ` +
@@ -159,7 +168,7 @@ async function prepareV2(input, { keystore: ks = keystore } = {}) {
   }
 
   // ── where the token will be ───────────────────────────────────────────────
-  const predicted = await v2.predictAddresses({
+  const predicted = await v2mod.predictAddresses({
     params: fullParams,
     launchConfigId,
     pairToken: pair,
@@ -169,7 +178,7 @@ async function prepareV2(input, { keystore: ks = keystore } = {}) {
   // The launch, run as a call. Free, and derived by the factory rather than by
   // our reconstruction of it — so agreement is real evidence, not the same
   // guess made twice. It also proves the launch would not revert.
-  const simulated = await v2.simulateLaunch({
+  const simulated = await v2mod.simulateLaunch({
     from: dev.address,
     params: fullParams,
     launchConfigId,
@@ -194,7 +203,7 @@ async function prepareV2(input, { keystore: ks = keystore } = {}) {
   // the factory, which rejects any msg.value that is not exactly the fee.
   const launchTx =
     devBuy > 0n
-      ? await v2.buildLaunchAndBuyTx({
+      ? await v2mod.buildLaunchAndBuyTx({
           params: fullParams,
           launchConfigId,
           pairToken: pair,
@@ -205,7 +214,7 @@ async function prepareV2(input, { keystore: ks = keystore } = {}) {
           value: launchFee + devBuy,
           forwarderAddress: predicted.wiring.forwarder,
         })
-      : await v2.buildLaunchTx({
+      : await v2mod.buildLaunchTx({
           params: fullParams,
           launchConfigId,
           pairToken: pair,
@@ -213,9 +222,9 @@ async function prepareV2(input, { keystore: ks = keystore } = {}) {
           value: launchFee,
         });
 
-  const launchGas = await estimateLaunchGasOrThrow(launchTx, dev.address);
+  const launchGas = await estimateLaunchGasOrThrow(launchTx, dev.address, { provider: prov });
 
-  const devBalance = await provider.getBalance(dev.address);
+  const devBalance = await prov.getBalance(dev.address);
   const devNeeded = launchFee + devBuy + gasCost(fees, launchGas);
   if (devBalance < devNeeded) {
     throw new Error(
@@ -227,7 +236,7 @@ async function prepareV2(input, { keystore: ks = keystore } = {}) {
   }
 
   const devSigner = ks.signer(dev.id, provider);
-  const devNonce = await provider.getTransactionCount(dev.address, 'pending');
+  const devNonce = await prov.getTransactionCount(dev.address, 'pending');
   const signedLaunch = {
     walletId: dev.id,
     address: dev.address,
@@ -250,7 +259,7 @@ async function prepareV2(input, { keystore: ks = keystore } = {}) {
   const buys = [];
   for (const w of wallets) {
     const wallet = known.get(w.walletId);
-    const balance = await provider.getBalance(wallet.address);
+    const balance = await prov.getBalance(wallet.address);
 
     let amountIn;
     if (w.mode === 'all') {
@@ -273,7 +282,7 @@ async function prepareV2(input, { keystore: ks = keystore } = {}) {
       }
     }
 
-    const nonce = await provider.getTransactionCount(wallet.address, 'pending');
+    const nonce = await prov.getTransactionCount(wallet.address, 'pending');
     const buyTx = await buildBuyTx({
       curveAddress: curve,
       amountIn,
@@ -363,7 +372,7 @@ async function prepareV2(input, { keystore: ks = keystore } = {}) {
       startBps: cfgs.snipeTaxStartBps,
       seconds: cfgs.snipeTaxSeconds,
       exemptions,
-      max: v2.MAX_SNIPE_TAX_EXEMPTIONS,
+      max: v2mod.MAX_SNIPE_TAX_EXEMPTIONS,
     },
     launch: signedLaunch,
     buys,
