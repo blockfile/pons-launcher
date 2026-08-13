@@ -511,6 +511,33 @@ function devWallet() {
     return load().wallets.filter((w) => w.role === 'bundle').map(publicView);
   }
 
+  /**
+   * Move a wallet from one role to another.
+   *
+   * Exists because the alternative is worse. A wallet already in the keystore
+   * cannot be imported again — one key, one role, or the two tabs would be
+   * spending the same address while claiming to be separate — so an operator
+   * who wants an existing, already-funded wallet as their v2 signer would
+   * otherwise have to generate a new one and transfer everything across for no
+   * reason but bookkeeping.
+   *
+   * The singleton rule still holds: moving INTO dev, v2dev or v2funding fails
+   * if one already exists, because "the signer" has to be unambiguous.
+   */
+  function setRole(id, role) {
+    if (!ROLES.has(role)) throw new Error(`unknown role "${role}"`);
+    const store = load();
+    const record = store.wallets.find((w) => w.id === id);
+    if (!record) throw new Error(`no wallet ${id}`);
+    if (record.role === role) return publicView(record);
+    if (SINGLETON_ROLES.has(role) && store.wallets.some((w) => w.role === role)) {
+      throw new Error(`a ${role} wallet already exists — delete or move it first`);
+    }
+    record.role = role;
+    persist();
+    return publicView(record);
+  }
+
   /** The single wallet holding a given singleton role, or null. */
   function walletWithRole(role) {
     const found = load().wallets.find((w) => w.role === role);
@@ -542,6 +569,7 @@ function devWallet() {
     exportAll,
     devWallet,
     bundleWallets,
+    setRole,
     walletWithRole,
     walletsWithRole,
     _reset,

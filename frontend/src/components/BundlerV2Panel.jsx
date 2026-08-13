@@ -112,6 +112,7 @@ export default function BundlerV2Panel({
   // a needless transfer to get funds where they were already going.
   const [note, setNote] = useState(null);
   const [importing, setImporting] = useState('');
+  const [picking, setPicking] = useState('');
   const [keys, setKeys] = useState('');
 
   const gen = (role, n = 1) =>
@@ -138,6 +139,66 @@ export default function BundlerV2Panel({
    * by mistake is the commonest way to get a bare 400 back from the server with
    * nothing useful in it.
    */
+  /**
+   * Move a wallet already in the keystore into a v2 role.
+   *
+   * A key cannot be imported twice — one key, one role, or the two tabs would
+   * be spending the same address while claiming to be separate. So the answer
+   * to "that wallet already exists" is to move it, not to make the operator
+   * generate a fresh one and transfer a balance across for bookkeeping.
+   */
+  const move = (id, role) =>
+    act(`move-${role}`, async () => {
+      const out = await api(`/wallets/${id}/role`, 'POST', { role });
+      setPicking('');
+      await reload?.();
+      return `moved ${out.address} to ${role}`;
+    });
+
+  const picker = (role, label) => {
+    if (picking !== role) return null;
+    // Anything not already spoken for by this tab. A v1 bundle wallet is the
+    // usual candidate — it is where an operator's spare funded wallets live.
+    const candidates = wallets.filter((w) => !['v2dev', 'v2funding'].includes(w.role));
+    return (
+      <div style={{ padding: '4px 0' }}>
+        <div className="hint" style={{ marginBottom: 4 }}>{label}</div>
+        {candidates.length ? (
+          <div className="row" style={{ alignItems: 'center', gap: 8 }}>
+            <select id={`pick-${role}`} style={{ flex: 1, minWidth: 0 }} defaultValue="">
+              <option value="" disabled>
+                choose a wallet…
+              </option>
+              {candidates.map((w) => (
+                <option key={w.id} value={w.id}>
+                  {w.address} — {w.role} — {Number(w.balanceEth || 0).toFixed(4)} ETH
+                </option>
+              ))}
+            </select>
+            <Busy
+              busy={busy === `move-${role}`}
+              className="ghost"
+              onClick={() => {
+                const el = document.getElementById(`pick-${role}`);
+                if (el?.value) move(el.value, role);
+              }}
+            >
+              Move it
+            </Busy>
+            <button type="button" className="ghost" onClick={() => setPicking('')}>
+              cancel
+            </button>
+          </div>
+        ) : (
+          <p className="hint">no other wallets in the keystore to move</p>
+        )}
+        <p className="hint" style={{ marginTop: 4 }}>
+          It leaves whatever role it holds now — a V1 bundle wallet moved here stops being one.
+        </p>
+      </div>
+    );
+  };
+
   const keyShapeError = (raw) => {
     const parts = String(raw).trim().split(/[s,]+/).filter(Boolean);
     if (!parts.length) return 'paste a key first';
@@ -348,6 +409,9 @@ export default function BundlerV2Panel({
                     <button type="button" className="ghost" onClick={() => { setImporting('v2dev'); setKeys(''); }}>
                       import
                     </button>
+                    <button type="button" className="ghost" onClick={() => { setPicking('v2dev'); setImporting(''); }}>
+                      use existing
+                    </button>
                   </>
                 )}
               </td>
@@ -355,6 +419,11 @@ export default function BundlerV2Panel({
             {importing === 'v2dev' && (
               <tr>
                 <td colSpan={4}>{importBox('v2dev', 'signer private key')}</td>
+              </tr>
+            )}
+            {picking === 'v2dev' && (
+              <tr>
+                <td colSpan={4}>{picker('v2dev', 'move an existing wallet into the signer role')}</td>
               </tr>
             )}
             <tr>
@@ -380,6 +449,9 @@ export default function BundlerV2Panel({
                     <button type="button" className="ghost" onClick={() => { setImporting('v2funding'); setKeys(''); }}>
                       import
                     </button>
+                    <button type="button" className="ghost" onClick={() => { setPicking('v2funding'); setImporting(''); }}>
+                      use existing
+                    </button>
                   </>
                 )}
               </td>
@@ -387,6 +459,11 @@ export default function BundlerV2Panel({
             {importing === 'v2funding' && (
               <tr>
                 <td colSpan={4}>{importBox('v2funding', 'funder private key')}</td>
+              </tr>
+            )}
+            {picking === 'v2funding' && (
+              <tr>
+                <td colSpan={4}>{picker('v2funding', 'move an existing wallet into the funder role')}</td>
               </tr>
             )}
           </tbody>

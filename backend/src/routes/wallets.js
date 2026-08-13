@@ -65,6 +65,27 @@ router.post('/wallets/import', requireApiKey, (req, res, next) => {
   }
 });
 
+// POST /api/wallets/:id/role — move a wallet between roles.
+//
+// A key already in the keystore cannot be imported a second time, so this is
+// how an existing wallet becomes the v2 signer or funder without generating a
+// fresh one and transferring its balance across for nothing.
+router.post('/wallets/:id/role', requireApiKey, (req, res, next) => {
+  try {
+    const { role } = req.body || {};
+    if (!role) throw new Error('role is required');
+    const ks = keystoreFor(req.user.id);
+    const out = ks.setRole(req.params.id, role);
+    activityFor(req.user.id).record('wallets', `moved ${out.address} to the ${role} role`, {
+      address: out.address,
+      role,
+    });
+    res.json(out);
+  } catch (err) {
+    next(err);
+  }
+});
+
 // ── the archive is not on this API ────────────────────────────────────────
 // A delete moves the wallet into an archive encrypted exactly as the live
 // keystore is, rather than dropping the key (see keystore.remove). Reading that
