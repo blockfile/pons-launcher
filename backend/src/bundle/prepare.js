@@ -13,14 +13,12 @@ const { provider } = require('../evm/provider');
 const { getFees, gasCost } = require('../evm/fees');
 const factory = require('../evm/factory');
 const { buildBuyTx } = require('../evm/router');
+const { rpcMessage } = require('../evm/errors');
 const { capCheck } = require('../evm/pricing');
 const { bundleShare } = require('../../../shared/bundleShare');
 const keystore = require('../wallets/keystore');
 const { spendableFromBalance } = require('../wallets/funding');
 
-// A launch deploys a token, opens a V3 pool, mints and locks the position and
-// optionally swaps — far past a normal transaction. Estimated when possible.
-const LAUNCH_GAS_FALLBACK = 6_000_000n;
 // Bundle buys are bumped hard: being one block late is the entire failure mode.
 const FEE_BUMP_PCT = 25;
 
@@ -102,11 +100,21 @@ async function prepare(input, { keystore: ks = keystore } = {}) {
   const launchValue = BigInt(launchFee) + devBuyWei;
   const launchTx = await factory.buildLaunchTx({ params, launchConfigId, dexId, salt, value: launchValue });
 
-  let launchGas = LAUNCH_GAS_FALLBACK;
+  // FAIL-SAFE, mirroring prepareV2. A launch that will not estimate is a launch
+  // that reverts, and the bundle buys are signed here and broadcast the instant
+  // the launch is sent. There is no gas fallback: if the launch cannot simulate,
+  // refuse the plan and sign nothing rather than fire a bundle at a doomed
+  // launch. (v1 buys route through the swap router and refund on revert, so the
+  // loss here is wasted gas rather than stranded principal — but it is the same
+  // defect that stranded 1.798 ETH on the v2 path, fixed the same way.)
+  let launchGas;
   try {
-    launchGas = (await provider.estimateGas({ ...launchTx, from: dev.address })) * 12n / 10n;
-  } catch (_err) {
-    warnings.push(`could not estimate launch gas — using fallback ${LAUNCH_GAS_FALLBACK}`);
+    launchGas = ((await provider.estimateGas({ ...launchTx, from: dev.address })) * 12n) / 10n;
+  } catch (err) {
+    throw new Error(
+      `the launch would revert, so nothing was signed: ${rpcMessage(err)}. ` +
+        'Fix this before arming — no bundle buys are broadcast when the launch cannot simulate.'
+    );
   }
 
   const devBalance = await provider.getBalance(dev.address);
@@ -233,4 +241,4 @@ async function prepare(input, { keystore: ks = keystore } = {}) {
   };
 }
 
-module.exports = { prepare, randomSalt, toSignable, LAUNCH_GAS_FALLBACK };
+module.exports = { prepare, randomSalt, toSignable };
