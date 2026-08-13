@@ -19,17 +19,54 @@
 // address with no contract — which on the EVM SUCCEEDS and silently keeps the
 // money.
 
-const { Contract, getAddress, ZeroAddress, hexlify, randomBytes } = require('ethers');
+const { Contract, Interface, getAddress, ZeroAddress, hexlify, randomBytes } = require('ethers');
 const config = require('../../config');
 const { provider } = require('../provider');
+const { rpcMessage } = require('../errors');
 const {
   FACTORY_V2_ABI,
   DEPLOYER_V2_ABI,
   FORWARDER_V2_ABI,
   MEME_HOOK_V2_ABI,
+  V2_ERROR_ABI,
   MAX_SNIPE_TAX_EXEMPTIONS,
   MAX_EXEMPTIONS_VIA_FORWARDER,
 } = require('./abi');
+
+// One interface holding every v2 custom error, so a revert selector coming back
+// from a failed launch is named rather than shown as raw bytes. The function
+// ABIs carry no error definitions, so this is the only place the names live.
+const V2_ERRORS = new Interface(V2_ERROR_ABI);
+
+/**
+ * Turn a reverted call/estimate into the contract's own words. The revert data
+ * hides in a different place depending on the node and the ethers path, so this
+ * digs it out of every known slot before decoding it against the v2 errors.
+ * Falls back to the plain RPC message when there is no custom error to name.
+ * @param {unknown} err
+ * @returns {string}
+ */
+function explainRevert(err) {
+  const data =
+    err?.data ||
+    err?.info?.error?.data ||
+    err?.error?.data ||
+    err?.revert?.data ||
+    (typeof err?.value === 'string' && err.value.startsWith('0x') ? err.value : null);
+
+  if (typeof data === 'string' && data.startsWith('0x') && data.length >= 10) {
+    try {
+      const parsed = V2_ERRORS.parseError(data);
+      if (parsed) {
+        const args = parsed.args.length ? ` (${parsed.args.map(String).join(', ')})` : '';
+        return `${parsed.name}${args}`;
+      }
+    } catch (_err) {
+      // Not one of the v2 errors; fall through to the plain message.
+    }
+  }
+  return rpcMessage(err);
+}
 
 function factory(runner = provider) {
   if (!config.v2FactoryAddress) throw new Error('PONS_V2_FACTORY is not set');
@@ -339,5 +376,6 @@ module.exports = {
   buildLaunchTx,
   buildLaunchAndBuyTx,
   parseLaunch,
+  explainRevert,
   MAX_SNIPE_TAX_EXEMPTIONS,
 };

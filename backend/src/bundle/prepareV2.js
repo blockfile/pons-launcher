@@ -28,15 +28,46 @@ const { bundleShare } = require('../../../shared/bundleShare');
 const keystore = require('../wallets/keystore');
 const { spendableFromBalance } = require('../wallets/funding');
 
-// A launch deploys a token and a curve and mints the whole supply. Estimated
-// when possible; this is only the fallback.
-const LAUNCH_GAS_FALLBACK = 6_000_000n;
 const FEE_BUMP_PCT = 25;
 
 /** Strip fields signTransaction rejects, and pin chainId. */
 function toSignable(tx, { nonce, gasLimit, fees, chainId }) {
   const { from, ...rest } = tx;
   return { ...rest, nonce, gasLimit, chainId, ...fees };
+}
+
+/**
+ * FAIL-SAFE. Estimate the launch, or refuse the whole plan.
+ *
+ * A launch that will not estimate is a launch that reverts. The bundle buys are
+ * signed by prepareV2 and broadcast the instant the launch is sent, so a
+ * reverting launch that was allowed through used to fire every buy anyway —
+ * each one paying into the curve address the launch never created. On the EVM a
+ * call to a codeless address SUCCEEDS and keeps the ETH, and that ETH cannot be
+ * recovered: the curve contract, if it is ever deployed there, never reads its
+ * own balance. On 2026-08-13 this stranded 1.798 ETH.
+ *
+ * So there is no gas fallback. If the launch cannot simulate, this throws with
+ * the contract's own revert reason and nothing downstream is signed.
+ *
+ * @param {object} launchTx populated launch transaction (may carry `from`)
+ * @param {string} from the dev/launcher address
+ * @param {{provider?: object, explain?: Function}} [deps] injectable for tests
+ * @returns {Promise<bigint>} gas limit, estimate + 20%
+ */
+async function estimateLaunchGasOrThrow(
+  launchTx,
+  from,
+  { provider: p = provider, explain = v2.explainRevert } = {}
+) {
+  try {
+    return ((await p.estimateGas({ ...launchTx, from })) * 12n) / 10n;
+  } catch (err) {
+    throw new Error(
+      `the launch would revert, so nothing was signed: ${explain(err)}. ` +
+        'Fix this before arming — no bundle buys are broadcast when the launch cannot simulate.'
+    );
+  }
 }
 
 /**
@@ -182,12 +213,7 @@ async function prepareV2(input, { keystore: ks = keystore } = {}) {
           value: launchFee,
         });
 
-  let launchGas = LAUNCH_GAS_FALLBACK;
-  try {
-    launchGas = ((await provider.estimateGas({ ...launchTx, from: dev.address })) * 12n) / 10n;
-  } catch (_err) {
-    warnings.push(`could not estimate launch gas — using fallback ${LAUNCH_GAS_FALLBACK}`);
-  }
+  const launchGas = await estimateLaunchGasOrThrow(launchTx, dev.address);
 
   const devBalance = await provider.getBalance(dev.address);
   const devNeeded = launchFee + devBuy + gasCost(fees, launchGas);
@@ -356,4 +382,4 @@ async function prepareV2(input, { keystore: ks = keystore } = {}) {
   };
 }
 
-module.exports = { prepareV2, toSignable, LAUNCH_GAS_FALLBACK };
+module.exports = { prepareV2, toSignable, estimateLaunchGasOrThrow };
