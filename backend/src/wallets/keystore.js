@@ -233,15 +233,24 @@ function build(userId) {
       );
     }
     // Only one dev wallet: it is the launch signer and the funding source, and
-    // two of them would silently make "the dev wallet" ambiguous.
-    if (role === 'dev' && store.wallets.some((w) => w.role === 'dev')) {
-      throw new Error('a dev wallet already exists — delete it first');
+    // two of them would silently make "the dev wallet" ambiguous. The v2 signer
+    // and funder are singular for the same reason — see SINGLETON_ROLES.
+    if (SINGLETON_ROLES.has(role) && store.wallets.some((w) => w.role === role)) {
+      throw new Error(`a ${role} wallet already exists — delete it first`);
     }
+    // EVERY wallet is created here — generate() and importKeys() both funnel
+    // through add() — so this is the one line that decides whether a role
+    // survives. It used to read `role === 'dev' ? 'dev' : 'bundle'`, which
+    // silently collapsed every v2 role into a v1 bundle wallet: the V2 tab
+    // looked like it worked, the wallets turned up on the V1 tab, and nothing
+    // errored anywhere. Unknown roles still fall back rather than being stored
+    // raw, so a typo cannot invent a role no panel will ever show.
+    const resolved = ROLES.has(role) ? role : 'bundle';
     const record = {
       id: crypto.randomUUID(),
       address: getAddress(wallet.address),
-      label: label || (role === 'dev' ? 'dev' : 'bundle'),
-      role: role === 'dev' ? 'dev' : 'bundle',
+      label: label || resolved,
+      role: resolved,
       createdAt: new Date().toISOString(),
       ...encrypt(wallet.privateKey),
     };
