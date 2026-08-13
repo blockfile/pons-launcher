@@ -766,6 +766,31 @@ td input[type='number'] {
   text-transform: uppercase;
   color: var(--dim);
 }
+/* The predicted market cap, given the same weight as the supply-share headline
+   it sits beside — it is the other figure the launch is sized for. */
+.mc-headline {
+  margin-left: auto;
+  display: inline-flex;
+  align-items: baseline;
+  gap: 7px;
+}
+.mc-headline .hint {
+  text-transform: none;
+  letter-spacing: 0;
+}
+.mc-price {
+  margin: 0 0 8px;
+}
+.mc-price input {
+  font: inherit;
+}
+/* Per-row predicted cap, under the supply share in the same cell. Quiet — the
+   share is the primary figure, this is the cap it implies. */
+.mc-row {
+  margin-top: 2px;
+  font-size: 11px;
+  white-space: nowrap;
+}
 /* The one warning an operator is meant to read at the moment of pressing, not
    on the way past. It is already vermilion and already first; the mark is there
    so it is found by the eye before the words are read. */

@@ -491,6 +491,15 @@ function shareV2({ launchConfig, creatorTaxBps = 0, devBuyWei, devBuyEth, buys =
   let raised = 0n;
   let crossesAt = null;
 
+  // Predicted market cap, in native wei. On a constant-product curve the price
+  // of one token is quoteReserve/tokenReserve, so the cap the whole supply
+  // implies is that price times the supply. At the opening reserves this equals
+  // the phantom quote (~1.68 ETH); every buy walks quoteReserve up and
+  // tokenReserve down, so the cap rises along the same sequential walk the rows
+  // are priced on. This is the figure that answers "what MC does this buy reach".
+  const mcWei = () => (tokenReserve > 0n && supply > 0n ? (quoteReserve * supply) / tokenReserve : 0n);
+  const openingMcWei = mcWei();
+
   const step = (key, wei) => {
     const before = raised;
     const r = v2Buy({ quoteInWei: wei, quoteReserve, tokenReserve, feeBps });
@@ -505,6 +514,9 @@ function shareV2({ launchConfig, creatorTaxBps = 0, devBuyWei, devBuyEth, buys =
 
   const dev = legWei({ amountWei: devBuyWei, amountEth: devBuyEth });
   const devOut = dev > 0n ? step('dev', dev) : null;
+  // The cap the dev buy alone reaches, before any bundle wallet. With no dev buy
+  // this is the opening cap.
+  const devMcWei = mcWei();
 
   // The curve the bundle actually meets, once the launch transaction's own dev
   // buy has been taken off it.
@@ -526,6 +538,9 @@ function shareV2({ launchConfig, creatorTaxBps = 0, devBuyWei, devBuyEth, buys =
     legs.push({
       key: buy.key,
       amountEth: formatWei(weis[i]),
+      // The market cap the curve reaches once this wallet's buy has landed,
+      // walking in order behind the dev buy. This is the per-row predicted MC.
+      mcEth: formatWei(mcWei()),
       // The top of the range — this wallet landing first, behind only the dev
       // buy. See shareV1 for why the top keeps the est* name.
       estTokens: Number(ranges[i].best) / 1e18,
@@ -544,6 +559,7 @@ function shareV2({ launchConfig, creatorTaxBps = 0, devBuyWei, devBuyEth, buys =
     ? {
         key: 'dev',
         amountEth: formatWei(dev),
+        mcEth: formatWei(devMcWei),
         estTokens: Number(devOut.tokensOut) / 1e18,
         estTokensRaw: devOut.tokensOut.toString(),
         estBps: bpsOf(devOut.tokensOut, supply),
@@ -559,6 +575,9 @@ function shareV2({ launchConfig, creatorTaxBps = 0, devBuyWei, devBuyEth, buys =
     : null;
 
   const totalTokens = bundleTokens + (devOut ? devOut.tokensOut : 0n);
+  // The cap the whole bundle reaches — dev buy plus every wallet — which is the
+  // reserves left after the last step. The live "predicted market cap" figure.
+  const finalMcWei = mcWei();
   return {
     protocol: 'v2',
     // Exact: the config fixes the curve before the launch, so this is the
@@ -566,6 +585,12 @@ function shareV2({ launchConfig, creatorTaxBps = 0, devBuyWei, devBuyEth, buys =
     exact: true,
     dev: devLeg,
     buys: legs,
+    // Predicted market cap in native ETH: where it opens, and where the bundle
+    // leaves it. Per-row caps are on each leg as `mcEth`.
+    marketCap: {
+      openingEth: formatWei(openingMcWei),
+      finalEth: formatWei(finalMcWei),
+    },
     bundle: {
       eth: formatWei(bundleWei),
       tokens: Number(bundleTokens) / 1e18,

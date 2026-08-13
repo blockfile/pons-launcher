@@ -33,11 +33,26 @@ const eth = (v) => Number(v || 0).toFixed(6);
  * and a step away from the delete that made room for it. Both halves of that
  * rotation are in step 1 now.
  */
+// A market cap in USD from its native-ETH figure and a hand-entered ETH price.
+// The ETH figure is the exact one the curve fixes; the dollar figure is only as
+// good as the price typed beside it, which is why the price is editable and the
+// ETH is always shown next to the dollars.
+function usdMc(ethStr, price) {
+  const v = Number(ethStr || 0) * Number(price || 0);
+  if (!Number.isFinite(v) || v <= 0) return null;
+  if (v >= 1000) return `$${(v / 1000).toFixed(1)}k`;
+  return `$${Math.round(v)}`;
+}
+
 export default function WalletsPanel({ step, wallets, rows, setRow, share, reload, report }) {
   const [count, setCount] = useState(5);
   const [showImport, setShowImport] = useState(false);
   const [keys, setKeys] = useState('');
   const [busy, setBusy] = useState('');
+  // The native token's USD price, for showing a predicted market cap the way an
+  // operator reads it ("15k MC"). No price feed exists on this chain, so it is
+  // typed; the ETH figure beside it is the exact one.
+  const [ethPrice, setEthPrice] = useState(1888);
   // Ticked wallet ids. Only ever bundle wallets reach a delete — see `chosen`.
   const [picked, setPicked] = useState(() => new Set());
   // The wallets the delete confirmation is asking about, frozen at the moment
@@ -370,6 +385,20 @@ export default function WalletsPanel({ step, wallets, rows, setRow, share, reloa
                   ) : (
                     <Share leg={legs.get(w.id)} exact={share?.exact} />
                   )}
+                  {/* The market cap this row's buy walks the curve to, landing
+                      in order behind the dev buy. Updates as the amount is
+                      typed. */}
+                  {(() => {
+                    const mcEth = isDev ? share?.dev?.mcEth : legs.get(w.id)?.mcEth;
+                    if (!(Number(mcEth) > 0)) return null;
+                    const dollars = usdMc(mcEth, ethPrice);
+                    return (
+                      <div className="mc-row hint" title={`predicted market cap after this buy — ${mcEth} ETH`}>
+                        MC {dollars ? `${dollars} · ` : ''}
+                        {Number(mcEth).toFixed(3)} ETH
+                      </div>
+                    );
+                  })()}
                 </td>
                 <td>
                   <Busy
@@ -413,7 +442,39 @@ export default function WalletsPanel({ step, wallets, rows, setRow, share, reloa
               of supply
               {share.dev ? ` · dev buy ${share.exact ? '' : '≈'}${pct(share.dev.estBps)} first` : ''}
             </span>
+            {/* The predicted market cap the whole bundle reaches — the figure
+                the launch is really being sized for. Live: it moves with every
+                amount typed above. Dollars for reading, ETH for the exact
+                number the curve fixes. */}
+            {share.marketCap && Number(share.marketCap.finalEth) > 0 && (
+              <span className="mc-headline">
+                predicted MC{' '}
+                <b className="tally">
+                  {usdMc(share.marketCap.finalEth, ethPrice) || `${Number(share.marketCap.finalEth).toFixed(3)} ETH`}
+                </b>
+                <span className="hint">
+                  {Number(share.marketCap.finalEth).toFixed(3)} ETH · opens{' '}
+                  {usdMc(share.marketCap.openingEth, ethPrice) ||
+                    `${Number(share.marketCap.openingEth).toFixed(3)} ETH`}
+                </span>
+              </span>
+            )}
           </h3>
+
+          {share.marketCap && (
+            <label className="hint mc-price" style={{ flexDirection: 'row', alignItems: 'center', gap: 6 }}>
+              1 ETH = $
+              <input
+                type="number"
+                value={ethPrice}
+                min="0"
+                step="1"
+                onChange={(e) => setEthPrice(e.target.value)}
+                style={{ width: 90 }}
+              />
+              <span>— sets the dollar figures; the ETH figures are exact</span>
+            </label>
+          )}
           <ul>
             <li>
               {buyingCount} wallet{buyingCount === 1 ? '' : 's'} · {share.bundle.eth} ETH · ≈

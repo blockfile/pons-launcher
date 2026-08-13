@@ -346,3 +346,40 @@ test('amounts already resolved to wei are taken as they are', () => {
   assert.equal(share.bundle.eth, '0.123456');
   assert.equal(share.buys[0].amountEth, '0.123456');
 });
+
+test('v2 predicts a market cap: opens at the phantom quote and rises with the bundle', () => {
+  // No buys: the cap the curve opens at is the phantom quote itself (1.68 ETH).
+  const empty = shareV2({ launchConfig: V2, buys: [] });
+  assert.ok(empty.marketCap, 'marketCap must be present');
+  assert.ok(
+    Math.abs(Number(empty.marketCap.openingEth) - 1.68) < 1e-6,
+    `opening MC should be 1.68 ETH, got ${empty.marketCap.openingEth}`
+  );
+  assert.equal(empty.marketCap.openingEth, empty.marketCap.finalEth, 'no buys → final equals opening');
+
+  // Dev buy plus a bundle walks the cap UP, monotonically, along the same order
+  // the rows are priced in.
+  const share = shareV2({
+    launchConfig: V2,
+    devBuyEth: '0.05',
+    creatorTaxBps: 50,
+    buys: [
+      { key: 'a', amountEth: '0.04' },
+      { key: 'b', amountEth: '0.04' },
+      { key: 'c', amountEth: '0.04' },
+    ],
+  });
+  assert.ok(Number(share.marketCap.finalEth) > 1.68, 'the bundle must raise the cap above opening');
+  assert.ok(Number(share.dev.mcEth) >= 1.68, 'the dev buy is the first step up');
+
+  // Every row carries its own predicted cap, and they only increase.
+  const caps = [Number(share.dev.mcEth), ...share.buys.map((b) => Number(b.mcEth))];
+  for (let i = 1; i < caps.length; i++) {
+    assert.ok(caps[i] >= caps[i - 1], `cap must not fall between rows: ${caps[i - 1]} → ${caps[i]}`);
+  }
+  // The last row's cap is the whole-bundle final cap.
+  assert.ok(
+    Math.abs(caps[caps.length - 1] - Number(share.marketCap.finalEth)) < 1e-6,
+    'the last row cap should equal the final bundle cap'
+  );
+});
