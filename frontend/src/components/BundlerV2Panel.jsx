@@ -113,6 +113,10 @@ export default function BundlerV2Panel({
   const [note, setNote] = useState(null);
   const [importing, setImporting] = useState('');
   const [picking, setPicking] = useState('');
+  // Two-click arm on the bulk delete. Thirty archived wallets is thirty keys
+  // moved out of the live keystore, and the count next to the second click is
+  // the last chance to notice it says thirty and not three.
+  const [armed, setArmed] = useState(false);
   const [keys, setKeys] = useState('');
 
   const gen = (role, n = 1) =>
@@ -568,6 +572,76 @@ export default function BundlerV2Panel({
         </div>
 
         {importBox('v2bundle', 'private keys — several separated by spaces, commas or newlines')}
+
+        {bundle.length > 0 && (
+          <table className="disperser-list">
+            <tbody>
+              {bundle.map((w) => (
+                <tr key={w.id}>
+                  <td>
+                    <a href={`${explorer}/address/${w.address}`} target="_blank" rel="noreferrer">
+                      {w.address}
+                    </a>
+                  </td>
+                  <td className="hint">{Number(w.balanceEth || 0).toFixed(4)} ETH</td>
+                  <td>
+                    <Busy
+                      busy={busy === `del-${w.id}`}
+                      className="ghost"
+                      title="archive this wallet — the key is recoverable on the server until purged"
+                      onClick={() =>
+                        act(`del-${w.id}`, async () => {
+                          await api(`/wallets/${w.id}`, 'DELETE');
+                          await reload?.();
+                          return `archived ${w.address}`;
+                        })
+                      }
+                    >
+                      ✕
+                    </Busy>
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        )}
+
+        {bundle.length > 0 && (
+          <div className="row">
+            <span className="hint">
+              deleting archives the key — recoverable on the server with{' '}
+              <code>npm run archive:restore</code> until it is purged
+            </span>
+            <span className="spacer" />
+            <Busy
+              busy={busy === 'del-all'}
+              className="ghost"
+              onClick={() => {
+                if (!armed) {
+                  setArmed(true);
+                  return;
+                }
+                setArmed(false);
+                act('del-all', async () => {
+                  let gone = 0;
+                  for (const w of bundle) {
+                    await api(`/wallets/${w.id}`, 'DELETE');
+                    gone += 1;
+                  }
+                  await reload?.();
+                  return `archived ${gone} V2 bundle wallet(s)`;
+                });
+              }}
+            >
+              {armed ? `Really delete all ${bundle.length}?` : 'Delete all'}
+            </Busy>
+            {armed && (
+              <button type="button" className="ghost" onClick={() => setArmed(false)}>
+                cancel
+              </button>
+            )}
+          </div>
+        )}
 
         <p className="hint">
           They need gas only later, when you sell — funding them then leaks nothing, because the
