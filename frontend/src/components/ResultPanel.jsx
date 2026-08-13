@@ -39,6 +39,16 @@ export default function ResultPanel({ step, output }) {
 
       {plan && (
         <>
+          {/* The one outcome the operator must act on, and the least visible: a
+              buy can report "confirmed" while having paid into a curve that was
+              never created. fireV2 raises `strand` when the launch did not
+              confirm but buys went out; it goes to the top, in danger colour. */}
+          {(result?.strand || result?.mismatch) && (
+            <div className="notice danger">
+              <h3>Check these wallets before treating this as done</h3>
+              <p>{result.strand || result.mismatch}</p>
+            </div>
+          )}
           {result && (
             <div className="stats">
               <div className="stat">

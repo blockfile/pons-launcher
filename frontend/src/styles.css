@@ -1326,6 +1326,19 @@ pre {
   overflow: hidden;
   margin: 12px 0;
 }
+/* A launch-changing warning inside the confirm dialog. Vermilion because, like
+   everywhere else in this console, it names a condition the operator must weigh
+   before an irreversible action. */
+.modal-warn {
+  margin: 10px 0 0;
+  padding: 10px 12px;
+  border: 1px solid var(--danger, #d9482b);
+  border-radius: 4px;
+  background: color-mix(in srgb, var(--danger, #d9482b) 12%, transparent);
+  color: var(--danger, #d9482b);
+  font-size: 13px;
+  line-height: 1.4;
+}
 .modal-fact {
   display: flex;
   align-items: baseline;

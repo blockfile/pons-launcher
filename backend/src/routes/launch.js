@@ -16,6 +16,33 @@ const { ethPriceUsd } = require('../ethPrice');
 
 const router = express.Router();
 
+// One launch at a time per account. Two launches overlapping would read the
+// same pending nonce for the shared dev wallet and sign two different launches
+// (different salts, different predicted curves) against it — and if a
+// load-balanced RPC ACKs both before their mempools sync, the losing launch's
+// buys can fire at a curve that never gets deployed and strand. A second launch
+// while one is in flight is never intended (a double-click, a second tab, a
+// client retry), so it is refused rather than raced. In-memory is sufficient:
+// the keystore and the process are one per deployment.
+const launching = new Set();
+
+function withLaunchLock(handler) {
+  return async (req, res, next) => {
+    const id = req.user.id;
+    if (launching.has(id)) {
+      return res
+        .status(409)
+        .json({ error: 'a launch is already in progress for this account — wait for it to finish' });
+    }
+    launching.add(id);
+    try {
+      await handler(req, res, next);
+    } finally {
+      launching.delete(id);
+    }
+  };
+}
+
 /**
  * A plan safe to return over HTTP. Signed transactions are stripped: anyone
  * holding a raw signed buy could broadcast it, so it never leaves the server.
@@ -104,7 +131,7 @@ router.post('/preflight', requireApiKey, async (req, res, next) => {
 
 // POST /api/launch — prepare, then fire. DRY_RUN still returns a full plan and
 // simulated results without touching the chain.
-router.post('/launch', requireApiKey, async (req, res, next) => {
+router.post('/launch', requireApiKey, withLaunchLock(async (req, res, next) => {
   try {
     const plan = await prepare(req.body || {}, { keystore: keystoreFor(req.user.id) });
     const result = await fire(plan);
@@ -113,7 +140,7 @@ router.post('/launch', requireApiKey, async (req, res, next) => {
   } catch (err) {
     next(err);
   }
-});
+}));
 
 // ── pons v2 ────────────────────────────────────────────────────────────────
 // A separate protocol behind separate routes, so nothing about v1 changes.
@@ -137,7 +164,7 @@ router.post('/v2/preflight', requireApiKey, async (req, res, next) => {
   }
 });
 
-router.post('/v2/launch', requireApiKey, async (req, res, next) => {
+router.post('/v2/launch', requireApiKey, withLaunchLock(async (req, res, next) => {
   try {
     const ks = keystoreFor(req.user.id);
     const plan = await prepareV2(req.body || {}, { keystore: ks });
@@ -158,7 +185,7 @@ router.post('/v2/launch', requireApiKey, async (req, res, next) => {
   } catch (err) {
     next(err);
   }
-});
+}));
 
 router.get('/launches', (req, res, next) => {
   try {
@@ -170,3 +197,4 @@ router.get('/launches', (req, res, next) => {
 
 module.exports = router;
 module.exports.jsonSafe = jsonSafe;
+module.exports.withLaunchLock = withLaunchLock;

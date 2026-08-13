@@ -52,6 +52,32 @@ test('aborts the bundle and broadcasts NOTHING when the re-check reverts', async
   assert.equal(broadcasts, 0, 'no launch and no buys may be broadcast when the re-check reverts');
 });
 
+test('flags a STRAND when the launch reverts but buys confirmed', async () => {
+  // The catastrophic case: launch reverts at inclusion (after passing the
+  // recheck), the pre-signed buys land against the codeless curve and "succeed".
+  // The result must say so loudly, not report the buys as plain confirmed.
+  const plan = await signedPlan();
+  const LAUNCH_HASH = '0x' + 'aa'.repeat(32);
+  let n = 0;
+  const rpc = {
+    estimateGas: async () => 500000n,
+    broadcastTransaction: async () => ({ hash: n++ === 0 ? LAUNCH_HASH : '0x' + n.toString(16).padStart(64, '0') }),
+  };
+  const res = await fireV2(plan, {
+    provider: rpc,
+    dryRun: false,
+    warmPool: async () => {},
+    // launch reverted, the buy "succeeded" against a curve that never existed
+    waitForReceipt: async (_rpc, hash) =>
+      hash === LAUNCH_HASH ? { status: 0, blockNumber: 5 } : { status: 1, blockNumber: 5 },
+    parseLaunch: () => null,
+  });
+  assert.equal(res.launch.status, 'reverted');
+  assert.ok(res.strand, 'a reverted launch with landed buys must raise a strand warning');
+  assert.match(res.strand, /stranded/i);
+  assert.ok(res.buys.some((b) => b.strandSuspected), 'the exposed buys must be flagged');
+});
+
 test('broadcasts the bundle when the re-check passes', async () => {
   const plan = await signedPlan();
   const broadcast = [];

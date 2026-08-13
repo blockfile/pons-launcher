@@ -209,6 +209,25 @@ async function fireV2(plan, deps = {}) {
     (r) => r.blockNumber != null && r.blockNumber === launch.blockNumber
   ).length;
 
+  // A buy can report "confirmed" while having STRANDED. Paying native value into
+  // the predicted curve address before — or without — the launch that deploys a
+  // contract there SUCCEEDS on the EVM and keeps the ETH; the buy's receipt says
+  // status 1. The only reliable tell from here is that the LAUNCH did not
+  // confirm while buys went out. Never let "confirmed" imply success in that
+  // case: flag every sent buy and raise it to the top of the result, because it
+  // is the one outcome the operator must act on and the least visible.
+  let strand = null;
+  if (launch.status !== 'confirmed') {
+    const exposed = results.filter((r) => r.status === 'confirmed' || r.status === 'sent' || r.status === 'pending');
+    if (exposed.length) {
+      for (const r of exposed) r.strandSuspected = true;
+      strand =
+        `the launch is ${launch.status} but ${exposed.length} buy(s) were broadcast — they may have paid ` +
+        `into a curve that was never created and stranded. Check these wallets' token balances before ` +
+        `treating this launch as done; a "confirmed" buy here does NOT mean it received tokens.`;
+    }
+  }
+
   return {
     protocol: 'v2',
     mode: plan.mode,
@@ -221,6 +240,7 @@ async function fireV2(plan, deps = {}) {
     sentMs,
     burstMs,
     ...(mismatch ? { mismatch } : {}),
+    ...(strand ? { strand } : {}),
   };
 }
 

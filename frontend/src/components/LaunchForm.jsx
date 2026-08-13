@@ -493,7 +493,22 @@ export default function LaunchForm({
               {pct(share.bundle.bps)} of supply
             </Fact>
           )}
+          {share?.marketCap && (
+            <Fact label="Predicted MC">{Number(share.marketCap.finalEth).toFixed(3)} ETH</Fact>
+          )}
         </div>
+        {/* The one condition that changes what this launch IS, surfaced at the
+            moment of the decision rather than only in a preflight report the
+            operator may have skipped. A graduated launch cannot be exited
+            through the curve. */}
+        {share?.graduation?.crosses && (
+          <p className="modal-warn">
+            ⚠ This bundle puts {share.graduation.raisedEth} ETH into the curve, at or over the{' '}
+            {share.graduation.thresholdEth} ETH graduation threshold. The curve <b>graduates on the way in</b>,
+            and a graduated launch can only be exited through the Uniswap v4 pool — not the curve. Size down
+            if you did not intend this.
+          </p>
+        )}
       </Modal>
     </Step>
   );
