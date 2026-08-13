@@ -11,6 +11,10 @@ import { uploadLogo } from '../api.js';
 const ACCEPT = ['image/png', 'image/jpeg', 'image/webp', 'image/gif'];
 const MAX_BYTES = 5 * 1024 * 1024;
 
+// onUploading is OPTIONAL. V1's launch form uses it to hold its arm switch
+// closed while an upload is in flight; a caller with nothing to hold — the v2
+// tab has no arm switch — simply omits it. Calling it unconditionally threw
+// "n is not a function" the moment a file was picked there.
 export default function LogoField({ value, onChange, onUploading }) {
   const [confirmed, setConfirmed] = useState(false);
   const [preview, setPreview] = useState('');
@@ -64,7 +68,7 @@ export default function LogoField({ value, onChange, onUploading }) {
     showPreview(URL.createObjectURL(file));
     setFileName(file.name);
     setBusy(true);
-    onUploading(true);
+    onUploading?.(true);
     try {
       const { uri, gatewayUrl } = await uploadLogo(file);
       onChange(uri);
@@ -73,7 +77,7 @@ export default function LogoField({ value, onChange, onUploading }) {
       fail(err.message);
     } finally {
       setBusy(false);
-      onUploading(false);
+      onUploading?.(false);
     }
   }
 
