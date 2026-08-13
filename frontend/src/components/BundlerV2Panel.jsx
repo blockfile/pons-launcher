@@ -57,7 +57,7 @@ export default function BundlerV2Panel({
     telegram: '',
     website: '',
   });
-  const [devBuy, setDevBuy] = useState('3.5');
+  const [devBuy, setDevBuy] = useState('0');
   const set = (k) => (e) =>
     setForm((f) => ({ ...f, [k]: typeof e === 'string' ? e : e.target.value }));
 
@@ -272,7 +272,12 @@ export default function BundlerV2Panel({
     return { share, each: bundle.length ? share / bundle.length : 0 };
   }, [configs, devBuy, staged, bundle.length]);
 
-  const ready = form.name && form.symbol && bundle.length > 0 && distributor;
+  // What will actually be spent: whatever is staged in the contract PLUS
+  // anything typed on the launch itself. The button used to gate on the typed
+  // figure alone, so a fully staged launch with 0 typed — the normal case once
+  // step 4 has been used — sat there disabled with nothing saying why.
+  const spend = Number(staged) + Number(devBuy || 0);
+  const ready = form.name && form.symbol && bundle.length > 0 && distributor && spend > 0;
 
   const steps = useMemo(() => {
     const plan = [
@@ -783,7 +788,7 @@ export default function BundlerV2Panel({
 
         <div className="row">
           <label className="hint">
-            dev buy
+            add
             <input
               type="number"
               step="0.1"
@@ -792,7 +797,7 @@ export default function BundlerV2Panel({
               onChange={(e) => setDevBuy(e.target.value)}
               style={{ width: 90, marginLeft: 6 }}
             />
-            {' ETH'}
+            {` ETH to the ${Number(staged).toFixed(4)} already staged`}
           </label>
           <span className="spacer" />
           {projection && (
@@ -822,13 +827,21 @@ export default function BundlerV2Panel({
         <div className="row">
           <span className="hint">
             {ready
-              ? 'simulated before it sends — a launch that would revert never spends the fee'
-              : 'needs a name, a symbol, bundle wallets and the distributor'}
+              ? `spends ${spend.toFixed(4)} ETH — ${Number(staged).toFixed(4)} staged${
+                  Number(devBuy) > 0 ? ` + ${Number(devBuy).toFixed(4)} sent with the launch` : ''
+                }. Simulated first, so a launch that would revert never spends the fee.`
+              : !distributor
+                ? 'needs the distributor from step 2'
+                : bundle.length === 0
+                  ? 'needs bundle wallets from step 3'
+                  : spend <= 0
+                    ? 'nothing to spend — stage ETH in step 4, or type an amount here'
+                    : 'needs a name and a symbol'}
           </span>
           <span className="spacer" />
           <Busy
             busy={busy === 'launch'}
-            disabled={!ready || !(Number(devBuy) > 0)}
+            disabled={!ready}
             onClick={() =>
               act('launch', async () => {
                 const out = await api('/distributor/launch', 'POST', {
