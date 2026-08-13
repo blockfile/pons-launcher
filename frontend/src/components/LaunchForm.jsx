@@ -111,18 +111,27 @@ export default function LaunchForm({
     onDraft?.({ name: f.name.trim(), symbol: f.symbol.trim(), logo: f.logo });
   }, [onDraft, f.name, f.symbol, f.logo]);
 
+  // A wallet joins the bundle only if it will actually buy: a fixed amount
+  // above zero, or "all" mode with a balance to spend. An empty wallet left in
+  // "all" mode used to be sent anyway and took a snipe-tax exemption slot for a
+  // buy that never happens — one of the ways a "31 wallet" bundle became 32
+  // exemptions and reverted ExemptionListTooLong.
+  const willBuy = (w) => {
+    const mode = rows[w.id]?.mode ?? 'fixed';
+    return mode === 'all' ? Number(w.balanceEth) > 0 : Number(rows[w.id]?.buy) > 0;
+  };
+
   function body() {
     // A WHITELIST, and on this line it decides whose money is spent. The
     // keystore also holds v2dev, v2funding and v2bundle roles; "not the dev
     // wallet" would arm a launch with wallets belonging to a different flow.
     const bundle = wallets
-      .filter((w) => w.role === 'bundle')
+      .filter((w) => w.role === 'bundle' && willBuy(w))
       .map((w) => ({
         walletId: w.id,
         mode: rows[w.id]?.mode ?? 'fixed',
         amountEth: rows[w.id]?.buy,
-      }))
-      .filter((w) => w.mode === 'all' || Number(w.amountEth) > 0);
+      }));
 
     const socials = {
       twitter: f.twitter.trim(),
@@ -200,10 +209,20 @@ export default function LaunchForm({
     });
   }
 
-  const buying = wallets.filter(
-    (w) => w.role === 'bundle' && (rows[w.id]?.mode === 'all' || Number(rows[w.id]?.buy) > 0)
-  ).length;
-  const ready =Boolean(f.name.trim() && f.symbol.trim() && f.logo) && !uploading;
+  const buying = wallets.filter((w) => w.role === 'bundle' && willBuy(w)).length;
+
+  // The exemption limit depends on the path. Any dev buy routes the launch
+  // through launchAndBuy on the forwarder, which appends its own buy recipient
+  // and so allows one FEWER exemption than the factory's 32. Comparing against a
+  // flat 32 let a 32-wallet bundle with a dev buy pass here and revert
+  // ExemptionListTooLong on-chain — the failure that stranded a bundle's ETH.
+  const hasDevBuy = Number(f.devBuyEth || 0) > 0;
+  const exemptionLimit = hasDevBuy
+    ? active?.maxExemptionsWithDevBuy ?? MAX_EXEMPTIONS - 1
+    : active?.maxExemptions ?? MAX_EXEMPTIONS;
+  const overExempt = isV2 && buying > exemptionLimit;
+
+  const ready = Boolean(f.name.trim() && f.symbol.trim() && f.logo) && !uploading;
   const blocked = live && !armed;
 
   return (
@@ -373,9 +392,10 @@ export default function LaunchForm({
               wallet keeps almost nothing
             </li>
             <li>
-              {buying} of your wallets declared exempt (max {active.maxExemptions ?? MAX_EXEMPTIONS})
-              {buying > (active.maxExemptions ?? MAX_EXEMPTIONS)
-                ? ' — too many, the launch would revert'
+              {buying} of your wallets declared exempt (max {exemptionLimit}
+              {hasDevBuy ? ', one lower because of the dev buy' : ''})
+              {overExempt
+                ? ` — too many by ${buying - exemptionLimit}, the launch would revert (ExemptionListTooLong)`
                 : ' — they buy at the untaxed price'}
             </li>
             <li>no wallet or per-buy cap: v2 has no restriction window</li>
@@ -410,13 +430,15 @@ export default function LaunchForm({
           // Vermilion means irreversible. A dry run is not, and colouring it
           // the same would teach the operator to ignore the colour that matters.
           className={live ? 'danger' : ''}
-          disabled={!ready || blocked}
+          disabled={!ready || blocked || overExempt}
           title={
             !ready
               ? 'fill in name, symbol and a logo'
-              : blocked
-                ? 'flip Arm first — this spends real funds'
-                : ''
+              : overExempt
+                ? `${buying} exempt wallets exceeds the ${exemptionLimit} limit for this path — remove ${buying - exemptionLimit}`
+                : blocked
+                  ? 'flip Arm first — this spends real funds'
+                  : ''
           }
           onClick={launch}
         >
