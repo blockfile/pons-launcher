@@ -40,6 +40,16 @@ const DISTRIBUTOR_ABI = [
   'function TOTAL_BPS() view returns (uint256)',
   'event Launched(address indexed token, address indexed launcher, uint256 devBuy, uint256 recipients)',
   'event Distributed(address indexed token, uint256 amountIn, uint256 amountOut, uint256 recipients)',
+  // The contract's own errors, so a revert from it decodes to a name rather
+  // than a selector. Easy to forget: an ABI of functions and events alone will
+  // parse every call correctly and every failure not at all.
+  'error NoRecipients()',
+  'error LengthMismatch(uint256 recipients, uint256 shares)',
+  'error SharesMustSumToBps(uint256 got)',
+  'error TransferFailed(address to, uint256 amount)',
+  'error FeeWalletMustBeZero()',
+  'error NothingToSpend()',
+  'error NotBeneficiary(address token, address caller)',
 ];
 
 const POOL_ABI = [
@@ -49,6 +59,50 @@ const POOL_ABI = [
 ];
 
 const iface = new Interface(DISTRIBUTOR_ABI);
+
+// Every error PonsLaunchFactory declares. A revert from inside launchToken
+// surfaces through our call, and without these it reads only as "unknown
+// custom error" — which names nothing and rules out nothing.
+const FACTORY_ERRORS = [
+  'error DexDisabled()',
+  'error FeeTransferFailed()',
+  'error InvalidBasisPoints()',
+  'error InvalidDexConfig()',
+  'error InvalidDexId()',
+  'error InvalidLaunchConfigId()',
+  'error InvalidMaxTxBasisPoints()',
+  'error InvalidTick()',
+  'error InvalidTokenParams()',
+  'error LaunchConfigDisabled()',
+  'error LaunchFeeNotPaid()',
+  'error NotWhitelisted()',
+  'error PoolAlreadyExists()',
+  'error ReentrancyGuardReentrantCall()',
+  'error RouterNotSet()',
+  'error SafeERC20FailedOperation(address)',
+  'error SupplyTooLow()',
+  'error TokenDeploymentFailed()',
+  'error TokenNotFound()',
+  'error ZeroAddress()',
+];
+const factoryIface = new Interface(FACTORY_ERRORS);
+
+// What each one actually means for someone filling in the launch form.
+const REVERT_HINTS = {
+  NothingToSpend: 'the distributor holds no ETH — stage the buy first (step 4)',
+  FeeWalletMustBeZero: 'feeWallet must be zero or the factory sends the supply elsewhere',
+  NoRecipients: 'no bundle wallets were passed',
+  SharesMustSumToBps: 'the shares do not add up to 10000',
+  TransferFailed: 'a token transfer to a bundle wallet failed',
+  InvalidTokenParams:
+    'the factory rejected the name, symbol, logo or description — check none are empty and the symbol is short',
+  LaunchFeeNotPaid: 'the value sent was below the launch fee',
+  LaunchConfigDisabled: 'launch config 0 is disabled on this factory',
+  DexDisabled: 'dex config 0 is disabled on this factory',
+  NotWhitelisted: 'this factory is gated and the distributor is not on its list',
+  PoolAlreadyExists: 'that salt has been used — retry, a fresh one is drawn each time',
+  TokenDeploymentFailed: 'CREATE2 failed — almost always a salt already used',
+};
 
 /**
  * Turn per-wallet ETH weights into basis points that sum to exactly 10000.
@@ -217,6 +271,43 @@ function buildLaunchTx({
   };
 }
 
+/**
+ * Turn a revert into something that names itself.
+ *
+ * ethers reports "execution reverted (unknown custom error)" whenever the
+ * four-byte selector is not in the ABI it was given, and provider.call() is
+ * given no ABI at all. Every error this contract can throw is known here, so
+ * decode against it first; anything else is reported WITH its selector, which
+ * is enough to look up rather than guess at.
+ */
+function explainRevert(err) {
+  const data = err?.data || err?.info?.error?.data || err?.error?.data;
+  const hex = typeof data === 'string' ? data : data?.data;
+  if (!hex || hex === '0x') {
+    return err.shortMessage || err.message || 'reverted with no reason';
+  }
+
+  for (const [where, i] of [
+    ['distributor', iface],
+    ['factory', factoryIface],
+  ]) {
+    try {
+      const parsed = i.parseError(hex);
+      if (parsed) {
+        const args = parsed.args.map((a) => String(a)).join(', ');
+        const hint = REVERT_HINTS[parsed.name];
+        return `${parsed.name}(${args}) from the ${where}${hint ? ` — ${hint}` : ''}`;
+      }
+    } catch (_err) {
+      /* try the next ABI */
+    }
+  }
+
+  // Not ours. The selector is the useful part — it identifies the error even
+  // when the throwing contract's ABI is not to hand.
+  return `reverted with custom error ${hex.slice(0, 10)} (from the factory or the pool, not the distributor)`;
+}
+
 /** The token address out of a mined atomic launch. */
 function launchedTokenFrom(receipt) {
   for (const log of receipt?.logs || []) {
@@ -253,5 +344,6 @@ module.exports = {
   buildTriggerTx,
   buildLaunchTx,
   launchedTokenFrom,
+  explainRevert,
   amountOutFrom,
 };

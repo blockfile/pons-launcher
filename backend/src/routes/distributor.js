@@ -39,6 +39,7 @@ const {
   buildTriggerTx,
   buildLaunchTx,
   launchedTokenFrom,
+  explainRevert,
   amountOutFrom,
   sharesFromWeights,
   equalShares,
@@ -330,7 +331,7 @@ router.post('/distributor/launch', requireApiKey, async (req, res, next) => {
     try {
       await provider.call({ ...tx, from: dev.address });
     } catch (err) {
-      throw new Error(`simulation failed, refusing to send — ${(err.shortMessage || err.message).slice(0, 200)}`);
+      throw new Error(`simulation failed, refusing to send — ${explainRevert(err)}`);
     }
 
     const sent = await signer.sendTransaction(tx);
