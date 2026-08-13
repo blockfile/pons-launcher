@@ -100,6 +100,12 @@ export default function BundlerV2Panel({
   const funder = wallets.find((w) => w.role === 'v2funding');
   const bundle = wallets.filter((w) => w.role === 'v2bundle');
   const [count, setCount] = useState(30);
+  // Import is offered everywhere create is. A wallet that already exists —
+  // funded, aged, or carried over from another tool — is often the one an
+  // operator actually wants here, and a console that can only generate forces
+  // a needless transfer to get funds where they were already going.
+  const [importing, setImporting] = useState('');
+  const [keys, setKeys] = useState('');
 
   const gen = (role, n = 1) =>
     act(role, async () => {
@@ -107,6 +113,38 @@ export default function BundlerV2Panel({
       await reload?.();
       return `generated ${made.length} ${role} wallet(s)`;
     });
+
+  const imp = (role) =>
+    act(`import-${role}`, async () => {
+      const added = await api('/wallets/import', 'POST', { privateKeys: keys, role });
+      setKeys('');
+      setImporting('');
+      await reload?.();
+      return `imported ${added.length} ${role} wallet(s)`;
+    });
+
+  /** One key field, shared by whichever role is mid-import. */
+  const importBox = (role, label) =>
+    importing === role && (
+      <div className="row">
+        <label className="hint" style={{ flex: 1 }}>
+          {label}
+          <input
+            type="password"
+            value={keys}
+            onChange={(e) => setKeys(e.target.value)}
+            placeholder="0x… private key"
+            style={{ width: '100%', marginLeft: 6 }}
+          />
+        </label>
+        <Busy busy={busy === `import-${role}`} className="ghost" disabled={!keys.trim()} onClick={() => imp(role)}>
+          Import
+        </Busy>
+        <button type="button" className="ghost" onClick={() => { setImporting(''); setKeys(''); }}>
+          cancel
+        </button>
+      </div>
+    );
 
   // What the dev buy actually takes, on the pool the config opens. Same
   // arithmetic the backend preflight runs — see shared/bundleShare.js for why
@@ -252,9 +290,14 @@ export default function BundlerV2Panel({
               </td>
               <td>
                 {!dev && (
-                  <Busy busy={busy === 'v2dev'} className="ghost" onClick={() => gen('v2dev')}>
-                    Create signer
-                  </Busy>
+                  <>
+                    <Busy busy={busy === 'v2dev'} className="ghost" onClick={() => gen('v2dev')}>
+                      Create
+                    </Busy>
+                    <button type="button" className="ghost" onClick={() => { setImporting('v2dev'); setKeys(''); }}>
+                      import
+                    </button>
+                  </>
                 )}
               </td>
             </tr>
@@ -274,18 +317,27 @@ export default function BundlerV2Panel({
               </td>
               <td>
                 {!funder && (
-                  <Busy busy={busy === 'v2funding'} className="ghost" onClick={() => gen('v2funding')}>
-                    Create funder
-                  </Busy>
+                  <>
+                    <Busy busy={busy === 'v2funding'} className="ghost" onClick={() => gen('v2funding')}>
+                      Create
+                    </Busy>
+                    <button type="button" className="ghost" onClick={() => { setImporting('v2funding'); setKeys(''); }}>
+                      import
+                    </button>
+                  </>
                 )}
               </td>
             </tr>
           </tbody>
         </table>
 
+        {importBox('v2dev', 'signer private key')}
+        {importBox('v2funding', 'funder private key')}
+
         <p className="hint">
           Fund the signer with a little ETH for gas, and the funder with whatever the launch will
-          spend. Both are ordinary keystore wallets — they back up and archive like every other.
+          spend. Both are ordinary keystore wallets — they back up and archive like every other,
+          and an imported key is treated exactly like a generated one.
         </p>
       </Step>
 
@@ -373,9 +425,14 @@ export default function BundlerV2Panel({
             disabled={!(Number(count) >= 1)}
             onClick={() => gen('v2bundle', Number(count))}
           >
-            Create {count} bundle wallets
+            Create {count}
           </Busy>
+          <button type="button" className="ghost" onClick={() => { setImporting('v2bundle'); setKeys(''); }}>
+            import
+          </button>
         </div>
+
+        {importBox('v2bundle', 'private keys — several separated by spaces, commas or newlines')}
 
         <p className="hint">
           They need gas only later, when you sell — funding them then leaks nothing, because the
