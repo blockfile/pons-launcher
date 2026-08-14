@@ -56,7 +56,7 @@
   /* Space Grotesk carries the display voice (brand, step titles, big figures);
      Inter is the workhorse body/UI face; JetBrains Mono is the data face, with
      the tabular figures every number in this app is compared against. */
-  --display: 'Space Grotesk', system-ui, sans-serif;
+  --display: 'Space Grotesk Variable', system-ui, sans-serif;
   --mono: 'JetBrains Mono', ui-monospace, 'SF Mono', Menlo, Consolas, monospace;
   --sans: 'Inter', system-ui, -apple-system, 'Segoe UI', sans-serif;
 
