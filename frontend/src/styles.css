@@ -181,9 +181,9 @@ main {
      narrow screen and every panel scrolls sideways with it, instead of the
      table alone scrolling inside its own box. */
   grid-template-columns: minmax(0, 1fr);
-  /* Room to breathe between steps. The spine below is extended to match, so the
+  /* Generous room between steps. The spine below is extended to match, so the
      panels still read as one connected procedure across the wider gap. */
-  gap: 28px;
+  gap: 40px;
 }
 
 /* Each panel is a raised card: a soft top-to-bottom gradient, a hairline border
@@ -192,7 +192,7 @@ section {
   background: linear-gradient(180deg, var(--panel), var(--panel-2));
   border: 1px solid var(--rule);
   border-radius: var(--radius-lg);
-  padding: 20px 22px;
+  padding: 24px 24px 26px;
   box-shadow: var(--shadow-card);
 }
 
@@ -217,18 +217,18 @@ h2::after {
 
 .lede {
   color: var(--dim);
-  margin: 0 0 14px;
+  margin: 0 0 20px;
   max-width: 68ch;
 }
 
 .row {
   display: flex;
-  gap: 8px;
+  gap: 10px;
   align-items: center;
   flex-wrap: wrap;
 }
 .row + .row {
-  margin-top: 10px;
+  margin-top: 14px;
 }
 .spacer {
   flex: 1;
@@ -708,9 +708,9 @@ button:disabled {
   position: absolute;
   left: 15px;
   top: 38px;
-  /* Reaches across the 28px inter-panel gap to the next node, so a wider gap
+  /* Reaches across the 40px inter-panel gap to the next node, so a wider gap
      does not break the spine. */
-  bottom: -29px;
+  bottom: -41px;
   width: 1px;
   background: var(--rule);
 }
@@ -728,7 +728,7 @@ button:disabled {
 }
 
 .stage h2 {
-  margin-bottom: 12px;
+  margin-bottom: 16px;
   min-height: 30px;
 }
 .stage-n {
