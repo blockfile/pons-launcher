@@ -131,6 +131,9 @@ export default function WalletsPanel({ step, wallets, rows, setRow, share, reloa
   // here too, not only refused at launch.
   const MAX_BUNDLE = 31;
   const bundleRoom = Math.max(0, MAX_BUNDLE - bundle.length);
+  // How many bundle wallets actually hold ETH — the summary tiles state it so
+  // "generated" and "funded" are not read as the same thing.
+  const fundedBundle = bundle.filter((w) => Number(w.balanceEth) > 0).length;
 
   // What the dev wallet must hold to fund every buy: the total buy plus each
   // wallet's gas reserve. Shown live so a shortfall is a number seen up front
@@ -294,6 +297,44 @@ export default function WalletsPanel({ step, wallets, rows, setRow, share, reloa
         breaching that cap. The table below is where the whole run is sized: what each wallet is
         funded with in step 4, what it buys in step 5, and what that comes to as a share of supply.
       </p>
+
+      {/* The run at a glance, across the top of the step: the two counts and the
+          two figures the bundle is judged by, lifted out of the table and the
+          breakdown notice so the shape of it reads before the detail does. The
+          grid stretches the tiles the full width of the card, so the summary is
+          also what fills the head of the panel. Read-only — every value here is
+          already computed below; nothing new is fetched or decided. */}
+      <div className="stats">
+        <div className="stat">
+          <span>Bundle wallets</span>
+          <b>
+            {bundle.length} <span className="stat-of">/ {MAX_BUNDLE}</span>
+          </b>
+        </div>
+        <div className="stat">
+          <span>Funded</span>
+          <b>
+            {fundedBundle} <span className="stat-of">of {bundle.length}</span>
+          </b>
+        </div>
+        <div className="stat">
+          <span>Bundle buy</span>
+          <b>{share && Number(share.bundle.eth) > 0 ? `${share.bundle.eth} ETH` : '—'}</b>
+        </div>
+        <div
+          className={`stat ${
+            share?.marketCap && Number(share.marketCap.finalEth) > 0 ? 'ok' : ''
+          }`}
+        >
+          <span>Predicted MC</span>
+          <b>
+            {share?.marketCap && Number(share.marketCap.finalEth) > 0
+              ? usdMc(share.marketCap.finalEth, ethPrice) ||
+                `${Number(share.marketCap.finalEth).toFixed(3)} ETH`
+              : '—'}
+          </b>
+        </div>
+      </div>
 
       <div className="row">
         <Busy

@@ -1221,6 +1221,14 @@ td input[type='number'] {
 .stat b {
   font: 700 18px/1 var(--mono);
 }
+/* The denominator of a count — "/ 31", "of 27". The figure is the headline; the
+   total it is measured against is context, so it sits smaller and dimmer beside
+   it rather than competing at the same weight. */
+.stat-of {
+  font-size: 12px;
+  font-weight: 500;
+  color: var(--dimmer);
+}
 .stat.ok b {
   color: var(--jade);
 }
