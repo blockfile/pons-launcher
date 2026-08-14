@@ -2,6 +2,7 @@ import { useEffect, useState } from 'react';
 import { api } from '../api.js';
 import Step from './Step.jsx';
 import { Busy } from './Section.jsx';
+import Address from './Address.jsx';
 
 /**
  * Step 2 — the Disperse contracts funding goes through.
@@ -107,37 +108,42 @@ export default function DispersersPanel({ step, explorer, credential, report, on
       )}
 
       {active > 0 && (
-        <table className="disperser-list">
-          <tbody>
-            {addresses.map((addr) => {
-              const rec = dispersers.find((d) => d.address.toLowerCase() === addr.toLowerCase());
-              return (
-                <tr key={addr}>
-                  <td>
-                    <a href={`${explorer}/address/${addr}`} target="_blank" rel="noreferrer">
-                      {addr}
-                    </a>
-                  </td>
-                  <td className="hint">
-                    {rec?.deployedAt ? new Date(rec.deployedAt).toLocaleDateString() : 'from env'}
-                  </td>
-                  <td>
-                    {rec && (
-                      <Busy
-                        busy={busy === addr}
-                        className="ghost"
-                        title="stop funding through this contract — it stays on chain"
-                        onClick={() => act(addr, () => api(`/dispersers/${addr}`, 'DELETE'))}
-                      >
-                        remove
-                      </Busy>
-                    )}
-                  </td>
-                </tr>
-              );
-            })}
-          </tbody>
-        </table>
+        <div className="table-scroll">
+          <table className="disperser-list">
+            <tbody>
+              {addresses.map((addr) => {
+                const rec = dispersers.find((d) => d.address.toLowerCase() === addr.toLowerCase());
+                return (
+                  <tr key={addr}>
+                    {/* Shortened text over a full-address href. This row also
+                        carries a remove, so the copy button is not only a
+                        convenience: checking a contract on an explorer before
+                        dropping it from the funding route should not mean
+                        retyping 42 characters. */}
+                    <td>
+                      <Address value={addr} href={`${explorer}/address/${addr}`} />
+                    </td>
+                    <td className="hint">
+                      {rec?.deployedAt ? new Date(rec.deployedAt).toLocaleDateString() : 'from env'}
+                    </td>
+                    <td>
+                      {rec && (
+                        <Busy
+                          busy={busy === addr}
+                          className="ghost"
+                          title="stop funding through this contract — it stays on chain"
+                          onClick={() => act(addr, () => api(`/dispersers/${addr}`, 'DELETE'))}
+                        >
+                          remove
+                        </Busy>
+                      )}
+                    </td>
+                  </tr>
+                );
+              })}
+            </tbody>
+          </table>
+        </div>
       )}
 
       <div className="row">

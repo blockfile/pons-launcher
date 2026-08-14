@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useState } from 'react';
 import { api } from '../api.js';
+import { shortAddress } from '../format.js';
 import bundleShareModule from '../../../shared/bundleShare.js';
 import Sequence from './Sequence.jsx';
 import Step from './Step.jsx';
@@ -8,7 +9,10 @@ import { Busy } from './Section.jsx';
 
 const { openingPool, constantProductBuy, parseEthToWei } = bundleShareModule;
 
-const short = (a) => (a ? `${a.slice(0, 8)}…${a.slice(-4)}` : '');
+// Same shared shortener as App's sequence chips, and used for the same thing:
+// the status detail under a step's heading. The addresses in this panel's own
+// tables stay whole — the signer and the funder are wallets ETH is SENT to.
+const short = (a) => shortAddress(a, 8, 4);
 const plural = (n, one, many = `${one}s`) => `${n} ${n === 1 ? one : many}`;
 
 /**
@@ -394,90 +398,92 @@ export default function BundlerV2Panel({
           the bundle wallets that receive the supply.
         </p>
 
-        <table className="disperser-list">
-          <tbody>
-            <tr>
-              <td className="hint">signer</td>
-              <td>
-                {dev ? (
-                  <a href={`${explorer}/address/${dev.address}`} target="_blank" rel="noreferrer">
-                    {dev.address}
-                  </a>
-                ) : (
-                  <span className="hint">not created</span>
-                )}
-              </td>
-              <td className="hint">
-                {dev ? `${Number(dev.balanceEth || 0).toFixed(4)} ETH — gas only` : ''}
-              </td>
-              <td>
-                {!dev && (
-                  <>
-                    <Busy busy={busy === 'v2dev'} className="ghost" onClick={() => gen('v2dev')}>
-                      Create
-                    </Busy>
-                    <button type="button" className="ghost" onClick={() => { setImporting('v2dev'); setKeys(''); }}>
-                      import
-                    </button>
-                    <button type="button" className="ghost" onClick={() => { setPicking('v2dev'); setImporting(''); }}>
-                      use existing
-                    </button>
-                  </>
-                )}
-              </td>
-            </tr>
-            {importing === 'v2dev' && (
+        <div className="table-scroll">
+          <table className="disperser-list">
+            <tbody>
               <tr>
-                <td colSpan={4}>{importBox('v2dev', 'signer private key')}</td>
+                <td className="hint">signer</td>
+                <td>
+                  {dev ? (
+                    <a href={`${explorer}/address/${dev.address}`} target="_blank" rel="noreferrer">
+                      {dev.address}
+                    </a>
+                  ) : (
+                    <span className="hint">not created</span>
+                  )}
+                </td>
+                <td className="hint">
+                  {dev ? `${Number(dev.balanceEth || 0).toFixed(4)} ETH — gas only` : ''}
+                </td>
+                <td>
+                  {!dev && (
+                    <>
+                      <Busy busy={busy === 'v2dev'} className="ghost" onClick={() => gen('v2dev')}>
+                        Create
+                      </Busy>
+                      <button type="button" className="ghost" onClick={() => { setImporting('v2dev'); setKeys(''); }}>
+                        import
+                      </button>
+                      <button type="button" className="ghost" onClick={() => { setPicking('v2dev'); setImporting(''); }}>
+                        use existing
+                      </button>
+                    </>
+                  )}
+                </td>
               </tr>
-            )}
-            {picking === 'v2dev' && (
+              {importing === 'v2dev' && (
+                <tr>
+                  <td colSpan={4}>{importBox('v2dev', 'signer private key')}</td>
+                </tr>
+              )}
+              {picking === 'v2dev' && (
+                <tr>
+                  <td colSpan={4}>{picker('v2dev', 'move an existing wallet into the signer role')}</td>
+                </tr>
+              )}
               <tr>
-                <td colSpan={4}>{picker('v2dev', 'move an existing wallet into the signer role')}</td>
+                <td className="hint">funder</td>
+                <td>
+                  {funder ? (
+                    <a href={`${explorer}/address/${funder.address}`} target="_blank" rel="noreferrer">
+                      {funder.address}
+                    </a>
+                  ) : (
+                    <span className="hint">not created</span>
+                  )}
+                </td>
+                <td className="hint">
+                  {funder ? `${Number(funder.balanceEth || 0).toFixed(4)} ETH — stages the buy` : ''}
+                </td>
+                <td>
+                  {!funder && (
+                    <>
+                      <Busy busy={busy === 'v2funding'} className="ghost" onClick={() => gen('v2funding')}>
+                        Create
+                      </Busy>
+                      <button type="button" className="ghost" onClick={() => { setImporting('v2funding'); setKeys(''); }}>
+                        import
+                      </button>
+                      <button type="button" className="ghost" onClick={() => { setPicking('v2funding'); setImporting(''); }}>
+                        use existing
+                      </button>
+                    </>
+                  )}
+                </td>
               </tr>
-            )}
-            <tr>
-              <td className="hint">funder</td>
-              <td>
-                {funder ? (
-                  <a href={`${explorer}/address/${funder.address}`} target="_blank" rel="noreferrer">
-                    {funder.address}
-                  </a>
-                ) : (
-                  <span className="hint">not created</span>
-                )}
-              </td>
-              <td className="hint">
-                {funder ? `${Number(funder.balanceEth || 0).toFixed(4)} ETH — stages the buy` : ''}
-              </td>
-              <td>
-                {!funder && (
-                  <>
-                    <Busy busy={busy === 'v2funding'} className="ghost" onClick={() => gen('v2funding')}>
-                      Create
-                    </Busy>
-                    <button type="button" className="ghost" onClick={() => { setImporting('v2funding'); setKeys(''); }}>
-                      import
-                    </button>
-                    <button type="button" className="ghost" onClick={() => { setPicking('v2funding'); setImporting(''); }}>
-                      use existing
-                    </button>
-                  </>
-                )}
-              </td>
-            </tr>
-            {importing === 'v2funding' && (
-              <tr>
-                <td colSpan={4}>{importBox('v2funding', 'funder private key')}</td>
-              </tr>
-            )}
-            {picking === 'v2funding' && (
-              <tr>
-                <td colSpan={4}>{picker('v2funding', 'move an existing wallet into the funder role')}</td>
-              </tr>
-            )}
-          </tbody>
-        </table>
+              {importing === 'v2funding' && (
+                <tr>
+                  <td colSpan={4}>{importBox('v2funding', 'funder private key')}</td>
+                </tr>
+              )}
+              {picking === 'v2funding' && (
+                <tr>
+                  <td colSpan={4}>{picker('v2funding', 'move an existing wallet into the funder role')}</td>
+                </tr>
+              )}
+            </tbody>
+          </table>
+        </div>
 
         <p className="hint">
           Fund the signer with a little ETH for gas, and the funder with whatever the launch will
@@ -496,30 +502,32 @@ export default function BundlerV2Panel({
         </p>
 
         {distributor ? (
-          <table className="disperser-list">
-            <tbody>
-              <tr>
-                <td>
-                  <a href={`${explorer}/address/${distributor.address}`} target="_blank" rel="noreferrer">
-                    {distributor.address}
-                  </a>
-                </td>
-                <td className="hint">
-                  {distributor.deployedAt ? new Date(distributor.deployedAt).toLocaleDateString() : ''}
-                </td>
-                <td>
-                  <Busy
-                    busy={busy === 'forget'}
-                    className="ghost"
-                    title="stop using this contract — it stays on chain"
-                    onClick={() => act('forget', () => api('/distributor', 'DELETE'))}
-                  >
-                    forget
-                  </Busy>
-                </td>
-              </tr>
-            </tbody>
-          </table>
+          <div className="table-scroll">
+            <table className="disperser-list">
+              <tbody>
+                <tr>
+                  <td>
+                    <a href={`${explorer}/address/${distributor.address}`} target="_blank" rel="noreferrer">
+                      {distributor.address}
+                    </a>
+                  </td>
+                  <td className="hint">
+                    {distributor.deployedAt ? new Date(distributor.deployedAt).toLocaleDateString() : ''}
+                  </td>
+                  <td>
+                    <Busy
+                      busy={busy === 'forget'}
+                      className="ghost"
+                      title="stop using this contract — it stays on chain"
+                      onClick={() => act('forget', () => api('/distributor', 'DELETE'))}
+                    >
+                      forget
+                    </Busy>
+                  </td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
         ) : (
           <div className="row">
             <span className="hint">
@@ -580,36 +588,38 @@ export default function BundlerV2Panel({
         {importBox('v2bundle', 'private keys — several separated by spaces, commas or newlines')}
 
         {bundle.length > 0 && (
-          <table className="disperser-list">
-            <tbody>
-              {bundle.map((w) => (
-                <tr key={w.id}>
-                  <td>
-                    <a href={`${explorer}/address/${w.address}`} target="_blank" rel="noreferrer">
-                      {w.address}
-                    </a>
-                  </td>
-                  <td className="hint">{Number(w.balanceEth || 0).toFixed(4)} ETH</td>
-                  <td>
-                    <Busy
-                      busy={busy === `del-${w.id}`}
-                      className="ghost"
-                      title="archive this wallet — the key is recoverable on the server until purged"
-                      onClick={() =>
-                        act(`del-${w.id}`, async () => {
-                          await api(`/wallets/${w.id}`, 'DELETE');
-                          await reload?.();
-                          return `archived ${w.address}`;
-                        })
-                      }
-                    >
-                      ✕
-                    </Busy>
-                  </td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
+          <div className="table-scroll">
+            <table className="disperser-list">
+              <tbody>
+                {bundle.map((w) => (
+                  <tr key={w.id}>
+                    <td>
+                      <a href={`${explorer}/address/${w.address}`} target="_blank" rel="noreferrer">
+                        {w.address}
+                      </a>
+                    </td>
+                    <td className="hint">{Number(w.balanceEth || 0).toFixed(4)} ETH</td>
+                    <td>
+                      <Busy
+                        busy={busy === `del-${w.id}`}
+                        className="ghost"
+                        title="archive this wallet — the key is recoverable on the server until purged"
+                        onClick={() =>
+                          act(`del-${w.id}`, async () => {
+                            await api(`/wallets/${w.id}`, 'DELETE');
+                            await reload?.();
+                            return `archived ${w.address}`;
+                          })
+                        }
+                      >
+                        ✕
+                      </Busy>
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
         )}
 
         {bundle.length > 0 && (

@@ -4,6 +4,7 @@ import Step from './Step.jsx';
 import { Busy } from './Section.jsx';
 import Modal, { Fact } from './Modal.jsx';
 import BackupControls from './BackupControls.jsx';
+import Address from './Address.jsx';
 
 // Balances arrive as decimal strings. Six places everywhere, so the line under
 // the button and the figure in the dialog are the same number.
@@ -134,13 +135,16 @@ export default function DevWalletPanel({ step, wallets, explorer, reload, report
 
         {dev ? (
           <span className="hint">
-            {explorer ? (
-              <a href={`${explorer}/address/${dev.address}`} target="_blank" rel="noreferrer">
-                {dev.address}
-              </a>
-            ) : (
-              dev.address
-            )}{' '}
+            {/* Full length, and with a copy button: this is the one address in
+                the console that has to leave it. Nothing here can fund the dev
+                wallet — every transfer spends OUT of it — so the operator reads
+                this address and pastes it into an exchange, and a 42-character
+                hex string retyped by hand is how funds go to a stranger. */}
+            <Address
+              value={dev.address}
+              full
+              href={explorer ? `${explorer}/address/${dev.address}` : undefined}
+            />{' '}
             · {eth(dev.balanceEth)} ETH
           </span>
         ) : (

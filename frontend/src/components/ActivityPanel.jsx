@@ -1,5 +1,6 @@
 import { useEffect, useState } from 'react';
 import { api } from '../api.js';
+import Address from './Address.jsx';
 
 // Colour carries the meaning here, so each kind gets one that matches what it
 // costs you to get wrong: money moving, contracts, and key material. An admin
@@ -183,40 +184,49 @@ export default function ActivityPanel({ explorer, credential, admin = false, me 
           ))}
       </div>
 
+      {/* The "not your log" marker is on the WRAPPER, not the table. It is a
+          border down the left edge, and the table is now the thing that scrolls
+          inside this box — painted on the table it slid out of view the moment a
+          row was read sideways, which is exactly the screenshot it exists to
+          stop being mistaken for your own. */}
       {entries.length > 0 && (
-        <table className="activity-list" data-elsewhere={elsewhere ? 'yes' : undefined}>
-          <tbody>
-            {entries.map((e, i) => (
-              <tr key={`${e.at}-${i}`} data-kind={KINDS[e.kind] || 'moved'}>
-                <td className="hint" style={{ whiteSpace: 'nowrap' }}>
-                  {new Date(e.at).toLocaleString()}
-                </td>
-                <td>
-                  <span className={`tag ${KINDS[e.kind] || 'moved'}`}>{e.kind}</span>
-                </td>
-                <td>
-                  {e.summary}
-                  {e.failed > 0 && <span className="hint"> · {e.failed} failed</span>}
-                  {/* The tx hashes are what you actually came back for. */}
-                  {(e.contracts || []).map((c) => (
-                    <div key={c.address} className="hint">
-                      <a href={`${explorer}/address/${c.address}`} target="_blank" rel="noreferrer">
-                        {c.address}
-                      </a>
-                    </div>
-                  ))}
-                  {(e.results || [])
-                    .filter((r) => r.error)
-                    .map((r, n) => (
-                      <div key={`${r.address}-${n}`} className="hint">
-                        {r.address} — {r.error}
+        <div className="table-scroll" data-elsewhere={elsewhere ? 'yes' : undefined}>
+          <table className="activity-list">
+            <tbody>
+              {entries.map((e, i) => (
+                <tr key={`${e.at}-${i}`} data-kind={KINDS[e.kind] || 'moved'}>
+                  <td className="hint" style={{ whiteSpace: 'nowrap' }}>
+                    {new Date(e.at).toLocaleString()}
+                  </td>
+                  <td>
+                    <span className={`tag ${KINDS[e.kind] || 'moved'}`}>{e.kind}</span>
+                  </td>
+                  <td>
+                    {e.summary}
+                    {e.failed > 0 && <span className="hint"> · {e.failed} failed</span>}
+                    {/* The tx hashes are what you actually came back for. */}
+                    {(e.contracts || []).map((c) => (
+                      <div key={c.address} className="hint">
+                        <Address value={c.address} href={`${explorer}/address/${c.address}`} />
                       </div>
                     ))}
-                </td>
-              </tr>
-            ))}
-          </tbody>
-        </table>
+                    {/* Deliberately NOT shortened. A failed transfer is what an
+                        operator reconciles against a block explorer afterwards,
+                        and the whole point of reading the log is to recover the
+                        exact address the money did not reach. */}
+                    {(e.results || [])
+                      .filter((r) => r.error)
+                      .map((r, n) => (
+                        <div key={`${r.address}-${n}`} className="hint">
+                          {r.address} — {r.error}
+                        </div>
+                      ))}
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
       )}
     </details>
   );

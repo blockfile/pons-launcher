@@ -3,6 +3,7 @@ import { LuTriangleAlert } from 'react-icons/lu';
 import { api } from '../api.js';
 import Step from './Step.jsx';
 import { Busy } from './Section.jsx';
+import Address from './Address.jsx';
 import Modal, { Fact } from './Modal.jsx';
 
 /**
@@ -210,42 +211,48 @@ export default function SellPanel({ step, explorer, credential, live, reload, re
       )}
 
       {rows.length > 0 && (
-        <table className="sell-list">
-          <thead>
-            <tr>
-              <th />
-              <th>Token</th>
-              <th>Held by bundle</th>
-              <th>Wallets</th>
-              <th>Route</th>
-            </tr>
-          </thead>
-          <tbody>
-            {rows.map((t) => (
-              <tr key={t.token}>
-                <td>
-                  <input
-                    type="radio"
-                    name="sell-token"
-                    checked={token === t.token}
-                    onChange={() => setToken(t.token)}
-                  />
-                </td>
-                <td>
-                  <b>{t.symbol || '—'}</b>
-                  <div className="hint">
-                    <a href={`${explorer}/address/${t.token}`} target="_blank" rel="noreferrer">
-                      {t.token}
-                    </a>
-                  </div>
-                </td>
-                <td>{amount(t.totalTokens, 2)}</td>
-                <td>{walletCount(t)}</td>
-                <td className="hint">{routeLabel(t)}</td>
+        <div className="table-scroll">
+          <table className="sell-list">
+            <thead>
+              <tr>
+                <th />
+                <th>Token</th>
+                <th>Held by bundle</th>
+                <th>Wallets</th>
+                <th>Route</th>
               </tr>
-            ))}
-          </tbody>
-        </table>
+            </thead>
+            <tbody>
+              {rows.map((t) => (
+                <tr key={t.token}>
+                  <td>
+                    <input
+                      type="radio"
+                      name="sell-token"
+                      checked={token === t.token}
+                      onChange={() => setToken(t.token)}
+                    />
+                  </td>
+                  <td>
+                    <b>{t.symbol || '—'}</b>
+                    {/* Link text only — the href is the full address, and the
+                        Token fact in the confirmation dialog still prints all
+                        42 characters. `symbol` comes off the chain and is
+                        spoofable, so the address is the identity here; the copy
+                        button is how it gets checked against an explorer
+                        without retyping it. */}
+                    <div className="hint">
+                      <Address value={t.token} href={`${explorer}/address/${t.token}`} />
+                    </div>
+                  </td>
+                  <td>{amount(t.totalTokens, 2)}</td>
+                  <td>{walletCount(t)}</td>
+                  <td className="hint">{routeLabel(t)}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
       )}
 
       {plan && (
@@ -358,40 +365,48 @@ export default function SellPanel({ step, explorer, credential, live, reload, re
             </div>
           </div>
 
-          <table className="sell-results">
-            <thead>
-              <tr>
-                <th>Wallet</th>
-                <th>Tokens sold</th>
-                <th>ETH received</th>
-                <th>Status</th>
-              </tr>
-            </thead>
-            <tbody>
-              {results.map((r, i) => (
-                <tr key={`${r.walletId ?? r.address}-${i}`}>
-                  <td className="addr">{r.address}</td>
-                  <td>{amount(r.tokensSold, 2)}</td>
-                  <td>{amount(r.ethReceived, 6)}</td>
-                  <td>
-                    <span className={r.status === 'confirmed' ? 'fill-ok' : 'fill-bad'}>
-                      {r.status || '—'}
-                    </span>
-                    {r.error && <div className="hint">{r.error}</div>}
-                    {/* Losing the receipts to a render crash is worst exactly
-                        here — after something irreversible has happened. */}
-                    {(Array.isArray(r.hashes) ? r.hashes : []).map((h) => (
-                      <div key={h} className="hint">
-                        <a href={`${explorer}/tx/${h}`} target="_blank" rel="noreferrer">
-                          {h.slice(0, 18)}…
-                        </a>
-                      </div>
-                    ))}
-                  </td>
+          <div className="table-scroll">
+            <table className="sell-results">
+              <thead>
+                <tr>
+                  <th>Wallet</th>
+                  <th>Tokens sold</th>
+                  <th>ETH received</th>
+                  <th>Status</th>
                 </tr>
-              ))}
-            </tbody>
-          </table>
+              </thead>
+              <tbody>
+                {results.map((r, i) => (
+                  <tr key={`${r.walletId ?? r.address}-${i}`}>
+                    {/* A receipt, so it is shortened only because it carries
+                        both a hover title and a copy button — the wallet is
+                        reconciled against an explorer afterwards and that needs
+                        the exact string, not a retyped one. */}
+                    <td className="addr">
+                      <Address value={r.address} />
+                    </td>
+                    <td>{amount(r.tokensSold, 2)}</td>
+                    <td>{amount(r.ethReceived, 6)}</td>
+                    <td>
+                      <span className={r.status === 'confirmed' ? 'fill-ok' : 'fill-bad'}>
+                        {r.status || '—'}
+                      </span>
+                      {r.error && <div className="hint">{r.error}</div>}
+                      {/* Losing the receipts to a render crash is worst exactly
+                          here — after something irreversible has happened. */}
+                      {(Array.isArray(r.hashes) ? r.hashes : []).map((h) => (
+                        <div key={h} className="hint">
+                          <a href={`${explorer}/tx/${h}`} target="_blank" rel="noreferrer">
+                            {h.slice(0, 18)}…
+                          </a>
+                        </div>
+                      ))}
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
 
           <p className="hint">
             A wallet that failed still holds its tokens — the others are unaffected, and it can be

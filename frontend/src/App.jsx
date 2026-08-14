@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import { LazyMotion, MotionConfig, domMax } from 'framer-motion';
 import { api, getApiKey, setApiKey } from './api.js';
+import { shortAddress } from './format.js';
 // The console and the backend's preflight run the SAME arithmetic, out of one
 // file neither of them owns — see shared/bundleShare.js for why, and
 // vite.config.js for how a CommonJS module gets into this bundle. Default
@@ -22,7 +23,11 @@ import Toaster from './components/Toaster.jsx';
 
 const { bundleShare } = bundleShareModule;
 
-const short = (a) => (a ? `${a.slice(0, 8)}…${a.slice(-4)}` : '');
+// One definition of the shortener, in format.js, so there is one place to look
+// when asking where an address is ever displayed less than whole. The sequence
+// chips take the tighter 8+4 they have always used: they are a status line, and
+// the address in them is a label for a wallet, not a value to check.
+const short = (a) => shortAddress(a, 8, 4);
 const plural = (n, one, many = `${one}s`) => `${n} ${n === 1 ? one : many}`;
 const andList = (xs) =>
   xs.length < 2 ? xs.join('') : `${xs.slice(0, -1).join(', ')} and ${xs[xs.length - 1]}`;

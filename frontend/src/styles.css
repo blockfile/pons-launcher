@@ -171,9 +171,13 @@ select {
 /* ── layout ──────────────────────────────────────────────────────────────── */
 
 main {
-  /* Wide enough that the nine-column wallet table still lays out without
-     scrolling, tight enough that a prose step is not marooned in a card twice
-     the width of its text. */
+  /* Tight enough that a prose step is not marooned in a card twice the width of
+     its text. It is NOT wide enough to be what fits the wallet table, and it
+     never was: this caps a panel's interior at 996px, and nine columns with a
+     full 42-character address in one of them want ~1170px however wide the
+     window is. What makes the table fit is the shortened address column; this
+     number is a reading measure, and .table-scroll is what catches any table
+     that outgrows it. */
   max-width: 1120px;
   margin: 0 auto;
   padding: 22px var(--pad) 80px;
@@ -510,6 +514,10 @@ button:disabled {
   font-size: 12.5px;
   line-height: 1.45;
   color: var(--ink);
+  /* A copy confirmation restates the whole 42-character address, which is one
+     unbreakable token wider than this rail. Let it break rather than let it
+     leave the ticket — the same reason .notice li breaks. */
+  overflow-wrap: anywhere;
 }
 .toast-x {
   flex: none;
@@ -869,6 +877,88 @@ table {
   border-collapse: collapse;
   margin-top: 14px;
 }
+
+/* Every table in the console is wrapped in one of these, and it is not
+   decoration — it is the only thing standing between a wide table and the card
+   it is drawn inside. A table box can never be squeezed below its min-content
+   width, so the `width: 100%` above is a FLOOR, not a cap: the wallet table's
+   nine columns used to want ~1170px against a 996px panel interior, a
+   42-character address being 326px of it with no place to break, and the
+   surplus was simply painted outside the card — the delete column landed on the
+   page background past the border, and below ~1380px the whole document
+   scrolled sideways with every other panel dragged along.
+
+   Shortening the address column (see .addr-cell) takes the wallet table to
+   ~960px, so at desktop widths it now fits and this box never scrolls. The
+   wrapper stays regardless: it is what holds every table inside its card on a
+   laptop, a split screen or a phone, and it is a safety net rather than a
+   layout — the scroll boundary belongs around the one element that can be too
+   wide, so the card is never escaped at any width.
+
+   A wrapper and not `display: block` on the table itself: a blockified table
+   loses its rows and columns in the accessibility tree — nine columns of
+   financial inputs stop being associated with their headers — and its inner
+   anonymous table box shrink-wraps to min-content, so columns collapse even on
+   screens where they would have fitted. And not `overflow` on the section: that
+   would scroll the lede and the stat tiles along with the table, and it would
+   clip .stage-rail, which paints deliberately outside the card to thread the
+   panels into one spine. */
+.table-scroll {
+  overflow-x: auto;
+  overscroll-behavior-x: contain;
+  /* The wrapper carries the table's top margin so the gap above it still
+     collapses against the paragraph before it exactly as the bare table's did.
+     overflow makes this a block formatting context, and a margin sealed inside
+     one cannot collapse out of it — left on the table, the spacing would
+     silently double wherever a table follows prose. */
+  margin-top: 14px;
+  scrollbar-width: thin;
+  scrollbar-color: var(--rule) transparent;
+}
+.table-scroll > table {
+  margin-top: 0;
+}
+/* A stock OS scrollbar appearing on a dark card reads as damage rather than as
+   an affordance. Drawn instead as the hairline it sits under: the same --rule
+   the tables are ruled with, no track of its own, and lifted to --dimmer only
+   once the pointer is already on it. Present exactly when there is something to
+   scroll to, which is the whole message. */
+.table-scroll::-webkit-scrollbar {
+  height: 8px;
+}
+.table-scroll::-webkit-scrollbar-track {
+  background: transparent;
+}
+.table-scroll::-webkit-scrollbar-thumb {
+  background: var(--rule);
+  border-radius: 999px;
+}
+.table-scroll::-webkit-scrollbar-thumb:hover {
+  background: var(--dimmer);
+}
+
+/* There was a scroll-driven edge fade here — a mask on this box that softened
+   whichever edge had more table beyond it. It is gone, and it must not come
+   back in any form that reduces the alpha of content.
+
+   A mask is content-blind. Which pixels it dims is decided by viewport width
+   and scroll offset, never by what those pixels say, and what it landed on at
+   ordinary laptop widths was the over-cap REVERTS badge in the last column —
+   the only per-row statement that a buy does not clamp but reverts and burns
+   its gas. Vermilion on the panel is 5.5:1 at full alpha and falls under the
+   4.5:1 floor within the first few pixels of a 44px ramp, so the warning was
+   drawn unreadable at rest, not merely dimmed. It faded live controls too: a
+   mask changes painting, not hit-testing, so the per-row × and the bulk-delete
+   checkboxes stayed clickable at an alpha nobody would click deliberately, and
+   focus rings went with them.
+
+   The semantics were the wrong way round as well. A hard cut with a scrollbar
+   under it says "there is more to the right"; a fade says "the content ends
+   here", so a half-faded warning reads as chrome and is not pursued. The
+   scrollbar below is the affordance, and it costs nothing.
+
+   The wallet table no longer overflows at desktop widths anyway — see the
+   address column, which is shortened now. */
 th {
   text-align: left;
   font: 700 10px/1 var(--mono);
@@ -908,8 +998,69 @@ td select {
   padding: 5px 7px;
   font-size: 12px;
 }
+/* A cap, not a width — the fields sit at it. 96px holds ten characters of a
+   six-decimal ETH amount ("123.456789") without clipping, and the 44px it gives
+   back across the Fund and Buy columns is what buys the address column two more
+   hex characters while still leaving the wallet table inside the card. */
 td input[type='number'] {
-  max-width: 118px;
+  max-width: 96px;
+}
+
+/* ── an address in a scanning table ───────────────────────────────────────
+   A shortened address and the button that copies the whole one. Both halves
+   are needed together: the truncation is what fits nine columns inside the
+   card, and the copy is what stops the truncation being a dead end, because
+   the shortened text cannot be retyped into anything.
+
+   Full addresses stay wherever an operator is committing — every confirmation
+   dialog, every "send ETH here", every preflight plan. See Address.jsx. */
+.addr-cell {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+/* nowrap is load-bearing, not cosmetic: the ellipsis is a break opportunity, so
+   without it every shortened address wraps to two lines and the row grows taller
+   instead of the table growing narrower. */
+.addr-text {
+  white-space: nowrap;
+}
+/* Deliberately not shaped like the row's × delete. That is the one destructive
+   control in the row and it must stay the dominant one, so this is half its
+   size, borderless until hovered, drawn in the dimmest ink, and it sits inside
+   the address cell rather than in the action column at the end of the row. */
+.addr-copy {
+  flex: none;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 22px;
+  height: 22px;
+  padding: 0;
+  font-size: 12px;
+  background: none;
+  border: 1px solid transparent;
+  border-radius: 4px;
+  color: var(--dimmer);
+  cursor: pointer;
+  box-shadow: none;
+}
+.addr-copy:hover:not(:disabled) {
+  color: var(--amber);
+  border-color: var(--rule);
+  background: var(--panel-hi);
+  filter: none;
+  box-shadow: none;
+}
+/* The tick after a confirmed write. Jade because it says the same thing the
+   toast beside it does — done, nothing spent. It is a swapped glyph and a
+   colour, with no motion of its own, so there is nothing here for the
+   reduced-motion block below to turn off. */
+.addr-copy.is-copied,
+.addr-copy.is-copied:hover:not(:disabled) {
+  color: var(--jade);
+  border-color: transparent;
+  background: none;
 }
 
 /* Role as a tinted pill with a status dot — the reference's badge language. */
@@ -1007,7 +1158,11 @@ td input[type='number'] {
    masked, but a length and a shape still read. */
 .key-field {
   flex: 1;
-  min-width: 300px;
+  /* min(300px, 100%) rather than a bare 300px: the row it sits in wraps, but a
+     flex item cannot wrap below its own min-width, so on a phone the field kept
+     its 300px and pushed itself straight through the card's right edge. The
+     300px intent survives on every card wide enough to honour it. */
+  min-width: min(300px, 100%);
   font: 12px var(--mono);
 }
 
@@ -1079,6 +1234,10 @@ td input[type='number'] {
 .notice li {
   font: 12px/1.5 var(--mono);
   color: var(--dim);
+  /* These lists name wallets — a 42-character address is one unbreakable token
+     302px wide, and a notice is not a table, so there is no scroller to catch
+     it. Let it break rather than let it leave the card. */
+  overflow-wrap: anywhere;
 }
 .notice.warn {
   border-left-color: var(--amber);
@@ -1344,10 +1503,14 @@ pre {
     height: auto;
     padding: 10px var(--pad);
   }
-  table {
-    display: block;
-    overflow-x: auto;
-  }
+  /* `table { display: block; overflow-x: auto }` used to live here, and it was
+     the only overflow handling in the whole stylesheet — quarantined behind a
+     breakpoint a desktop operator is never at, which is exactly how the wallet
+     table came to be drawn outside its card at every width above it. The
+     .table-scroll wrapper does this job now, at every width and without
+     blockifying the table out of the accessibility tree, so a phone needs no
+     rule of its own here. Do not reintroduce one: it would nest a scroller
+     inside a scroller. */
 
   /* The spine narrows but never goes away: it is the thing that says these
      panels are one procedure, and a phone is exactly where a stack of cards
@@ -1519,12 +1682,24 @@ pre {
   color: var(--vermilion);
   border-color: var(--vermilion);
 }
-/* Someone else's log, opened by an admin. Marked down the whole edge of the
-   table so that a glance, or a screenshot pasted into a chat, cannot be taken
-   for your own record. Amber, not vermilion: reading is not irreversible. */
-.activity-list[data-elsewhere] {
+/* Someone else's log, opened by an admin. Marked down the whole edge so that a
+   glance, or a screenshot pasted into a chat, cannot be taken for your own
+   record. Amber, not vermilion: reading is not irreversible.
+
+   On the scroll wrapper rather than on the table, because the table is the
+   thing that MOVES inside it: painted on the table, the marker slid off the
+   left of the box as soon as a long row was read sideways — and a screenshot
+   taken mid-scroll is precisely the case it exists for. */
+.table-scroll[data-elsewhere] {
   border-left: 3px solid var(--amber-dim);
   padding-left: 10px;
+}
+/* An activity row carries plain-text failure lines that name a wallet in full
+   (a receipt is no use shortened), and an address is one unbreakable 302px
+   token. Breaking it lowers the table's min-content width instead of forcing
+   the whole log into a sideways scroll. */
+.activity-list .hint {
+  overflow-wrap: anywhere;
 }
 
 /* An admin having opened someone else's log. Grey on purpose: it is neither

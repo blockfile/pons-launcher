@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from 'react';
 import { api, notify } from '../api.js';
 import Step from './Step.jsx';
 import { Busy } from './Section.jsx';
+import Address from './Address.jsx';
 import Modal, { Fact } from './Modal.jsx';
 import Share, { pct, tokens } from './Share.jsx';
 import BackupControls from './BackupControls.jsx';
@@ -451,154 +452,165 @@ export default function WalletsPanel({ step, wallets, rows, setRow, share, reloa
         </div>
       )}
 
-      <table className="wallet-list">
-        <thead>
-          <tr>
-            <th>
-              {/* Selects the bundle wallets and only ever the bundle wallets;
-                  the dev wallet is not in this list at all. */}
-              <input
-                ref={allBox}
-                type="checkbox"
-                checked={allPicked}
-                disabled={!bundle.length || busy === 'delete'}
-                title="select every bundle wallet"
-                onChange={(e) =>
-                  setPicked(e.target.checked ? new Set(bundle.map((b) => b.id)) : new Set())
-                }
-              />
-            </th>
-            <th>Role</th>
-            <th>Address</th>
-            <th>Balance</th>
-            <th>Fund (ETH)</th>
-            <th>Buy mode</th>
-            <th>Buy (ETH)</th>
-            {/* Not "Est. share": on v2 it is not an estimate. The ~ on each
-                figure is what says which one this is. */}
-            <th>Supply share</th>
-            <th />
-          </tr>
-        </thead>
-        <tbody>
-          {wallets.length === 0 && (
+      <div className="table-scroll">
+        <table className="wallet-list">
+          <thead>
             <tr>
-              <td colSpan="9" className="empty">
-                No wallets yet. Generate the bundle wallets above — the dev wallet from step 1
-                appears here too.
-              </td>
+              <th>
+                {/* Selects the bundle wallets and only ever the bundle wallets;
+                    the dev wallet is not in this list at all. */}
+                <input
+                  ref={allBox}
+                  type="checkbox"
+                  checked={allPicked}
+                  disabled={!bundle.length || busy === 'delete'}
+                  title="select every bundle wallet"
+                  onChange={(e) =>
+                    setPicked(e.target.checked ? new Set(bundle.map((b) => b.id)) : new Set())
+                  }
+                />
+              </th>
+              <th>Role</th>
+              <th>Address</th>
+              <th>Balance</th>
+              <th>Fund (ETH)</th>
+              <th>Buy mode</th>
+              <th>Buy (ETH)</th>
+              {/* Not "Est. share": on v2 it is not an estimate. The ~ on each
+                  figure is what says which one this is. */}
+              <th>Supply share</th>
+              <th />
             </tr>
-          )}
-          {wallets.map((w) => {
-            const row = rows[w.id] || {};
-            const isDev = w.role === 'dev';
-            const bal = Number(w.balanceEth);
-            return (
-              <tr key={w.id}>
-                <td>
-                  {/* No checkbox on the dev wallet — not a disabled one, none.
-                      It signs the launch and holds the funds, and the bulk
-                      delete must have no path to it, accidental or otherwise. */}
-                  {w.role === 'bundle' && (
-                    <input
-                      type="checkbox"
-                      checked={picked.has(w.id)}
-                      disabled={busy === 'delete'}
-                      title="select for bulk delete"
-                      onChange={(e) => tick(w.id, e.target.checked)}
-                    />
-                  )}
-                </td>
-                <td>
-                  <span className={`role ${w.role}`}>{w.role}</span>
-                </td>
-                <td className="addr">{w.address}</td>
-                <td>
-                  <span className={`bal ${bal === 0 ? 'zero' : ''}`}>{bal.toFixed(6)}</span>
-                </td>
-                <td>
-                  {!isDev && (
-                    <input
-                      type="number"
-                      step="0.0001"
-                      placeholder="0.0"
-                      value={row.fund ?? ''}
-                      onChange={(e) => setRow(w.id, { fund: e.target.value })}
-                    />
-                  )}
-                </td>
-                <td>
-                  {!isDev && (
-                    <select
-                      value={row.mode ?? 'fixed'}
-                      onChange={(e) => setRow(w.id, { mode: e.target.value })}
-                    >
-                      <option value="fixed">fixed</option>
-                      <option value="all">all − gas</option>
-                    </select>
-                  )}
-                </td>
-                <td>
-                  {!isDev && (
-                    <input
-                      type="number"
-                      step="0.0001"
-                      placeholder="0.0"
-                      // "all − gas" is resolved server-side from the live
-                      // balance, so an amount here would be meaningless.
-                      disabled={row.mode === 'all'}
-                      value={row.mode === 'all' ? '' : row.buy ?? ''}
-                      onChange={(e) => setRow(w.id, { buy: e.target.value })}
-                    />
-                  )}
-                </td>
-                <td>
-                  {/* The dev row shows the dev buy, which is not typed here at
-                      all — it is set in step 5 and it executes FIRST, inside
-                      the launch transaction. On a curve that matters: it moves
-                      the price every bundle wallet then pays. */}
-                  {isDev ? (
-                    <Share
-                      leg={share?.dev}
-                      exact={share?.exact}
-                      title={`the dev buy, made inside the launch itself and before every bundle buy — ≈${tokens(
-                        share?.dev?.estTokens
-                      )} tokens`}
-                    />
-                  ) : (
-                    <Share leg={legs.get(w.id)} exact={share?.exact} />
-                  )}
-                  {/* The market cap this row's buy walks the curve to, landing
-                      in order behind the dev buy. Updates as the amount is
-                      typed. */}
-                  {(() => {
-                    const mcEth = isDev ? share?.dev?.mcEth : legs.get(w.id)?.mcEth;
-                    if (!(Number(mcEth) > 0)) return null;
-                    const dollars = usdMc(mcEth, ethPrice);
-                    return (
-                      <div className="mc-row hint" title={`predicted market cap after this buy — ${mcEth} ETH`}>
-                        MC {dollars ? `${dollars} · ` : ''}
-                        {Number(mcEth).toFixed(3)} ETH
-                      </div>
-                    );
-                  })()}
-                </td>
-                <td>
-                  <Busy
-                    busy={now === w.id}
-                    className="ghost"
-                    disabled={busy === 'delete'}
-                    title="delete this wallet"
-                    onClick={() => setDeleting([w])}
-                  >
-                    ×
-                  </Busy>
+          </thead>
+          <tbody>
+            {wallets.length === 0 && (
+              <tr>
+                <td colSpan="9" className="empty">
+                  No wallets yet. Generate the bundle wallets above — the dev wallet from step 1
+                  appears here too.
                 </td>
               </tr>
-            );
-          })}
-        </tbody>
-      </table>
+            )}
+            {wallets.map((w) => {
+              const row = rows[w.id] || {};
+              const isDev = w.role === 'dev';
+              const bal = Number(w.balanceEth);
+              return (
+                <tr key={w.id}>
+                  <td>
+                    {/* No checkbox on the dev wallet — not a disabled one, none.
+                        It signs the launch and holds the funds, and the bulk
+                        delete must have no path to it, accidental or otherwise. */}
+                    {w.role === 'bundle' && (
+                      <input
+                        type="checkbox"
+                        checked={picked.has(w.id)}
+                        disabled={busy === 'delete'}
+                        title="select for bulk delete"
+                        onChange={(e) => tick(w.id, e.target.checked)}
+                      />
+                    )}
+                  </td>
+                  <td>
+                    <span className={`role ${w.role}`}>{w.role}</span>
+                  </td>
+                  {/* Shortened, with the full address on hover and on the copy
+                      button beside it. This column was 326px of unbreakable hex
+                      — a third of the table, and the reason the delete column
+                      was painted outside the card. The row's × still opens a
+                      dialog that states the whole address, and the delete is
+                      keyed by w.id, so nothing here is decided from the
+                      shortened text. */}
+                  <td className="addr">
+                    <Address value={w.address} />
+                  </td>
+                  <td>
+                    <span className={`bal ${bal === 0 ? 'zero' : ''}`}>{bal.toFixed(6)}</span>
+                  </td>
+                  <td>
+                    {!isDev && (
+                      <input
+                        type="number"
+                        step="0.0001"
+                        placeholder="0.0"
+                        value={row.fund ?? ''}
+                        onChange={(e) => setRow(w.id, { fund: e.target.value })}
+                      />
+                    )}
+                  </td>
+                  <td>
+                    {!isDev && (
+                      <select
+                        value={row.mode ?? 'fixed'}
+                        onChange={(e) => setRow(w.id, { mode: e.target.value })}
+                      >
+                        <option value="fixed">fixed</option>
+                        <option value="all">all − gas</option>
+                      </select>
+                    )}
+                  </td>
+                  <td>
+                    {!isDev && (
+                      <input
+                        type="number"
+                        step="0.0001"
+                        placeholder="0.0"
+                        // "all − gas" is resolved server-side from the live
+                        // balance, so an amount here would be meaningless.
+                        disabled={row.mode === 'all'}
+                        value={row.mode === 'all' ? '' : row.buy ?? ''}
+                        onChange={(e) => setRow(w.id, { buy: e.target.value })}
+                      />
+                    )}
+                  </td>
+                  <td>
+                    {/* The dev row shows the dev buy, which is not typed here at
+                        all — it is set in step 5 and it executes FIRST, inside
+                        the launch transaction. On a curve that matters: it moves
+                        the price every bundle wallet then pays. */}
+                    {isDev ? (
+                      <Share
+                        leg={share?.dev}
+                        exact={share?.exact}
+                        title={`the dev buy, made inside the launch itself and before every bundle buy — ≈${tokens(
+                          share?.dev?.estTokens
+                        )} tokens`}
+                      />
+                    ) : (
+                      <Share leg={legs.get(w.id)} exact={share?.exact} />
+                    )}
+                    {/* The market cap this row's buy walks the curve to, landing
+                        in order behind the dev buy. Updates as the amount is
+                        typed. */}
+                    {(() => {
+                      const mcEth = isDev ? share?.dev?.mcEth : legs.get(w.id)?.mcEth;
+                      if (!(Number(mcEth) > 0)) return null;
+                      const dollars = usdMc(mcEth, ethPrice);
+                      return (
+                        <div className="mc-row hint" title={`predicted market cap after this buy — ${mcEth} ETH`}>
+                          MC {dollars ? `${dollars} · ` : ''}
+                          {Number(mcEth).toFixed(3)} ETH
+                        </div>
+                      );
+                    })()}
+                  </td>
+                  <td>
+                    <Busy
+                      busy={now === w.id}
+                      className="ghost"
+                      disabled={busy === 'delete'}
+                      title="delete this wallet"
+                      onClick={() => setDeleting([w])}
+                    >
+                      ×
+                    </Busy>
+                  </td>
+                </tr>
+              );
+            })}
+          </tbody>
+        </table>
+      </div>
 
       {/* The bundle total, next to the amounts that make it, and honest about
           how much it can be trusted. This is the question the operator has been
