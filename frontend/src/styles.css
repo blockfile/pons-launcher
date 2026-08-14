@@ -178,7 +178,9 @@ main {
      narrow screen and every panel scrolls sideways with it, instead of the
      table alone scrolling inside its own box. */
   grid-template-columns: minmax(0, 1fr);
-  gap: 16px;
+  /* Room to breathe between steps. The spine below is extended to match, so the
+     panels still read as one connected procedure across the wider gap. */
+  gap: 28px;
 }
 
 /* Each panel is a raised card: a soft top-to-bottom gradient, a hairline border
@@ -331,12 +333,15 @@ button:active:not(:disabled) {
   transform: translateY(1px);
   filter: brightness(0.97);
 }
+/* Secondary buttons sit on a distinctly lighter surface than the card, so they
+   read as raised controls rather than blending into the panel behind them. A
+   subtle border defines the edge; hover warms toward amber. */
 button.ghost {
-  background: var(--panel);
+  background: var(--panel-hi);
   color: var(--ink);
   border-color: var(--rule);
   font-weight: 600;
-  box-shadow: none;
+  box-shadow: 0 1px 0 rgba(255, 255, 255, 0.03) inset;
 }
 /* The auto-fill tool above the wallet table. Given a bordered box with an accent
    stripe so it is found without being hunted for — but the stripe is the only
@@ -676,7 +681,9 @@ button:disabled {
   position: absolute;
   left: 15px;
   top: 38px;
-  bottom: -17px;
+  /* Reaches across the 28px inter-panel gap to the next node, so a wider gap
+     does not break the spine. */
+  bottom: -29px;
   width: 1px;
   background: var(--rule);
 }
