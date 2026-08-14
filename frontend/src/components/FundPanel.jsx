@@ -97,9 +97,13 @@ export default function FundPanel({ step, wallets, rows, dispersers, reload, rep
             onChange={(e) => setTokenAddress(e.target.value)}
           />
         )}
+        {/* .spend, not ghost: this empties every bundle wallet back to dev on
+            the first click, with no confirmation dialog anywhere behind it.
+            Tinted vermilion rather than filled — the filled amber beside it is
+            step 4's own action and has to stay the loudest thing in the row. */}
         <Busy
           busy={busy === 'sweep'}
-          className="ghost"
+          className="spend"
           title="return everything to the dev wallet"
           onClick={() =>
             act('sweep', () =>

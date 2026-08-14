@@ -338,9 +338,10 @@ export default function WalletsPanel({ step, wallets, rows, setRow, share, reloa
       </div>
 
       <div className="row">
+        {/* Amber, for the same reason step 1's generate is: this is the forward
+            action of step 3, and it sat grey among four other grey controls. */}
         <Busy
           busy={busy === 'bundle'}
-          className="ghost"
           disabled={bundleRoom === 0}
           title={bundleRoom === 0 ? `at the ${MAX_BUNDLE}-wallet limit — delete some to add more` : ''}
           onClick={() =>
@@ -369,9 +370,12 @@ export default function WalletsPanel({ step, wallets, rows, setRow, share, reloa
         <button className="ghost" onClick={() => setShowImport((v) => !v)}>
           Import bundle keys
         </button>
+        {/* .quiet: a pure re-read. It changes nothing on chain, on disk or in
+            the keystore, so it should not look like the two controls beside it
+            that generate and import keys. */}
         <Busy
           busy={busy === 'reload'}
-          className="ghost"
+          className="quiet"
           onClick={() => act('reload', async () => 'balances refreshed')}
         >
           Refresh balances

@@ -454,7 +454,14 @@ export default function App() {
             </>
           )}
 
-          <div hidden={SHOW_V2_BUNDLER && mode !== 'v1'}>
+          {/* `sequence` is presentation only — it is what lets the stylesheet
+              put the inter-step gap where the steps actually are. Everything
+              below is nested inside this one div so a single `hidden` can take
+              the whole v1 flow off the page, and a grid gap on <main> only ever
+              spaces main's DIRECT children, so until this class existed the six
+              step cards sat flush against each other. The class carries no
+              behaviour; the `hidden` expression is untouched. */}
+          <div className="sequence" hidden={SHOW_V2_BUNDLER && mode !== 'v1'}>
           <Sequence
             steps={steps}
             notice={

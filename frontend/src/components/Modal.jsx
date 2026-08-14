@@ -146,8 +146,10 @@ export default function Modal({
 
         <div className="modal-foot">
           {/* Cancel first in the tab order and in reading order: the way out
-              should be the thing found first. */}
-          <button type="button" className="ghost" onClick={onCancel}>
+              should be the thing found first. .quiet, because it is the path
+              where nothing happens — it should recede beside a confirm that
+              may be carrying the vermilion for a delete or a key export. */}
+          <button type="button" className="quiet" onClick={onCancel}>
             {cancelLabel}
           </button>
           <button

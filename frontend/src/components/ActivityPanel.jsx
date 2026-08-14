@@ -173,10 +173,15 @@ export default function ActivityPanel({ explorer, credential, admin = false, me 
         {['', 'fund', 'sweep', 'deploy', 'wallets', 'export']
           .concat(admin ? ['admin'] : [])
           .map((k) => (
+            /* Quiet, both states: filtering a log reads, it does not act. The
+               selected chip used to be a solid amber fill, which put the
+               loudest button in the console on a control that changes nothing
+               — it keeps the amber, as text on a tint, because the law says
+               amber is where you are standing. */
             <button
               key={k || 'all'}
               type="button"
-              className={filter === k ? '' : 'ghost'}
+              className={filter === k ? 'quiet is-on' : 'quiet'}
               onClick={() => setFilter(k)}
             >
               {k || 'all'}

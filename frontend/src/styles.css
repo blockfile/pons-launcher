@@ -13,6 +13,33 @@
  * Nothing else gets a colour. If a thing is neither ready, dangerous, nor
  * confirmed, it is grey.
  *
+ * Buttons apply that law at two amplitudes, because "how loud is this?" was
+ * never the question the operator actually has — "what happens if I am wrong?"
+ * is. The line that matters is WHETHER ANYTHING ASKS TWICE: every delete and
+ * every key export here opens a dialog, and the dialog is where the vermilion
+ * gets spent, so those triggers stay grey. Two controls ask nothing at all.
+ *
+ *   solid amber      the forward action of the step you are on — one per panel
+ *   solid vermilion  armed, live, irreversible — behind the Arm switch
+ *   tinted vermilion an ASIDE that spends on chain; nothing will ask first
+ *   ghost grey       it changes something, but a dialog asks, or no ETH moves
+ *   quiet grey       it reads, or it backs out; nothing changes anywhere
+ *
+ * Amber outranks the tint, and the order matters because the two overlap: step
+ * 4's Send button spends the largest sum in the console with no dialog behind
+ * it, and it is still amber, because it is the whole point of the step it sits
+ * in. So the tint is not "this spends" — every step spends — it is "this spends
+ * and is NOT what you came here to do": the optional disperser deploy, the
+ * sweep back. A step's own action never wears it, or the tint would mark five
+ * of six panels and mean nothing. One amber per panel is the invariant; a panel
+ * with none is the bug this rule was written after, where the step the operator
+ * was standing on offered two identical grey buttons and no way to tell which
+ * was the way forward.
+ *
+ * That is one hue split by amplitude and one grey split by weight. No new
+ * colour enters the palette, and the loudest control on any page is still the
+ * one that ends the run.
+ *
  * The console is also a PROCEDURE — six steps, in one order — so the page is
  * drawn as one: a hairline down the left edge threading a numbered node per
  * step, filled jade behind you and marked amber where you are standing. There
@@ -188,8 +215,31 @@ main {
      narrow screen and every panel scrolls sideways with it, instead of the
      table alone scrolling inside its own box. */
   grid-template-columns: minmax(0, 1fr);
-  /* Generous room between steps. The spine below is extended to match, so the
-     panels still read as one connected procedure across the wider gap. */
+  /* Generous room — but read `.sequence` below before touching this number.
+     What this gap actually spaces is the sequence wrapper, the divider and the
+     two record panels, NOT the steps: the steps are one level deeper. */
+  gap: 40px;
+}
+
+/* The step cards are NOT children of the grid above. App.jsx nests Sequence,
+   the guide and all six panels inside one wrapper div so that a single `hidden`
+   can take the whole v1 flow off the page when the (currently disabled) V2 tab
+   is active — and a grid gap only ever spaces a container's DIRECT children.
+   For as long as that wrapper was a plain block the steps sat flush at 0px, and
+   every widening of the gap above went somewhere nobody was looking. Repeating
+   the grid here is what actually separates the steps; the two gaps are the same
+   number on purpose, so the run down the page has one rhythm.
+
+   `:not([hidden])` is load-bearing, not tidiness. A `display` declaration here
+   outranks the UA sheet's `[hidden] { display: none }`, so without the guard the
+   entire v1 sequence would reappear behind the V2 tab. Guarded, a hidden wrapper
+   still computes to `display: none`. Do not remove it.
+
+   minmax(0, 1fr) for exactly the reason main has it: the wallet table is wider
+   than the measure, and a content-sized column would let it push the page. */
+.sequence:not([hidden]) {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
   gap: 40px;
 }
 
@@ -324,10 +374,13 @@ textarea {
   width: 100%;
 }
 
-/* Buttons are the instruments. Three tiers, each unmistakable at a glance:
-   PRIMARY (amber, filled, a faint glow) is the action to take; GHOST is a
-   secondary move that changes nothing on-chain; DANGER (vermilion) spends or is
-   irreversible. Every one gives real feedback — lift on hover, press on click —
+/* Buttons are the instruments. Five tiers, and they encode CONSEQUENCE rather
+   than importance — the table at the top of this file is the whole rule:
+   PRIMARY (amber, filled, a faint glow) is the step's own forward action;
+   DANGER (vermilion, filled) is armed and live; SPEND (vermilion, tinted)
+   moves ETH the instant it is clicked with no dialog behind it; GHOST changes
+   something a dialog will ask about, or moves no ETH at all; QUIET only reads
+   or retreats. Every one gives real feedback — lift on hover, press on click —
    so a control never feels dead. */
 button {
   cursor: pointer;
@@ -410,6 +463,65 @@ button.danger {
 button.danger:hover:not(:disabled) {
   box-shadow: 0 0 16px -2px var(--vermilion-dim);
 }
+
+/* An on-chain spend with nothing behind it to catch a mis-click. Same meaning
+   as .danger at a lower amplitude, which is why it is tinted and outlined and
+   never filled: a panel cannot have two loudest buttons, and in FundPanel this
+   sits in the same row as the amber "Send X ETH to N wallets" that IS step 4.
+   The colour lives in the fill and the border — the label stays --ink because
+   --vermilion text on this tint measures 4.17:1 over the lighter card surface,
+   under the floor. Only for controls that spend and do NOT open a dialog: the
+   moment something asks twice, the vermilion belongs in the dialog instead. */
+button.spend {
+  background: var(--tint-vermilion);
+  color: var(--ink);
+  border-color: var(--vermilion);
+  font-weight: 600;
+  box-shadow: none;
+}
+button.spend:hover:not(:disabled) {
+  background: var(--vermilion-dim);
+  border-color: var(--vermilion);
+  color: var(--ink);
+  filter: none;
+  box-shadow: 0 0 14px -4px var(--vermilion-dim);
+}
+
+/* Reads, or retreats. Flat on the card rather than raised like .ghost, and a
+   step dimmer in the label — the separation is form and weight, not hue, so
+   this tier costs the palette nothing. Having it is what lets .ghost stop
+   meaning "everything that is not amber" and start meaning "this changes
+   something". Text labels only: the border is near-invisible against the card
+   by design, so an icon-only control must not use it. */
+button.quiet {
+  background: transparent;
+  color: var(--dim);
+  border-color: var(--rule);
+  font-weight: 500;
+  box-shadow: none;
+}
+button.quiet:hover:not(:disabled) {
+  background: var(--panel-hi);
+  border-color: var(--dimmer);
+  color: var(--ink);
+  filter: none;
+  box-shadow: none;
+}
+/* The selected chip in a quiet group. Amber, because the law says amber is
+   where you are standing — but as text on a tint, not as a solid fill. A
+   read-only log filter should not out-shout the step it is sitting under. */
+button.quiet.is-on {
+  background: var(--tint-amber);
+  border-color: var(--amber-dim);
+  color: var(--amber);
+  font-weight: 600;
+}
+button.quiet.is-on:hover:not(:disabled) {
+  background: var(--tint-amber);
+  border-color: var(--amber);
+  color: var(--amber);
+}
+
 button.link {
   background: none;
   border: none;
@@ -727,8 +839,12 @@ button:disabled {
   position: absolute;
   left: 15px;
   top: 38px;
-  /* Reaches across the 40px inter-panel gap to the next node, so a wider gap
-     does not break the spine. */
+  /* Reaches across the 40px gap in `.sequence` and stops exactly on the next
+     card's top edge. 41 and not 40 because this is offset from `.stage-mark`,
+     which ends at the card's PADDING box — one border inside the edge the gap
+     is measured from. Anything larger draws the spine down through the next
+     card's face and across its node, which is the overlap this was reported as.
+     If the gap in `.sequence` changes, this changes with it: gap + 1. */
   bottom: -41px;
   width: 1px;
   background: var(--rule);
@@ -1530,6 +1646,9 @@ pre {
   .stage-rail {
     left: 12px;
     top: 32px;
+    /* `bottom` deliberately absent: the gap in `.sequence` is not narrowed at
+       this width, so the spine has the same distance to bridge as on desktop
+       and -41px is still exactly right. */
   }
   .stage h2 {
     min-height: 24px;

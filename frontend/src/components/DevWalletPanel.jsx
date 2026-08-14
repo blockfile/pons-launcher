@@ -109,9 +109,12 @@ export default function DevWalletPanel({ step, wallets, explorer, reload, report
       </p>
 
       <div className="row">
+        {/* The amber primary, because it is what step 1 IS. The step the
+            operator is standing on has to have one obvious forward action, and
+            this was drawn as a grey ghost beside an equally grey Import — two
+            identical controls, neither of which looked like the thing to do. */}
         <Busy
           busy={busy === 'dev'}
-          className="ghost"
           disabled={Boolean(dev) || busy === 'delete'}
           title={dev ? 'a dev wallet already exists' : ''}
           onClick={generate}
