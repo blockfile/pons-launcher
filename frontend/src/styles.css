@@ -171,7 +171,10 @@ select {
 /* ── layout ──────────────────────────────────────────────────────────────── */
 
 main {
-  max-width: 1180px;
+  /* Wide enough that the nine-column wallet table still lays out without
+     scrolling, tight enough that a prose step is not marooned in a card twice
+     the width of its text. */
+  max-width: 1120px;
   margin: 0 auto;
   padding: 22px var(--pad) 80px;
   display: grid;
@@ -230,8 +233,16 @@ h2::after {
 .row + .row {
   margin-top: 14px;
 }
+/* A separator between a group of controls and a trailing one — but a BOUNDED
+   one. Left to grow freely (flex: 1) on a wide card it strands the trailing
+   control against the far edge and opens a canyon of dead space down the middle
+   of the row, which is exactly the emptiness the console was reading as broken.
+   Capped, it still sets the two groups visibly apart while the row stays one
+   left-aligned unit, so the eye is not thrown across the card to find a lone
+   button. */
 .spacer {
-  flex: 1;
+  flex: 1 1 auto;
+  max-width: 120px;
 }
 
 .grid {
