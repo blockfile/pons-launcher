@@ -21,6 +21,27 @@ const { jsonSafe } = require('./launch');
 
 const router = express.Router();
 
+// The most bundle wallets a launch can carry. A launch with a dev buy goes
+// through the forwarder, which appends its own buy recipient before handing the
+// snipe-tax exemption list to the factory — so the factory's 32 leaves room for
+// only 31 of ours. Passing 32 is the ExemptionListTooLong revert that stranded a
+// bundle's ETH, so the wallets are capped here rather than left to be caught at
+// launch: an operator cannot even create a 32nd bundle wallet.
+const MAX_BUNDLE_WALLETS = 31;
+
+function assertBundleRoom(ks, role, adding) {
+  if (role !== 'bundle') return;
+  const have = ks.bundleWallets().length;
+  if (have + adding > MAX_BUNDLE_WALLETS) {
+    throw new Error(
+      `a launch exempts at most ${MAX_BUNDLE_WALLETS} bundle wallets (the dev wallet is separate). ` +
+        `You have ${have}; ${adding} more would be ${have + adding}. Remove some first, or add up to ${
+          MAX_BUNDLE_WALLETS - have
+        }.`
+    );
+  }
+}
+
 // GET /api/wallets — addresses, roles and balances. Never key material.
 router.get('/wallets', requireApiKey, async (req, res, next) => {
   try {
@@ -37,6 +58,7 @@ router.post('/wallets/generate', requireApiKey, (req, res, next) => {
     const { count = 1, label, role = 'bundle' } = req.body || {};
     const n = Number(count);
     if (!Number.isInteger(n) || n < 1 || n > 100) throw new Error('count must be 1-100');
+    assertBundleRoom(ks, role, n);
     const made = ks.generate(n, { label, role });
     activityFor(req.user.id).record('wallets', `generated ${made.length} ${role} wallet(s)`, {
       addresses: made.map((w) => w.address),
@@ -55,6 +77,7 @@ router.post('/wallets/import', requireApiKey, (req, res, next) => {
       ? privateKeys
       : String(privateKeys || '').split(/[\s,]+/);
     if (!keys.filter(Boolean).length) throw new Error('privateKeys is required');
+    assertBundleRoom(ks, role, keys.filter(Boolean).length);
     const added = ks.importKeys(keys, { label, role });
     activityFor(req.user.id).record('wallets', `imported ${added.length} ${role} wallet(s)`, {
       addresses: added.map((w) => w.address),

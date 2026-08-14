@@ -125,6 +125,13 @@ export default function WalletsPanel({ step, wallets, rows, setRow, share, reloa
   // stuck holding tokens it cannot sell is worse than a slightly larger fund.
   const SELL_RESERVE = 10;
 
+  // The most bundle wallets a launch can exempt: the forwarder appends its own
+  // buy recipient, so the factory's 32 leaves room for 31 of ours. A 32nd is the
+  // ExemptionListTooLong revert that stranded a bundle — so the count is capped
+  // here too, not only refused at launch.
+  const MAX_BUNDLE = 31;
+  const bundleRoom = Math.max(0, MAX_BUNDLE - bundle.length);
+
   // What the dev wallet must hold to fund every buy: the total buy plus each
   // wallet's gas reserve. Shown live so a shortfall is a number seen up front
   // rather than a third of the bundle silently skipped at preflight for lack of
@@ -291,10 +298,12 @@ export default function WalletsPanel({ step, wallets, rows, setRow, share, reloa
         <Busy
           busy={busy === 'bundle'}
           className="ghost"
+          disabled={bundleRoom === 0}
+          title={bundleRoom === 0 ? `at the ${MAX_BUNDLE}-wallet limit — delete some to add more` : ''}
           onClick={() =>
             act('bundle', () =>
               api('/wallets/generate', 'POST', {
-                count: Number(count) || 1,
+                count: Math.min(Number(count) || 1, bundleRoom),
                 role: 'bundle',
                 label: 'bundle',
               })
@@ -306,11 +315,14 @@ export default function WalletsPanel({ step, wallets, rows, setRow, share, reloa
         <input
           type="number"
           min="1"
-          max="100"
+          max={bundleRoom || 1}
           value={count}
           onChange={(e) => setCount(e.target.value)}
           title="how many"
         />
+        <span className="hint">
+          {bundle.length}/{MAX_BUNDLE} bundle wallets{bundleRoom > 0 ? ` · room for ${bundleRoom} more` : ' · full'}
+        </span>
         <button className="ghost" onClick={() => setShowImport((v) => !v)}>
           Import bundle keys
         </button>
