@@ -1,4 +1,5 @@
 import { useEffect, useState } from 'react';
+import { LuCircleAlert, LuCircleCheck, LuInfo, LuX } from 'react-icons/lu';
 
 /**
  * The notice rail — instrument tickets that slide in when an action is refused
@@ -35,18 +36,25 @@ export default function Toaster() {
   }
 
   const label = { error: 'blocked', ok: 'done', info: 'note' };
+  const Icon = { error: LuCircleAlert, ok: LuCircleCheck, info: LuInfo };
 
   return (
     <div className="toaster" role="status" aria-live="polite">
-      {toasts.map((t) => (
-        <div key={t.id} className={`toast toast-${t.kind}`}>
-          <span className="toast-tag">{label[t.kind] || 'note'}</span>
-          <span className="toast-msg">{t.message.replace(/^ERROR:\s*/i, '')}</span>
-          <button className="toast-x" title="dismiss" onClick={() => dismiss(t.id)}>
-            ×
-          </button>
-        </div>
-      ))}
+      {toasts.map((t) => {
+        const Glyph = Icon[t.kind] || LuInfo;
+        return (
+          <div key={t.id} className={`toast toast-${t.kind}`}>
+            <Glyph className="toast-icon" aria-hidden="true" />
+            <span className="toast-body">
+              <span className="toast-tag">{label[t.kind] || 'note'}</span>
+              <span className="toast-msg">{t.message.replace(/^ERROR:\s*/i, '')}</span>
+            </span>
+            <button className="toast-x" title="dismiss" onClick={() => dismiss(t.id)}>
+              <LuX aria-hidden="true" />
+            </button>
+          </div>
+        );
+      })}
     </div>
   );
 }

@@ -53,8 +53,12 @@
   --tint-sky: rgba(90, 169, 255, 0.13);
   --tint-grey: rgba(150, 164, 186, 0.12);
 
-  --mono: ui-monospace, 'SF Mono', SFMono-Regular, Menlo, Consolas, monospace;
-  --sans: system-ui, -apple-system, 'Segoe UI', sans-serif;
+  /* Space Grotesk carries the display voice (brand, step titles, big figures);
+     Inter is the workhorse body/UI face; JetBrains Mono is the data face, with
+     the tabular figures every number in this app is compared against. */
+  --display: 'Space Grotesk', system-ui, sans-serif;
+  --mono: 'JetBrains Mono', ui-monospace, 'SF Mono', Menlo, Consolas, monospace;
+  --sans: 'Inter', system-ui, -apple-system, 'Segoe UI', sans-serif;
 
   --pad: 18px;
   --radius: 8px;
@@ -113,9 +117,8 @@ select {
 }
 
 .mark {
-  font: 700 13px/1 var(--mono);
-  letter-spacing: 0.18em;
-  text-transform: uppercase;
+  font: 700 17px/1 var(--display);
+  letter-spacing: 0.01em;
   margin: 0;
   white-space: nowrap;
 }
@@ -428,13 +431,34 @@ button:disabled {
   display: flex;
   align-items: flex-start;
   gap: 10px;
-  padding: 11px 12px;
-  background: var(--panel);
+  padding: 12px 13px;
+  background: linear-gradient(180deg, var(--panel-hi), var(--panel));
   border: 1px solid var(--rule);
   border-left-width: 3px;
-  border-radius: 5px;
-  box-shadow: 0 10px 30px -12px rgba(0, 0, 0, 0.8);
+  border-radius: var(--radius);
+  box-shadow: 0 14px 34px -14px rgba(0, 0, 0, 0.85);
   animation: toast-in 0.16s ease-out;
+}
+.toast-icon {
+  flex: none;
+  width: 17px;
+  height: 17px;
+  margin-top: 1px;
+}
+.toast-body {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+.toast-error .toast-icon {
+  color: var(--vermilion);
+}
+.toast-ok .toast-icon {
+  color: var(--jade);
+}
+.toast-info .toast-icon {
+  color: var(--amber);
 }
 @keyframes toast-in {
   from {
@@ -472,7 +496,6 @@ button:disabled {
   color: var(--amber);
 }
 .toast-msg {
-  flex: 1;
   font-size: 12.5px;
   line-height: 1.45;
   color: var(--ink);
@@ -482,10 +505,14 @@ button:disabled {
   background: none;
   border: none;
   color: var(--dim);
-  font-size: 16px;
-  line-height: 1;
+  display: inline-flex;
+  align-items: center;
   padding: 0 2px;
   box-shadow: none;
+}
+.toast-x svg {
+  width: 15px;
+  height: 15px;
 }
 .toast-x:hover:not(:disabled) {
   color: var(--ink);
@@ -708,9 +735,14 @@ button:disabled {
   color: var(--dimmer);
   white-space: nowrap;
 }
+/* The step title reads as a heading now — display face, sentence case, larger —
+   rather than another line of silkscreen caps. The "STEP N" eyebrow beside it
+   stays small and mono, so the two do not compete. */
 .stage-t {
   color: var(--ink);
-  letter-spacing: 0.14em;
+  font: 600 15px/1.2 var(--display);
+  letter-spacing: 0;
+  text-transform: none;
 }
 .stage.is-later .stage-t {
   color: var(--dim);
@@ -824,22 +856,29 @@ button:disabled {
 table {
   width: 100%;
   border-collapse: collapse;
-  margin-top: 12px;
+  margin-top: 14px;
 }
 th {
   text-align: left;
-  font: 600 10px/1 var(--mono);
-  letter-spacing: 0.12em;
+  font: 700 10px/1 var(--mono);
+  letter-spacing: 0.1em;
   text-transform: uppercase;
   color: var(--dimmer);
-  padding: 0 10px 8px;
+  padding: 0 12px 10px;
   border-bottom: 1px solid var(--rule);
   white-space: nowrap;
 }
 td {
-  padding: 7px 10px;
+  padding: 10px 12px;
   border-bottom: 1px solid var(--rule-soft);
   vertical-align: middle;
+}
+/* Rows lift on hover, so the eye can track one wallet across nine columns. */
+tbody tr {
+  transition: background 0.1s ease;
+}
+tbody tr:hover td {
+  background: rgba(255, 255, 255, 0.018);
 }
 tr:last-child td {
   border-bottom: none;
@@ -970,10 +1009,11 @@ td input[type='number'] {
 /* ── notices: warnings must be unmissable ────────────────────────────────── */
 
 .notice {
-  border-left: 3px solid var(--rule);
+  border: 1px solid var(--rule);
+  border-left: 3px solid var(--dimmer);
   background: var(--panel-2);
-  padding: 10px 14px;
-  border-radius: 0 4px 4px 0;
+  padding: 12px 15px;
+  border-radius: var(--radius);
   margin-top: 12px;
 }
 .notice h3 {
@@ -1031,13 +1071,16 @@ td input[type='number'] {
 }
 .notice.warn {
   border-left-color: var(--amber);
+  border-color: var(--amber-dim);
+  background: var(--tint-amber);
 }
 .notice.warn h3 {
   color: var(--amber);
 }
 .notice.danger {
   border-left-color: var(--vermilion);
-  background: #170c0b;
+  border-color: var(--vermilion-dim);
+  background: var(--tint-vermilion);
 }
 .notice.danger h3 {
   color: var(--vermilion);
@@ -1487,19 +1530,20 @@ pre {
   display: grid;
   place-items: center;
   padding: 24px;
-  background: rgba(6, 9, 13, 0.8);
+  background: rgba(6, 9, 13, 0.72);
+  backdrop-filter: blur(3px);
 }
 
 .modal {
   width: min(560px, 100%);
   max-height: calc(100vh - 48px);
   overflow-y: auto;
-  background: var(--panel);
+  background: linear-gradient(180deg, var(--panel), var(--panel-2));
   border: 1px solid var(--rule);
-  border-top: 3px solid var(--dimmer);
-  border-radius: 6px;
-  padding: 20px;
-  box-shadow: 0 24px 64px rgba(0, 0, 0, 0.6);
+  border-top: 3px solid var(--amber);
+  border-radius: var(--radius-lg);
+  padding: 22px;
+  box-shadow: 0 28px 70px -20px rgba(0, 0, 0, 0.8);
 }
 /* The panel takes focus on open so a stray Enter has nothing to press; that
    should not draw a focus ring around the whole dialog. */
