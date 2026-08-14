@@ -18,6 +18,7 @@ import SellPanel from './components/SellPanel.jsx';
 import HistoryPanel from './components/HistoryPanel.jsx';
 import ActivityPanel from './components/ActivityPanel.jsx';
 import BundlerV2Panel from './components/BundlerV2Panel.jsx';
+import Toaster from './components/Toaster.jsx';
 
 const { bundleShare } = bundleShareModule;
 
@@ -331,6 +332,7 @@ export default function App() {
     // in unnoticed the next time something needs animating.
     <LazyMotion features={animation} strict>
       <MotionConfig reducedMotion="user">
+        <Toaster />
         <header className={`strip ${live ? 'is-live' : ''}`}>
           <h1 className="mark">
             pons<b>·</b>launcher

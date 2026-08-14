@@ -261,21 +261,39 @@ textarea {
   width: 100%;
 }
 
+/* Buttons are the instruments. Three tiers, each unmistakable at a glance:
+   PRIMARY (amber, filled, a faint glow) is the action to take; GHOST is a
+   secondary move that changes nothing on-chain; DANGER (vermilion) spends or is
+   irreversible. Every one gives real feedback — lift on hover, press on click —
+   so a control never feels dead. */
 button {
   cursor: pointer;
   font-weight: 600;
+  letter-spacing: 0.01em;
   background: var(--amber);
   color: #16120a;
   border-color: var(--amber);
+  box-shadow: 0 0 0 0 transparent;
+  transition:
+    filter 0.12s ease,
+    box-shadow 0.12s ease,
+    transform 0.06s ease,
+    border-color 0.12s ease;
 }
 button:hover:not(:disabled) {
-  filter: brightness(1.1);
+  filter: brightness(1.08);
+  box-shadow: 0 0 14px -2px var(--amber-dim);
+}
+button:active:not(:disabled) {
+  transform: translateY(1px);
+  filter: brightness(0.97);
 }
 button.ghost {
-  background: var(--panel-2);
+  background: var(--panel);
   color: var(--ink);
   border-color: var(--rule);
-  font-weight: 500;
+  font-weight: 600;
+  box-shadow: none;
 }
 /* The auto-fill tool above the wallet table. Given a bordered box with an accent
    stripe so it is found without being hunted for — but the stripe is the only
@@ -313,13 +331,18 @@ button.ghost {
   color: var(--amber);
 }
 button.ghost:hover:not(:disabled) {
-  border-color: var(--dimmer);
+  border-color: var(--amber);
+  color: var(--amber);
   filter: none;
+  box-shadow: none;
 }
 button.danger {
   background: var(--vermilion);
   border-color: var(--vermilion);
   color: #1a0603;
+}
+button.danger:hover:not(:disabled) {
+  box-shadow: 0 0 16px -2px var(--vermilion-dim);
 }
 button.link {
   background: none;
@@ -331,9 +354,95 @@ button.link {
   text-underline-offset: 3px;
 }
 button:disabled {
-  opacity: 0.4;
+  opacity: 0.38;
   cursor: not-allowed;
+  filter: grayscale(0.4);
+  box-shadow: none;
+}
+
+/* ── notice rail ─────────────────────────────────────────────────────────────
+   Instrument tickets that slide in when an action is refused or completed, so a
+   block is never a silent failure into a panel elsewhere. Fixed to the corner,
+   above everything, but never over the primary controls. */
+.toaster {
+  position: fixed;
+  right: 16px;
+  bottom: 16px;
+  z-index: 60;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  max-width: min(420px, calc(100vw - 32px));
+  pointer-events: none;
+}
+.toast {
+  pointer-events: auto;
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  padding: 11px 12px;
+  background: var(--panel);
+  border: 1px solid var(--rule);
+  border-left-width: 3px;
+  border-radius: 5px;
+  box-shadow: 0 10px 30px -12px rgba(0, 0, 0, 0.8);
+  animation: toast-in 0.16s ease-out;
+}
+@keyframes toast-in {
+  from {
+    opacity: 0;
+    transform: translateY(6px);
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  .toast {
+    animation: none;
+  }
+}
+.toast-error {
+  border-left-color: var(--vermilion);
+}
+.toast-ok {
+  border-left-color: var(--jade);
+}
+.toast-info {
+  border-left-color: var(--amber);
+}
+.toast-tag {
+  flex: none;
+  font: 700 10px/1.6 var(--mono);
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+}
+.toast-error .toast-tag {
+  color: var(--vermilion);
+}
+.toast-ok .toast-tag {
+  color: var(--jade);
+}
+.toast-info .toast-tag {
+  color: var(--amber);
+}
+.toast-msg {
+  flex: 1;
+  font-size: 12.5px;
+  line-height: 1.45;
+  color: var(--ink);
+}
+.toast-x {
+  flex: none;
+  background: none;
+  border: none;
+  color: var(--dim);
+  font-size: 16px;
+  line-height: 1;
+  padding: 0 2px;
+  box-shadow: none;
+}
+.toast-x:hover:not(:disabled) {
+  color: var(--ink);
   filter: none;
+  box-shadow: none;
 }
 
 .hint {

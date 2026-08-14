@@ -40,6 +40,18 @@ export function setApiKey(key) {
   }
 }
 
+/**
+ * Raise a visible notice. Every blocked action and every completed one can flag
+ * itself here, and a single listener (see Toaster) shows it — so a refusal is
+ * never a silent failure into a panel a page away. `kind` is 'error' | 'ok' |
+ * 'info'.
+ */
+export function notify(message, kind = 'info') {
+  if (typeof window !== 'undefined' && message) {
+    window.dispatchEvent(new CustomEvent('pons:notice', { detail: { message: String(message), kind } }));
+  }
+}
+
 export async function api(path, method = 'GET', body) {
   const res = await fetch(`/api${path}`, {
     method,
@@ -47,7 +59,14 @@ export async function api(path, method = 'GET', body) {
     body: body ? JSON.stringify(body) : undefined,
   });
   const json = await res.json().catch(() => ({ error: `${res.status} ${res.statusText}` }));
-  if (!res.ok) throw new Error(json.error || `${res.status}`);
+  if (!res.ok) {
+    const message = json.error || `${res.status}`;
+    // A blocked mutation always announces itself. Background reads (price, gas,
+    // configs) fail quietly — their callers already handle it — so only
+    // non-GET refusals raise a toast.
+    if (method !== 'GET') notify(message, 'error');
+    throw new Error(message);
+  }
   return json;
 }
 

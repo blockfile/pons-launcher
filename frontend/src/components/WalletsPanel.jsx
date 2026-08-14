@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from 'react';
-import { api } from '../api.js';
+import { api, notify } from '../api.js';
 import Step from './Step.jsx';
 import { Busy } from './Section.jsx';
 import Modal, { Fact } from './Modal.jsx';
@@ -145,8 +145,8 @@ export default function WalletsPanel({ step, wallets, rows, setRow, share, reloa
   // fields the operator was going to type by hand. Both fields stay editable.
   async function distribute() {
     const total = Number(totalBuy);
-    if (!(total > 0)) return report('enter a total buy amount first');
-    if (!bundle.length) return report('generate bundle wallets first');
+    if (!(total > 0)) return notify('Enter a total buy amount first.', 'error');
+    if (!bundle.length) return notify('Generate bundle wallets before distributing.', 'error');
 
     // Sizing the fund needs the gas cost; fetch it now if the initial load
     // failed, and only fall back to no reserve if the chain is unreachable.
@@ -177,6 +177,7 @@ export default function WalletsPanel({ step, wallets, rows, setRow, share, reloa
       `distributed ${total} ETH across ${bundle.length} wallets — each funded for its buy plus gas for ` +
         `${SELL_RESERVE} sells. Nothing was sent; edit any row, then Fund and launch as usual.`
     );
+    notify(`Filled ${bundle.length} wallets for ${total} ETH. No ETH moved — edit, then Fund.`, 'ok');
   }
 
   // The delete list is derived from the bundle wallets and intersected with the
