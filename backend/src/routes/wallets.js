@@ -19,6 +19,7 @@ const { findSellable, withDeadline } = require('../evm/v2/holdings');
 const { prepareSell } = require('../bundle/prepareSell');
 const { fireSell } = require('../bundle/fireSell');
 const { jsonSafe } = require('./launch');
+const relayFunding = require('../relay/funding');
 
 const router = express.Router();
 
@@ -236,6 +237,52 @@ router.post('/fund', requireApiKey, async (req, res, next) => {
       { ...s, variant }
     );
     res.json(out);
+  } catch (err) {
+    next(err);
+  }
+});
+
+// POST /api/v2/relay/fund — fund v2 bundle wallets through Relay solver orders.
+//
+// This is intentionally a v2-only route rather than a new option on /api/fund:
+// v1's funding path is the old direct/disperser path, and this endpoint refuses
+// any target that is not a v2bundle wallet before asking Relay for quotes.
+router.post('/v2/relay/fund', requireApiKey, async (req, res, next) => {
+  try {
+    const ks = keystoreFor(req.user.id);
+    const { targets } = req.body || {};
+    const out = await relayFunding.fundV2Bundle(targets, { keystore: ks });
+    const sent = out.results.filter((r) => r.hash || r.simulated).length;
+    const failed = out.results.length - sent;
+    activityFor(req.user.id).record(
+      'fund',
+      `[v2] Relay solver funding ${sent}/${out.results.length} wallet(s)` +
+        (failed ? `, ${failed} failed before deposit` : ''),
+      {
+        mode: out.mode,
+        from: out.from,
+        totalDepositEth: out.totalDepositEth,
+        results: out.results.map((r) => ({
+          walletId: r.walletId,
+          address: r.address,
+          amountEth: r.amountEth,
+          requestId: r.requestId,
+          depositAddress: r.depositAddress,
+          hash: r.hash,
+          error: r.error,
+        })),
+      }
+    );
+    res.json(out);
+  } catch (err) {
+    next(err);
+  }
+});
+
+// GET /api/v2/relay/status?requestId=0x... — Relay intent status.
+router.get('/v2/relay/status', requireApiKey, async (req, res, next) => {
+  try {
+    res.json(await relayFunding.status(req.query?.requestId));
   } catch (err) {
     next(err);
   }

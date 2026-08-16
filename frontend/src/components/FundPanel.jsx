@@ -3,6 +3,7 @@ import { api } from '../api.js';
 import Step from './Step.jsx';
 import { Busy } from './Section.jsx';
 import { rolesFor } from '../variant.js';
+import Address from './Address.jsx';
 
 /**
  * Step 4 — moving ETH from the dev wallet out to the bundle wallets.
@@ -18,14 +19,18 @@ import { rolesFor } from '../variant.js';
  */
 export default function FundPanel({ step, wallets, rows, dispersers, reload, report, variant = 'v1' }) {
   const roles = rolesFor(variant);
+  const isV2 = variant === 'v2';
   const [includeTokens, setIncludeTokens] = useState(false);
   const [tokenAddress, setTokenAddress] = useState('');
   const [busy, setBusy] = useState('');
+  const [relayRuns, setRelayRuns] = useState([]);
 
   async function act(name, fn) {
     setBusy(name);
     try {
-      report(await fn());
+      const out = await fn();
+      report(out);
+      if (out?.mode === 'relay-solver') setRelayRuns(out.results || []);
       // Give the transfers a moment to land before re-reading balances.
       setTimeout(reload, 3000);
     } catch (err) {
@@ -51,13 +56,25 @@ export default function FundPanel({ step, wallets, rows, dispersers, reload, rep
   const active = dispersers?.addresses?.length ?? 0;
   const threshold = Number(dispersers?.batchThreshold ?? 0);
   const batches = Boolean(threshold) && targets.length >= threshold;
+  const fundEndpoint = isV2 ? '/v2/relay/fund' : '/fund';
+  const fundBody = isV2 ? { targets } : { targets, variant };
 
   return (
     <Step {...step}>
       <p className="lede">
-        Sends ETH from the dev wallet to each bundle wallet, using the <b>Fund</b> column in the
-        table above. Blank rows are skipped. Fund a little above what each wallet will buy — it pays
-        its own gas.
+        {isV2 ? (
+          <>
+            Funds v2 bundle wallets through Relay solver orders, using the <b>Fund</b> column as the
+            exact amount each wallet should receive. The dev wallet pays Relay deposit addresses;
+            solvers fill the bundle wallets.
+          </>
+        ) : (
+          <>
+            Sends ETH from the dev wallet to each bundle wallet, using the <b>Fund</b> column in the
+            table above. Blank rows are skipped. Fund a little above what each wallet will buy — it
+            pays its own gas.
+          </>
+        )}
       </p>
 
       <div className="row">
@@ -65,14 +82,22 @@ export default function FundPanel({ step, wallets, rows, dispersers, reload, rep
           busy={busy === 'fund'}
           disabled={!targets.length}
           title={targets.length ? '' : 'enter a fund amount in the table above'}
-          onClick={() => act('fund', () => api('/fund', 'POST', { targets, variant }))}
+          onClick={() => act('fund', () => api(fundEndpoint, 'POST', fundBody))}
         >
           {targets.length
-            ? `Send ${total.toFixed(4)} ETH to ${targets.length} wallet${targets.length === 1 ? '' : 's'}`
+            ? isV2
+              ? `Relay ${total.toFixed(4)} ETH to ${targets.length} wallet${targets.length === 1 ? '' : 's'}`
+              : `Send ${total.toFixed(4)} ETH to ${targets.length} wallet${targets.length === 1 ? '' : 's'}`
             : 'Nothing to send'}
         </Busy>
 
-        {targets.length > 0 && Boolean(threshold) && (
+        {isV2 && targets.length > 0 && (
+          <span className="hint">
+            strict exact-output Relay deposits — verify balances before preflight
+          </span>
+        )}
+
+        {!isV2 && targets.length > 0 && Boolean(threshold) && (
           <span className="hint">
             {batches && active > 0
               ? `batched through ${active} disperser contract${active === 1 ? '' : 's'} — one transaction`
@@ -120,6 +145,48 @@ export default function FundPanel({ step, wallets, rows, dispersers, reload, rep
           Sweep back to dev
         </Busy>
       </div>
+
+      {isV2 && relayRuns.length > 0 && (
+        <div className="table-scroll" style={{ marginTop: 12 }}>
+          <table className="wallet-list">
+            <thead>
+              <tr>
+                <th>Bundle wallet</th>
+                <th>Receives</th>
+                <th>Relay deposit</th>
+                <th>Request</th>
+                <th>State</th>
+              </tr>
+            </thead>
+            <tbody>
+              {relayRuns.map((r) => (
+                <tr key={r.requestId || r.walletId}>
+                  <td className="addr">
+                    <Address value={r.address} />
+                  </td>
+                  <td className="bal">{Number(r.amountEth || 0).toFixed(6)}</td>
+                  <td className="addr">
+                    <Address value={r.depositAddress} />
+                    <div className="hint">{Number(r.depositEth || 0).toFixed(6)} ETH</div>
+                  </td>
+                  <td className="addr">
+                    {r.requestId ? `${r.requestId.slice(0, 10)}…${r.requestId.slice(-6)}` : '—'}
+                  </td>
+                  <td>
+                    {r.error ? (
+                      <span className="fund-state is-part">deposit failed</span>
+                    ) : r.simulated ? (
+                      <span className="fund-state is-wait">quoted</span>
+                    ) : (
+                      <span className="fund-state is-in">deposit sent</span>
+                    )}
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      )}
     </Step>
   );
 }

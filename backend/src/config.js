@@ -58,6 +58,12 @@ const config = {
     .map((a) => a.trim().toLowerCase())
     .filter(Boolean),
 
+  // Relay.link solver funding. Used only by the pons v2 bundle funding path:
+  // strict exact-output deposit orders send ETH to Relay, then a solver fills
+  // the v2 bundle wallet on Robinhood Chain. The old /api/fund path does not
+  // read this and v1 keeps its direct/disperser behaviour.
+  relayApiUrl: (process.env.RELAY_API_URL || 'https://api.relay.link').replace(/\/$/, ''),
+
   // ethers' tx.wait() polls every 4s by default, which is forty blocks on this
   // chain. v2 reads the curve address out of the launch receipt, so that delay
   // would sit squarely in the critical path — poll for it directly instead.

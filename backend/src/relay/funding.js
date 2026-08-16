@@ -1,0 +1,272 @@
+'use strict';
+
+// Relay.link solver funding for the active pons v2 launcher.
+//
+// This is deliberately NOT wired into the old funding.disperse helper. v1 keeps
+// sending directly from dev/disperser, while this path creates strict
+// exact-output Relay deposit orders whose destination is a v2 bundle wallet.
+// The deposit transaction goes to Relay; the fill that lands in the bundle
+// wallet comes from whichever solver Relay chooses.
+
+const { formatEther, getAddress, parseEther } = require('ethers');
+const config = require('../config');
+const { provider } = require('../evm/provider');
+const { rpcMessage } = require('../evm/errors');
+const { devWalletFor, bundleWalletsFor } = require('../wallets/variants');
+
+const NATIVE = '0x0000000000000000000000000000000000000000';
+const MAX_TARGETS = 31;
+
+function wei(value) {
+  return BigInt(value || 0);
+}
+
+function relayUrl(path) {
+  return `${config.relayApiUrl}${path.startsWith('/') ? path : `/${path}`}`;
+}
+
+async function relayRequest(path, { method = 'GET', body, fetchImpl = fetch } = {}) {
+  const res = await fetchImpl(relayUrl(path), {
+    method,
+    headers: { 'content-type': 'application/json' },
+    body: body ? JSON.stringify(body) : undefined,
+  });
+  const json = await res.json().catch(() => ({}));
+  if (!res.ok) {
+    throw new Error(json.message || json.error || `Relay returned ${res.status}`);
+  }
+  return json;
+}
+
+function quoteBody({ from, recipient, amountWei, chainId = config.chainId }) {
+  return {
+    user: getAddress(from),
+    recipient: getAddress(recipient),
+    originChainId: Number(chainId),
+    destinationChainId: Number(config.chainId),
+    originCurrency: NATIVE,
+    destinationCurrency: NATIVE,
+    amount: amountWei.toString(),
+    tradeType: 'EXACT_OUTPUT',
+    useDepositAddress: true,
+    strict: true,
+    refundTo: getAddress(from),
+  };
+}
+
+async function quoteDeposit(input, deps = {}) {
+  return relayRequest('/quote/v2', {
+    method: 'POST',
+    body: quoteBody(input),
+    fetchImpl: deps.fetch,
+  });
+}
+
+function depositStep(quote, { expectedFrom, expectedChainId = config.chainId } = {}) {
+  const step = (quote.steps || []).find((s) => s.id === 'deposit');
+  const item = step?.items?.find((i) => i.kind === 'transaction' || i.data) || step?.items?.[0];
+  const data = item?.data;
+  if (!step || !data) throw new Error('Relay quote did not include a deposit transaction');
+  if (Number(data.chainId) !== Number(expectedChainId)) {
+    throw new Error(`Relay returned origin chain ${data.chainId}; this server can only sign chain ${expectedChainId}`);
+  }
+  if (expectedFrom && getAddress(data.from) !== getAddress(expectedFrom)) {
+    throw new Error(`Relay returned a deposit from ${data.from}, expected ${expectedFrom}`);
+  }
+  if (!data.to) throw new Error('Relay quote did not include a deposit address');
+  if (wei(data.value) <= 0n) throw new Error('Relay quote did not include a positive deposit amount');
+
+  return {
+    step,
+    item,
+    tx: data,
+    requestId: step.requestId || null,
+    check: item.check || null,
+    depositAddress: getAddress(step.depositAddress || data.to),
+  };
+}
+
+function normaliseTx(tx, nonce) {
+  const out = {
+    to: getAddress(tx.to),
+    data: tx.data || '0x',
+    value: wei(tx.value),
+    gasLimit: wei(tx.gas || tx.gasLimit || 0),
+    nonce,
+    chainId: Number(tx.chainId),
+  };
+  if (tx.maxFeePerGas != null) out.maxFeePerGas = wei(tx.maxFeePerGas);
+  if (tx.maxPriorityFeePerGas != null) out.maxPriorityFeePerGas = wei(tx.maxPriorityFeePerGas);
+  if (tx.gasPrice != null) out.gasPrice = wei(tx.gasPrice);
+  return out;
+}
+
+function maxGasCost(tx) {
+  const gas = wei(tx.gas || tx.gasLimit || 0);
+  const price = wei(tx.maxFeePerGas || tx.gasPrice || 0);
+  return gas * price;
+}
+
+function publicFees(quote) {
+  const out = {};
+  for (const [key, value] of Object.entries(quote.fees || {})) {
+    out[key] = {
+      amount: value?.amount?.toString?.() || '0',
+      amountFormatted: value?.amountFormatted || null,
+      amountUsd: value?.amountUsd || null,
+      symbol: value?.currency?.symbol || null,
+      chainId: value?.currency?.chainId ?? null,
+    };
+  }
+  return out;
+}
+
+function publicDetails(quote) {
+  return {
+    operation: quote.details?.operation || null,
+    timeEstimate: quote.details?.timeEstimate ?? null,
+    rate: quote.details?.rate || null,
+    totalImpact: quote.details?.totalImpact || null,
+    currencyIn: {
+      amount: quote.details?.currencyIn?.amount || null,
+      amountFormatted: quote.details?.currencyIn?.amountFormatted || null,
+      amountUsd: quote.details?.currencyIn?.amountUsd || null,
+      chainId: quote.details?.currencyIn?.currency?.chainId ?? null,
+    },
+    currencyOut: {
+      amount: quote.details?.currencyOut?.amount || null,
+      amountFormatted: quote.details?.currencyOut?.amountFormatted || null,
+      amountUsd: quote.details?.currencyOut?.amountUsd || null,
+      chainId: quote.details?.currencyOut?.currency?.chainId ?? null,
+    },
+    solver: quote.protocol?.v2?.orderData?.solver || null,
+    orderId: quote.protocol?.v2?.orderId || null,
+  };
+}
+
+function planTargets(targets, ks) {
+  if (!Array.isArray(targets) || !targets.length) throw new Error('targets[] is required');
+  if (targets.length > MAX_TARGETS) throw new Error(`v2 relay funding is capped at ${MAX_TARGETS} wallets`);
+
+  const bundles = new Map(bundleWalletsFor(ks, 'v2').map((w) => [w.id, w]));
+  const seen = new Set();
+  return targets.map((t) => {
+    if (seen.has(t.walletId)) throw new Error(`wallet ${t.walletId} is listed twice`);
+    seen.add(t.walletId);
+    const wallet = bundles.get(t.walletId);
+    if (!wallet) throw new Error(`wallet ${t.walletId} is not a v2 bundle wallet`);
+    const amount = parseEther(String(t.amountEth || 0));
+    if (amount <= 0n) throw new Error(`wallet ${t.walletId} needs a positive amount`);
+    return {
+      walletId: wallet.id,
+      address: getAddress(wallet.address),
+      amountWei: amount,
+      amountEth: formatEther(amount),
+    };
+  });
+}
+
+async function fundV2Bundle(targets, { keystore: ks, relayQuote = quoteDeposit, rpc = provider, dryRun = config.dryRun } = {}) {
+  if (!ks) throw new Error('keystore is required');
+
+  const dev = devWalletFor(ks, 'v2');
+  const planned = planTargets(targets, ks);
+  const signer = ks.signer(dev.id, rpc);
+
+  const quoted = await Promise.all(
+    planned.map(async (target) => {
+      const quote = await relayQuote({
+        from: dev.address,
+        recipient: target.address,
+        amountWei: target.amountWei,
+        chainId: config.chainId,
+      });
+      const deposit = depositStep(quote, { expectedFrom: dev.address, expectedChainId: config.chainId });
+      return { target, quote, deposit };
+    })
+  );
+
+  const totalDeposit = quoted.reduce((sum, q) => sum + wei(q.deposit.tx.value), 0n);
+  const totalMaxGas = quoted.reduce((sum, q) => sum + maxGasCost(q.deposit.tx), 0n);
+  const balance = await rpc.getBalance(dev.address);
+  if (balance < totalDeposit + totalMaxGas) {
+    throw new Error(
+      `v2 dev wallet has ${formatEther(balance)} ETH but Relay deposits need up to ` +
+        `${formatEther(totalDeposit + totalMaxGas)} (deposits + max gas)`
+    );
+  }
+
+  if (dryRun) {
+    return {
+      protocol: 'v2',
+      mode: 'relay-solver',
+      simulated: true,
+      from: dev.address,
+      totalDepositEth: formatEther(totalDeposit),
+      results: quoted.map(({ target, quote, deposit }) => ({
+        walletId: target.walletId,
+        address: target.address,
+        amountEth: target.amountEth,
+        requestId: deposit.requestId,
+        depositAddress: deposit.depositAddress,
+        depositEth: formatEther(wei(deposit.tx.value)),
+        hash: null,
+        simulated: true,
+        check: deposit.check,
+        fees: publicFees(quote),
+        details: publicDetails(quote),
+      })),
+    };
+  }
+
+  let nonce = await rpc.getTransactionCount(dev.address, 'pending');
+  const results = await Promise.all(
+    quoted.map(async ({ target, quote, deposit }) => {
+      const thisNonce = nonce++;
+      const entry = {
+        walletId: target.walletId,
+        address: target.address,
+        amountEth: target.amountEth,
+        requestId: deposit.requestId,
+        depositAddress: deposit.depositAddress,
+        depositEth: formatEther(wei(deposit.tx.value)),
+        check: deposit.check,
+        fees: publicFees(quote),
+        details: publicDetails(quote),
+      };
+      try {
+        const sent = await signer.sendTransaction(normaliseTx(deposit.tx, thisNonce));
+        return { ...entry, hash: sent.hash };
+      } catch (err) {
+        return { ...entry, error: rpcMessage(err) };
+      }
+    })
+  );
+
+  return {
+    protocol: 'v2',
+    mode: 'relay-solver',
+    from: dev.address,
+    totalDepositEth: formatEther(totalDeposit),
+    results,
+  };
+}
+
+async function status(requestId, deps = {}) {
+  if (!/^0x[0-9a-fA-F]{64}$/.test(String(requestId || ''))) {
+    throw new Error('requestId must be a 32-byte hex string');
+  }
+  return relayRequest(`/intents/status/v3?requestId=${encodeURIComponent(requestId)}`, {
+    fetchImpl: deps.fetch,
+  });
+}
+
+module.exports = {
+  NATIVE,
+  quoteBody,
+  depositStep,
+  fundV2Bundle,
+  quoteDeposit,
+  status,
+  _private: { planTargets, normaliseTx, maxGasCost, publicDetails, publicFees },
+};
