@@ -463,8 +463,8 @@ export default function App() {
             </button>
             <span className="hint">
               {tab === 'v1'
-                ? 'the six-step sequence — dev wallet funds everything'
-                : 'a bench for ETH arriving from outside this console — watches balances, sends nothing'}
+                ? `the ${steps.length}-step sequence — dev wallet funds everything`
+                : `${steps.length} steps, no disperser — funded from outside this console`}
             </span>
           </div>
 

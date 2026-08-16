@@ -13,8 +13,13 @@
  * v1 on both sides, so nothing that predates this file changes behaviour.
  */
 export const VARIANTS = {
-  v1: { dev: 'dev', bundle: 'bundle', label: 'V1' },
-  v2: { dev: 'v2dev', bundle: 'v2bundle', label: 'V2' },
+  // `dispersers` must match the backend's copy exactly — it is what decides
+  // whether the disperser step is in this launcher's plan at all. It was
+  // missing here once, and because `undefined` is falsy the step vanished from
+  // BOTH launchers rather than just v2. The test beside this file now compares
+  // every shared field for that reason.
+  v1: { dev: 'dev', bundle: 'bundle', dispersers: true, label: 'V1' },
+  v2: { dev: 'v2dev', bundle: 'v2bundle', dispersers: false, label: 'V2' },
 };
 
 export const DEFAULT_VARIANT = 'v1';

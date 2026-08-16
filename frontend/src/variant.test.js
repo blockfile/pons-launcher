@@ -70,8 +70,17 @@ test('the console role map matches the backend one exactly', () => {
   // this is the seam where they are checked against each other.
   for (const name of Object.keys(backend.VARIANTS)) {
     assert.ok(VARIANTS[name], `console is missing the ${name} variant`);
-    assert.equal(VARIANTS[name].dev, backend.VARIANTS[name].dev, `${name}.dev drifted`);
-    assert.equal(VARIANTS[name].bundle, backend.VARIANTS[name].bundle, `${name}.bundle drifted`);
+    // EVERY field the backend declares, not a chosen few. Comparing only dev
+    // and bundle is how `dispersers` went missing here: undefined is falsy, so
+    // the disperser step disappeared from v1 as well as v2 and the drift test
+    // still passed.
+    for (const field of Object.keys(backend.VARIANTS[name])) {
+      assert.equal(
+        VARIANTS[name][field],
+        backend.VARIANTS[name][field],
+        `${name}.${field} drifted between the console and the backend`
+      );
+    }
   }
   assert.equal(DEFAULT_VARIANT, backend.DEFAULT_VARIANT);
 });
