@@ -104,6 +104,16 @@ export default function App() {
 
   const setRow = (id, patch) => setRows((r) => ({ ...r, [id]: { ...r[id], ...patch } }));
 
+  // Drop what belongs to the launcher being left. Both of these are answers
+  // about a specific set of wallets, and v2 has no disperser panel to overwrite
+  // the value at all — so without this, switching to v2 would keep showing v1's
+  // deployed contracts and let step 4 claim a funding run would be batched
+  // through them.
+  useEffect(() => {
+    setDispersers(null);
+    setSellable(null);
+  }, [tab]);
+
   /**
    * What every bundle amount currently on screen would take of the supply.
    *
@@ -157,7 +167,13 @@ export default function App() {
   };
 
   const loadWallets = useCallback(async () => setWallets(await api('/wallets')), []);
-  const loadHistory = useCallback(async () => setHistory(await api('/launches?limit=15')), []);
+  // Per launcher. The store is one file per user and the variant is what
+  // separates the two inside it — without this filter v2's step 5 reads v1's
+  // launches as its own and reports DONE for a run it never made.
+  const loadHistory = useCallback(
+    async () => setHistory(await api(`/launches?limit=15&variant=${tab}`)),
+    [tab]
+  );
 
   const loadAll = useCallback(async () => {
     try {
@@ -232,8 +248,9 @@ export default function App() {
     // waiting for.
     const missing = DRAFT_FIELDS.filter(([k]) => !draft?.[k]).map(([, label]) => label);
 
-    const plan = [
+    const fullPlan = [
       {
+        key: 'dev',
         n: 1,
         title: 'Create dev wallet',
         done: Boolean(dev),
@@ -242,6 +259,7 @@ export default function App() {
           : 'it signs the launch and pays for everything',
       },
       {
+        key: 'disperser',
         n: 2,
         title: 'Deploy disperser contract',
         optional: true,
@@ -252,6 +270,7 @@ export default function App() {
           : 'without one, funding sends one transfer per wallet',
       },
       {
+        key: 'wallets',
         n: 3,
         title: 'Generate bundle wallets',
         done: bundle.length > 0,
@@ -260,6 +279,7 @@ export default function App() {
           : 'each buys behind the dev buy, capped at 5%',
       },
       {
+        key: 'fund',
         n: 4,
         title: 'Fund bundle wallets',
         done: funded > 0,
@@ -268,6 +288,7 @@ export default function App() {
           : 'ETH out of the dev wallet, one row each',
       },
       {
+        key: 'launch',
         n: 5,
         title: 'Launch + bundle',
         done: launched,
@@ -285,6 +306,7 @@ export default function App() {
               : 'name, symbol and logo ready',
       },
       {
+        key: 'sell',
         n: 6,
         title: 'Sell everything',
         done: false,
@@ -293,6 +315,14 @@ export default function App() {
           : 'nothing your bundle holds is sellable yet',
       },
     ];
+
+    // Steps this launcher does not have simply are not in its plan — v2 funds
+    // with individual transfers, so it has no disperser step and its remaining
+    // steps renumber to close the gap rather than skipping a number.
+    const plan = fullPlan.filter((s) => s.key !== 'disperser' || roles.dispersers);
+    plan.forEach((s, i) => {
+      s.n = i + 1;
+    });
 
     // The chain of required steps. A step waits on the last required one before
     // it; `needs` set explicitly wins, which is how the optional step still
@@ -340,7 +370,9 @@ export default function App() {
 
   // The step whose panel is drawn where, so a panel never has to know its own
   // number and the order lives in one place — this file, in render order below.
-  const step = (n) => steps[n - 1];
+  // By KEY, not by position. v2 has no disperser step, so its numbering closes
+  // the gap and a panel asking for "step 2" would get the wrong one.
+  const step = (key) => steps.find((s) => s.key === key) || null;
 
   return (
     // reducedMotion="user" hands the whole question to the operating system:
@@ -514,23 +546,25 @@ export default function App() {
 
           <DevWalletPanel
             variant={tab}
-            step={step(1)}
+            step={step('dev')}
             wallets={wallets}
             explorer={health?.explorer || ''}
             reload={loadWallets}
             report={report}
           />
+          {roles.dispersers && (
           <DispersersPanel
             variant={tab}
-            step={step(2)}
+            step={step('disperser')}
             explorer={health?.explorer || ''}
             credential={credential}
             report={report}
             onState={setDispersers}
           />
+          )}
           <WalletsPanel
             variant={tab}
-            step={step(3)}
+            step={step('wallets')}
             wallets={wallets}
             rows={rows}
             setRow={setRow}
@@ -540,7 +574,7 @@ export default function App() {
           />
           <FundPanel
             variant={tab}
-            step={step(4)}
+            step={step('fund')}
             wallets={wallets}
             rows={rows}
             dispersers={dispersers}
@@ -556,7 +590,7 @@ export default function App() {
 
           <LaunchForm
             variant={tab}
-            step={step(5)}
+            step={step('launch')}
             configs={configs}
             wallets={wallets}
             rows={rows}
@@ -584,13 +618,13 @@ export default function App() {
               title: 'Result',
               state: 'readout',
               chip: reportedAt ? `updated ${reportedAt}` : null,
-              railDone: steps[4].state === 'done',
+              railDone: step('launch')?.state === 'done',
             }}
             output={output}
           />
           <SellPanel
             variant={tab}
-            step={{ ...step(6), last: true }}
+            step={{ ...step('sell'), last: true }}
             explorer={health?.explorer || ''}
             credential={credential}
             live={live}

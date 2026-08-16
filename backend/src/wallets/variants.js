@@ -21,14 +21,19 @@
  * ETH of regression.
  */
 const VARIANTS = {
-  v1: { dev: 'dev', bundle: 'bundle' },
-  // v2 reuses the roles the distributor strategy already declared. They are
-  // safe to take: BundlerV2Panel is switched off (SHOW_V2_BUNDLER === false)
-  // because the pons v1 factory it targets has launchEnabled === false and a
-  // provably empty whitelist, so nothing is currently spending them. If that
-  // panel is ever revived, one of the two needs a third role rather than a
-  // shared one — sharing is exactly the bug the roles were added to fix.
-  v2: { dev: 'v2dev', bundle: 'v2bundle' },
+  // `dispersers` is whether the launcher batches funding through a deployed
+  // Disperse contract. v1 does; v2 funds with individual transfers and has no
+  // step 2 at all. It is a property of the launcher rather than a setting,
+  // because the whole point of the disperser is to survive rate limiting on a
+  // large fan-out, and a launcher that is not doing that fan-out has nothing to
+  // batch — offering the step anyway would be a control that costs gas to
+  // deploy and then never gets used.
+  v1: { dev: 'dev', bundle: 'bundle', dispersers: true },
+  // v2 owns these outright. The distributor strategy used to hold v2dev and
+  // v2bundle; it moved to distdev/distfunding/distbundle when this launcher
+  // took them, so nothing else can reach them — see the note above ROLES in
+  // keystore.js.
+  v2: { dev: 'v2dev', bundle: 'v2bundle', dispersers: false },
 };
 
 const DEFAULT_VARIANT = 'v1';
@@ -66,4 +71,16 @@ function bundleWalletsFor(ks, variant = DEFAULT_VARIANT) {
   return bundle === 'bundle' ? ks.bundleWallets() : ks.walletsWithRole(bundle);
 }
 
-module.exports = { VARIANTS, DEFAULT_VARIANT, roles, devWalletFor, bundleWalletsFor };
+/** Does this launcher batch its funding through a Disperse contract? */
+function usesDispersers(variant = DEFAULT_VARIANT) {
+  return roles(variant).dispersers === true;
+}
+
+module.exports = {
+  VARIANTS,
+  DEFAULT_VARIANT,
+  roles,
+  devWalletFor,
+  bundleWalletsFor,
+  usesDispersers,
+};

@@ -59,8 +59,32 @@ const DEFAULT_ID = 'default';
 
 // v1 uses dev + bundle. v2 uses its own three so the strategies never share a
 // wallet — see the note above devWallet().
-const ROLES = new Set(['dev', 'bundle', 'v2dev', 'v2funding', 'v2bundle']);
-const SINGLETON_ROLES = new Set(['dev', 'v2dev', 'v2funding']);
+// Three owners, no overlap:
+//   dev / bundle                      — the v1 launcher
+//   v2dev / v2bundle                  — the v2 launcher
+//   distdev / distfunding / distbundle — the distributor strategy
+//
+// The dist* names exist because the distributor used to hold v2dev/v2funding/
+// v2bundle, and the v2 LAUNCHER then took two of those three. Two features
+// spending one wallet while each believed it owned it is the exact bug the
+// roles were introduced to prevent, so the older and currently-disabled of the
+// two moved rather than the live one.
+//
+// 'v2funding' is kept for one reason: a keystore written before that move may
+// still hold a wallet under it. Nothing reads it now, but dropping it from this
+// set would make the wallet unreachable — setRole would refuse to move it out
+// and the operator could not recover the key through the console.
+const ROLES = new Set([
+  'dev',
+  'bundle',
+  'v2dev',
+  'v2bundle',
+  'distdev',
+  'distfunding',
+  'distbundle',
+  'v2funding',
+]);
+const SINGLETON_ROLES = new Set(['dev', 'v2dev', 'distdev', 'distfunding', 'v2funding']);
 const instances = new Map();
 // Same alphabet as users.slug() (backend/src/users/users.js). Duplicated
 // rather than imported: this module deliberately consumes nothing from the

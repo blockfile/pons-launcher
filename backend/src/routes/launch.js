@@ -225,7 +225,13 @@ router.post('/v2/launch', requireApiKey, withLaunchLock(async (req, res, next) =
 
 router.get('/launches', (req, res, next) => {
   try {
-    res.json(historyFor(req.user.id).list(Number(req.query.limit) || 50));
+    // Filtered by launcher. Without this v2's step 5 reads v1's launches as
+    // its own and reports DONE for a run it never made — the history is one
+    // store per user, and the variant is what separates the two inside it.
+    const want = req.query.variant || DEFAULT_VARIANT;
+    const all = historyFor(req.user.id).list(500);
+    const mine = all.filter((e) => (e?.plan?.variant || DEFAULT_VARIANT) === want);
+    res.json(mine.slice(0, Number(req.query.limit) || 50));
   } catch (err) {
     next(err);
   }

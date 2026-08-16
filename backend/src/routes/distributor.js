@@ -56,7 +56,7 @@ const router = express.Router();
  * wallets. Three roles, three addresses, none of them shared with v1.
  */
 function v2Signer(ks) {
-  const signer = ks.walletWithRole('v2dev');
+  const signer = ks.walletWithRole('distdev');
   if (!signer) {
     throw new Error('no v2 dev wallet — generate one on the V2 tab first');
   }
@@ -66,7 +66,7 @@ function v2Signer(ks) {
 /**
  * Resolve the wallets a buy will pay out to, and their shares.
  *
- * v2bundle ONLY. These are not v1's bundle wallets and must never be: the two
+ * distbundle ONLY. These are not v1's bundle wallets and must never be: the two
  * strategies fund and spend differently, and an operator who cannot tell from
  * the screen which set a button is about to move is one click from mixing them.
  *
@@ -76,7 +76,7 @@ function v2Signer(ks) {
  */
 function resolveRecipients(ks, body) {
   const ids = Array.isArray(body?.walletIds) ? body.walletIds : [];
-  const known = ks.walletsWithRole('v2bundle');
+  const known = ks.walletsWithRole('distbundle');
   const chosen = ids.length
     ? ids.map((id) => {
         const w = known.find((k) => k.id === id);
@@ -234,7 +234,7 @@ router.post('/distributor/stage', requireApiKey, async (req, res, next) => {
     if (!record) throw new Error('no distributor deployed — deploy one first');
 
     const ks = keystoreFor(req.user.id);
-    const funder = ks.walletWithRole('v2funding');
+    const funder = ks.walletWithRole('distfunding');
     if (!funder) throw new Error('no v2 funding wallet — create one on the V2 tab first');
 
     const value = parseEther(String(amountEth));
@@ -286,7 +286,7 @@ router.post('/distributor/withdraw', requireApiKey, async (req, res, next) => {
     const signer = ks.signer(v2Signer(ks).id, provider);
     // Back to the funder by default: it is where the stage came from, and the
     // signer is meant to hold gas and nothing else.
-    const to = req.body?.to || ks.walletWithRole('v2funding')?.address || v2Signer(ks).address;
+    const to = req.body?.to || ks.walletWithRole('distfunding')?.address || v2Signer(ks).address;
 
     const before = await provider.getBalance(record.address);
     if (before === 0n) throw new Error('the distributor holds no ETH');

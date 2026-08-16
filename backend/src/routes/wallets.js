@@ -4,7 +4,12 @@ const express = require('express');
 const config = require('../config');
 const { keystoreFor } = require('../wallets/keystore');
 const funding = require('../wallets/funding');
-const { DEFAULT_VARIANT, devWalletFor, bundleWalletsFor } = require('../wallets/variants');
+const {
+  DEFAULT_VARIANT,
+  devWalletFor,
+  bundleWalletsFor,
+  usesDispersers,
+} = require('../wallets/variants');
 const { dispersersFor } = require('../store/dispersers');
 const { distributorFor } = require('../store/distributors');
 const { activityFor, viewFor, summariseTransfers } = require('../store/activity');
@@ -531,8 +536,15 @@ router.post('/dispersers/deploy', requireApiKey, async (req, res, next) => {
     if (confirm !== true) throw new Error('deploying spends ETH — requires { confirm: true }');
     if (config.dryRun) throw new Error('DRY_RUN is on — nothing would be deployed');
 
+    const deployVariant = req.body?.variant || DEFAULT_VARIANT;
+    // Refused rather than quietly allowed: a launcher that funds with
+    // individual transfers has nothing to batch, so a contract deployed for it
+    // would cost gas and then never be called.
+    if (!usesDispersers(deployVariant)) {
+      throw new Error(`the ${deployVariant} launcher funds with individual transfers and uses no disperser`);
+    }
     const ks = keystoreFor(req.user.id);
-    const signer = ks.signer(devWalletFor(ks, req.body?.variant || DEFAULT_VARIANT).id, provider);
+    const signer = ks.signer(devWalletFor(ks, deployVariant).id, provider);
     const store = dispersersFor(req.user.id);
 
     try {

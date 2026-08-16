@@ -106,9 +106,9 @@ export default function BundlerV2Panel({
   // v2's OWN wallets. Nothing here reads v1's dev or bundle roles: the two
   // strategies fund and spend differently, and a screen that cannot say which
   // set a button is about to move is one click from mixing them.
-  const dev = wallets.find((w) => w.role === 'v2dev');
-  const funder = wallets.find((w) => w.role === 'v2funding');
-  const bundle = wallets.filter((w) => w.role === 'v2bundle');
+  const dev = wallets.find((w) => w.role === 'distdev');
+  const funder = wallets.find((w) => w.role === 'distfunding');
+  const bundle = wallets.filter((w) => w.role === 'distbundle');
   const [count, setCount] = useState(30);
   // Import is offered everywhere create is. A wallet that already exists —
   // funded, aged, or carried over from another tool — is often the one an
@@ -168,7 +168,7 @@ export default function BundlerV2Panel({
     if (picking !== role) return null;
     // Anything not already spoken for by this tab. A v1 bundle wallet is the
     // usual candidate — it is where an operator's spare funded wallets live.
-    const candidates = wallets.filter((w) => !['v2dev', 'v2funding'].includes(w.role));
+    const candidates = wallets.filter((w) => !['distdev', 'distfunding'].includes(w.role));
     return (
       <div style={{ padding: '4px 0' }}>
         <div className="hint" style={{ marginBottom: 4 }}>{label}</div>
@@ -418,27 +418,27 @@ export default function BundlerV2Panel({
                 <td>
                   {!dev && (
                     <>
-                      <Busy busy={busy === 'v2dev'} className="ghost" onClick={() => gen('v2dev')}>
+                      <Busy busy={busy === 'distdev'} className="ghost" onClick={() => gen('distdev')}>
                         Create
                       </Busy>
-                      <button type="button" className="ghost" onClick={() => { setImporting('v2dev'); setKeys(''); }}>
+                      <button type="button" className="ghost" onClick={() => { setImporting('distdev'); setKeys(''); }}>
                         import
                       </button>
-                      <button type="button" className="ghost" onClick={() => { setPicking('v2dev'); setImporting(''); }}>
+                      <button type="button" className="ghost" onClick={() => { setPicking('distdev'); setImporting(''); }}>
                         use existing
                       </button>
                     </>
                   )}
                 </td>
               </tr>
-              {importing === 'v2dev' && (
+              {importing === 'distdev' && (
                 <tr>
-                  <td colSpan={4}>{importBox('v2dev', 'signer private key')}</td>
+                  <td colSpan={4}>{importBox('distdev', 'signer private key')}</td>
                 </tr>
               )}
-              {picking === 'v2dev' && (
+              {picking === 'distdev' && (
                 <tr>
-                  <td colSpan={4}>{picker('v2dev', 'move an existing wallet into the signer role')}</td>
+                  <td colSpan={4}>{picker('distdev', 'move an existing wallet into the signer role')}</td>
                 </tr>
               )}
               <tr>
@@ -458,27 +458,27 @@ export default function BundlerV2Panel({
                 <td>
                   {!funder && (
                     <>
-                      <Busy busy={busy === 'v2funding'} className="ghost" onClick={() => gen('v2funding')}>
+                      <Busy busy={busy === 'distfunding'} className="ghost" onClick={() => gen('distfunding')}>
                         Create
                       </Busy>
-                      <button type="button" className="ghost" onClick={() => { setImporting('v2funding'); setKeys(''); }}>
+                      <button type="button" className="ghost" onClick={() => { setImporting('distfunding'); setKeys(''); }}>
                         import
                       </button>
-                      <button type="button" className="ghost" onClick={() => { setPicking('v2funding'); setImporting(''); }}>
+                      <button type="button" className="ghost" onClick={() => { setPicking('distfunding'); setImporting(''); }}>
                         use existing
                       </button>
                     </>
                   )}
                 </td>
               </tr>
-              {importing === 'v2funding' && (
+              {importing === 'distfunding' && (
                 <tr>
-                  <td colSpan={4}>{importBox('v2funding', 'funder private key')}</td>
+                  <td colSpan={4}>{importBox('distfunding', 'funder private key')}</td>
                 </tr>
               )}
-              {picking === 'v2funding' && (
+              {picking === 'distfunding' && (
                 <tr>
-                  <td colSpan={4}>{picker('v2funding', 'move an existing wallet into the funder role')}</td>
+                  <td colSpan={4}>{picker('distfunding', 'move an existing wallet into the funder role')}</td>
                 </tr>
               )}
             </tbody>
@@ -573,19 +573,19 @@ export default function BundlerV2Panel({
             {bundle.length ? `${plural(bundle.length, 'V2 bundle wallet')} so far` : 'none yet'}
           </span>
           <Busy
-            busy={busy === 'v2bundle'}
+            busy={busy === 'distbundle'}
             className="ghost"
             disabled={!(Number(count) >= 1)}
-            onClick={() => gen('v2bundle', Number(count))}
+            onClick={() => gen('distbundle', Number(count))}
           >
             Create {count}
           </Busy>
-          <button type="button" className="ghost" onClick={() => { setImporting('v2bundle'); setKeys(''); }}>
+          <button type="button" className="ghost" onClick={() => { setImporting('distbundle'); setKeys(''); }}>
             import
           </button>
         </div>
 
-        {importBox('v2bundle', 'private keys — several separated by spaces, commas or newlines')}
+        {importBox('distbundle', 'private keys — several separated by spaces, commas or newlines')}
 
         {bundle.length > 0 && (
           <div className="table-scroll">

@@ -360,6 +360,8 @@ async function prepareV2(input, deps = {}) {
   }
 
   return {
+    // Which launcher built this — see the note in prepare.js.
+    variant: deps.variant || DEFAULT_VARIANT,
     protocol: 'v2',
     mode: 'presigned',
     token,

@@ -225,6 +225,10 @@ async function prepare(input, { keystore: ks = keystore, variant = DEFAULT_VARIA
   const share = bundleShare({ protocol: 'v1', launchConfig, devBuyWei, buys: legs });
 
   return {
+    // Which launcher built this. It rides on the plan so the history record
+    // knows too — without it every run looks the same afterwards and v2's
+    // step 5 reads v1's launches as its own.
+    variant,
     token,
     salt,
     launchConfigId: Number(launchConfigId),

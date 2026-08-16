@@ -1,7 +1,13 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
 
-const { roles, devWalletFor, bundleWalletsFor, DEFAULT_VARIANT } = require('./variants');
+const {
+  roles,
+  devWalletFor,
+  bundleWalletsFor,
+  usesDispersers,
+  DEFAULT_VARIANT,
+} = require('./variants');
 
 // A keystore stand-in. Only the four accessors the money paths reach for.
 function fakeKeystore(wallets) {
@@ -17,6 +23,27 @@ function fakeKeystore(wallets) {
   };
 }
 
+test('only v1 batches funding through a disperser', () => {
+  // v2 funds with individual transfers, so it has no step 2 and the deploy
+  // route refuses it. A contract deployed for a launcher that never calls it
+  // is gas spent on nothing.
+  assert.equal(usesDispersers('v1'), true);
+  assert.equal(usesDispersers(), true);
+  assert.equal(usesDispersers('v2'), false);
+});
+
+test('the two launchers own disjoint roles, and neither is the distributor', () => {
+  // distdev/distfunding/distbundle belong to the distributor strategy. It used
+  // to hold v2dev and v2bundle; it moved when the v2 launcher took them.
+  const v1 = roles('v1');
+  const v2 = roles('v2');
+  const used = [v1.dev, v1.bundle, v2.dev, v2.bundle];
+  assert.equal(new Set(used).size, 4, 'no role may be claimed by both launchers');
+  for (const r of used) {
+    assert.equal(r.startsWith('dist'), false, `${r} belongs to the distributor`);
+  }
+});
+
 const POPULATED = [
   { id: 'a', role: 'dev', address: '0xV1DEV' },
   { id: 'b', role: 'bundle', address: '0xV1B1' },
@@ -27,8 +54,9 @@ const POPULATED = [
 
 test('the default variant is v1, so an unchanged caller is unchanged', () => {
   assert.equal(DEFAULT_VARIANT, 'v1');
-  assert.deepEqual(roles(), { dev: 'dev', bundle: 'bundle' });
-  assert.deepEqual(roles('v1'), { dev: 'dev', bundle: 'bundle' });
+  assert.equal(roles().dev, 'dev');
+  assert.equal(roles().bundle, 'bundle');
+  assert.deepEqual(roles(), roles('v1'));
 });
 
 test('omitting the variant resolves exactly what the hardcoded accessors returned', () => {
