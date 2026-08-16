@@ -4,6 +4,7 @@ const express = require('express');
 const config = require('../config');
 const { keystoreFor } = require('../wallets/keystore');
 const funding = require('../wallets/funding');
+const { DEFAULT_VARIANT, devWalletFor, bundleWalletsFor } = require('../wallets/variants');
 const { dispersersFor } = require('../store/dispersers');
 const { distributorFor } = require('../store/distributors');
 const { activityFor, viewFor, summariseTransfers } = require('../store/activity');
@@ -29,12 +30,19 @@ const router = express.Router();
 // launch: an operator cannot even create a 32nd bundle wallet.
 const MAX_BUNDLE_WALLETS = 31;
 
+// Every bundle role, not just v1's. The 31 is a property of the FACTORY — the
+// forwarder appends its own recipient to a 32-slot exemption list — so it binds
+// any launcher pointed at it, and a v2 bundle of 32 would strand its ETH on the
+// same revert that stranded v1's. Counted per role rather than across both, so
+// the two launchers each get their own 31 instead of eating each other's.
+const BUNDLE_ROLES = new Set(['bundle', 'v2bundle']);
+
 function assertBundleRoom(ks, role, adding) {
-  if (role !== 'bundle') return;
-  const have = ks.bundleWallets().length;
+  if (!BUNDLE_ROLES.has(role)) return;
+  const have = ks.walletsWithRole(role).length;
   if (have + adding > MAX_BUNDLE_WALLETS) {
     throw new Error(
-      `a launch exempts at most ${MAX_BUNDLE_WALLETS} bundle wallets (the dev wallet is separate). ` +
+      `a launch exempts at most ${MAX_BUNDLE_WALLETS} ${role} wallets (the dev wallet is separate). ` +
         `You have ${have}; ${adding} more would be ${have + adding}. Remove some first, or add up to ${
           MAX_BUNDLE_WALLETS - have
         }.`
@@ -211,18 +219,21 @@ router.post('/wallets/backup', requireApiKey, requireAuthConfigured, (req, res, 
 router.post('/fund', requireApiKey, async (req, res, next) => {
   try {
     const ks = keystoreFor(req.user.id);
-    const { targets } = req.body || {};
+    const { targets, variant = DEFAULT_VARIANT } = req.body || {};
     if (!Array.isArray(targets) || !targets.length) throw new Error('targets[] is required');
     // Bound the work before it starts: disperse does an O(n) keystore lookup per
     // target, so an unbounded list is O(n²) CPU on the request path. A real
     // bundle is tens of wallets; 500 is far above that and far below abusive.
     if (targets.length > 500) throw new Error(`targets[] is capped at 500 (got ${targets.length})`);
-    const out = await funding.disperse(targets, { keystore: ks, userId: req.user.id });
+    const out = await funding.disperse(targets, { keystore: ks, userId: req.user.id, variant });
     const s = summariseTransfers(out);
+    // The variant is on the log line, not only in the payload: an operator
+    // reading the activity log after a bad run needs to know WHICH launcher
+    // spent, and "funded 27 wallets" reads identically for both.
     activityFor(req.user.id).record(
       'fund',
-      `funded ${s.sent}/${s.wallets} wallet(s)` + (s.failed ? `, ${s.failed} failed` : ''),
-      s
+      `[${variant}] funded ${s.sent}/${s.wallets} wallet(s)` + (s.failed ? `, ${s.failed} failed` : ''),
+      { ...s, variant }
     );
     res.json(out);
   } catch (err) {
@@ -234,13 +245,14 @@ router.post('/fund', requireApiKey, async (req, res, next) => {
 router.post('/sweep', requireApiKey, async (req, res, next) => {
   try {
     const ks = keystoreFor(req.user.id);
-    const { includeTokens = false, tokenAddress = null } = req.body || {};
-    const out = await funding.sweep({ includeTokens, tokenAddress }, { keystore: ks });
+    const { includeTokens = false, tokenAddress = null, variant = DEFAULT_VARIANT } = req.body || {};
+    const out = await funding.sweep({ includeTokens, tokenAddress }, { keystore: ks, variant });
     const s = summariseTransfers(out);
     activityFor(req.user.id).record(
       'sweep',
-      `swept ${s.sent}/${s.wallets} wallet(s) to the dev wallet` + (s.failed ? `, ${s.failed} failed` : ''),
-      { ...s, includeTokens, tokenAddress }
+      `[${variant}] swept ${s.sent}/${s.wallets} wallet(s) to the dev wallet` +
+        (s.failed ? `, ${s.failed} failed` : ''),
+      { ...s, includeTokens, tokenAddress, variant }
     );
     res.json(out);
   } catch (err) {
@@ -320,10 +332,13 @@ const SELLABLE_TIMEOUT_MS = 30_000;
 router.get('/sellable', requireApiKey, async (req, res, next) => {
   try {
     const ks = keystoreFor(req.user.id);
+    // Which launcher is asking. A v2 sell must scan v2 bundle wallets, or the
+    // picker offers tokens the v2 signer cannot sell.
+    const sellVariant = req.query?.variant || DEFAULT_VARIANT;
     const out = await withDeadline(
       findSellable({
-        deployer: ks.devWallet().address,
-        wallets: ks.bundleWallets(),
+        deployer: devWalletFor(ks, sellVariant).address,
+        wallets: bundleWalletsFor(ks, sellVariant),
         knownTokens: historyTokens(req.user.id),
         // Every wallet this account holds or has held, so rotating the dev
         // wallet does not orphan everything launched before the rotation — the
@@ -362,7 +377,7 @@ router.get('/sellable', requireApiKey, async (req, res, next) => {
 router.post('/sell/preflight', requireApiKey, async (req, res, next) => {
   try {
     const { token } = req.body || {};
-    const plan = await prepareSell({ token }, { keystore: keystoreFor(req.user.id) });
+    const plan = await prepareSell({ token }, { keystore: keystoreFor(req.user.id), variant: req.body?.variant || DEFAULT_VARIANT });
     res.json(publicSellPlan(plan));
   } catch (err) {
     next(err);
@@ -380,7 +395,7 @@ router.post('/sell', requireApiKey, async (req, res, next) => {
     }
 
     const ks = keystoreFor(req.user.id);
-    const plan = await prepareSell({ token }, { keystore: ks });
+    const plan = await prepareSell({ token }, { keystore: ks, variant: req.body?.variant || DEFAULT_VARIANT });
     const result = await fireSell(plan);
 
     // The failures are why anyone comes back to this log, so the per-wallet
@@ -441,7 +456,8 @@ router.get('/dispersers', requireApiKey, async (req, res, next) => {
     // a failed price quote must not hide the list of contracts.
     try {
       const ks = keystoreFor(req.user.id);
-      const signer = ks.signer(ks.devWallet().id, provider);
+      // The quote is for whichever dev wallet would actually pay for the deploy.
+      const signer = ks.signer(devWalletFor(ks, req.query?.variant || DEFAULT_VARIANT).id, provider);
       const { each, from, balance } = await estimate('Disperse', 1, signer);
       out.quote = {
         deployer: from,
@@ -469,7 +485,7 @@ router.post('/dispersers/deploy', requireApiKey, async (req, res, next) => {
     if (config.dryRun) throw new Error('DRY_RUN is on — nothing would be deployed');
 
     const ks = keystoreFor(req.user.id);
-    const signer = ks.signer(ks.devWallet().id, provider);
+    const signer = ks.signer(devWalletFor(ks, req.body?.variant || DEFAULT_VARIANT).id, provider);
     const store = dispersersFor(req.user.id);
 
     try {

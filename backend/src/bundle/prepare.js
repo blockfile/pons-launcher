@@ -17,6 +17,7 @@ const { rpcMessage } = require('../evm/errors');
 const { capCheck } = require('../evm/pricing');
 const { bundleShare } = require('../../../shared/bundleShare');
 const keystore = require('../wallets/keystore');
+const { DEFAULT_VARIANT, devWalletFor, bundleWalletsFor } = require('../wallets/variants');
 const { spendableFromBalance } = require('../wallets/funding');
 
 // Bundle buys are bumped hard: being one block late is the entire failure mode.
@@ -44,7 +45,7 @@ function toSignable(tx, { nonce, gasLimit, fees, chainId }) {
  * @param {Array<{walletId:string, mode:'fixed'|'all', amountEth?:string|number}>} input.wallets
  * @returns {Promise<object>} the signed plan, ready for fire()
  */
-async function prepare(input, { keystore: ks = keystore } = {}) {
+async function prepare(input, { keystore: ks = keystore, variant = DEFAULT_VARIANT } = {}) {
   const {
     params,
     launchConfigId,
@@ -59,7 +60,9 @@ async function prepare(input, { keystore: ks = keystore } = {}) {
   // reject here rather than trust the form's own disabled-button check.
   if (!params.logo) throw new Error('logo is required');
 
-  const dev = ks.devWallet();
+  // The signer is the variant's dev wallet, so a v2 launch is signed and paid
+  // for by the v2 dev wallet and never touches v1's.
+  const dev = devWalletFor(ks, variant);
 
   // Resolve every referenced bundle wallet through the caller's own keystore
   // before any chain work starts. This is what makes a foreign wallet id (one

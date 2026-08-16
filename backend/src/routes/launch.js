@@ -6,6 +6,7 @@ const factory = require('../evm/factory');
 const { prepare } = require('../bundle/prepare');
 const { fire } = require('../bundle/fire');
 const { keystoreFor } = require('../wallets/keystore');
+const { DEFAULT_VARIANT } = require('../wallets/variants');
 const { historyFor } = require('../store/history');
 const { requireApiKey } = require('../middleware/auth');
 const { uploadImage, ACCEPTED, MAX_BYTES } = require('../ipfs/upload');
@@ -146,7 +147,8 @@ router.post(
 // address before any money moves.
 router.post('/preflight', requireApiKey, async (req, res, next) => {
   try {
-    res.json(publicPlan(await prepare(req.body || {}, { keystore: keystoreFor(req.user.id) })));
+    const variant = req.body?.variant || DEFAULT_VARIANT;
+    res.json(publicPlan(await prepare(req.body || {}, { keystore: keystoreFor(req.user.id), variant })));
   } catch (err) {
     next(err);
   }
@@ -156,7 +158,8 @@ router.post('/preflight', requireApiKey, async (req, res, next) => {
 // simulated results without touching the chain.
 router.post('/launch', requireApiKey, withLaunchLock(async (req, res, next) => {
   try {
-    const plan = await prepare(req.body || {}, { keystore: keystoreFor(req.user.id) });
+    const variant = req.body?.variant || DEFAULT_VARIANT;
+    const plan = await prepare(req.body || {}, { keystore: keystoreFor(req.user.id), variant });
     const result = await fire(plan);
     const entry = historyFor(req.user.id).record({ plan, result });
     res.json({ plan: publicPlan(plan), result, recorded: entry.at });
@@ -181,7 +184,14 @@ router.get('/v2/configs', async (req, res, next) => {
 
 router.post('/v2/preflight', requireApiKey, async (req, res, next) => {
   try {
-    res.json(publicPlan(await prepareV2(req.body || {}, { keystore: keystoreFor(req.user.id) })));
+    res.json(
+      publicPlan(
+        await prepareV2(req.body || {}, {
+          keystore: keystoreFor(req.user.id),
+          variant: req.body?.variant || DEFAULT_VARIANT,
+        })
+      )
+    );
   } catch (err) {
     next(err);
   }
@@ -190,7 +200,10 @@ router.post('/v2/preflight', requireApiKey, async (req, res, next) => {
 router.post('/v2/launch', requireApiKey, withLaunchLock(async (req, res, next) => {
   try {
     const ks = keystoreFor(req.user.id);
-    const plan = await prepareV2(req.body || {}, { keystore: ks });
+    const plan = await prepareV2(req.body || {}, {
+      keystore: ks,
+      variant: req.body?.variant || DEFAULT_VARIANT,
+    });
 
     // Refuse rather than burn the fee. canLaunch() is the factory's own gate;
     // reading whitelistedLaunchers instead reports false for wallets that can

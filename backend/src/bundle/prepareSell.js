@@ -53,6 +53,7 @@ const v1Factory = require('../evm/factory');
 const { buildSellTx } = require('../evm/router');
 const { readPoolPrice, quoteSellOutV1 } = require('../evm/pricing');
 const keystore = require('../wallets/keystore');
+const { DEFAULT_VARIANT, devWalletFor, bundleWalletsFor } = require('../wallets/variants');
 const { toSignable } = require('./prepareV2');
 
 // Approve is a single SSTORE plus whatever the token does around it; 100k is
@@ -115,10 +116,14 @@ async function prepareSell({ token }, deps = {}) {
   const meta = deps.tokenMeta || ((t) => holdings.tokenMeta(t));
   const balanceOf = deps.balanceOf || null;
   const dryRun = deps.dryRun ?? config.dryRun;
+  // Which launcher's wallets this sell is for. The sell empties BUNDLE wallets
+  // back to a dev wallet, so pointing it at the wrong variant would move one
+  // launcher's tokens into the other's signer.
+  const variant = deps.variant || DEFAULT_VARIANT;
 
   if (!token) throw new Error('token is required');
   const address = getAddress(token);
-  const dev = ks.devWallet();
+  const dev = devWalletFor(ks, variant);
   const warnings = [];
 
   // ── may we sell this at all ───────────────────────────────────────────────
@@ -214,7 +219,7 @@ async function prepareSell({ token }, deps = {}) {
   }
 
   const { symbol, decimals } = await meta(address).catch(() => ({ symbol: '???', decimals: 18 }));
-  const wallets = ks.bundleWallets();
+  const wallets = bundleWalletsFor(ks, variant);
 
   // ── who holds any ─────────────────────────────────────────────────────────
   const held = await holdings.tokenHoldings(

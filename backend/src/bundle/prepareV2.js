@@ -26,6 +26,7 @@ const v2 = require('../evm/v2/factory');
 const { buildBuyTx } = require('../evm/v2/curve');
 const { bundleShare } = require('../../../shared/bundleShare');
 const keystore = require('../wallets/keystore');
+const { DEFAULT_VARIANT, devWalletFor } = require('../wallets/variants');
 const { spendableFromBalance } = require('../wallets/funding');
 
 const FEE_BUMP_PCT = 25;
@@ -94,7 +95,7 @@ async function prepareV2(input, deps = {}) {
   if (!params || !params.name || !params.symbol) throw new Error('name and symbol are required');
   if (!params.logo) throw new Error('logo is required');
 
-  const dev = ks.devWallet();
+  const dev = devWalletFor(ks, deps.variant || DEFAULT_VARIANT);
   const warnings = [];
   const pair = getAddress(pairToken);
 
