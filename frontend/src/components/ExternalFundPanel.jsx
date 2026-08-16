@@ -3,6 +3,7 @@ import { LuCircleCheck, LuClock, LuTriangleAlert } from 'react-icons/lu';
 import { notify } from '../api.js';
 import Section from './Section.jsx';
 import Address, { copyToClipboard } from './Address.jsx';
+import { rolesFor } from '../variant.js';
 
 const eth = (v) => Number(v || 0).toFixed(6);
 
@@ -29,7 +30,8 @@ const eth = (v) => Number(v || 0).toFixed(6);
  * makes on a timer, so the worst this panel can do is be out of date by five
  * seconds.
  */
-export default function ExternalFundPanel({ wallets, rows, reload }) {
+export default function ExternalFundPanel({ wallets, rows, reload, variant = 'v1' }) {
+  const roles = rolesFor(variant);
   const [watching, setWatching] = useState(false);
   const [lastCheck, setLastCheck] = useState('');
 
@@ -37,7 +39,7 @@ export default function ExternalFundPanel({ wallets, rows, reload }) {
   // is the same Fund column typed in step 3 — deliberately not a second set of
   // amounts, because two places to type the same number is how they diverge.
   const owed = wallets
-    .filter((w) => w.role === 'bundle')
+    .filter((w) => w.role === roles.bundle)
     .map((w) => {
       const need = Number(rows[w.id]?.fund) || 0;
       const have = Number(w.balanceEth) || 0;

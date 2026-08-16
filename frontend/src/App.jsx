@@ -7,6 +7,7 @@ import { shortAddress } from './format.js';
 // vite.config.js for how a CommonJS module gets into this bundle. Default
 // import because that file is CommonJS: the backend requires it directly.
 import bundleShareModule from '../../shared/bundleShare.js';
+import { rolesFor } from './variant.js';
 import Guide from './components/Guide.jsx';
 import Sequence from './components/Sequence.jsx';
 import DevWalletPanel from './components/DevWalletPanel.jsx';
@@ -68,6 +69,10 @@ export default function App() {
   // tab rather than folded into step 4 because v1 moves real money and must not
   // change shape while something next to it is being tried out.
   const [tab, setTab] = useState('v1');
+  // The role pair the whole console is currently drawing. Only one tab renders
+  // at a time, so every list below filters on these rather than on the literal
+  // 'dev'/'bundle' it used when there was one launcher.
+  const roles = rolesFor(tab);
   const [health, setHealth] = useState(null);
   const [wallets, setWallets] = useState([]);
   const [configs, setConfigs] = useState(null);
@@ -124,7 +129,7 @@ export default function App() {
       // Table order is firing order — prepare() walks the same list the same
       // way — and on a curve the order is the price, so it has to match.
       buys: wallets
-        .filter((w) => w.role === 'bundle')
+        .filter((w) => w.role === roles.bundle)
         .map((w) => ({
           key: w.id,
           // "all − gas" is resolved server-side from the live balance. The
@@ -134,7 +139,7 @@ export default function App() {
           amountEth: rows[w.id]?.mode === 'all' ? w.balanceEth : rows[w.id]?.buy,
         })),
     });
-  }, [sizing, wallets, rows]);
+  }, [sizing, wallets, rows, roles]);
 
   // Strings stay strings so errors read as errors; everything else is a payload
   // for ResultPanel to lay out.
@@ -175,7 +180,7 @@ export default function App() {
   }, [loadAll, key]);
 
   const live = Boolean(health && !health.dryRun);
-  const funded = wallets.filter((w) => w.role === 'bundle' && Number(w.balanceEth) > 0).length;
+  const funded = wallets.filter((w) => w.role === roles.bundle && Number(w.balanceEth) > 0).length;
 
   // Whether this console may read at all, and what it re-reads on. It is not
   // the key: a deployment that injects the key at nginx (the map block in
@@ -214,8 +219,8 @@ export default function App() {
    * indistinguishable from "not started".
    */
   const steps = useMemo(() => {
-    const dev = wallets.find((w) => w.role === 'dev');
-    const bundle = wallets.filter((w) => w.role === 'bundle');
+    const dev = wallets.find((w) => w.role === roles.dev);
+    const bundle = wallets.filter((w) => w.role === roles.bundle);
     const activeDispersers = dispersers?.addresses?.length ?? 0;
     const threshold = dispersers?.batchThreshold;
     const sellCount = Array.isArray(sellable) ? sellable.length : 0;
@@ -331,7 +336,7 @@ export default function App() {
               : null,
       };
     });
-  }, [wallets, funded, dispersers, sellable, history, draft]);
+  }, [wallets, funded, dispersers, sellable, history, draft, roles]);
 
   // The step whose panel is drawn where, so a panel never has to know its own
   // number and the order lives in one place — this file, in render order below.
@@ -431,10 +436,6 @@ export default function App() {
             </span>
           </div>
 
-          {tab === 'v2' && (
-            <ExternalFundPanel wallets={wallets} rows={rows} reload={loadWallets} />
-          )}
-
           {/* THE V2 BUNDLER TAB IS HIDDEN, and the reason is not that it is
               unfinished. It targets the pons v1 factory, whose owner set
               launchEnabled to false on 2026-08-12 at 19:42 UTC — 22 seconds
@@ -498,7 +499,7 @@ export default function App() {
               spaces main's DIRECT children, so until this class existed the six
               step cards sat flush against each other. The class carries no
               behaviour; the `hidden` expression is untouched. */}
-          <div className="sequence" hidden={tab !== 'v1' || (SHOW_V2_BUNDLER && mode !== 'v1')}>
+          <div className="sequence" hidden={SHOW_V2_BUNDLER && mode !== 'v1'}>
           <Sequence
             steps={steps}
             notice={
@@ -512,6 +513,7 @@ export default function App() {
           <Guide />
 
           <DevWalletPanel
+            variant={tab}
             step={step(1)}
             wallets={wallets}
             explorer={health?.explorer || ''}
@@ -519,6 +521,7 @@ export default function App() {
             report={report}
           />
           <DispersersPanel
+            variant={tab}
             step={step(2)}
             explorer={health?.explorer || ''}
             credential={credential}
@@ -526,6 +529,7 @@ export default function App() {
             onState={setDispersers}
           />
           <WalletsPanel
+            variant={tab}
             step={step(3)}
             wallets={wallets}
             rows={rows}
@@ -535,6 +539,7 @@ export default function App() {
             report={report}
           />
           <FundPanel
+            variant={tab}
             step={step(4)}
             wallets={wallets}
             rows={rows}
@@ -542,7 +547,15 @@ export default function App() {
             reload={loadWallets}
             report={report}
           />
+          {/* The v2 bench: ETH that arrives from outside the console. It sits
+              beside step 4 because it answers the same question — is every
+              wallet funded — for the case where this console did not send it. */}
+          {tab === 'v2' && (
+            <ExternalFundPanel wallets={wallets} rows={rows} reload={loadWallets} variant={tab} />
+          )}
+
           <LaunchForm
+            variant={tab}
             step={step(5)}
             configs={configs}
             wallets={wallets}
@@ -576,6 +589,7 @@ export default function App() {
             output={output}
           />
           <SellPanel
+            variant={tab}
             step={{ ...step(6), last: true }}
             explorer={health?.explorer || ''}
             credential={credential}

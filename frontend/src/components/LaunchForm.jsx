@@ -5,6 +5,7 @@ import { Busy } from './Section.jsx';
 import LogoField from './LogoField.jsx';
 import Modal, { Fact } from './Modal.jsx';
 import { pct } from './Share.jsx';
+import { rolesFor } from '../variant.js';
 
 // The chain makes a block every ~100ms, but the restriction window is counted
 // in the EVM's own block number, which advances roughly every 16 seconds. So
@@ -47,7 +48,9 @@ export default function LaunchForm({
   report,
   onDraft,
   onSizing,
+  variant = 'v1',
 }) {
+  const roles = rolesFor(variant);
   const [f, setF] = useState(BLANK);
   const [protocol, setProtocol] = useState('v1');
   const [v2, setV2] = useState(null);
@@ -126,7 +129,7 @@ export default function LaunchForm({
     // keystore also holds v2dev, v2funding and v2bundle roles; "not the dev
     // wallet" would arm a launch with wallets belonging to a different flow.
     const bundle = wallets
-      .filter((w) => w.role === 'bundle' && willBuy(w))
+      .filter((w) => w.role === roles.bundle && willBuy(w))
       .map((w) => ({
         walletId: w.id,
         mode: rows[w.id]?.mode ?? 'fixed',
@@ -143,6 +146,9 @@ export default function LaunchForm({
 
     if (isV2) {
       return {
+        // Which launcher is spending. The backend resolves the signer from
+        // this, so omitting it would sign a v2 launch with v1's dev wallet.
+        variant,
         params: {
           name: f.name.trim(),
           symbol: f.symbol.trim(),
@@ -162,6 +168,7 @@ export default function LaunchForm({
     }
 
     return {
+      variant,
       params: {
         name: f.name.trim(),
         symbol: f.symbol.trim(),
@@ -209,7 +216,7 @@ export default function LaunchForm({
     });
   }
 
-  const buying = wallets.filter((w) => w.role === 'bundle' && willBuy(w)).length;
+  const buying = wallets.filter((w) => w.role === roles.bundle && willBuy(w)).length;
 
   // The exemption limit depends on the path. Any dev buy routes the launch
   // through launchAndBuy on the forwarder, which appends its own buy recipient

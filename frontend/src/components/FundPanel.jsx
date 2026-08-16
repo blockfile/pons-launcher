@@ -2,6 +2,7 @@ import { useState } from 'react';
 import { api } from '../api.js';
 import Step from './Step.jsx';
 import { Busy } from './Section.jsx';
+import { rolesFor } from '../variant.js';
 
 /**
  * Step 4 — moving ETH from the dev wallet out to the bundle wallets.
@@ -15,7 +16,8 @@ import { Busy } from './Section.jsx';
  * "why did this fund run get rate limited" is the question step 2 exists to
  * answer and the answer is only visible at this moment.
  */
-export default function FundPanel({ step, wallets, rows, dispersers, reload, report }) {
+export default function FundPanel({ step, wallets, rows, dispersers, reload, report, variant = 'v1' }) {
+  const roles = rolesFor(variant);
   const [includeTokens, setIncludeTokens] = useState(false);
   const [tokenAddress, setTokenAddress] = useState('');
   const [busy, setBusy] = useState('');
@@ -38,7 +40,7 @@ export default function FundPanel({ step, wallets, rows, dispersers, reload, rep
   // v2bundle roles, and funding those from here would move real ETH into
   // wallets this panel is not about.
   const targets = wallets
-    .filter((w) => w.role === 'bundle')
+    .filter((w) => w.role === roles.bundle)
     .map((w) => ({ walletId: w.id, amountEth: rows[w.id]?.fund }))
     .filter((t) => Number(t.amountEth) > 0);
 
@@ -63,7 +65,7 @@ export default function FundPanel({ step, wallets, rows, dispersers, reload, rep
           busy={busy === 'fund'}
           disabled={!targets.length}
           title={targets.length ? '' : 'enter a fund amount in the table above'}
-          onClick={() => act('fund', () => api('/fund', 'POST', { targets }))}
+          onClick={() => act('fund', () => api('/fund', 'POST', { targets, variant }))}
         >
           {targets.length
             ? `Send ${total.toFixed(4)} ETH to ${targets.length} wallet${targets.length === 1 ? '' : 's'}`
@@ -107,7 +109,11 @@ export default function FundPanel({ step, wallets, rows, dispersers, reload, rep
           title="return everything to the dev wallet"
           onClick={() =>
             act('sweep', () =>
-              api('/sweep', 'POST', { includeTokens, tokenAddress: tokenAddress.trim() || null })
+              api('/sweep', 'POST', {
+                includeTokens,
+                tokenAddress: tokenAddress.trim() || null,
+                variant,
+              })
             )
           }
         >

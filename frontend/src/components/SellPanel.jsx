@@ -48,7 +48,16 @@ function routeLabel(t) {
   return 'bonding — sells back to the curve';
 }
 
-export default function SellPanel({ step, explorer, credential, live, reload, report, onState }) {
+export default function SellPanel({
+  step,
+  explorer,
+  credential,
+  live,
+  reload,
+  report,
+  onState,
+  variant = 'v1',
+}) {
   const [list, setList] = useState(null);
   const [missing, setMissing] = useState(false);
   const [error, setError] = useState('');
@@ -64,7 +73,10 @@ export default function SellPanel({ step, explorer, credential, live, reload, re
 
   async function load() {
     try {
-      setList(await api('/sellable'));
+      // The variant rides on the query string because this is a GET: a v2 sell
+      // must scan v2's bundle wallets, or the picker offers tokens the v2
+      // signer holds none of.
+      setList(await api(`/sellable?variant=${variant}`));
       setError('');
       setMissing(false);
     } catch (err) {
@@ -78,10 +90,12 @@ export default function SellPanel({ step, explorer, credential, live, reload, re
   // Re-read when the credential changes, not just on mount: it decides whether
   // this route may be read at all, and the panel mounts before a key is pasted.
   // A key restored from sessionStorage is there on the first render already.
+  // And on the variant, because switching launcher changes which wallets are
+  // scanned — a stale list here would offer v1's tokens to v2's signer.
   useEffect(() => {
     const t = setTimeout(load, credential ? 400 : 0);
     return () => clearTimeout(t);
-  }, [credential]);
+  }, [credential, variant]);
 
   const rows = Array.isArray(list) ? list : [];
   const selected = rows.find((r) => r.token === token) || null;
@@ -130,7 +144,7 @@ export default function SellPanel({ step, explorer, credential, live, reload, re
 
   function preflight() {
     act('preflight', async () => {
-      const res = await api('/sell/preflight', 'POST', { token });
+      const res = await api('/sell/preflight', 'POST', { token, variant });
       setPlan(res);
       setResult(null);
       return res;
@@ -154,7 +168,7 @@ export default function SellPanel({ step, explorer, credential, live, reload, re
     if (!p) return;
 
     act('sell', async () => {
-      const res = await api('/sell', 'POST', { token: p.token, confirm: true });
+      const res = await api('/sell', 'POST', { token: p.token, confirm: true, variant });
       setResult(res);
       // Re-lock the guard: one arming, one sell.
       setArmed(false);

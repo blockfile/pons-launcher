@@ -6,6 +6,7 @@ import Address from './Address.jsx';
 import Modal, { Fact } from './Modal.jsx';
 import Share, { pct, tokens } from './Share.jsx';
 import BackupControls from './BackupControls.jsx';
+import { rolesFor } from '../variant.js';
 
 // Balances arrive as decimal strings. Six places everywhere, so the column and
 // the dialog show the same number.
@@ -45,7 +46,8 @@ function usdMc(ethStr, price) {
   return `$${Math.round(v)}`;
 }
 
-export default function WalletsPanel({ step, wallets, rows, setRow, share, reload, report }) {
+export default function WalletsPanel({ step, wallets, rows, setRow, share, reload, report, variant = 'v1' }) {
+  const roles = rolesFor(variant);
   const [count, setCount] = useState(5);
   const [showImport, setShowImport] = useState(false);
   const [keys, setKeys] = useState('');
@@ -120,7 +122,7 @@ export default function WalletsPanel({ step, wallets, rows, setRow, share, reloa
 
   // A whitelist, not "everything that is not the dev wallet": a role this
   // console does not know about is never swept into a bulk delete either.
-  const bundle = wallets.filter((w) => w.role === 'bundle');
+  const bundle = wallets.filter((w) => w.role === roles.bundle);
 
   // How many sells each wallet keeps gas for, deliberately generous — a wallet
   // stuck holding tokens it cannot sell is worse than a slightly larger fund.
@@ -209,7 +211,7 @@ export default function WalletsPanel({ step, wallets, rows, setRow, share, reloa
   useEffect(() => {
     setPicked((prev) => {
       if (!prev.size) return prev;
-      const live = new Set(wallets.filter((w) => w.role === 'bundle').map((w) => w.id));
+      const live = new Set(wallets.filter((w) => w.role === roles.bundle).map((w) => w.id));
       const next = new Set([...prev].filter((id) => live.has(id)));
       return next.size === prev.size ? prev : next;
     });
@@ -278,7 +280,7 @@ export default function WalletsPanel({ step, wallets, rows, setRow, share, reloa
   // of a ceiling — said once, under the table, rather than on every row.
   // Whitelist, for the reason given above `bundle` — and now literally: the V2
   // roles exist, and "not the dev wallet" would count them here.
-  const allMode = wallets.filter((w) => w.role === 'bundle' && rows[w.id]?.mode === 'all').length;
+  const allMode = wallets.filter((w) => w.role === roles.bundle && rows[w.id]?.mode === 'all').length;
   // Wallets with something to buy. A zero-amount leg is kept in the sequence —
   // it moves nothing, so dropping it would change nothing — but it is not a
   // wallet that is buying, and counting it as one would misstate the bundle.
@@ -348,8 +350,8 @@ export default function WalletsPanel({ step, wallets, rows, setRow, share, reloa
             act('bundle', () =>
               api('/wallets/generate', 'POST', {
                 count: Math.min(Number(count) || 1, bundleRoom),
-                role: 'bundle',
-                label: 'bundle',
+                role: roles.bundle,
+                label: roles.bundle,
               })
             )
           }
@@ -406,7 +408,7 @@ export default function WalletsPanel({ step, wallets, rows, setRow, share, reloa
               act('import', async () => {
                 const made = await api('/wallets/import', 'POST', {
                   privateKeys: keys.split('\n'),
-                  role: 'bundle',
+                  role: roles.bundle,
                 });
                 setKeys('');
                 return made;
@@ -497,7 +499,7 @@ export default function WalletsPanel({ step, wallets, rows, setRow, share, reloa
             )}
             {wallets.map((w) => {
               const row = rows[w.id] || {};
-              const isDev = w.role === 'dev';
+              const isDev = w.role === roles.dev;
               const bal = Number(w.balanceEth);
               return (
                 <tr key={w.id}>
@@ -505,7 +507,7 @@ export default function WalletsPanel({ step, wallets, rows, setRow, share, reloa
                     {/* No checkbox on the dev wallet — not a disabled one, none.
                         It signs the launch and holds the funds, and the bulk
                         delete must have no path to it, accidental or otherwise. */}
-                    {w.role === 'bundle' && (
+                    {w.role === roles.bundle && (
                       <input
                         type="checkbox"
                         checked={picked.has(w.id)}
@@ -922,7 +924,7 @@ export default function WalletsPanel({ step, wallets, rows, setRow, share, reloa
               {/* Sweep pulls funds INTO the dev wallet, so it is no answer for
                   the dev wallet itself — and that is the one row where the
                   balance is usually largest. */}
-              {one?.role === 'dev' ? (
+              {one?.role === roles.dev ? (
                 <li>
                   This is the dev wallet. Sweep moves funds into it, not out, so nothing in this
                   console can rescue this balance — send it somewhere you control first.
@@ -956,7 +958,7 @@ export default function WalletsPanel({ step, wallets, rows, setRow, share, reloa
             about to delete it to "sell it in step 6 first" sent them to a panel
             that would list nothing of theirs. The dev row's × opens this same
             dialog, so the branch has to be here. */}
-        {one?.role === 'dev' ? (
+        {one?.role === roles.dev ? (
           <p className="hint">
             Token balances are not in this table and are not counted above. Step 6 sells what the
             bundle wallets hold and never touches this one — a launched token sitting here has to be

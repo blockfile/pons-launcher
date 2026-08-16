@@ -20,7 +20,14 @@ import Address from './Address.jsx';
  * are used regardless, so a sequence that refused to continue without one would
  * be lying about what the backend does.
  */
-export default function DispersersPanel({ step, explorer, credential, report, onState }) {
+export default function DispersersPanel({
+  step,
+  explorer,
+  credential,
+  report,
+  onState,
+  variant = 'v1',
+}) {
   const [state, setState] = useState(null);
   const [count, setCount] = useState(3);
   const [busy, setBusy] = useState('');
@@ -35,7 +42,7 @@ export default function DispersersPanel({ step, explorer, credential, report, on
 
   async function load() {
     try {
-      setState(await api('/dispersers'));
+      setState(await api(`/dispersers?variant=${variant}`));
       setError('');
     } catch (err) {
       setError(err.message);
@@ -51,7 +58,7 @@ export default function DispersersPanel({ step, explorer, credential, report, on
   useEffect(() => {
     const t = setTimeout(load, credential ? 400 : 0);
     return () => clearTimeout(t);
-  }, [credential]);
+  }, [credential, variant]);
 
   async function act(name, fn) {
     setBusy(name);
@@ -176,7 +183,7 @@ export default function DispersersPanel({ step, explorer, credential, report, on
           disabled={!(Number(count) >= 1)}
           onClick={() =>
             act('deploy', () =>
-              api('/dispersers/deploy', 'POST', { count: Number(count), confirm: true })
+              api('/dispersers/deploy', 'POST', { count: Number(count), confirm: true, variant })
             )
           }
         >

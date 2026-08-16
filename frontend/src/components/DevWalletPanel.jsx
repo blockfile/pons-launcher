@@ -5,6 +5,7 @@ import { Busy } from './Section.jsx';
 import Modal, { Fact } from './Modal.jsx';
 import BackupControls from './BackupControls.jsx';
 import Address from './Address.jsx';
+import { rolesFor } from '../variant.js';
 
 // Balances arrive as decimal strings. Six places everywhere, so the line under
 // the button and the figure in the dialog are the same number.
@@ -41,7 +42,8 @@ const eth = (v) => Number(v || 0).toFixed(6);
  * sweep moves funds INTO it — so this dialog says the true thing instead, and
  * says it about the wallet that usually holds the most ETH of any.
  */
-export default function DevWalletPanel({ step, wallets, explorer, reload, report }) {
+export default function DevWalletPanel({ step, wallets, explorer, reload, report, variant = 'v1' }) {
+  const roles = rolesFor(variant);
   const [busy, setBusy] = useState('');
   const [showImport, setShowImport] = useState(false);
   const [key, setKey] = useState('');
@@ -49,12 +51,14 @@ export default function DevWalletPanel({ step, wallets, explorer, reload, report
   // so the figures on screen are the ones the delete runs on. Null means no
   // dialog is open, and no dialog open means nothing is deleted.
   const [deleting, setDeleting] = useState(null);
-  const dev = wallets.find((w) => w.role === 'dev');
+  const dev = wallets.find((w) => w.role === roles.dev);
 
   async function generate() {
     setBusy('dev');
     try {
-      report(await api('/wallets/generate', 'POST', { count: 1, role: 'dev', label: 'dev' }));
+      report(
+        await api('/wallets/generate', 'POST', { count: 1, role: roles.dev, label: roles.dev })
+      );
       await reload();
     } catch (err) {
       report(`ERROR: ${err.message}`);
@@ -69,7 +73,7 @@ export default function DevWalletPanel({ step, wallets, explorer, reload, report
       report(
         await api('/wallets/import', 'POST', {
           privateKeys: [key.trim()],
-          role: 'dev',
+          role: roles.dev,
           label: 'dev',
         })
       );
