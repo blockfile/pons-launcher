@@ -12,6 +12,7 @@ const V1_BUNDLE = '0x3333333333333333333333333333333333333333';
 const DEPOSIT = '0x4444444444444444444444444444444444444444';
 const REQUEST = `0x${'a'.repeat(64)}`;
 const HASH = `0x${'b'.repeat(64)}`;
+const REFRESHED_FEES = { type: 2, maxFeePerGas: 30_000_000n, maxPriorityFeePerGas: 0n };
 
 function fakeKeystore(sent = []) {
   const wallets = [
@@ -110,6 +111,7 @@ test('fundV2Bundle sends the Relay deposit transaction, not a direct bundle tran
     keystore: fakeKeystore(sent),
     relayQuote,
     rpc: fakeRpc(),
+    getFeesFn: async () => REFRESHED_FEES,
     dryRun: false,
   });
 
@@ -125,6 +127,8 @@ test('fundV2Bundle sends the Relay deposit transaction, not a direct bundle tran
   assert.equal(sent[0].value, parseEther('0.01001'));
   assert.equal(sent[0].nonce, 7);
   assert.equal(sent[0].chainId, 4663);
+  assert.equal(sent[0].maxFeePerGas, REFRESHED_FEES.maxFeePerGas);
+  assert.equal(sent[0].maxPriorityFeePerGas, REFRESHED_FEES.maxPriorityFeePerGas);
 });
 
 test('fundV2Bundle rejects non-v2 bundle wallets before quoting Relay', async () => {
@@ -138,6 +142,7 @@ test('fundV2Bundle rejects non-v2 bundle wallets before quoting Relay', async ()
           return relayQuote({ from: DEV, recipient: V1_BUNDLE, amountWei: parseEther('0.01') });
         },
         rpc: fakeRpc(),
+        getFeesFn: async () => REFRESHED_FEES,
       }),
     /not a v2 bundle wallet/
   );
@@ -150,6 +155,7 @@ test('dry run quotes Relay but does not broadcast deposits', async () => {
     keystore: fakeKeystore(sent),
     relayQuote,
     rpc: fakeRpc(),
+    getFeesFn: async () => REFRESHED_FEES,
     dryRun: true,
   });
 

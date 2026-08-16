@@ -12,10 +12,12 @@ const { formatEther, getAddress, parseEther } = require('ethers');
 const config = require('../config');
 const { provider } = require('../evm/provider');
 const { rpcMessage } = require('../evm/errors');
+const { getFees, gasCost } = require('../evm/fees');
 const { devWalletFor, bundleWalletsFor } = require('../wallets/variants');
 
 const NATIVE = '0x0000000000000000000000000000000000000000';
 const MAX_TARGETS = 31;
+const RELAY_FEE_BUMP_PCT = 50;
 
 function wei(value) {
   return BigInt(value || 0);
@@ -86,25 +88,20 @@ function depositStep(quote, { expectedFrom, expectedChainId = config.chainId } =
   };
 }
 
-function normaliseTx(tx, nonce) {
-  const out = {
+function normaliseTx(tx, nonce, fees = {}) {
+  return {
     to: getAddress(tx.to),
     data: tx.data || '0x',
     value: wei(tx.value),
     gasLimit: wei(tx.gas || tx.gasLimit || 0),
     nonce,
     chainId: Number(tx.chainId),
+    ...fees,
   };
-  if (tx.maxFeePerGas != null) out.maxFeePerGas = wei(tx.maxFeePerGas);
-  if (tx.maxPriorityFeePerGas != null) out.maxPriorityFeePerGas = wei(tx.maxPriorityFeePerGas);
-  if (tx.gasPrice != null) out.gasPrice = wei(tx.gasPrice);
-  return out;
 }
 
-function maxGasCost(tx) {
-  const gas = wei(tx.gas || tx.gasLimit || 0);
-  const price = wei(tx.maxFeePerGas || tx.gasPrice || 0);
-  return gas * price;
+function gasLimitOf(tx) {
+  return wei(tx.gas || tx.gasLimit || 0);
 }
 
 function publicFees(quote) {
@@ -166,7 +163,10 @@ function planTargets(targets, ks) {
   });
 }
 
-async function fundV2Bundle(targets, { keystore: ks, relayQuote = quoteDeposit, rpc = provider, dryRun = config.dryRun } = {}) {
+async function fundV2Bundle(
+  targets,
+  { keystore: ks, relayQuote = quoteDeposit, rpc = provider, dryRun = config.dryRun, getFeesFn = getFees } = {}
+) {
   if (!ks) throw new Error('keystore is required');
 
   const dev = devWalletFor(ks, 'v2');
@@ -186,8 +186,14 @@ async function fundV2Bundle(targets, { keystore: ks, relayQuote = quoteDeposit, 
     })
   );
 
+  // Relay quotes a concrete deposit transaction, including fee fields. On this
+  // chain the base fee can tick between quote and broadcast; using Relay's
+  // stale maxFeePerGas caused every deposit to be rejected before it reached the
+  // mempool. Keep Relay's recipient/value/data, but refresh the fee ceiling at
+  // send time with the same kind of headroom the launch path uses.
+  const refreshedFees = await getFeesFn(RELAY_FEE_BUMP_PCT);
   const totalDeposit = quoted.reduce((sum, q) => sum + wei(q.deposit.tx.value), 0n);
-  const totalMaxGas = quoted.reduce((sum, q) => sum + maxGasCost(q.deposit.tx), 0n);
+  const totalMaxGas = quoted.reduce((sum, q) => sum + gasCost(refreshedFees, gasLimitOf(q.deposit.tx)), 0n);
   const balance = await rpc.getBalance(dev.address);
   if (balance < totalDeposit + totalMaxGas) {
     throw new Error(
@@ -235,7 +241,7 @@ async function fundV2Bundle(targets, { keystore: ks, relayQuote = quoteDeposit, 
         details: publicDetails(quote),
       };
       try {
-        const sent = await signer.sendTransaction(normaliseTx(deposit.tx, thisNonce));
+        const sent = await signer.sendTransaction(normaliseTx(deposit.tx, thisNonce, refreshedFees));
         return { ...entry, hash: sent.hash };
       } catch (err) {
         return { ...entry, error: rpcMessage(err) };
@@ -268,5 +274,5 @@ module.exports = {
   fundV2Bundle,
   quoteDeposit,
   status,
-  _private: { planTargets, normaliseTx, maxGasCost, publicDetails, publicFees },
+  _private: { planTargets, normaliseTx, gasLimitOf, publicDetails, publicFees },
 };
