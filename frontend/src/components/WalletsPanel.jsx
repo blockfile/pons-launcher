@@ -124,6 +124,18 @@ export default function WalletsPanel({ step, wallets, rows, setRow, share, reloa
   // console does not know about is never swept into a bulk delete either.
   const bundle = wallets.filter((w) => w.role === roles.bundle);
 
+  // What this table may draw AT ALL: the two roles belonging to the launcher
+  // on screen, and nothing else.
+  //
+  // The keystore is one file holding both launchers, so /wallets returns every
+  // wallet the user owns and the filtering is this console's job. Mapping the
+  // raw list — which this table did — put v2's dev and bundle wallets in the
+  // v1 table, each with a live delete and a Fund field wired to v1's run. The
+  // separation is worth nothing if the screen still shows both sets, and a
+  // funded wallet listed under the wrong launcher is a wallet somebody deletes
+  // believing it is idle.
+  const visible = wallets.filter((w) => w.role === roles.dev || w.role === roles.bundle);
+
   // How many sells each wallet keeps gas for, deliberately generous — a wallet
   // stuck holding tokens it cannot sell is worse than a slightly larger fund.
   const SELL_RESERVE = 10;
@@ -489,7 +501,7 @@ export default function WalletsPanel({ step, wallets, rows, setRow, share, reloa
             </tr>
           </thead>
           <tbody>
-            {wallets.length === 0 && (
+            {visible.length === 0 && (
               <tr>
                 <td colSpan="9" className="empty">
                   No wallets yet. Generate the bundle wallets above — the dev wallet from step 1
@@ -497,7 +509,7 @@ export default function WalletsPanel({ step, wallets, rows, setRow, share, reloa
                 </td>
               </tr>
             )}
-            {wallets.map((w) => {
+            {visible.map((w) => {
               const row = rows[w.id] || {};
               const isDev = w.role === roles.dev;
               const bal = Number(w.balanceEth);

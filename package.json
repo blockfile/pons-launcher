@@ -13,7 +13,7 @@
     "dev:web": "npm run dev --workspace frontend",
     "build": "npm run build --workspace frontend",
     "start": "npm start --workspace backend",
-    "test": "npm test --workspace backend",
+    "test": "npm test --workspace backend && npm test --workspace frontend",
     "user:add": "npm run user:add --workspace backend --",
     "user:list": "npm run user:list --workspace backend",
     "user:remove": "npm run user:remove --workspace backend --",
