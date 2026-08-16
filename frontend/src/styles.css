@@ -243,6 +243,58 @@ main {
   gap: 40px;
 }
 
+/* The launcher switch. Sits above the sequence rather than inside a card,
+   because it selects which console you are looking at — it is not part of any
+   one of them. */
+.tabs {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+.tabs .hint {
+  margin-left: 4px;
+}
+
+/* Whether a wallet's funding has landed. Three states and no fourth, matching
+   the palette's law: jade for what is already true, amber for a shortfall that
+   is not yet dangerous, grey for something that simply has not happened. The
+   glyph carries the state as well as the colour — a funding screen read in a
+   hurry should not depend on hue alone. */
+.fund-state {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font: 600 11px/1.5 var(--mono);
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  padding: 3px 9px;
+  border-radius: 999px;
+  background: var(--tint-grey);
+  color: var(--dim);
+  white-space: nowrap;
+}
+.fund-state svg {
+  width: 12px;
+  height: 12px;
+  flex: none;
+}
+.fund-state.is-in {
+  color: var(--jade);
+  background: var(--tint-jade);
+}
+.fund-state.is-part {
+  color: var(--amber);
+  background: var(--tint-amber);
+}
+
+/* The amount a wallet is still owed. Vermilion because a wallet that is short
+   is not late — it is one preflight will drop from the run. */
+.bal.short {
+  color: var(--vermilion);
+  font-weight: 600;
+}
+
 /* Each panel is a raised card: a soft top-to-bottom gradient, a hairline border
    caught by a light source, and a drop shadow that lifts it off the page. */
 section {

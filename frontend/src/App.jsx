@@ -19,6 +19,7 @@ import SellPanel from './components/SellPanel.jsx';
 import HistoryPanel from './components/HistoryPanel.jsx';
 import ActivityPanel from './components/ActivityPanel.jsx';
 import BundlerV2Panel from './components/BundlerV2Panel.jsx';
+import ExternalFundPanel from './components/ExternalFundPanel.jsx';
 import Toaster from './components/Toaster.jsx';
 
 const { bundleShare } = bundleShareModule;
@@ -60,6 +61,13 @@ export default function App() {
   // switch to, and a switcher with one destination is furniture.
   const SHOW_V2_BUNDLER = false;
   const [mode, setMode] = useState('v1');
+  // Which launcher is on screen. 'v1' is the six-step sequence that has always
+  // been here and is untouched by this switch. 'v2' is the experimental bench:
+  // funding that arrives from outside the console, where there is no signed
+  // transaction to follow and the balance is the only evidence. Kept behind a
+  // tab rather than folded into step 4 because v1 moves real money and must not
+  // change shape while something next to it is being tried out.
+  const [tab, setTab] = useState('v1');
   const [health, setHealth] = useState(null);
   const [wallets, setWallets] = useState([]);
   const [configs, setConfigs] = useState(null);
@@ -398,6 +406,35 @@ export default function App() {
         </header>
 
         <main>
+          {/* Which launcher is on screen. Quiet chips rather than filled
+              buttons: choosing a tab is navigation, and the palette's amber is
+              spent on the action a step is FOR, never on getting there. */}
+          <div className="tabs">
+            <button
+              type="button"
+              className={tab === 'v1' ? 'quiet is-on' : 'quiet'}
+              onClick={() => setTab('v1')}
+            >
+              Launcher
+            </button>
+            <button
+              type="button"
+              className={tab === 'v2' ? 'quiet is-on' : 'quiet'}
+              onClick={() => setTab('v2')}
+            >
+              V2 · external funding
+            </button>
+            <span className="hint">
+              {tab === 'v1'
+                ? 'the six-step sequence — dev wallet funds everything'
+                : 'a bench for ETH arriving from outside this console — watches balances, sends nothing'}
+            </span>
+          </div>
+
+          {tab === 'v2' && (
+            <ExternalFundPanel wallets={wallets} rows={rows} reload={loadWallets} />
+          )}
+
           {/* THE V2 BUNDLER TAB IS HIDDEN, and the reason is not that it is
               unfinished. It targets the pons v1 factory, whose owner set
               launchEnabled to false on 2026-08-12 at 19:42 UTC — 22 seconds
@@ -461,7 +498,7 @@ export default function App() {
               spaces main's DIRECT children, so until this class existed the six
               step cards sat flush against each other. The class carries no
               behaviour; the `hidden` expression is untouched. */}
-          <div className="sequence" hidden={SHOW_V2_BUNDLER && mode !== 'v1'}>
+          <div className="sequence" hidden={tab !== 'v1' || (SHOW_V2_BUNDLER && mode !== 'v1')}>
           <Sequence
             steps={steps}
             notice={
