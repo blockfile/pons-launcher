@@ -14,6 +14,7 @@ const { erc20, readTokenBalance } = require('../evm/erc20');
 const { rpcMessage } = require('../evm/errors');
 const { shouldBatch, splitAcross, buildDisperseTx, addresses } = require('../evm/disperse');
 const keystore = require('./keystore');
+const { DEFAULT_VARIANT, devWalletFor, bundleWalletsFor } = require('./variants');
 
 // A plain transfer costs 21,195 gas on this chain, not the 21,000 every EVM
 // tutorial assumes. Hardcoding the textbook number had the node reject every
@@ -58,8 +59,11 @@ async function balances({ keystore: ks = keystore } = {}) {
  * Send native ETH from the dev wallet to bundle wallets.
  * @param {Array<{walletId:string, amountEth:string|number}>} targets
  */
-async function disperse(targets, { keystore: ks = keystore, userId = 'default' } = {}) {
-  const dev = ks.devWallet();
+async function disperse(
+  targets,
+  { keystore: ks = keystore, userId = 'default', variant = DEFAULT_VARIANT } = {}
+) {
+  const dev = devWalletFor(ks, variant);
   const signer = ks.signer(dev.id, provider);
   const fees = await getFees(DISPERSE_FEE_BUMP_PCT);
 
@@ -164,9 +168,12 @@ async function disperse(targets, { keystore: ks = keystore, userId = 'default' }
  * them.
  * @param {{includeTokens?:boolean, tokenAddress?:string}} opts
  */
-async function sweep({ includeTokens = false, tokenAddress = null } = {}, { keystore: ks = keystore } = {}) {
-  const dev = ks.devWallet();
-  const wallets = ks.bundleWallets();
+async function sweep(
+  { includeTokens = false, tokenAddress = null } = {},
+  { keystore: ks = keystore, variant = DEFAULT_VARIANT } = {}
+) {
+  const dev = devWalletFor(ks, variant);
+  const wallets = bundleWalletsFor(ks, variant);
   const fees = await getFees(SWEEP_FEE_BUMP_PCT);
   const results = [];
 
