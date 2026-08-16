@@ -25,6 +25,7 @@ const { prepareSell } = require('../bundle/prepareSell');
 const { fireSell } = require('../bundle/fireSell');
 const { jsonSafe } = require('./launch');
 const relayFunding = require('../relay/funding');
+const timedRelayFunding = require('../relay/timedFunding');
 
 const router = express.Router();
 
@@ -288,6 +289,41 @@ router.post('/v2/relay/fund', requireApiKey, async (req, res, next) => {
 router.get('/v2/relay/status', requireApiKey, async (req, res, next) => {
   try {
     res.json(await relayFunding.status(req.query?.requestId));
+  } catch (err) {
+    next(err);
+  }
+});
+
+// Server-held timed funding for v2 bundle wallets. The browser can close after
+// starting it; only stopping/resuming needs the web UI to be open.
+router.get('/v2/relay/timed-fund', requireApiKey, (req, res, next) => {
+  try {
+    res.json(timedRelayFunding.status(req.user.id));
+  } catch (err) {
+    next(err);
+  }
+});
+
+router.post('/v2/relay/timed-fund/start', requireApiKey, (req, res, next) => {
+  try {
+    const { targets, intervalMinutes } = req.body || {};
+    res.json(timedRelayFunding.start(req.user.id, targets, { intervalMinutes }));
+  } catch (err) {
+    next(err);
+  }
+});
+
+router.post('/v2/relay/timed-fund/stop', requireApiKey, (req, res, next) => {
+  try {
+    res.json(timedRelayFunding.stop(req.user.id));
+  } catch (err) {
+    next(err);
+  }
+});
+
+router.post('/v2/relay/timed-fund/resume', requireApiKey, (req, res, next) => {
+  try {
+    res.json(timedRelayFunding.resume(req.user.id));
   } catch (err) {
     next(err);
   }
