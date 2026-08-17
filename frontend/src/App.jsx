@@ -26,6 +26,7 @@ import Toaster from './components/Toaster.jsx';
 // the tree below — see frontend/src/v3/V3Console.jsx. It is a branch here and
 // nothing else: every prop, effect and step of the v1/v2 flow is untouched.
 import V3Console from './v3/V3Console.jsx';
+import V4Console from './v4/V4Console.jsx';
 
 const { bundleShare } = bundleShareModule;
 
@@ -472,12 +473,21 @@ export default function App() {
             >
               V3 · relay chain
             </button>
+            <button
+              type="button"
+              className={tab === 'v4' ? 'quiet is-on' : 'quiet'}
+              onClick={() => setTab('v4')}
+            >
+              V4 · seasoning
+            </button>
             <span className="hint">
               {tab === 'v1'
                 ? `the ${steps.length}-step sequence — dev wallet funds everything`
                 : tab === 'v2'
                   ? `${steps.length} steps, no disperser — funded from outside this console`
-                  : 'not a launcher — distributes a live token, one wallet at a time'}
+                  : tab === 'v3'
+                    ? 'not a launcher — distributes a live token, one wallet at a time'
+                    : 'not a launcher — drips ETH into fresh wallets over weeks'}
             </span>
           </div>
 
@@ -486,6 +496,14 @@ export default function App() {
               having wallets at all. Its state lives inside it. */}
           {tab === 'v3' ? (
             <V3Console
+              health={health}
+              credential={credential}
+              report={report}
+              output={output}
+              reportedAt={reportedAt}
+            />
+          ) : tab === 'v4' ? (
+            <V4Console
               health={health}
               credential={credential}
               report={report}
