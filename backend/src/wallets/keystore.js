@@ -74,6 +74,13 @@ const DEFAULT_ID = 'default';
 // still hold a wallet under it. Nothing reads it now, but dropping it from this
 // set would make the wallet unreachable — setRole would refuse to move it out
 // and the operator could not recover the key through the console.
+//
+// v3dev / v3main / v3bundle are the fourth owner — the Relay chain. Their names
+// live in v3/roles.js, which is V3's own table and shares nothing with
+// variants.js; they are listed HERE because this set is the one gate every
+// wallet passes through. add() resolves a role it does not recognise to
+// 'bundle', so leaving them out would not fail — it would silently create every
+// V3 wallet holding v1's bundle role, on v1's tab, spendable by v1's launcher.
 const ROLES = new Set([
   'dev',
   'bundle',
@@ -83,8 +90,22 @@ const ROLES = new Set([
   'distfunding',
   'distbundle',
   'v2funding',
+  'v3dev',
+  'v3main',
+  'v3bundle',
 ]);
-const SINGLETON_ROLES = new Set(['dev', 'v2dev', 'distdev', 'distfunding', 'v2funding']);
+// v3main joins the singletons: the chain sells from one position, and a second
+// main wallet would mean half the supply sitting somewhere the engine never
+// looks.
+const SINGLETON_ROLES = new Set([
+  'dev',
+  'v2dev',
+  'distdev',
+  'distfunding',
+  'v2funding',
+  'v3dev',
+  'v3main',
+]);
 const instances = new Map();
 // Same alphabet as users.slug() (backend/src/users/users.js). Duplicated
 // rather than imported: this module deliberately consumes nothing from the
