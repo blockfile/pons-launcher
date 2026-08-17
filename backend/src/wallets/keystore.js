@@ -81,6 +81,12 @@ const DEFAULT_ID = 'default';
 // wallet passes through. add() resolves a role it does not recognise to
 // 'bundle', so leaving them out would not fail — it would silently create every
 // V3 wallet holding v1's bundle role, on v1's tab, spendable by v1's launcher.
+//
+// v4master / v4seed are the fifth owner — the seasoning campaigns. Their names
+// live in v4/roles.js, which is V4's own table and shares nothing with
+// variants.js or v3/roles.js. v4master is deliberately NOT in SINGLETON_ROLES:
+// campaigns run in parallel, one per funding wallet, so a singleton would cap
+// the whole feature at one campaign.
 const ROLES = new Set([
   'dev',
   'bundle',
@@ -93,6 +99,8 @@ const ROLES = new Set([
   'v3dev',
   'v3main',
   'v3bundle',
+  'v4master',
+  'v4seed',
 ]);
 // v3main joins the singletons: the chain sells from one position, and a second
 // main wallet would mean half the supply sitting somewhere the engine never
