@@ -316,6 +316,9 @@ export default function V4Console({ health, credential, report, output, reported
       <V4SeedPanel
         step={step('seeds')}
         wallets={seeds}
+        // The backup route exports BOTH V4 roles, so the export dialog has to
+        // count both. See `exported` in the panel.
+        masters={masters}
         facts={seedFacts}
         explorer={explorer}
         reload={loadWallets}

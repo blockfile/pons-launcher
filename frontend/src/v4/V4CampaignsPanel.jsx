@@ -90,7 +90,12 @@ export default function V4CampaignsPanel({ step, campaigns, details, lastSent, e
           (min, t) => (t.status === 'pending' && (min == null || t.day < min) ? t.day : min),
           null
         );
-        const day = nextDay ?? days;
+        // UNKNOWN AND FINISHED ARE NOT THE SAME ANSWER. Reducing over a
+        // transfer list that has not loaded yields null exactly as a campaign
+        // with nothing left to send does, and `nextDay ?? days` would then
+        // report a campaign on day one as "day 20 of 20" — a finished campaign,
+        // drawn from the absence of the data that would have said otherwise.
+        const day = full ? (nextDay ?? days) : null;
         const attempts = transfers.reduce((n, t) => n + (t.attempts?.length || 0), 0);
         const sentAt = lastSent[c.id];
         const overdue = c.status === 'running' && c.nextDueAt != null && c.nextDueAt < now;
@@ -107,7 +112,7 @@ export default function V4CampaignsPanel({ step, campaigns, details, lastSent, e
               <span className="spacer" />
               {days && (
                 <span className="hint">
-                  day {day} of {days}
+                  day {day ?? '—'} of {days}
                 </span>
               )}
             </h3>
@@ -116,7 +121,21 @@ export default function V4CampaignsPanel({ step, campaigns, details, lastSent, e
                 how far along the campaign is, and this says whether it is still
                 moving. */}
             <p className={stalled || overdue ? 'crux' : ''}>
-              {sentAt ? `last sent ${ago(sentAt, now)}` : 'nothing sent yet'}
+              {/* "nothing sent yet" is a CLAIM, and it may only be made from the
+                  transfer list. lastSent is undefined both when the campaign
+                  has sent nothing and when its schedule has not been read —
+                  indistinguishable states, and asserting the first from the
+                  second puts "nothing sent yet" directly above a Sent 128/400
+                  tile. Usually that window is one request wide; the case that
+                  matters is a detail read failing while nothing is running,
+                  because polling is off and nothing retries until the operator
+                  acts. That is precisely the stopped campaign this line exists
+                  to expose, so it is the one place it must not guess. */}
+              {!full
+                ? 'last send not read yet'
+                : sentAt
+                  ? `last sent ${ago(sentAt, now)}`
+                  : 'nothing sent yet'}
               {c.status === 'running' && c.nextDueIso && (
                 <> · {overdue ? `overdue since ${clock(c.nextDueIso, now)}` : `next due ${clock(c.nextDueIso, now)}`}</>
               )}
@@ -270,6 +289,13 @@ export default function V4CampaignsPanel({ step, campaigns, details, lastSent, e
                           <p className="hint" style={{ overflowWrap: 'anywhere' }}>
                             {rows
                               .flatMap((t) => t.attempts || [])
+                              // Chronological, not table order. A transfer that
+                              // failed is re-slotted forward, so an early row
+                              // can fail after a later one — taking the last
+                              // row's last attempt would name a stale error as
+                              // the most recent thing that went wrong. Safe to
+                              // sort in place: flatMap already made a new array.
+                              .sort((a, b) => (a.at < b.at ? -1 : a.at > b.at ? 1 : 0))
                               .slice(-1)
                               .map((a) => `last failure: ${a.error}`)}
                           </p>

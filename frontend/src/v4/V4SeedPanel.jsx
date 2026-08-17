@@ -28,7 +28,7 @@ import { MAX_GENERATE, ROLES, clock, eth } from './roles.js';
  * reason: this hands over every key the tab holds, and a mis-click must not be
  * enough to do it.
  */
-export default function V4SeedPanel({ step, wallets, facts, explorer, reload, report }) {
+export default function V4SeedPanel({ step, wallets, masters, facts, explorer, reload, report }) {
   const [busy, setBusy] = useState('');
   const [count, setCount] = useState(50);
   // Whatever has been typed into the export confirmation, and whether it is
@@ -52,6 +52,22 @@ export default function V4SeedPanel({ step, wallets, facts, explorer, reload, re
   // a number the server has already decided to refuse.
   const wanted = Math.min(MAX_GENERATE, Math.max(1, Math.round(Number(count) || 0)));
   const unprotected = wallets.filter((w) => !w.backedUp);
+
+  /**
+   * How many keys the download actually contains: BOTH of V4's roles.
+   *
+   * The route exports onlyV4Wallets(exportAll()), and isV4Role accepts v4master
+   * as well as v4seed — so the file carries the funding wallets too, and this
+   * panel's own `wallets` prop is only the seeds. Counting the slice this step
+   * happens to draw is the exact mistake BackupControls documents having
+   * already made once: the dialog has to count what the file will hold, or the
+   * number in the title is a smaller promise than the file keeps.
+   *
+   * It is also what the button is enabled on. An operator who has created a
+   * funding wallet and no seeds yet must still be able to back that key up —
+   * it is the one holding the ETH, and the route would export it happily.
+   */
+  const exported = masters.length + wallets.length;
 
   return (
     <Step {...step}>
@@ -86,7 +102,7 @@ export default function V4SeedPanel({ step, wallets, facts, explorer, reload, re
         <Busy
           busy={busy === 'backup'}
           className="ghost"
-          disabled={!wallets.length}
+          disabled={!exported}
           onClick={() => {
             setTyped('');
             setExporting(true);
@@ -214,7 +230,7 @@ export default function V4SeedPanel({ step, wallets, facts, explorer, reload, re
       <Modal
         open={exporting}
         danger
-        title={`This downloads the PRIVATE KEY of all ${wallets.length} V4 wallets.`}
+        title={`This downloads the PRIVATE KEY of all ${exported} V4 wallets.`}
         question={null}
         confirmLabel="Download"
         confirmDisabled={typed !== 'EXPORT'}
@@ -225,8 +241,9 @@ export default function V4SeedPanel({ step, wallets, facts, explorer, reload, re
         onCancel={() => setExporting(false)}
       >
         <p>
-          Anyone who opens that file can spend every one of them. It is V4's wallets only — the
-          funding wallets and the seeds — and never another tab's keys.
+          Anyone who opens that file can spend every one of them. It is V4's wallets only — all{' '}
+          {masters.length} funding {masters.length === 1 ? 'wallet' : 'wallets'} and all{' '}
+          {wallets.length} {wallets.length === 1 ? 'seed' : 'seeds'} — and never another tab's keys.
         </p>
         <label className="modal-type">
           Type EXPORT to continue.
