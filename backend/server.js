@@ -14,6 +14,10 @@ const launchRoutes = require('./src/routes/launch');
 // keystore with v1 and nothing else — see routes/distributor.js for why the
 // two strategies are kept apart rather than merged.
 const distributorRoutes = require('./src/routes/distributor');
+// V3, the Relay chain. Its own router, its own modules under src/v3, and no
+// edit to v1's or v2's money paths anywhere — unmounting this line removes the
+// whole strategy. See src/v3/roles.js for why it does not share variants.js.
+const v3Routes = require('./src/routes/v3');
 const { rpcMessage } = require('./src/evm/errors');
 
 const app = express();
@@ -57,6 +61,7 @@ app.use('/api', identify);
 app.use('/api', walletRoutes);
 app.use('/api', launchRoutes);
 app.use('/api', distributorRoutes);
+app.use('/api', v3Routes);
 
 app.use((req, res) => {
   if (req.path.startsWith('/api/')) return res.status(404).json({ error: 'not found' });
