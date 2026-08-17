@@ -18,6 +18,8 @@ const distributorRoutes = require('./src/routes/distributor');
 // edit to v1's or v2's money paths anywhere — unmounting this line removes the
 // whole strategy. See src/v3/roles.js for why it does not share variants.js.
 const v3Routes = require('./src/routes/v3');
+const v4Routes = require('./src/routes/v4');
+const v4Runner = require('./src/v4/runner');
 const { rpcMessage } = require('./src/evm/errors');
 
 const app = express();
@@ -62,6 +64,7 @@ app.use('/api', walletRoutes);
 app.use('/api', launchRoutes);
 app.use('/api', distributorRoutes);
 app.use('/api', v3Routes);
+app.use('/api', v4Routes);
 
 app.use((req, res) => {
   if (req.path.startsWith('/api/')) return res.status(404).json({ error: 'not found' });
@@ -94,6 +97,25 @@ async function main() {
     console.error(`[pons-launcher] FACTORY CHECK FAILED: ${err.message}`);
     if (!config.dryRun) throw err;
     console.error('[pons-launcher] continuing anyway because DRY_RUN=true');
+  }
+
+  // A seasoning campaign outlives this process. Every other job in this codebase
+  // dies on restart, which is fine for a run measured in minutes and is not fine
+  // for one measured in weeks — so V4's campaigns are read back off disk and
+  // re-armed here. Transfers that came due while the process was gone are
+  // re-slotted forward, never fired as a burst.
+  try {
+    const { resumed, parked } = v4Runner.resumeAll();
+    if (resumed.length || parked.length) {
+      console.log(
+        `[v4] resumed ${resumed.length} seasoning campaign(s)` +
+          (parked.length
+            ? `, parked ${parked.length} (funding wallet already claimed by another campaign — not funding)`
+            : '')
+      );
+    }
+  } catch (err) {
+    console.error('[v4] could not resume campaigns:', err.message);
   }
 
   server = app.listen(config.port, config.host, () => {
