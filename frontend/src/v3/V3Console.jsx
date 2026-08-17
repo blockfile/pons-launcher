@@ -14,8 +14,8 @@ import V3ExitPanel from './V3ExitPanel.jsx';
  *
  * It owns all of its own state and shares none with the v1/v2 tree beside it.
  * That is the isolation rule expressed in the console: App renders one or the
- * other, this component holds V3's wallets, its per-wallet buy amounts and its
- * running job, and nothing it does can change what the other tab is drawing.
+ * other, this component holds V3's wallets, its token and its running job, and
+ * nothing it does can change what the other tab is drawing.
  *
  * FIVE STEPS, AND WHY THERE IS NO LAUNCH AMONG THEM. V3 is not a launcher. It
  * takes a token that is already live — launched here on another tab, by a
@@ -30,9 +30,6 @@ import V3ExitPanel from './V3ExitPanel.jsx';
 export default function V3Console({ health, credential, report, output, reportedAt }) {
   const [wallets, setWallets] = useState({ treasury: null, main: null, bundle: [], running: false });
   const [job, setJob] = useState(null);
-  // Per-wallet buy amount, keyed by wallet id, lifted here because step 2 sets
-  // it and step 4 spends it.
-  const [rows, setRows] = useState({});
   const [token, setToken] = useState('');
 
   const explorer = health?.explorer || '';
@@ -73,11 +70,8 @@ export default function V3Console({ health, credential, report, output, reported
     return () => clearInterval(t);
   }, [credential, job?.running, loadJob, loadWallets]);
 
-  const setRow = (id, patch) => setRows((r) => ({ ...r, [id]: { ...r[id], ...patch } }));
-
   const bundle = wallets.bundle || [];
   const funded = bundle.filter((w) => Number(w.balanceEth) > 0).length;
-  const priced = bundle.filter((w) => Number(rows[w.id]?.buyEth) > 0).length;
 
   /**
    * The order of work, and where in it the operator is standing.
@@ -103,8 +97,8 @@ export default function V3Console({ health, credential, report, output, reported
         title: 'Generate bundle wallets',
         done: bundle.length > 0,
         detail: bundle.length
-          ? `${plural(bundle.length, 'wallet')} · ${priced} priced · ${funded} funded`
-          : 'each one buys once, funded by a sale that just happened',
+          ? `${plural(bundle.length, 'wallet')} · ${plural(bundle.length, 'cycle')} · ${funded} funded`
+          : 'how many pieces the position is cut into',
       },
       {
         key: 'main',
@@ -161,7 +155,7 @@ export default function V3Console({ health, credential, report, output, reported
             : null,
       };
     });
-  }, [wallets, bundle, funded, priced, job]);
+  }, [wallets, bundle, funded, job]);
 
   const step = (key) => steps.find((s) => s.key === key) || null;
 
@@ -190,8 +184,6 @@ export default function V3Console({ health, credential, report, output, reported
       <V3BundlePanel
         step={step('bundle')}
         wallets={bundle}
-        rows={rows}
-        setRow={setRow}
         explorer={explorer}
         reload={loadWallets}
         report={report}
@@ -212,8 +204,6 @@ export default function V3Console({ health, credential, report, output, reported
       <V3ChainPanel
         step={step('chain')}
         wallets={bundle}
-        rows={rows}
-        setRow={setRow}
         job={job}
         token={token}
         setToken={setToken}

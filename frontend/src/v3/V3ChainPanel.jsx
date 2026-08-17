@@ -19,11 +19,20 @@ const STATE_LABEL = {
 };
 
 const DEFAULT_INTERVAL_MS = 7000;
+const DEFAULT_VARIANCE_PCT = 30;
+
+const money = (v) => (v == null ? null : `$${Number(v).toLocaleString(undefined, { maximumFractionDigits: 2 })}`);
+
+function duration(ms) {
+  const s = Math.round(ms / 1000);
+  if (s < 90) return `${s}s`;
+  const m = Math.floor(s / 60);
+  return m < 60 ? `${m}m ${s % 60}s` : `${Math.floor(m / 60)}h ${m % 60}m`;
+}
 
 export default function V3ChainPanel({
   step,
   wallets,
-  rows,
   job,
   token,
   setToken,
@@ -36,19 +45,19 @@ export default function V3ChainPanel({
   const [bigBuy, setBigBuy] = useState('');
   const [intervalMs, setIntervalMs] = useState(DEFAULT_INTERVAL_MS);
   const [jitterPct, setJitterPct] = useState(0);
+  const [variancePct, setVariancePct] = useState(DEFAULT_VARIANCE_PCT);
   const [plan, setPlan] = useState(null);
   const [arming, setArming] = useState(false);
-
-  const targets = wallets
-    .filter((w) => Number(rows[w.id]?.buyEth) > 0)
-    .map((w) => ({ walletId: w.id, buyEth: String(rows[w.id].buyEth) }));
 
   const body = () => ({
     token: token.trim(),
     bigBuyEth: bigBuy.trim(),
-    targets,
+    // Every bundle wallet, in table order. There is no per-wallet amount: the
+    // run divides the position across them as it goes.
+    targets: wallets.map((w) => ({ walletId: w.id })),
     intervalMs: Number(intervalMs),
     jitterPct: Number(jitterPct),
+    variancePct: Number(variancePct),
   });
 
   async function act(what, fn) {
@@ -69,14 +78,15 @@ export default function V3ChainPanel({
 
   const running = Boolean(job?.running);
   const resumable = job && (job.status === 'stopped' || job.status === 'failed');
-  const ready = token.trim() && Number(bigBuy) > 0 && targets.length > 0;
+  const ready = token.trim() && Number(bigBuy) > 0 && wallets.length > 0;
   const link = (hash) => (explorer && hash ? `${explorer}/tx/${hash}` : '');
 
   return (
     <Step {...step}>
       <p className="lede">
-        One big buy from the main wallet, then a cycle per wallet: sell enough to fund the next one,
-        move it through Relay, and buy. Every {(Number(intervalMs) / 1000).toFixed(1)}s.
+        One big buy from the main wallet, then a cycle per wallet: sell a slice of the position, move
+        the proceeds through Relay, and buy with what arrives. Every{' '}
+        {(Number(intervalMs) / 1000).toFixed(1)}s until the position is gone.
       </p>
 
       <div className="row">
@@ -127,6 +137,18 @@ export default function V3ChainPanel({
             disabled={running}
           />
         </label>
+        <label>
+          size variance (%)
+          <input
+            type="number"
+            min="0"
+            max="90"
+            value={variancePct}
+            onChange={(e) => setVariancePct(e.target.value)}
+            style={{ width: 90 }}
+            disabled={running}
+          />
+        </label>
         <span className="spacer" />
         <Busy
           busy={busy === 'plan'}
@@ -144,24 +166,42 @@ export default function V3ChainPanel({
         </Busy>
       </div>
 
-      {/* Exactly 7.000s between every buy is a machine-readable signature. The
-          field defaults to off because the operator, not this panel, decides
-          whether a given run wants to look human. */}
-      {Number(jitterPct) === 0 && (
-        <p className="hint">
-          Jitter is off, so every buy lands exactly {(Number(intervalMs) / 1000).toFixed(1)}s apart —
-          a regular figure on a chart. Set a percentage to spread them.
-        </p>
-      )}
+      <p className="hint">
+        <b>Jitter</b> spreads the time between buys; <b>size variance</b> spreads how big each one is.
+        {Number(variancePct) === 0 && ' At 0% every buy is the same size, which is a pattern in itself.'}
+        {Number(jitterPct) === 0 &&
+          ` Buys land exactly ${(Number(intervalMs) / 1000).toFixed(1)}s apart at the moment.`}
+      </p>
 
       {plan && !running && (
         <div className="notice">
           <div className="row">
-            <b>{plan.firstCycle.tokens}</b> tokens sold in cycle 1 to raise{' '}
-            <b>{plan.firstCycle.raiseEth} ETH</b>
+            <span>
+              position after the big buy: <b>{Number(plan.position.eth).toFixed(4)} ETH</b>
+              {plan.position.usd && <> ({money(plan.position.usd)})</>}
+            </span>
             <span className="spacer" />
             <span className="hint">
-              {plural(plan.targets.length, 'cycle')} · {plan.totalBuyEth} ETH of buying
+              {plural(plan.walletCount, 'cycle')} · about {duration(plan.estimatedRunMs)}
+            </span>
+          </div>
+          <div className="row">
+            <span>
+              each wallet buys with roughly{' '}
+              <b>
+                {plan.slice.meanUsd
+                  ? money(plan.slice.meanUsd)
+                  : `${Number(plan.slice.meanEth).toFixed(5)} ETH`}
+              </b>
+              {Number(variancePct) > 0 && (
+                <>
+                  {' '}
+                  — varying between{' '}
+                  {plan.slice.lowUsd
+                    ? `${money(plan.slice.lowUsd)} and ${money(plan.slice.highUsd)}`
+                    : `${Number(plan.slice.lowEth).toFixed(5)} and ${Number(plan.slice.highEth).toFixed(5)} ETH`}
+                </>
+              )}
             </span>
           </div>
           {plan.snipeTax.bps > 0 && (
@@ -221,9 +261,9 @@ export default function V3ChainPanel({
               <tr>
                 <th>#</th>
                 <th>Wallet</th>
-                <th className="num">Buy</th>
                 <th>State</th>
                 <th className="num">Sold for</th>
+                <th className="num">Bought with</th>
                 <th>Sell</th>
                 <th>Buy tx</th>
               </tr>
@@ -242,9 +282,12 @@ export default function V3ChainPanel({
                       />
                     )}
                   </td>
-                  <td className="num">{c.buyEth ?? '—'}</td>
-                  <td>{STATE_LABEL[c.state] || c.state}</td>
-                  <td className="num">{c.ethRaised ?? '—'}</td>
+                  <td>
+                    {STATE_LABEL[c.state] || c.state}
+                    {c.finalSlice && c.kind === 'cycle' && <span className="hint"> · remainder</span>}
+                  </td>
+                  <td className="num">{c.ethRaised ? Number(c.ethRaised).toFixed(5) : '—'}</td>
+                  <td className="num">{c.buyEth ? Number(c.buyEth).toFixed(5) : '—'}</td>
                   <td>
                     {c.sellHash ? (
                       <a href={link(c.sellHash)} target="_blank" rel="noreferrer">
@@ -268,9 +311,7 @@ export default function V3ChainPanel({
             </tbody>
           </table>
           {job.cycles.some((c) => c.error) && (
-            <p className="hint">
-              {job.cycles.find((c) => c.error)?.error}
-            </p>
+            <p className="hint">{job.cycles.find((c) => c.error)?.error}</p>
           )}
         </div>
       )}
@@ -295,11 +336,21 @@ export default function V3ChainPanel({
         <Fact label="Token" mono>
           {token}
         </Fact>
-        <Fact label="Big buy">{bigBuy} ETH</Fact>
-        <Fact label="Cycles">{plural(targets.length, 'wallet')}</Fact>
-        <Fact label="Cadence">
-          {(Number(intervalMs) / 1000).toFixed(1)}s{Number(jitterPct) > 0 ? ` ± ${jitterPct}%` : ' exactly'}
+        <Fact label="Big buy">
+          {bigBuy} ETH{plan?.bigBuyUsd ? ` (${money(plan.bigBuyUsd)})` : ''}
         </Fact>
+        <Fact label="Cycles">{plural(wallets.length, 'wallet')}</Fact>
+        {plan && (
+          <Fact label="Each buys about">
+            {plan.slice.meanUsd ? money(plan.slice.meanUsd) : `${Number(plan.slice.meanEth).toFixed(5)} ETH`}
+            {Number(variancePct) > 0 ? ` ± ${variancePct}%` : ''}
+          </Fact>
+        )}
+        <Fact label="Cadence">
+          {(Number(intervalMs) / 1000).toFixed(1)}s
+          {Number(jitterPct) > 0 ? ` ± ${jitterPct}%` : ' exactly'}
+        </Fact>
+        {plan && <Fact label="Takes about">{duration(plan.estimatedRunMs)}</Fact>}
         {plan?.snipeTax?.bps > 0 && (
           <Fact label="Opening tax">{plan.snipeTax.bps} bps — these wallets are not exempt</Fact>
         )}

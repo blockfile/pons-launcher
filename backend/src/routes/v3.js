@@ -34,6 +34,7 @@ const { provider } = require('../evm/provider');
 const { getFees, gasCost } = require('../evm/fees');
 const config = require('../config');
 const holdings = require('../evm/v2/holdings');
+const { ethPriceUsd } = require('../ethPrice');
 const v3roles = require('../v3/roles');
 const trade = require('../v3/trade');
 const relay = require('../v3/relay');
@@ -116,17 +117,20 @@ async function resolveRun(body = {}, ks, deps = {}) {
     throw new Error('no v3 bundle wallet — generate some on the V3 tab first');
   }
 
-  const requested = Array.isArray(body.targets) && body.targets.length
-    ? body.targets
-    : bundle.map((w) => ({ walletId: w.id, buyEth: body.defaultBuyEth }));
+  // No per-wallet amount. The position is divided across however many wallets
+  // are in the run, one cycle each, sized as it goes — so all a target needs to
+  // be is a wallet we own. Omitting `targets` means every bundle wallet, which
+  // is what the console sends.
+  const requested =
+    Array.isArray(body.targets) && body.targets.length
+      ? body.targets
+      : bundle.map((w) => ({ walletId: w.id }));
 
   const known = new Map(bundle.map((w) => [w.id, w]));
   const targets = requested.map((t) => {
     const wallet = known.get(t.walletId);
     if (!wallet) throw new Error(`wallet ${t.walletId} is not a v3 bundle wallet`);
-    const buyWei = parseAmount(t.buyEth, `the buy amount for ${wallet.address}`);
-    if (buyWei <= 0n) throw new Error(`wallet ${t.walletId} needs a positive buy amount`);
-    return { walletId: wallet.id, address: wallet.address, buyWei };
+    return { walletId: wallet.id, address: wallet.address };
   });
 
   // ── can the main wallet start ─────────────────────────────────────────────
@@ -153,43 +157,80 @@ async function resolveRun(body = {}, ks, deps = {}) {
     curveState: curve,
     intervalMs: body.intervalMs,
     jitterPct: body.jitterPct,
+    variancePct: body.variancePct,
   };
 }
 
+/** A wei amount as dollars, or null when no price is available. */
+function usd(wei, price) {
+  if (!price) return null;
+  return (Number(formatEther(wei)) * price).toFixed(2);
+}
+
 /**
- * A dry preview. Everything resolveRun checks, plus what cycle one would sell
- * and what the opening tax would cost. Broadcasts nothing.
+ * A dry preview. Everything resolveRun checks, plus what the run would look
+ * like: how big the position will be after the big buy, what an average slice
+ * works out to, and what the opening tax would cost. Broadcasts nothing.
+ *
+ * THE POSITION IS NOT THE BIG BUY. Buying and then selling the same tokens back
+ * pays the fee and the creator tax twice AND the operator's own price impact
+ * twice, so what is actually available to distribute is meaningfully less than
+ * what goes in. Estimating it here — rather than dividing the big buy by the
+ * wallet count — is the difference between the panel's average slice being
+ * roughly right and being confidently wrong.
  */
 async function buildPlan(body, ks, deps = {}) {
   const run = await resolveRun(body, ks, deps);
   const t = deps.trade || trade;
   const s = deps.sizing || sizing;
-  const getFeesFn = deps.getFeesFn || getFees;
+  const priceFn = deps.ethPriceUsd || ethPriceUsd;
 
-  const fees = await getFeesFn(trade.FEE_BUMP_PCT);
-  const recipientGas =
-    gasCost(fees, BigInt(config.buyGasLimit)) + parseEther(String(config.gasBufferEth));
-  const mainGas = gasCost(fees, trade.APPROVE_GAS + trade.SELL_GAS + engine.RELAY_DEPOSIT_GAS);
+  const curve = run.curveState;
+  const shape = {
+    quoteReserve: curve.quoteReserve,
+    tokenReserve: curve.tokenReserve,
+    feeBps: curve.feeBps,
+    creatorTaxBps: curve.creatorTaxBps,
+  };
 
-  const first = run.targets[0];
-  const targetWei = first.buyWei + recipientGas + mainGas;
-  const tokensIn = s.tokensToRaise({
-    targetWei,
-    quoteReserve: run.curveState.quoteReserve,
-    tokenReserve: run.curveState.tokenReserve,
-    feeBps: run.curveState.feeBps,
-    creatorTaxBps: run.curveState.creatorTaxBps,
-  });
+  // Round-trip the big buy through the curve to estimate the position.
+  const tokensBought = s.quoteBuyOut({ quoteIn: run.bigBuyWei, ...shape });
+  const positionWei = s.quoteSellOut({ tokensIn: tokensBought, ...shape });
+  const walletCount = run.targets.length;
+  const meanWei = walletCount > 0 ? positionWei / BigInt(walletCount) : 0n;
+
+  const variancePct = Number(body.variancePct ?? sizing.DEFAULT_VARIANCE_PCT);
+  const lowWei = (meanWei * BigInt(Math.round(10_000 - variancePct * 100))) / 10_000n;
+  const highWei = (meanWei * BigInt(Math.round(10_000 + variancePct * 100))) / 10_000n;
+
+  // Advisory only, and never allowed to fail the plan — a dollar figure is a
+  // convenience beside the ETH figures, which are the ones the curve fixes.
+  const price = await priceFn()
+    .then((p) => p.usd)
+    .catch(() => null);
 
   // Per the FIRST bundle wallet: the tax is a function of the recipient and the
   // clock, and every wallet in this run is in the same position.
-  const snipeTax = await t.snipeTax(run.curve, first.address, deps);
+  const snipeTax = await t.snipeTax(run.curve, run.targets[0].address, deps);
 
-  const totalBuy = run.targets.reduce((sum, x) => sum + x.buyWei, 0n);
+  const bleedPct =
+    run.bigBuyWei > 0n
+      ? Number(((run.bigBuyWei - positionWei) * 10_000n) / run.bigBuyWei) / 100
+      : 0;
+
   const warnings = [
     'there is no slippage floor on any trade in this run — every sell and every buy takes ' +
       'whatever price it gets',
+    `buying the position and selling it back costs about ${bleedPct.toFixed(1)}% to fees and to ` +
+      "your own price impact, so the wallets share roughly " +
+      `${formatEther(positionWei)} ETH rather than the full ${formatEther(run.bigBuyWei)}`,
   ];
+  if (bleedPct > 20) {
+    warnings.push(
+      `that ${bleedPct.toFixed(1)}% is high, and it is price impact rather than fees: this big buy ` +
+        'is large relative to the curve. A smaller big buy loses far less on the round trip.'
+    );
+  }
   if (snipeTax.bps > 0) {
     warnings.push(
       `the opening snipe tax is still live at ${snipeTax.bps} bps and V3's wallets are NOT exempt — ` +
@@ -201,30 +242,38 @@ async function buildPlan(body, ks, deps = {}) {
   return {
     token: run.token,
     curve: run.curve,
-    graduated: run.curveState.graduated,
-    readyToGraduate: run.curveState.readyToGraduate,
-    feeBps: run.curveState.feeBps,
-    creatorTaxBps: run.curveState.creatorTaxBps,
+    graduated: curve.graduated,
+    readyToGraduate: curve.readyToGraduate,
+    feeBps: curve.feeBps,
+    creatorTaxBps: curve.creatorTaxBps,
     bigBuyEth: formatEther(run.bigBuyWei),
+    bigBuyUsd: usd(run.bigBuyWei, price),
+    ethUsd: price,
     mainWallet: { walletId: run.main.id, address: run.main.address },
-    targets: run.targets.map((x, i) => ({
-      index: i + 1,
-      walletId: x.walletId,
-      address: x.address,
-      buyEth: formatEther(x.buyWei),
-      fundEth: formatEther(x.buyWei + recipientGas),
-    })),
-    totalBuyEth: formatEther(totalBuy),
-    totalWithGasEth: formatEther(totalBuy + recipientGas * BigInt(run.targets.length)),
-    firstCycle: {
-      walletId: first.walletId,
-      raiseEth: formatEther(targetWei),
-      tokens: formatUnits(tokensIn, 18),
-      tokensRaw: tokensIn.toString(),
+    walletCount,
+    targets: run.targets.map((x, i) => ({ index: i + 1, walletId: x.walletId, address: x.address })),
+    // What the run has to hand out, after the round trip.
+    position: {
+      tokens: formatUnits(tokensBought, 18),
+      tokensRaw: tokensBought.toString(),
+      eth: formatEther(positionWei),
+      usd: usd(positionWei, price),
+      bleedPct: Number(bleedPct.toFixed(2)),
+    },
+    // What one cycle looks like on average, and the band it varies within.
+    slice: {
+      meanEth: formatEther(meanWei),
+      meanUsd: usd(meanWei, price),
+      lowEth: formatEther(lowWei),
+      lowUsd: usd(lowWei, price),
+      highEth: formatEther(highWei),
+      highUsd: usd(highWei, price),
     },
     snipeTax,
     intervalMs: Number(body.intervalMs ?? engine.DEFAULT_INTERVAL_MS),
     jitterPct: Number(body.jitterPct ?? engine.DEFAULT_JITTER_PCT),
+    variancePct,
+    estimatedRunMs: Number(body.intervalMs ?? engine.DEFAULT_INTERVAL_MS) * walletCount,
     minQuoteOut: '0',
     warnings,
   };
@@ -383,6 +432,7 @@ router.post('/v3/chain/start', requireApiKey, async (req, res, next) => {
           targets: run.targets,
           intervalMs: run.intervalMs,
           jitterPct: run.jitterPct,
+          variancePct: run.variancePct,
         })
       )
     );

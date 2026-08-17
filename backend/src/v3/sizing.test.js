@@ -2,9 +2,18 @@
 
 const test = require('node:test');
 const assert = require('node:assert/strict');
-const { parseEther } = require('ethers');
+const { formatEther, parseEther } = require('ethers');
 
-const { quoteSellOut, tokensToRaise, SELL_HEADROOM_PCT, BPS } = require('./sizing');
+const {
+  quoteSellOut,
+  quoteBuyOut,
+  tokensToRaise,
+  sliceFor,
+  SELL_HEADROOM_PCT,
+  DEFAULT_VARIANCE_PCT,
+  MAX_VARIANCE_PCT,
+  BPS,
+} = require('./sizing');
 
 const TOKENS = (n) => BigInt(n) * 10n ** 18n;
 
@@ -136,4 +145,140 @@ test('it refuses fees that would take everything', () => {
 
 test('BPS is ten thousand', () => {
   assert.equal(BPS, 10_000n);
+});
+
+// ── quoteBuyOut ─────────────────────────────────────────────────────────────
+
+test('buying nothing receives nothing', () => {
+  assert.equal(quoteBuyOut({ quoteIn: 0n, ...CURVE }), 0n);
+});
+
+test('a bigger buy receives more, at a worse average price', () => {
+  const one = quoteBuyOut({ quoteIn: parseEther('1'), ...CURVE });
+  const ten = quoteBuyOut({ quoteIn: parseEther('10'), ...CURVE });
+  assert.ok(ten > one);
+  assert.ok(ten < one * 10n, 'ten times the ETH must not receive ten times the tokens');
+});
+
+// THE ROUND-TRIP BLEED, AND WHERE IT COMES FROM. A V3 run buys the position and
+// then sells all of it back, so what the bundle wallets can be funded with is
+// always less than the big buy. Two costs, and they behave completely
+// differently — which is why the plan estimates the position rather than
+// assuming it equals the big buy:
+//
+//   fees     fee + creator tax, paid on the way in AND on the way out. Flat,
+//            roughly 2× the rate, whatever the size.
+//   impact   buying moves the price up and selling moves it back down through
+//            your own footprint. Negligible on a small buy, brutal on a large
+//            one relative to the curve's reserve.
+test('a small buy round-trips back at close to the fee cost alone', () => {
+  const inWei = parseEther('0.1'); // 0.25% of a 40 ETH reserve
+  const back = quoteSellOut({ tokensIn: quoteBuyOut({ quoteIn: inWei, ...CURVE }), ...CURVE });
+  assert.ok(back < inWei, 'a round trip cannot come back whole');
+  // 1% fee + 1% tax each way ≈ 4%; impact adds only a little at this size.
+  assert.ok(back > (inWei * 94n) / 100n, `expected ~4% of cost, lost ${formatEther(inWei - back)} ETH`);
+});
+
+test('a large buy round-trips back far worse, and impact is why', () => {
+  // 5 ETH into a 40 ETH reserve is an eighth of the curve. The fees are the
+  // same 4%; everything beyond that is the operator paying their own price
+  // impact twice. An operator sizing a big buy needs to see this.
+  const inWei = parseEther('5');
+  const back = quoteSellOut({ tokensIn: quoteBuyOut({ quoteIn: inWei, ...CURVE }), ...CURVE });
+  const lostPct = Number(((inWei - back) * 10_000n) / inWei) / 100;
+  assert.ok(lostPct > 10, `expected heavy impact, lost only ${lostPct}%`);
+  assert.ok(lostPct < 40, `lost ${lostPct}%, which would mean the maths is wrong rather than costly`);
+});
+
+// ── sliceFor ────────────────────────────────────────────────────────────────
+
+test('with no variance every slice is exactly the running mean', () => {
+  const slice = sliceFor({ valueWei: parseEther('20'), remainingWallets: 20, variancePct: 0 });
+  assert.equal(slice, parseEther('1'));
+});
+
+test('the default variance is thirty percent', () => {
+  assert.equal(DEFAULT_VARIANCE_PCT, 30);
+});
+
+test('a slice stays within the variance band around the mean', () => {
+  const value = parseEther('500');
+  for (const roll of [0, 0.13, 0.5, 0.87, 1]) {
+    const slice = sliceFor({ valueWei: value, remainingWallets: 20, variancePct: 30, roll });
+    assert.ok(slice >= parseEther('17.5'), `${slice} below the -30% floor`);
+    assert.ok(slice <= parseEther('32.5'), `${slice} above the +30% ceiling`);
+  }
+});
+
+test('the extremes of the roll hit the edges of the band', () => {
+  const value = parseEther('500');
+  assert.equal(sliceFor({ valueWei: value, remainingWallets: 20, variancePct: 30, roll: 0 }), parseEther('17.5'));
+  assert.equal(sliceFor({ valueWei: value, remainingWallets: 20, variancePct: 30, roll: 1 }), parseEther('32.5'));
+  assert.equal(sliceFor({ valueWei: value, remainingWallets: 20, variancePct: 30, roll: 0.5 }), parseEther('25'));
+});
+
+test('the last wallet takes the whole remainder, whatever the variance', () => {
+  for (const variancePct of [0, 30, 90]) {
+    for (const roll of [0, 0.5, 1]) {
+      assert.equal(
+        sliceFor({ valueWei: parseEther('7.3'), remainingWallets: 1, variancePct, roll }),
+        parseEther('7.3'),
+        'the position must land on zero, not near it'
+      );
+    }
+  }
+});
+
+// THE PROPERTY THE WHOLE DESIGN RESTS ON. Walk a position down through N
+// wallets, recomputing the mean each time, and it must not run out early —
+// every wallet gets a positive slice and the last one clears the rest.
+test('recomputing the mean exhausts the position exactly, over any wallet count', () => {
+  for (const wallets of [2, 3, 7, 20, 50]) {
+    let remaining = parseEther('500');
+    const slices = [];
+    for (let i = 0; i < wallets; i += 1) {
+      const left = wallets - i;
+      // Worst case for early exhaustion: every early cycle rolls the maximum.
+      const slice = sliceFor({ valueWei: remaining, remainingWallets: left, variancePct: 30, roll: 1 });
+      assert.ok(slice > 0n, `wallet ${i + 1} of ${wallets} got nothing`);
+      assert.ok(slice <= remaining, `wallet ${i + 1} of ${wallets} was sold more than is left`);
+      slices.push(slice);
+      remaining -= slice;
+    }
+    assert.equal(remaining, 0n, `${wallets} wallets left ${remaining} behind`);
+  }
+});
+
+test('it exhausts exactly even when every cycle rolls the minimum', () => {
+  let remaining = parseEther('500');
+  const wallets = 20;
+  for (let i = 0; i < wallets; i += 1) {
+    remaining -= sliceFor({ valueWei: remaining, remainingWallets: wallets - i, variancePct: 30, roll: 0 });
+  }
+  assert.equal(remaining, 0n);
+});
+
+test('a slice never exceeds what is left', () => {
+  const slice = sliceFor({ valueWei: 100n, remainingWallets: 2, variancePct: 90, roll: 1 });
+  assert.ok(slice <= 100n);
+});
+
+test('a slice is never zero, even when the position is nearly dust', () => {
+  const slice = sliceFor({ valueWei: 3n, remainingWallets: 3, variancePct: 90, roll: 0 });
+  assert.ok(slice > 0n, 'a cycle that sells nothing leaves a hole in the tape');
+});
+
+test('it refuses an exhausted position', () => {
+  assert.throws(() => sliceFor({ valueWei: 0n, remainingWallets: 3 }), /nothing left/);
+});
+
+test('it refuses a variance above the cap', () => {
+  assert.throws(
+    () => sliceFor({ valueWei: parseEther('1'), remainingWallets: 3, variancePct: MAX_VARIANCE_PCT + 1 }),
+    /variance/
+  );
+});
+
+test('it refuses a nonsense wallet count', () => {
+  assert.throws(() => sliceFor({ valueWei: parseEther('1'), remainingWallets: 0 }), /positive integer/);
 });

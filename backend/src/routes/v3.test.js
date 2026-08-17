@@ -49,18 +49,19 @@ function harness({
     },
     rpc: { getBalance: async () => mainEth },
     getFeesFn: async () => ({ type: 2, maxFeePerGas: 1_000_000_000n, maxPriorityFeePerGas: 1n }),
+    // Injected by default so no test reaches an exchange. Individual tests
+    // override it to assert the priced and the unpriced paths.
+    ethPriceUsd: async () => ({ usd: 4000, source: 'fake', at: 0 }),
   };
 }
 
 const BODY = {
   token: TOKEN,
   bigBuyEth: '5',
-  targets: [
-    { walletId: 'w1', buyEth: '0.1' },
-    { walletId: 'w2', buyEth: '0.2' },
-  ],
+  targets: [{ walletId: 'w1' }, { walletId: 'w2' }],
   intervalMs: 7000,
   jitterPct: 0,
+  variancePct: 30,
   confirm: true,
 };
 
@@ -72,13 +73,16 @@ test('it resolves a good request into what the engine needs', async () => {
   assert.equal(out.token, TOKEN);
   assert.equal(out.curve, CURVE);
   assert.equal(out.bigBuyWei, parseEther('5'));
+  // Wallets and addresses only — no per-wallet amount. The run sizes each
+  // cycle from what is left of the position when it gets there.
   assert.deepEqual(
-    out.targets.map((t) => [t.walletId, t.buyWei]),
+    out.targets.map((t) => [t.walletId, t.address]),
     [
-      ['w1', parseEther('0.1')],
-      ['w2', parseEther('0.2')],
+      ['w1', W1.address],
+      ['w2', W2.address],
     ]
   );
+  assert.ok(!('buyWei' in out.targets[0]));
 });
 
 test('it refuses a token the v2 factory has never heard of', async () => {
@@ -133,22 +137,23 @@ test('it refuses when the main wallet cannot cover the big buy and its gas', asy
   await assert.rejects(() => resolve(h), /has 1\.0 ETH/);
 });
 
-test('it refuses a target with no positive buy amount', async () => {
-  const h = harness();
-  const body = { ...BODY, targets: [{ walletId: 'w1', buyEth: '0' }] };
-  await assert.rejects(() => resolve(h, body), /positive/);
-});
-
 test('it refuses a non-positive big buy', async () => {
   const h = harness();
   await assert.rejects(() => resolve(h, { ...BODY, bigBuyEth: '0' }), /big buy/);
 });
 
+test('it refuses a big buy that is not a number', async () => {
+  const h = harness();
+  await assert.rejects(() => resolve(h, { ...BODY, bigBuyEth: 'lots' }), /number of ETH/);
+});
+
 test('it defaults to every bundle wallet when targets are omitted', async () => {
   const h = harness();
-  const out = await resolve(h, { ...BODY, targets: undefined, defaultBuyEth: '0.05' });
-  assert.deepEqual(out.targets.map((t) => t.walletId), ['w1', 'w2']);
-  assert.ok(out.targets.every((t) => t.buyWei === parseEther('0.05')));
+  const out = await resolve(h, { ...BODY, targets: undefined });
+  assert.deepEqual(
+    out.targets.map((t) => t.walletId),
+    ['w1', 'w2']
+  );
 });
 
 test('the plan states the snipe tax each wallet would pay and when it closes', async () => {
@@ -167,12 +172,63 @@ test('the plan is silent about the snipe tax once the window has closed', async 
   assert.ok(!plan.warnings.join(' ').match(/snipe tax/i));
 });
 
-test('the plan says what cycle one would sell, without selling it', async () => {
+test('the plan estimates the position after the round trip, not the big buy', async () => {
+  // Buying 5 ETH of a curve and selling it back does not return 5 ETH: fees and
+  // the operator's own price impact are both paid twice. The wallets share the
+  // smaller figure, and the plan has to say so or every slice it quotes is
+  // optimistic.
   const h = harness();
   const plan = await v3.buildPlan(BODY, h.keystore, h);
-  assert.ok(BigInt(plan.firstCycle.tokensRaw) > 0n);
-  assert.equal(plan.firstCycle.walletId, 'w1');
-  assert.equal(plan.totalBuyEth, '0.3');
+  assert.ok(Number(plan.position.eth) > 0);
+  assert.ok(Number(plan.position.eth) < 5, 'the round trip cannot come back whole');
+  assert.ok(plan.position.bleedPct > 0);
+  assert.match(plan.warnings.join(' '), /price impact/);
+});
+
+test('the plan states an average slice and the band it varies within', async () => {
+  const h = harness();
+  const plan = await v3.buildPlan(BODY, h.keystore, h);
+  // Two wallets, so the mean is half the position.
+  assert.ok(Math.abs(Number(plan.slice.meanEth) - Number(plan.position.eth) / 2) < 1e-9);
+  assert.ok(Number(plan.slice.lowEth) < Number(plan.slice.meanEth));
+  assert.ok(Number(plan.slice.highEth) > Number(plan.slice.meanEth));
+  assert.equal(plan.walletCount, 2);
+});
+
+test('a variance of zero makes the band collapse onto the mean', async () => {
+  const h = harness();
+  const plan = await v3.buildPlan({ ...BODY, variancePct: 0 }, h.keystore, h);
+  assert.equal(plan.slice.lowEth, plan.slice.meanEth);
+  assert.equal(plan.slice.highEth, plan.slice.meanEth);
+});
+
+test('the plan prices everything in dollars when a rate is available', async () => {
+  const h = harness();
+  h.ethPriceUsd = async () => ({ usd: 4000, source: 'test', at: 0 });
+  const plan = await v3.buildPlan(BODY, h.keystore, h);
+  assert.equal(plan.ethUsd, 4000);
+  assert.equal(plan.bigBuyUsd, '20000.00');
+  assert.ok(Number(plan.slice.meanUsd) > 0);
+});
+
+test('a dead price feed leaves the dollar figures null rather than failing', async () => {
+  // The ETH figures are the ones the curve fixes; dollars are advisory, and a
+  // plan that refused to answer because an exchange was down would be worse
+  // than one that answers without them.
+  const h = harness();
+  h.ethPriceUsd = async () => {
+    throw new Error('both sources down');
+  };
+  const plan = await v3.buildPlan(BODY, h.keystore, h);
+  assert.equal(plan.ethUsd, null);
+  assert.equal(plan.slice.meanUsd, null);
+  assert.ok(Number(plan.slice.meanEth) > 0, 'the ETH figures must still be there');
+});
+
+test('the plan estimates how long the run will take', async () => {
+  const h = harness();
+  const plan = await v3.buildPlan(BODY, h.keystore, h);
+  assert.equal(plan.estimatedRunMs, 7000 * 2);
 });
 
 test('the plan always states that there is no slippage floor', async () => {

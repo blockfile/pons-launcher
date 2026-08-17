@@ -53,6 +53,12 @@ const BPS = 10_000n;
 // What the spec settled on, and what the engine passes when it does not say.
 const SELL_HEADROOM_PCT = 10;
 
+// How far a cycle's slice may stray from the running mean, and the ceiling on
+// what an operator can ask for. ±30% is clearly irregular without any single
+// buy standing out; past ±90% the small end rounds to dust.
+const DEFAULT_VARIANCE_PCT = 30;
+const MAX_VARIANCE_PCT = 90;
+
 /** Ceiling division for positive BigInts. */
 function ceilDiv(a, b) {
   return (a + b - 1n) / b;
@@ -126,4 +132,96 @@ function tokensToRaise({
   return ceilDiv(gross * t, q - gross);
 }
 
-module.exports = { BPS, SELL_HEADROOM_PCT, quoteSellOut, tokensToRaise, _private: { ceilDiv } };
+/**
+ * What buying `quoteIn` receives. The curve, forward, on the other side.
+ *
+ * Used only to ESTIMATE, in the plan: it answers "after the big buy, how big is
+ * the position, and so how big is an average slice". The engine never sizes a
+ * real trade with this — it reads the main wallet's actual token balance.
+ *
+ * Fee comes off the input here rather than the output, which is the other side
+ * of the same arrangement quoteSellOut models.
+ *
+ * @returns {bigint} tokens
+ */
+function quoteBuyOut({ quoteIn, quoteReserve, tokenReserve, feeBps = 0, creatorTaxBps = 0 }) {
+  const amount = BigInt(quoteIn);
+  if (amount <= 0n) return 0n;
+
+  const takenBps = BigInt(feeBps) + BigInt(creatorTaxBps);
+  if (takenBps >= BPS) return 0n;
+
+  const net = (amount * (BPS - takenBps)) / BPS;
+  const q = BigInt(quoteReserve);
+  const t = BigInt(tokenReserve);
+  const denom = q + net;
+  if (denom <= 0n) return 0n;
+
+  return (t * net) / denom;
+}
+
+/**
+ * What this cycle should raise: the running mean, jittered.
+ *
+ * THE MEAN IS RECOMPUTED EVERY CYCLE, and that is the whole design.
+ *
+ * Dividing the position once at the start and selling that fixed amount N times
+ * does not work, because every sell moves the price down: the position is worth
+ * less after each cycle than the arithmetic assumed, and the run reaches the
+ * last few wallets with nothing left to sell. Recomputing `remaining value ÷
+ * remaining wallets` self-corrects. A cycle that sold into more impact than
+ * expected lowers the value the next mean is drawn from, so the shortfall is
+ * spread over the wallets that are left rather than landing entirely on the
+ * last one.
+ *
+ * THE LAST WALLET TAKES WHATEVER IS LEFT, exactly — no jitter, no arithmetic.
+ * That is what makes the position land on zero rather than near it, and it is
+ * why the caller passes the whole remaining balance for that cycle instead of a
+ * target.
+ *
+ * `roll` is a 0..1 uniform, injected rather than drawn here so the engine's
+ * tests are deterministic.
+ *
+ * @returns {bigint} wei this cycle should raise
+ */
+function sliceFor({ valueWei, remainingWallets, variancePct = DEFAULT_VARIANCE_PCT, roll = 0.5 }) {
+  const value = BigInt(valueWei);
+  if (value <= 0n) throw new Error('there is nothing left of the position to slice');
+
+  const left = Number(remainingWallets);
+  if (!Number.isInteger(left) || left < 1) throw new Error('remainingWallets must be a positive integer');
+
+  // One wallet left means it takes the remainder. The caller is expected to
+  // sell the whole balance in that case; returning the full value keeps this
+  // function honest about what it is saying.
+  if (left === 1) return value;
+
+  const mean = value / BigInt(left);
+  const swing = Number(variancePct);
+  if (!Number.isFinite(swing) || swing < 0 || swing > MAX_VARIANCE_PCT) {
+    throw new Error(`variance must be between 0 and ${MAX_VARIANCE_PCT} percent`);
+  }
+  if (swing === 0) return mean;
+
+  // ±swing%, uniform. Done in basis points so the whole calculation stays in
+  // BigInt once the roll has been folded in.
+  const factorBps = BigInt(Math.round(10_000 + swing * 100 * (roll * 2 - 1)));
+  const slice = (mean * factorBps) / BPS;
+
+  // Never more than is there, and never zero — a cycle that sells nothing
+  // would transfer nothing and buy nothing, leaving a hole in the tape.
+  if (slice >= value) return value;
+  return slice > 0n ? slice : 1n;
+}
+
+module.exports = {
+  BPS,
+  SELL_HEADROOM_PCT,
+  DEFAULT_VARIANCE_PCT,
+  MAX_VARIANCE_PCT,
+  quoteSellOut,
+  quoteBuyOut,
+  tokensToRaise,
+  sliceFor,
+  _private: { ceilDiv },
+};

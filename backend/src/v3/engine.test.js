@@ -70,6 +70,10 @@ function harness({
   const logged = [];
   const balances = { [MAIN.address]: parseEther('50') };
   let polls = 0;
+  // The main wallet's token position, walked down by each fake sell.
+  let position = TOKENS(1_000_000);
+  // What each bundle wallet's solver fill delivered, by address.
+  const filled = {};
 
   const wallets = [MAIN, ...targets];
   const keystore = {
@@ -97,7 +101,10 @@ function harness({
       getBalance: async (a) => {
         if (a === MAIN.address) return balances[MAIN.address];
         if (fillNever) return 0n;
-        return polls >= fillAfter ? parseEther('1') : 0n;
+        // The solver's fill: exactly what the transfer ordered, once enough
+        // polls have gone by. Modelled rather than faked as a constant so the
+        // buy really is sized from what arrived.
+        return polls >= fillAfter ? (filled[a] ?? 0n) : 0n;
       },
     },
     getFeesFn: async () => ({ type: 2, maxFeePerGas: 1_000_000_000n, maxPriorityFeePerGas: 1n }),
@@ -123,6 +130,9 @@ function harness({
         const index = calls.filter((c) => c.step === 'sell').length + 1;
         note('sell', index, { tokensIn });
         if (fail?.step === 'sell' && fail.index === index) throw new Error('sell reverted');
+        // The position shrinks by what was sold, so the next cycle's slice is
+        // drawn against a genuinely smaller balance.
+        position -= tokensIn;
         return {
           approveHash: `0xap${index}`,
           sellHash: `0xse${index}`,
@@ -132,7 +142,7 @@ function harness({
           tokensIn,
         };
       },
-      tokenBalance: async () => TOKENS(1_000_000),
+      tokenBalance: async () => position,
     },
     relay: {
       transfer: async ({ toAddress, amountWei }) => {
@@ -140,12 +150,13 @@ function harness({
         note('transfer', index, { amountWei });
         if (fail?.step === 'transfer' && fail.index === index) throw new Error('relay refused');
         balances[MAIN.address] -= amountWei;
+        filled[toAddress] = amountWei;
         return { hash: `0xrl${index}`, requestId: `0xreq${index}`, depositAddress: '0xdep', amountWei };
       },
     },
-    sizing: {
-      tokensToRaise: () => TOKENS(5000),
-    },
+    // The real sizing module, not a fake: it is pure arithmetic with its own
+    // tests, and faking it here would hide whether the engine divides the
+    // position correctly — which is the behaviour these tests are about.
     fillPollMs: 1,
     fillTimeoutMs: 20,
   };
@@ -156,10 +167,20 @@ function harness({
     curve: CURVE,
     symbol: 'TEST',
     bigBuyWei: parseEther('5'),
-    targets: targets.map((t) => ({ walletId: t.id, address: t.address, buyWei: parseEther('0.1') })),
+    targets: targets.map((t) => ({ walletId: t.id, address: t.address })),
   };
 
-  return { engine, clock, calls, logged, input, deps, balances, polls: () => polls };
+  return {
+    engine,
+    clock,
+    calls,
+    logged,
+    input,
+    deps,
+    balances,
+    polls: () => polls,
+    position: () => position,
+  };
 }
 
 const steps = (calls) => calls.map((c) => `${c.step}${c.index}`);
@@ -376,15 +397,84 @@ test('two users run independently', async () => {
   await assert.doesNotReject(() => h.engine.start('u2', h.input));
 });
 
-test('the transfer carries the buy amount plus a gas reserve, not the bare buy', async () => {
+test('the transfer carries what the sell raised, less gas and a relay allowance', async () => {
   const h = harness({ targets: [W1] });
   await h.engine.start(USER, h.input);
   await h.clock.drain();
   const transfer = h.calls.find((c) => c.step === 'transfer');
+  // The fake sell raises exactly 1 ETH. The transfer must be less than that —
+  // the main wallet keeps its own next round of gas and the Relay fee back —
+  // but not by much.
+  assert.ok(transfer.amountWei < parseEther('1'), 'gas and the relay fee must be held back');
+  assert.ok(transfer.amountWei > parseEther('0.9'), `held back too much: ${transfer.amountWei}`);
+});
+
+test('the buy spends everything that arrived, less gas', async () => {
+  const h = harness({ targets: [W1] });
+  await h.engine.start(USER, h.input);
+  await h.clock.drain();
+  const cycle = h.engine.status(USER).cycles.find((c) => c.kind === 'cycle');
+  // Whatever the transfer delivered, minus gas — never a preset figure.
+  assert.ok(Number(cycle.buyEth) < Number(cycle.transferredEth), 'gas must be left behind');
   assert.ok(
-    transfer.amountWei > parseEther('0.1'),
-    'a wallet funded with exactly its buy cannot pay the gas to make it'
+    Number(cycle.buyEth) > Number(cycle.transferredEth) * 0.99,
+    `bought with ${cycle.buyEth} of the ${cycle.transferredEth} that arrived — too much held back`
   );
+});
+
+// THE DIVISION. Three wallets, one position: each cycle draws its slice from
+// what is actually left, and the last one clears the rest.
+test('the position is divided across the wallets and lands on zero', async () => {
+  const h = harness({ targets: [W1, W2, W3] });
+  await h.engine.start(USER, h.input);
+  await h.clock.drain();
+  assert.equal(h.engine.status(USER).status, 'complete');
+  assert.equal(h.position(), 0n, 'the last wallet must clear the position exactly');
+});
+
+test('the last cycle is flagged as the one taking the remainder', async () => {
+  const h = harness({ targets: [W1, W2, W3] });
+  await h.engine.start(USER, h.input);
+  await h.clock.drain();
+  const cycles = h.engine.status(USER).cycles.filter((c) => c.kind === 'cycle');
+  assert.deepEqual(
+    cycles.map((c) => c.finalSlice),
+    [false, false, true]
+  );
+});
+
+test('every cycle sells a positive slice, none is starved', async () => {
+  const h = harness({ targets: [W1, W2, W3] });
+  await h.engine.start(USER, h.input);
+  await h.clock.drain();
+  for (const s of h.calls.filter((c) => c.step === 'sell')) {
+    assert.ok(s.tokensIn > 0n, 'a cycle that sells nothing leaves a hole in the tape');
+  }
+});
+
+test('variance makes consecutive slices differ', async () => {
+  // Rolls alternate between the ends of the band, so two adjacent cycles must
+  // not sell the same amount.
+  const clock = fakeClock();
+  const h = harness({ clock, targets: [W1, W2, W3] });
+  let n = 0;
+  h.deps.randomFn = () => (n++ % 2 === 0 ? 0.05 : 0.95);
+  const engine = createEngine(h.deps);
+  await engine.start(USER, { ...h.input, variancePct: 40 });
+  await clock.drain();
+  const sells = h.calls.filter((c) => c.step === 'sell');
+  assert.notEqual(sells[0].tokensIn, sells[1].tokensIn, 'identical slices are a machine signature');
+});
+
+test('a position that is already gone halts the run rather than selling nothing', async () => {
+  const h = harness({ targets: [W1, W2] });
+  h.deps.trade.tokenBalance = async () => 0n;
+  const engine = createEngine(h.deps);
+  await engine.start(USER, h.input);
+  await h.clock.drain();
+  const job = engine.status(USER);
+  assert.equal(job.status, 'failed');
+  assert.match(job.failure.error, /nothing left to distribute/);
 });
 
 test('start refuses an interval below the floor', async () => {
@@ -405,10 +495,26 @@ test('start refuses no targets', async () => {
   await assert.rejects(() => h.engine.start(USER, { ...h.input, targets: [] }), /wallet/);
 });
 
-test('start refuses a target with no buy amount', async () => {
+test('start refuses a target with no address', async () => {
   const h = harness();
-  const targets = [{ walletId: 'w1', address: W1.address, buyWei: 0n }];
-  await assert.rejects(() => h.engine.start(USER, { ...h.input, targets }), /positive/);
+  await assert.rejects(
+    () => h.engine.start(USER, { ...h.input, targets: [{ walletId: 'w1' }] }),
+    /address/
+  );
+});
+
+test('start refuses the same wallet twice', async () => {
+  const h = harness();
+  const twice = [
+    { walletId: 'w1', address: W1.address },
+    { walletId: 'w1', address: W1.address },
+  ];
+  await assert.rejects(() => h.engine.start(USER, { ...h.input, targets: twice }), /twice/);
+});
+
+test('start refuses a variance above the cap', async () => {
+  const h = harness();
+  await assert.rejects(() => h.engine.start(USER, { ...h.input, variancePct: 91 }), /variance/);
 });
 
 test('start refuses a non-positive big buy', async () => {

@@ -66,8 +66,15 @@ const FILL_POLL_MS = 1_500;
 const FILL_TIMEOUT_MS = 90_000;
 
 // A deposit to a Relay deposit address is a plain value send with no calldata.
-// 50k is generous and is only used to decide how much the sell has to raise.
+// 50k is generous and is only used to decide how much a cycle keeps back.
 const RELAY_DEPOSIT_GAS = 50_000n;
+
+// Held back from each transfer for Relay's own fee. An EXACT_OUTPUT order
+// charges the fee on the SENDER's side, so the deposit is always larger than
+// the amount ordered — and how much larger is not known until the quote comes
+// back, which is after the size has to be chosen. Anything unspent stays in the
+// main wallet and comes out at the exit.
+const RELAY_FEE_PCT = 3;
 
 // Same headroom trade.js uses, so the gas figures the sell is sized against are
 // the ones the transactions will actually quote.
@@ -94,7 +101,11 @@ function publicCycle(c) {
     step: c.step || null,
     walletId: c.walletId || null,
     address: c.address || null,
+    // What this wallet ACTUALLY bought with — decided by what the sell raised,
+    // not set in advance. Null until the buy has happened.
     buyEth: c.buyWei == null ? null : formatEther(c.buyWei),
+    sliceEth: c.sliceWei == null ? null : formatEther(c.sliceWei),
+    finalSlice: Boolean(c.finalSlice),
     tokensSold: c.tokensSold == null ? null : c.tokensSold.toString(),
     ethRaised: c.ethRaised == null ? null : formatEther(c.ethRaised),
     transferredEth: c.transferredWei == null ? null : formatEther(c.transferredWei),
@@ -130,6 +141,7 @@ function publicJob(job) {
     bigBuyEth: formatEther(job.bigBuyWei),
     intervalMs: job.intervalMs,
     jitterPct: job.jitterPct,
+    variancePct: job.variancePct,
     currentIndex: job.currentIndex,
     total: job.targets.length,
     completed: done,
@@ -145,7 +157,6 @@ function publicJob(job) {
       index: i + 1,
       walletId: t.walletId,
       address: t.address,
-      buyEth: formatEther(t.buyWei),
     })),
     cycles,
   };
@@ -233,39 +244,25 @@ function createEngine(deps = {}) {
   }
 
   /**
-   * What this cycle's sell has to raise, what the recipient must receive, and
-   * the least it can arrive with and still buy.
+   * The gas figures a cycle has to work around.
    *
-   * The gas constants come from the real trade module rather than the injected
-   * one: they describe transactions this engine does not build, so they are
-   * data, and a test that substitutes the trading behaviour should not have to
-   * restate them.
+   * They come from the real trade module rather than the injected one: they
+   * describe transactions this engine does not build, so they are data, and a
+   * test that substitutes the trading behaviour should not have to restate
+   * them.
    */
-  async function amountsFor(buyWei) {
+  async function gasFor() {
     const fees = await getFeesFn(FEE_BUMP_PCT);
-    const buyGas = gasCost(fees, BigInt(config.buyGasLimit));
-
-    // The recipient needs its buy plus the gas to make it, plus the same small
-    // buffer prepareV2 leaves — a wallet funded with exactly its buy cannot pay
-    // for it.
-    const recipientGas = buyGas + parseEther(String(config.gasBufferEth));
-
-    // And the main wallet has to cover its own next approve, sell and deposit
-    // out of this sell, or the run walks itself dry a few cycles in.
-    const mainGas = gasCost(
-      fees,
-      defaultTrade.APPROVE_GAS + defaultTrade.SELL_GAS + RELAY_DEPOSIT_GAS
-    );
-
-    const fundWei = buyWei + recipientGas;
     return {
       fees,
-      fundWei,
-      recipientGas,
-      // What the fill wait holds out for: enough to make the buy, without
-      // insisting on the buffer, which is deliberately slack.
-      needWei: buyWei + buyGas,
-      targetWei: fundWei + mainGas,
+      // What a bundle wallet needs to make its buy, plus the same small buffer
+      // prepareV2 leaves.
+      buyGas: gasCost(fees, BigInt(config.buyGasLimit)),
+      buffer: parseEther(String(config.gasBufferEth)),
+      // What the main wallet has to keep back out of each sale to pay for its
+      // own next approve, sell and deposit — or the run walks itself dry a few
+      // cycles in.
+      mainGas: gasCost(fees, defaultTrade.APPROVE_GAS + defaultTrade.SELL_GAS + RELAY_DEPOSIT_GAS),
     };
   }
 
@@ -318,7 +315,12 @@ function createEngine(deps = {}) {
     const wallet = v3roles.bundle(ks).find((w) => w.id === target.walletId);
     if (!wallet) throw new Error(`wallet ${target.walletId} is no longer a v3 bundle wallet`);
 
-    const { fundWei, needWei, targetWei } = await amountsFor(target.buyWei);
+    const { buyGas, buffer, mainGas } = await gasFor();
+
+    // How many wallets, including this one, still have to be served. This is
+    // the divisor the slice is drawn against, and recomputing it every cycle is
+    // what makes the position land on zero exactly when the wallets run out.
+    const remainingWallets = job.targets.length - (index - 1);
 
     // ── sell ────────────────────────────────────────────────────────────────
     if (!record.sellDone) {
@@ -332,13 +334,54 @@ function createEngine(deps = {}) {
         throw new Error('the curve graduated mid-run — the remaining position cannot be sold here');
       }
 
-      const tokensIn = sizing.tokensToRaise({
-        targetWei,
-        quoteReserve: curve.quoteReserve,
-        tokenReserve: curve.tokenReserve,
-        feeBps: curve.feeBps,
-        creatorTaxBps: curve.creatorTaxBps,
-      });
+      const balance = await trade.tokenBalance(curve.token, main.address, { ...tradeDeps, rpc });
+      if (balance <= 0n) {
+        throw new Error(
+          'the main wallet holds none of this token — the position is already gone, so there is ' +
+            'nothing left to distribute'
+        );
+      }
+
+      let tokensIn;
+      if (remainingWallets <= 1) {
+        // THE LAST WALLET TAKES THE WHOLE REMAINDER. Not a computed slice: the
+        // point of the run is that the position ends at zero rather than near
+        // it, and arithmetic against a moving price cannot promise that.
+        tokensIn = balance;
+        record.finalSlice = true;
+      } else {
+        // What the position is worth if sold right now, price impact included —
+        // NOT a spot price times a balance, which would overstate a large
+        // position and make the early slices too big.
+        const valueWei = sizing.quoteSellOut({
+          tokensIn: balance,
+          quoteReserve: curve.quoteReserve,
+          tokenReserve: curve.tokenReserve,
+          feeBps: curve.feeBps,
+          creatorTaxBps: curve.creatorTaxBps,
+        });
+
+        const sliceWei = sizing.sliceFor({
+          valueWei,
+          remainingWallets,
+          variancePct: job.variancePct,
+          roll: randomFn(),
+        });
+
+        // headroomPct 0: unlike the old model there is no fixed obligation on
+        // the other side of this sell to fall short of. Whatever it raises is
+        // what the next wallet buys with.
+        tokensIn = sizing.tokensToRaise({
+          targetWei: sliceWei,
+          quoteReserve: curve.quoteReserve,
+          tokenReserve: curve.tokenReserve,
+          feeBps: curve.feeBps,
+          creatorTaxBps: curve.creatorTaxBps,
+          headroomPct: 0,
+        });
+        if (tokensIn > balance) tokensIn = balance;
+        record.sliceWei = sliceWei;
+      }
 
       const sold = await trade.sell(
         { wallet: main, curveAddress: job.curve, token: curve.token, tokensIn },
@@ -353,61 +396,100 @@ function createEngine(deps = {}) {
       record.sellDone = true;
       log(
         job.userId,
-        `[v3] cycle ${index}/${job.targets.length}: sold for ${formatEther(sold.ethReceived)} ETH`,
-        { jobId: job.id, walletId: target.walletId, tokensIn: tokensIn.toString(), hash: sold.sellHash }
+        `[v3] cycle ${index}/${job.targets.length}: sold ${
+          record.finalSlice ? 'the remaining position' : 'a slice'
+        } for ${formatEther(sold.ethReceived)} ETH`,
+        {
+          jobId: job.id,
+          walletId: target.walletId,
+          tokensIn: tokensIn.toString(),
+          remainingWallets,
+          hash: sold.sellHash,
+        }
       );
     }
 
     // ── transfer ────────────────────────────────────────────────────────────
-    // Sized from fundWei, and paid out of whatever the main wallet actually
-    // holds — relay.transfer checks that balance itself and refuses rather than
-    // broadcasting a deposit the wallet cannot cover. That check, not the sell
-    // estimate, is what decides whether this cycle can proceed.
+    // Sized from what the sell ACTUALLY raised, never from the estimate. The
+    // main wallet keeps back its own next round of gas, and a small allowance
+    // for the Relay fee — which is charged on the sender's side of an
+    // EXACT_OUTPUT order and is not known until the quote comes back.
     if (!record.transferDone) {
       record.step = 'transferring';
       record.state = 'transferring';
 
+      const spendable = record.ethRaised - mainGas;
+      if (spendable <= 0n) {
+        throw new Error(
+          `this cycle raised ${formatEther(record.ethRaised)} ETH, which does not cover the ` +
+            `${formatEther(mainGas)} ETH of gas the next one needs — the slices have become too small to continue`
+        );
+      }
+
+      const transferWei = (spendable * BigInt(100 - RELAY_FEE_PCT)) / 100n;
+      if (transferWei <= buyGas + buffer) {
+        throw new Error(
+          `this cycle would fund ${target.address} with ${formatEther(transferWei)} ETH, which is ` +
+            'not enough to pay for a buy — the position is too small to divide further'
+        );
+      }
+
       const sent = await relay.transfer(
-        { fromWallet: main, toAddress: target.address, amountWei: fundWei },
+        { fromWallet: main, toAddress: target.address, amountWei: transferWei },
         { ...tradeDeps, keystore: ks, rpc }
       );
 
       record.requestId = sent.requestId;
       record.depositAddress = sent.depositAddress;
-      record.transferredWei = fundWei;
+      record.transferredWei = transferWei;
       record.transferDone = true;
       log(
         job.userId,
-        `[v3] cycle ${index}/${job.targets.length}: transferred ${formatEther(fundWei)} ETH to ${target.address}`,
+        `[v3] cycle ${index}/${job.targets.length}: transferred ${formatEther(transferWei)} ETH to ${target.address}`,
         { jobId: job.id, walletId: target.walletId, requestId: sent.requestId, hash: sent.hash }
       );
     }
 
     // ── wait for the fill ───────────────────────────────────────────────────
+    // 99% of what was ordered: the order is EXACT_OUTPUT so the full amount
+    // should land, and the tolerance exists only so a rounding difference of a
+    // few wei cannot hang a cycle for the whole timeout.
     if (!record.fillDone) {
       record.step = 'waiting-fill';
       record.state = 'waiting-fill';
-      await waitForFill(record, target.address, needWei);
+      await waitForFill(record, target.address, (record.transferredWei * 99n) / 100n);
       record.fillDone = true;
     }
 
     // ── buy ─────────────────────────────────────────────────────────────────
+    // Everything that arrived, less gas. The wallet was funded for this one
+    // buy and has no other job, so leaving a remainder behind would only strand
+    // dust across every wallet in the run.
     if (!record.buyDone) {
       record.step = 'buying';
       record.state = 'buying';
 
+      const balance = BigInt(await rpc.getBalance(target.address));
+      const spend = balance - buyGas - buffer;
+      if (spend <= 0n) {
+        throw new Error(
+          `${target.address} holds ${formatEther(balance)} ETH, which does not cover the gas to buy with`
+        );
+      }
+
       const out = await trade.buy(
-        { wallet, curveAddress: job.curve, amountWei: target.buyWei },
+        { wallet, curveAddress: job.curve, amountWei: spend },
         { ...tradeDeps, keystore: ks, rpc }
       );
       if (out.status === 'reverted') throw new Error('the buy reverted');
 
+      record.buyWei = spend;
       record.buyHash = out.hash;
       record.tokensOut = out.tokensOut;
       record.buyDone = true;
       log(
         job.userId,
-        `[v3] cycle ${index}/${job.targets.length}: ${target.address} bought with ${formatEther(target.buyWei)} ETH`,
+        `[v3] cycle ${index}/${job.targets.length}: ${target.address} bought with ${formatEther(spend)} ETH`,
         { jobId: job.id, walletId: target.walletId, hash: out.hash }
       );
     }
@@ -507,13 +589,14 @@ function createEngine(deps = {}) {
     if (!Array.isArray(targets) || !targets.length) {
       throw new Error('at least one bundle wallet is required');
     }
+    // No per-wallet amount: the position is divided across however many wallets
+    // there are, one cycle each, sized as the run goes.
     const seen = new Set();
     const planned = targets.map((t) => {
       if (seen.has(t.walletId)) throw new Error(`wallet ${t.walletId} is listed twice`);
       seen.add(t.walletId);
-      const buyWei = BigInt(t.buyWei ?? 0);
-      if (buyWei <= 0n) throw new Error(`wallet ${t.walletId} needs a positive buy amount`);
-      return { walletId: t.walletId, address: t.address, buyWei };
+      if (!t.address) throw new Error(`wallet ${t.walletId} has no address`);
+      return { walletId: t.walletId, address: t.address };
     });
 
     const intervalMs = Number(input.intervalMs ?? DEFAULT_INTERVAL_MS);
@@ -523,6 +606,10 @@ function createEngine(deps = {}) {
     const jitterPct = Number(input.jitterPct ?? DEFAULT_JITTER_PCT);
     if (!Number.isFinite(jitterPct) || jitterPct < 0 || jitterPct > MAX_JITTER_PCT) {
       throw new Error(`jitter must be between 0 and ${MAX_JITTER_PCT} percent`);
+    }
+    const variancePct = Number(input.variancePct ?? sizing.DEFAULT_VARIANCE_PCT);
+    if (!Number.isFinite(variancePct) || variancePct < 0 || variancePct > sizing.MAX_VARIANCE_PCT) {
+      throw new Error(`variance must be between 0 and ${sizing.MAX_VARIANCE_PCT} percent`);
     }
 
     const startedAt = iso(nowFn());
@@ -537,6 +624,7 @@ function createEngine(deps = {}) {
       bigBuyWei: bigBuy,
       intervalMs,
       jitterPct,
+      variancePct,
       currentIndex: 0,
       targets: planned,
       cycles: [],
@@ -557,6 +645,7 @@ function createEngine(deps = {}) {
       bigBuyEth: formatEther(bigBuy),
       intervalMs,
       jitterPct,
+      variancePct,
       wallets: planned.length,
     });
 
