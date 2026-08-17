@@ -18,11 +18,24 @@ test('generate refuses a role V4 does not own', () => {
 });
 
 test('the backup gate refuses a campaign whose wallets have no backup', () => {
+  // Strengthened from the brief's own `/s2|backup/i`: that regex is satisfied
+  // by the literal word "backup" alone, so it passed even when the message
+  // named nothing. Requiring the wallet id itself is what actually pins "it
+  // names the ones that do not," which is the file's own header claim.
   assert.throws(
     () => guards.assertBackedUp(['s1', 's2'], () => ['s2']),
-    /s2|backup/i
+    /s2/
   );
   assert.doesNotThrow(() => guards.assertBackedUp(['s1'], () => []));
+});
+
+test('the backup gate names every unprotected wallet, not just a count', () => {
+  assert.throws(() => guards.assertBackedUp(['s1', 's2', 's3'], () => ['s2', 's3']), (err) => {
+    assert.match(err.message, /s2/);
+    assert.match(err.message, /s3/);
+    assert.doesNotMatch(err.message, /\bs1\b/);
+    return true;
+  });
 });
 
 test('a campaign refuses a seed wallet another campaign already claimed', () => {
@@ -46,6 +59,21 @@ test('backup requires an explicit confirm', () => {
   assert.throws(() => guards.assertConfirmed({}), /confirm/);
   assert.throws(() => guards.assertConfirmed({ confirm: 'yes' }), /confirm/);
   assert.doesNotThrow(() => guards.assertConfirmed({ confirm: true }));
+});
+
+test('assertGenerateCount caps well below where keystore.persist() would stall the shared event loop', () => {
+  // keystore.generate(n) rewrites the WHOLE keystore file on every one of its
+  // n add() calls, so a single call is O(n^2) in bytes written and runs on
+  // the one event loop the runner's timers and every other tab share. 1000
+  // measured at ~10s of blocked event loop from an empty keystore.
+  assert.doesNotThrow(() => guards.assertGenerateCount(1));
+  assert.doesNotThrow(() => guards.assertGenerateCount(guards.MAX_GENERATE_COUNT));
+  assert.throws(
+    () => guards.assertGenerateCount(guards.MAX_GENERATE_COUNT + 1),
+    new RegExp(`count must be between 1 and ${guards.MAX_GENERATE_COUNT}`)
+  );
+  assert.throws(() => guards.assertGenerateCount(1000), /count must be between/);
+  assert.throws(() => guards.assertGenerateCount(0), /count must be between/);
 });
 
 // ── onlyV4Wallets: never another tab's keys out of a V4 route ──────────────
@@ -89,6 +117,13 @@ test('resolveWalletIds accepts an explicit subset and refuses an id that is not 
   assert.throws(() => guards.resolveWalletIds({ walletIds: ['s2', 'not-a-seed'] }, ks), /not-a-seed/);
 });
 
+test('resolveWalletIds deduplicates an explicit list, so one request cannot fund the same wallet twice', () => {
+  const ks = fakeKs({ seeds: [{ id: 's1' }, { id: 's2' }, { id: 's3' }] });
+  assert.deepEqual(guards.resolveWalletIds({ walletIds: ['s1', 's1', 's1'] }, ks), ['s1']);
+  // Order-preserving and mixed with real duplicates elsewhere in the list.
+  assert.deepEqual(guards.resolveWalletIds({ walletIds: ['s2', 's1', 's2', 's3'] }, ks), ['s2', 's1', 's3']);
+});
+
 // ── buildCampaignPreview: routes params through normaliseParams ────────────
 
 const BASE_PARAMS = {
@@ -125,6 +160,23 @@ test('buildCampaignPreview reports infeasible without throwing, and a full sched
   assert.equal(fits.feasible.ok, true);
   assert.equal(fits.transfers.length, 2);
   assert.equal(fits.seed, 'fixed-seed');
+});
+
+test('duplicate walletIds in one request produce exactly one transfer per distinct wallet', () => {
+  const ks = fakeKs({ seeds: seedWallets(3) });
+  // s1 named three times. Without dedup this is 3 transfers to the same
+  // address from one funding wallet — one plan giving a wallet two funding
+  // edges, which assertUnclaimed's own error message exists to prevent, and
+  // which assertUnclaimed cannot see because it only checks OTHER campaigns.
+  const out = guards.buildCampaignPreview(
+    { params: BASE_PARAMS, walletIds: ['s1', 's1', 's1'] },
+    ks,
+    { nowFn: () => 0 }
+  );
+  assert.equal(out.feasible.ok, true);
+  assert.equal(out.walletIds.length, 1);
+  assert.equal(out.transfers.length, 1);
+  assert.equal(out.transfers[0].walletId, 's1');
 });
 
 test('buildCampaignPreview reuses a posted-back seed instead of minting a new one', () => {

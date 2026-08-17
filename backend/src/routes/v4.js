@@ -82,6 +82,25 @@ function assertConfirmed(body) {
   if ((body || {}).confirm !== true) throw new Error('this requires { confirm: true }');
 }
 
+// How many wallets one POST /v4/wallets/generate call may create.
+//
+// keystore.generate(n) calls add() n times, and add()'s persist() rewrites the
+// WHOLE keystore file synchronously on every single call — so a call is O(n^2)
+// in bytes written, not O(n), and it runs on the one event loop the runner's
+// timers and every other tab's requests share. v3's equivalent route caps at
+// 100 (routes/v3.js); V4 needs more per call since a campaign funds hundreds
+// of wallets, but 1000 measured at ~10s of BLOCKED event loop from an empty
+// keystore — long enough to stall a concurrent V1 launch on another tab,
+// which is the one thing this feature must never do. 200 keeps a single
+// call's worst case in the same ballpark as v3's.
+const MAX_GENERATE_COUNT = 200;
+
+function assertGenerateCount(n) {
+  if (!Number.isInteger(n) || n < 1 || n > MAX_GENERATE_COUNT) {
+    throw new Error(`count must be between 1 and ${MAX_GENERATE_COUNT}`);
+  }
+}
+
 function assertMaster(walletId, masters) {
   if (!masters.some((w) => w.id === walletId)) {
     throw new Error(`wallet ${walletId} is not a v4master funding wallet`);
@@ -102,7 +121,8 @@ function assertBackedUp(walletIds, backedUpFn) {
   const missing = backedUpFn(walletIds);
   if (missing.length) {
     throw new Error(
-      `${missing.length} of ${walletIds.length} seed wallets have no key backup on record. ` +
+      `${missing.length} of ${walletIds.length} seed wallets have no key backup on record: ` +
+        `${missing.slice(0, 5).join(', ')}${missing.length > 5 ? '…' : ''}. ` +
         'Download the V4 backup first — these keys exist in one encrypted file and nowhere else, ' +
         'and a campaign funds them with real ETH.'
     );
@@ -131,7 +151,13 @@ function onlyV4Wallets(wallets) {
 function resolveWalletIds(body, ks) {
   const known = v4roles.seeds(ks);
   if (Array.isArray(body.walletIds) && body.walletIds.length) {
-    const ids = body.walletIds.map(String);
+    // Deduplicated before anything downstream sees it. assertUnclaimed only
+    // compares against wallets OTHER campaigns have already claimed — a
+    // repeated id inside this one request is invisible to it, and would
+    // otherwise fund the same address more than once from one plan: exactly
+    // the "two funding edges" assertUnclaimed's own message warns about,
+    // reachable straight from a request body.
+    const ids = [...new Set(body.walletIds.map(String))];
     const knownIds = new Set(known.map((w) => w.id));
     const missing = ids.filter((id) => !knownIds.has(id));
     if (missing.length) {
@@ -294,9 +320,7 @@ router.post('/v4/wallets/generate', requireApiKey, (req, res, next) => {
     const { count = 1, role, label } = req.body || {};
     assertV4Role(role);
     const n = Number(count);
-    // A campaign funds hundreds of wallets over weeks; this ceiling is
-    // generous headroom for that, not a realistic single call's size.
-    if (!Number.isInteger(n) || n < 1 || n > 1000) throw new Error('count must be between 1 and 1000');
+    assertGenerateCount(n);
 
     const made = keystoreFor(req.user.id).generate(n, { role, label });
     activityFor(req.user.id).record('v4', `[v4] generated ${made.length} ${role} wallet(s)`, {
@@ -420,7 +444,7 @@ router.post('/v4/campaigns', requireApiKey, async (req, res, next) => {
     const ks = keystoreFor(req.user.id);
     const store = storeFor(req.user.id);
 
-    const { master, params, walletIds, result } = await resolveCampaignStart(body, ks, store);
+    const { master, params, result } = await resolveCampaignStart(body, ks, store);
 
     const campaign = {
       id: crypto.randomUUID(),
@@ -475,6 +499,8 @@ module.exports._private = {
   assertMaster,
   assertUnclaimed,
   assertBackedUp,
+  assertGenerateCount,
+  MAX_GENERATE_COUNT,
   onlyV4Wallets,
   resolveWalletIds,
   buildCampaignPreview,
