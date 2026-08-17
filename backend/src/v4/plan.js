@@ -61,6 +61,25 @@ function ethString(value, what) {
   return raw;
 }
 
+/**
+ * Can the densest day this config allows (perDayMax sends, each at least
+ * gapMinMs apart) actually fit inside DAY_FILL of one day?
+ *
+ * Shared by normaliseParams (rejects a bad config at the door) and generate
+ * (re-asserted, because generate is exported and callable with a hand-built
+ * params object that never went through normaliseParams at all).
+ */
+function densityFits(params) {
+  return params.perDayMax * params.gapMinMs <= DAY_MS * DAY_FILL;
+}
+
+function densityError(params) {
+  return new Error(
+    `gap minimum of ${params.gapMinMs}ms cannot fit ${params.perDayMax} sends inside one day — ` +
+      'lower the per-day maximum or the gap minimum'
+  );
+}
+
 /** Validate and fill in a parameter set. Throws naming the field it refuses. */
 function normaliseParams(raw = {}) {
   const days = Math.round(num(raw.days, DEFAULTS.days));
@@ -94,14 +113,12 @@ function normaliseParams(raw = {}) {
   // a day. Rejecting this up front is what lets dayTimes() promise every
   // send lands on its own day without ever having to invent time that is not
   // there — the alternative is a day silently running over into the next.
-  if (perDayMax * gapMinMs > DAY_MS * DAY_FILL) {
-    throw new Error(
-      `gap minimum of ${gapMinMs}ms cannot fit ${perDayMax} sends inside one day — ` +
-        'lower the per-day maximum or the gap minimum'
-    );
-  }
+  // generate() re-checks the same thing (see densityFits) for callers that
+  // build a params object by hand instead of going through here.
+  const params = { days, perDayMin, perDayMax, amountMinEth, amountMaxEth, gapMinMs, gapMaxMs };
+  if (!densityFits(params)) throw densityError(params);
 
-  return { days, perDayMin, perDayMax, amountMinEth, amountMaxEth, gapMinMs, gapMaxMs };
+  return params;
 }
 
 /**
@@ -191,10 +208,13 @@ function squeezeGaps(gaps, floorMs, usable) {
     }
   }
   // If every gap is already at the floor, count * floorMs alone exceeds
-  // `usable` — no redistribution can fix that. normaliseParams rejects that
-  // combination of perDayMax and gapMinMs up front, so dayTimes should never
-  // actually reach this branch; it is here so a future change to that check
-  // fails loudly (via the day-boundary test) rather than silently overflowing.
+  // `usable` — no redistribution can fix that. Both normaliseParams and
+  // generate() reject that combination of perDayMax and gapMinMs before
+  // dayTimes is ever called (see densityFits), so this branch should be
+  // unreachable in practice. It returns the gaps unchanged rather than
+  // throwing because it has no context to raise a good error from here —
+  // the actual guard, and the actual error message, live at the two call
+  // sites that can see the whole params object.
   if (flexTotal <= 0) return gaps;
 
   const reduceBy = Math.min(excess, flexTotal);
@@ -249,11 +269,19 @@ function dayTimes(dayStart, count, params, r) {
  * @param {object} input
  * @param {string[]} input.walletIds  seed wallet ids, each funded exactly once
  * @param {object} input.addresses    walletId -> address
- * @param {object} input.params       from normaliseParams
+ * @param {object} input.params       from normaliseParams (re-validated here regardless)
  * @param {string} input.seed         stored with the campaign; makes this reproducible
  * @param {number} input.now          campaign start, ms since epoch
  */
 function generate({ walletIds, addresses, params, seed, now }) {
+  // generate is exported, so params here may not have come through
+  // normaliseParams at all — a caller can hand-build one. Re-assert the
+  // day-boundary invariant rather than trust it, or a bypassed validation
+  // silently schedules transfers past their day's end (dayTimes has no way
+  // to refuse mid-generation; by the time it would notice, the transfer
+  // objects already exist).
+  if (!densityFits(params)) throw densityError(params);
+
   const check = feasible(walletIds.length, params);
   if (!check.ok) throw new Error(check.reason);
 
@@ -338,5 +366,5 @@ module.exports = {
   feasible,
   generate,
   estimateCost,
-  _private: { dailyCounts, dayTimes, amountFor, squeezeGaps },
+  _private: { dailyCounts, dayTimes, amountFor, squeezeGaps, densityFits },
 };

@@ -157,6 +157,49 @@ test('normaliseParams refuses a zero-day campaign and a backwards range', () => 
   assert.throws(() => plan.normaliseParams({ gapMinMs: 0 }), /gap/);
 });
 
+test('the per-day/gap-floor guard sits exactly at its boundary, not somewhere near it', () => {
+  // 68 * 20min = 81,600,000ms, just inside DAY_MS * 0.95 = 82,080,000ms.
+  // 69 * 20min = 82,800,000ms, just past it. This guard is now the only
+  // thing standing between a caller and the day-boundary overflow bug fixed
+  // in this task, so both sides of the line need to be pinned: accepting
+  // one fewer send than the day can hold would silently make legal
+  // campaigns impossible, and accepting one more reopens the overflow.
+  assert.doesNotThrow(() => plan.normaliseParams({ perDayMin: 1, perDayMax: 68, gapMinMs: 20 * 60_000 }));
+  assert.throws(
+    () => plan.normaliseParams({ perDayMin: 1, perDayMax: 69, gapMinMs: 20 * 60_000 }),
+    /gap/
+  );
+});
+
+test('generate refuses a hand-built params object that skips normaliseParams and cannot fit its own gap floor', () => {
+  // generate() is exported and callable on its own — nothing forces a caller
+  // to route params through normaliseParams first. Without generate's own
+  // re-check, this exact shape reproduces the day-boundary overflow bug:
+  // 100 sends a day at a 15-minute floor cannot fit inside one day, so
+  // dayTimes would silently push transfers past their day's end.
+  const ws = wallets(15);
+  const badParams = {
+    days: 1,
+    perDayMin: 15,
+    perDayMax: 100,
+    amountMinEth: '0.001',
+    amountMaxEth: '0.002',
+    gapMinMs: 15 * 60_000,
+    gapMaxMs: 15 * 60_000,
+  };
+  assert.throws(
+    () =>
+      plan.generate({
+        walletIds: ws.map((w) => w.id),
+        addresses: Object.fromEntries(ws.map((w) => [w.id, w.address])),
+        params: badParams,
+        seed: 'z'.repeat(32),
+        now: NOW,
+      }),
+    /gap/
+  );
+});
+
 test('rng is deterministic and stays in range', () => {
   const a = rng.make('seed-one');
   const b = rng.make('seed-one');
