@@ -94,6 +94,29 @@ test('onlyV4Wallets keeps v4master and v4seed and drops every other role', () =>
   );
 });
 
+// ── withMasterBalance: an unreadable chain must not hide the wallets ───────
+
+test('withMasterBalance reports the funding wallet balance in ETH', async () => {
+  const row = await guards.withMasterBalance({ id: 'm1', address: '0xabc' }, {
+    getBalance: async () => parseEther('1.5'),
+  });
+  assert.equal(row.balanceEth, '1.5');
+  assert.equal(row.id, 'm1');
+});
+
+test('withMasterBalance reports null rather than throwing when the RPC is down', async () => {
+  // null, and deliberately not 0: GET /v4/wallets is what draws the whole tab,
+  // and a wallet shown empty when it holds two ETH is the reading that has
+  // somebody fund it twice.
+  const row = await guards.withMasterBalance({ id: 'm1', address: '0xabc' }, {
+    getBalance: async () => {
+      throw new Error('ECONNREFUSED');
+    },
+  });
+  assert.equal(row.balanceEth, null);
+  assert.equal(row.id, 'm1');
+});
+
 // ── resolveWalletIds ─────────────────────────────────────────────────────
 
 function fakeKs({ masters = [], seeds = [] } = {}) {

@@ -272,8 +272,33 @@ async function resolveCampaignStart(body = {}, ks, store, deps = {}) {
 
 // ── wallets ─────────────────────────────────────────────────────────────────
 
+/**
+ * A funding wallet with its balance, and null when the chain will not say.
+ *
+ * BALANCES FOR THE MASTERS ONLY, NEVER FOR THE SEEDS. A campaign halts the
+ * moment its funding wallet runs dry, so this is the one figure the console
+ * sizes a campaign against — and there are a handful of masters, one per
+ * campaign. The seeds are hundreds, on a tab that re-reads while a campaign
+ * runs, and their balance does not move after the single transfer that funds
+ * them: the amount that plan sent is already on record in the campaign, so
+ * hundreds of RPC calls a minute would buy nothing that is not already known.
+ *
+ * A balance that cannot be read is null rather than a failed request. GET
+ * /v4/wallets is what draws the whole tab, and an unreachable RPC must not be
+ * able to hide which wallets exist — that is the moment an operator most needs
+ * to see them. null is also deliberately not 0: a wallet drawn empty when it
+ * holds two ETH is the reading that has somebody fund it twice.
+ */
+async function withMasterBalance(wallet, rpc = provider) {
+  try {
+    return { ...wallet, balanceEth: formatEther(await rpc.getBalance(wallet.address)) };
+  } catch (_err) {
+    return { ...wallet, balanceEth: null };
+  }
+}
+
 // GET /api/v4/wallets — V4's two groups. Never key material.
-router.get('/v4/wallets', requireApiKey, (req, res, next) => {
+router.get('/v4/wallets', requireApiKey, async (req, res, next) => {
   try {
     const ks = keystoreFor(req.user.id);
     const store = storeFor(req.user.id);
@@ -297,9 +322,13 @@ router.get('/v4/wallets', requireApiKey, (req, res, next) => {
     const missingBackup = new Set(store.backedUp(seeds.map((w) => w.id)));
     const now = Date.now();
 
+    const masterRows = await Promise.all(
+      masters.map(async (w) => ({ ...(await withMasterBalance(w)), inCampaign: busyMasters.has(w.id) }))
+    );
+
     res.json(
       jsonSafe({
-        masters: masters.map((w) => ({ ...w, inCampaign: busyMasters.has(w.id) })),
+        masters: masterRows,
         seeds: seeds.map((w) => ({
           ...w,
           claimed: claimed.has(w.id),
@@ -502,6 +531,7 @@ module.exports._private = {
   assertGenerateCount,
   MAX_GENERATE_COUNT,
   onlyV4Wallets,
+  withMasterBalance,
   resolveWalletIds,
   buildCampaignPreview,
   estimateCampaignCost,

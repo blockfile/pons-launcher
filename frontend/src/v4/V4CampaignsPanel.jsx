@@ -1,0 +1,317 @@
+import { useEffect, useState } from 'react';
+import { api } from '../api.js';
+import Step from '../components/Step.jsx';
+import { Busy } from '../components/Section.jsx';
+import Modal, { Fact } from '../components/Modal.jsx';
+import Address from '../components/Address.jsx';
+import { ago, clock, eth, plural } from './roles.js';
+
+// Which notice a status paints itself as. Halted is vermilion because it is the
+// one state that needs a hand put on it — three failures in a row is a systemic
+// fault, not bad luck, and the campaign has stopped sending. Paused is amber:
+// deliberate, reversible, and nothing is wrong. Everything else is plain.
+const TONE = { halted: 'danger', paused: 'warn' };
+
+/**
+ * Step 4 — the campaigns, several at once, for as long as they take.
+ *
+ * A CAMPAIGN THAT HAS STOPPED MUST NOT LOOK LIKE ONE THAT IS MERELY QUIET, and
+ * that is the whole design of this panel. Sends land about once an hour across
+ * three weeks, so counters barely move by the minute: "128 sent" reads exactly
+ * the same whether the last one left six minutes ago or six days ago. Nobody
+ * notices a number that stopped changing over three weeks — they notice it in
+ * hindsight, after the schedule has run out.
+ *
+ * So every card carries "last sent 34m ago · next due 15:12" beside the counts,
+ * and it keeps ticking on a clock of its own rather than on the poll: a stopped
+ * campaign is not polled (see V4Console — polling follows `running`), and a
+ * frozen "34m ago" on a campaign that halted yesterday would be the exact lie
+ * this readout exists to prevent. Two more tells sit next to it — a next-due
+ * time already in the past, and a running campaign with no timer armed, which
+ * is a runner that has stopped re-arming rather than a campaign that is waiting.
+ */
+export default function V4CampaignsPanel({ step, campaigns, details, lastSent, explorer, reload, report }) {
+  const [busy, setBusy] = useState('');
+  const [cancelling, setCancelling] = useState(null);
+  const [open, setOpen] = useState({});
+  // A clock, not a poll. It costs one state write every fifteen seconds and
+  // nothing on the network, and it is what keeps "34m ago" honest after the
+  // campaign it describes has stopped being fetched.
+  const [now, setNow] = useState(() => Date.now());
+  useEffect(() => {
+    const t = setInterval(() => setNow(Date.now()), 15_000);
+    return () => clearInterval(t);
+  }, []);
+
+  async function act(what, fn) {
+    setBusy(what);
+    try {
+      report(await fn());
+      await reload();
+    } catch (err) {
+      report(`ERROR: ${err.message}`);
+    } finally {
+      setBusy('');
+    }
+  }
+
+  if (!campaigns.length) {
+    return (
+      <Step {...step}>
+        <p className="lede">
+          Every campaign this account has run, and what each one is doing right now.
+        </p>
+        <div className="notice">
+          <h3>Nothing running</h3>
+          <p>
+            Plan one in step 3. It will keep going here across restarts — the schedule is on disk,
+            not in a browser tab, so this page can be closed and the sends carry on without it.
+          </p>
+        </div>
+      </Step>
+    );
+  }
+
+  return (
+    <Step {...step}>
+      <p className="lede">
+        Every campaign this account has run, and what each one is doing right now. Closing this tab
+        changes nothing: the schedule lives on the server and survives a restart.
+      </p>
+
+      {campaigns.map((c) => {
+        const full = details[c.id];
+        const transfers = full?.transfers || [];
+        const days = c.params?.days ?? full?.params?.days ?? null;
+        // The day the runner is actually working on, which is the day of the
+        // next transfer still waiting — not elapsed time. A campaign paused for
+        // a week is not on day twelve of its own schedule.
+        const nextDay = transfers.reduce(
+          (min, t) => (t.status === 'pending' && (min == null || t.day < min) ? t.day : min),
+          null
+        );
+        const day = nextDay ?? days;
+        const attempts = transfers.reduce((n, t) => n + (t.attempts?.length || 0), 0);
+        const sentAt = lastSent[c.id];
+        const overdue = c.status === 'running' && c.nextDueAt != null && c.nextDueAt < now;
+        const stalled = c.status === 'running' && !c.armed && !c.inFlight;
+
+        return (
+          <div className={`notice ${TONE[c.status] || ''}`.trim()} key={c.id}>
+            <h3>
+              {c.name}
+              <span className="hint">
+                {c.status}
+                {c.inFlight ? ' · sending' : ''}
+              </span>
+              <span className="spacer" />
+              {days && (
+                <span className="hint">
+                  day {day} of {days}
+                </span>
+              )}
+            </h3>
+
+            {/* The staleness line. Counts are below it, deliberately: they say
+                how far along the campaign is, and this says whether it is still
+                moving. */}
+            <p className={stalled || overdue ? 'crux' : ''}>
+              {sentAt ? `last sent ${ago(sentAt, now)}` : 'nothing sent yet'}
+              {c.status === 'running' && c.nextDueIso && (
+                <> · {overdue ? `overdue since ${clock(c.nextDueIso, now)}` : `next due ${clock(c.nextDueIso, now)}`}</>
+              )}
+              {c.status === 'running' && !c.nextDueIso && <> · nothing left to send</>}
+              {c.status !== 'running' && <> · {c.status}, nothing scheduled</>}
+              {stalled && <> · no timer armed</>}
+            </p>
+
+            {(c.haltReason || c.pauseReason) && (
+              <p style={{ overflowWrap: 'anywhere' }}>{c.haltReason || c.pauseReason}</p>
+            )}
+
+            <div className="stats" style={{ marginTop: 12 }}>
+              <div className="stat ok">
+                <span>Sent</span>
+                <b>
+                  {c.sent}
+                  <span className="stat-of"> / {c.total}</span>
+                </b>
+              </div>
+              <div className="stat">
+                <span>Waiting</span>
+                <b>{c.pending}</b>
+              </div>
+              <div className={`stat ${attempts ? 'bad' : ''}`}>
+                <span>Failed sends</span>
+                <b>
+                  {full ? attempts : '—'}
+                  {c.consecutiveFailures > 0 && (
+                    <span className="stat-of"> · {c.consecutiveFailures} in a row</span>
+                  )}
+                </b>
+              </div>
+              <div className={`stat ${c.abandoned ? 'bad' : ''}`}>
+                <span>Abandoned</span>
+                <b>{c.abandoned}</b>
+              </div>
+            </div>
+
+            <div className="row">
+              <Busy
+                busy={busy === `pause:${c.id}`}
+                className="ghost"
+                disabled={c.status !== 'running'}
+                onClick={() => act(`pause:${c.id}`, () => api(`/v4/campaigns/${c.id}/pause`, 'POST'))}
+              >
+                Pause
+              </Busy>
+              <Busy
+                busy={busy === `resume:${c.id}`}
+                className="ghost"
+                disabled={c.status !== 'paused' && c.status !== 'halted'}
+                onClick={() => act(`resume:${c.id}`, () => api(`/v4/campaigns/${c.id}/resume`, 'POST'))}
+              >
+                Resume
+              </Busy>
+              <button
+                className="ghost danger"
+                disabled={c.status === 'cancelled' || c.status === 'complete'}
+                onClick={() => setCancelling(c)}
+              >
+                Cancel
+              </button>
+              <span className="spacer" />
+              <button
+                className="link"
+                onClick={() => setOpen((o) => ({ ...o, [c.id]: !o[c.id] }))}
+                disabled={!full}
+              >
+                {open[c.id] ? 'hide the schedule' : 'the schedule'}
+              </button>
+            </div>
+
+            {open[c.id] && full && (
+              <div style={{ marginTop: 12 }}>
+                {(full.byDay || []).map((d) => {
+                  const rows = transfers.filter((t) => t.day === d.day);
+                  const sent = rows.filter((t) => t.status === 'sent').length;
+                  return (
+                    <details className="disperse-panel" key={d.day} style={{ marginTop: 6 }}>
+                      <summary>
+                        Day {d.day}{' '}
+                        <span className="hint">
+                          — {plural(d.count, 'wallet')} · {Number(d.totalEth).toFixed(6)} ETH ·{' '}
+                          {sent}/{d.count} sent
+                        </span>
+                      </summary>
+                      <div className="table-scroll">
+                        <table>
+                          <thead>
+                            <tr>
+                              <th>Wallet</th>
+                              <th className="num">Amount</th>
+                              <th>Due</th>
+                              <th>Status</th>
+                              <th>Tx</th>
+                            </tr>
+                          </thead>
+                          <tbody>
+                            {rows.map((t) => (
+                              <tr key={t.id}>
+                                <td>
+                                  <Address
+                                    value={t.address}
+                                    href={explorer ? `${explorer}/address/${t.address}` : ''}
+                                  />
+                                </td>
+                                <td className="num">{eth(t.amountEth)}</td>
+                                <td>{clock(new Date(t.dueAt).toISOString(), now)}</td>
+                                <td>
+                                  {t.status === 'sent' ? (
+                                    <>
+                                      sent <span className="hint">{ago(t.sentAt, now)}</span>
+                                    </>
+                                  ) : t.status === 'abandoned' ? (
+                                    <span className="bal short">
+                                      abandoned after {plural(t.attempts?.length || 0, 'try', 'tries')}
+                                    </span>
+                                  ) : t.attempts?.length ? (
+                                    <>
+                                      waiting{' '}
+                                      <span className="hint">
+                                        · {plural(t.attempts.length, 'failed try', 'failed tries')}
+                                      </span>
+                                    </>
+                                  ) : (
+                                    'waiting'
+                                  )}
+                                </td>
+                                <td>
+                                  {t.hash ? (
+                                    <a
+                                      href={explorer ? `${explorer}/tx/${t.hash}` : ''}
+                                      target="_blank"
+                                      rel="noreferrer"
+                                    >
+                                      tx
+                                    </a>
+                                  ) : (
+                                    '—'
+                                  )}
+                                </td>
+                              </tr>
+                            ))}
+                          </tbody>
+                        </table>
+                        {/* The last thing that went wrong on this day, in full.
+                            An attempt count says a transfer is in trouble; only
+                            the error says whether it is this wallet or Relay. */}
+                        {rows.some((t) => t.attempts?.length) && (
+                          <p className="hint" style={{ overflowWrap: 'anywhere' }}>
+                            {rows
+                              .flatMap((t) => t.attempts || [])
+                              .slice(-1)
+                              .map((a) => `last failure: ${a.error}`)}
+                          </p>
+                        )}
+                      </div>
+                    </details>
+                  );
+                })}
+              </div>
+            )}
+          </div>
+        );
+      })}
+
+      <Modal
+        open={Boolean(cancelling)}
+        title="Cancel this campaign?"
+        danger
+        question="Every wallet it has not reached yet stays unfunded."
+        onCancel={() => setCancelling(null)}
+        confirmLabel="Cancel it"
+        onConfirm={async () => {
+          const c = cancelling;
+          setCancelling(null);
+          await act(`cancel:${c.id}`, () => api(`/v4/campaigns/${c.id}/cancel`, 'POST'));
+        }}
+      >
+        <p>
+          Cancelling is one-way — a cancelled campaign cannot be resumed, because restarting it
+          would re-fund wallets against a schedule already decided against. Pause instead if the
+          plan is right and the moment is wrong.
+        </p>
+        {cancelling && (
+          <>
+            <Fact label="Campaign">{cancelling.name}</Fact>
+            <Fact label="Funded so far">
+              {cancelling.sent} of {cancelling.total}
+            </Fact>
+            <Fact label="Left unsent">{plural(cancelling.pending, 'wallet')}</Fact>
+          </>
+        )}
+      </Modal>
+    </Step>
+  );
+}
