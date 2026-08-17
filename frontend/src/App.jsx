@@ -22,6 +22,10 @@ import ActivityPanel from './components/ActivityPanel.jsx';
 import BundlerV2Panel from './components/BundlerV2Panel.jsx';
 import ExternalFundPanel from './components/ExternalFundPanel.jsx';
 import Toaster from './components/Toaster.jsx';
+// V3 renders its own console, out of its own directory, sharing no state with
+// the tree below — see frontend/src/v3/V3Console.jsx. It is a branch here and
+// nothing else: every prop, effect and step of the v1/v2 flow is untouched.
+import V3Console from './v3/V3Console.jsx';
 
 const { bundleShare } = bundleShareModule;
 
@@ -461,12 +465,35 @@ export default function App() {
             >
               V2 · external funding
             </button>
+            <button
+              type="button"
+              className={tab === 'v3' ? 'quiet is-on' : 'quiet'}
+              onClick={() => setTab('v3')}
+            >
+              V3 · relay chain
+            </button>
             <span className="hint">
               {tab === 'v1'
                 ? `the ${steps.length}-step sequence — dev wallet funds everything`
-                : `${steps.length} steps, no disperser — funded from outside this console`}
+                : tab === 'v2'
+                  ? `${steps.length} steps, no disperser — funded from outside this console`
+                  : 'not a launcher — distributes a live token, one wallet at a time'}
             </span>
           </div>
+
+          {/* V3 replaces the whole flow rather than adding to it: it does not
+              launch, so it has no step in common with the tree below beyond
+              having wallets at all. Its state lives inside it. */}
+          {tab === 'v3' ? (
+            <V3Console
+              health={health}
+              credential={credential}
+              report={report}
+              output={output}
+              reportedAt={reportedAt}
+            />
+          ) : (
+          <>
 
           {/* THE V2 BUNDLER TAB IS HIDDEN, and the reason is not that it is
               unfinished. It targets the pons v1 factory, whose owner set
@@ -634,6 +661,8 @@ export default function App() {
           />
 
           </div>
+          </>
+          )}
 
           {/* Where the sequence stops. Everything below is a record of runs that
               already happened, and the left edge changes to say so. Outside the
