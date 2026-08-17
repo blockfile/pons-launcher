@@ -8,6 +8,7 @@ import V3BundlePanel from './V3BundlePanel.jsx';
 import V3MainPanel from './V3MainPanel.jsx';
 import V3ChainPanel from './V3ChainPanel.jsx';
 import V3ExitPanel from './V3ExitPanel.jsx';
+import V3SweepPanel from './V3SweepPanel.jsx';
 
 /**
  * The V3 tab, whole.
@@ -17,7 +18,7 @@ import V3ExitPanel from './V3ExitPanel.jsx';
  * other, this component holds V3's wallets, its token and its running job, and
  * nothing it does can change what the other tab is drawing.
  *
- * FIVE STEPS, AND WHY THERE IS NO LAUNCH AMONG THEM. V3 is not a launcher. It
+ * SIX STEPS, AND WHY THERE IS NO LAUNCH AMONG THEM. V3 is not a launcher. It
  * takes a token that is already live — launched here on another tab, by a
  * wallet this account holds — and distributes a position across bundle wallets
  * one at a time. The launch belongs to whichever tab made it.
@@ -128,6 +129,15 @@ export default function V3Console({ health, credential, report, output, reported
         done: false,
         detail: 'out of every bundle wallet and the main wallet too',
       },
+      {
+        key: 'sweep',
+        n: 6,
+        title: 'Sweep the ETH home',
+        // Same reasoning as the exit: an empty set of wallets is both "swept"
+        // and "never run", so there is nothing honest to mark done.
+        done: false,
+        detail: 'through Relay, so the sweep does not link the buyers',
+      },
     ];
 
     let previousRequired = null;
@@ -227,9 +237,17 @@ export default function V3Console({ health, credential, report, output, reported
       />
 
       <V3ExitPanel
-        step={{ ...step('exit'), last: true }}
+        step={step('exit')}
         token={token}
         setToken={setToken}
+        explorer={explorer}
+        reload={loadWallets}
+        report={report}
+        locked={Boolean(job?.running)}
+      />
+
+      <V3SweepPanel
+        step={{ ...step('sweep'), last: true }}
         explorer={explorer}
         reload={loadWallets}
         report={report}

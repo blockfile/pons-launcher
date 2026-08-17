@@ -41,6 +41,7 @@ const relay = require('../v3/relay');
 const sizing = require('../v3/sizing');
 const engine = require('../v3/engine');
 const exit = require('../v3/exit');
+const sweep = require('../v3/sweep');
 
 const router = express.Router();
 
@@ -488,6 +489,48 @@ router.post('/v3/exit', requireApiKey, async (req, res, next) => {
         await exit.run(req.user.id, {
           token: record.token,
           curve: record.curve,
+          confirm: req.body?.confirm,
+        })
+      )
+    );
+  } catch (err) {
+    next(err);
+  }
+});
+
+// ── the sweep ───────────────────────────────────────────────────────────────
+// Collecting the ETH back out once the exit has sold everything. Always through
+// Relay — see the header of v3/sweep.js for why a direct sweep would undo the
+// whole run after the fact.
+
+router.get('/v3/sweep/preview', requireApiKey, async (req, res, next) => {
+  try {
+    res.json(
+      jsonSafe(
+        await sweep.preview(req.user.id, {
+          destination: req.query.destination || 'main',
+          minSweepEth: req.query.minSweepEth,
+        })
+      )
+    );
+  } catch (err) {
+    next(err);
+  }
+});
+
+router.post('/v3/sweep', requireApiKey, async (req, res, next) => {
+  try {
+    if (engine.isRunning(req.user.id)) {
+      throw new Error(
+        'a v3 run is in progress — sweeping now would take the ETH a pending cycle is about to ' +
+          'buy with. Stop the run first.'
+      );
+    }
+    res.json(
+      jsonSafe(
+        await sweep.run(req.user.id, {
+          destination: req.body?.destination || 'main',
+          minSweepEth: req.body?.minSweepEth,
           confirm: req.body?.confirm,
         })
       )
