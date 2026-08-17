@@ -313,6 +313,55 @@ nothing sent, and the campaign resumes and stretches when the host returns.
 but only survives a *machine reboot* if `pm2 startup` has installed the boot
 hook. Worth confirming on the deployment before a campaign is relied on.
 
+## Not losing the keys
+
+These wallets have no seed phrase behind them. They are random keys in one
+AES-256-GCM file on one machine, and a campaign sends real ETH to hundreds of
+them over three weeks. Losing that file loses the funds outright.
+
+`.gitignore` already covers `data/` and `*.keystore.json`, and nothing under
+`backend/data/` is tracked. Two things are added on top.
+
+### The keystore write becomes atomic
+
+[`keystore.js`](../../../backend/src/wallets/keystore.js) `persist()` is a plain
+`fs.writeFileSync` that rewrites the **entire** keystore — every role, v1's dev
+key included. `add()` calls it once per wallet, so generating 400 seed wallets
+is 400 consecutive full rewrites, and a process killed partway through any one
+of them truncates the file holding every key in the deployment.
+
+That is not hypothetical on the current deployment: 76 PM2 restarts against a
+`max_memory_restart: '400M'` ceiling is exactly the profile that eventually
+lands a kill mid-write.
+
+`persist()` therefore writes to a sibling `.tmp` and renames. Rename is a single
+filesystem operation, so the path holds either the old complete file or the new
+complete file and never half of either.
+
+**This is the one exception to the isolation rule, and it is deliberate.** It
+modifies a function v1, v2 and V3 all depend on — but it makes that function
+safer without changing its semantics, and the risk it removes is a risk to their
+keys, not just V4's. It lands as its own commit, before any V4 code, so it can
+be reverted alone.
+
+### A campaign cannot start without a key backup
+
+`POST /v4/campaigns` refuses until **every** seed wallet in the plan appears in a
+backup on record, and the refusal names the wallets that do not.
+
+The store keeps `backups: [{ at, walletIds[] }]`, appended by
+`POST /v4/wallets/backup`. That endpoint returns V4's wallets only — filtered by
+role — so backing up a campaign never hands the operator v1's dev key in the
+same file.
+
+The gate costs one click. It prevents funding hundreds of wallets that cannot
+afterwards be spent from.
+
+### What is still on the operator
+
+`KEYSTORE_PASSPHRASE` is not recoverable. Lose it and the encrypted file is
+noise, backup or no backup. Nothing in this build can change that.
+
 ## Routes
 
 `backend/src/routes/v4.js`, mounted at `/api/v4`.
