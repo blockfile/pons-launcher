@@ -184,21 +184,52 @@ test('a success resets the consecutive-failure counter', async () => {
 test('a transfer is abandoned after three attempts, and the campaign goes on', async () => {
   const { store } = env();
   const clock = fakeClock();
+
+  // WHICH transfer is cursed is chosen by DUE ORDER, not by which address
+  // happens to end in a "1". plan.generate returns transfers sorted by dueAt,
+  // and the seeded schedule for count: 8 funds the wallets in the order
+  // 5 2 6 3 8 1 4 7 — so "the address ending in 1" is sixth of eight, and the
+  // test passed only because two transfers happened to follow it. Curse the
+  // genuinely last one instead and its three failures run back to back, which
+  // halts the campaign: `assert.equal(c.status, 'complete')` would then fail
+  // against a CORRECT implementation. The natural response to that is to weaken
+  // the assertion, which is how a real guarantee gets quietly deleted — so pin
+  // the position instead.
+  const built = makeCampaign(store, { count: 8 });
+  const dueOrder = built.transfers.map((t) => t.address);
+  const cursedAddress = dueOrder[0];
+
+  const outcomes = [];
   const runner = runnerWith(store, clock, async ({ toAddress }) => {
-    // Only the first wallet ever fails, so failures are never consecutive.
-    if (toAddress.endsWith('1')) throw new Error('this one is cursed');
+    if (toAddress === cursedAddress) {
+      outcomes.push('fail');
+      throw new Error('this one is cursed');
+    }
+    outcomes.push('ok');
     return { hash: '0x' + 'a'.repeat(64) };
   });
 
-  makeCampaign(store, { count: 8 });
   runner.resumeAll();
   await clock.drain();
 
+  // The premise, asserted rather than assumed: this test only means what it
+  // says while the cursed transfer's failures are separated by successes. If a
+  // change to plan.js or to the retry gap ever breaks that, it fails HERE,
+  // naming the reason — instead of failing below, where it would look like the
+  // runner had wrongly halted a campaign it was right to halt.
+  assert.ok(
+    !outcomes.join(',').includes('fail,fail,fail'),
+    `the cursed transfer failed three times in a row (${outcomes.join(',')}) — the campaign is ` +
+      'then right to halt, and this test is no longer testing abandonment'
+  );
+
   const c = store.storeFor('u').get('c1');
-  const cursed = c.transfers.find((t) => t.address.endsWith('1'));
+  const cursed = c.transfers.find((t) => t.address === cursedAddress);
   assert.equal(cursed.status, 'abandoned');
   assert.equal(cursed.attempts.length, 3);
   assert.equal(c.status, 'complete');
+  // Abandoned, not silently retried forever, and not counted as funded.
+  assert.equal(c.transfers.filter((t) => t.status === 'sent').length, 7);
 });
 
 test('a restart re-arms from disk and does not fire a burst', async () => {
@@ -272,6 +303,104 @@ test('pause stops the clock and resume picks up where it stopped', async () => {
   runner.resume('u', 'c1');
   await clock.drain();
   assert.equal(sends, 6);
+});
+
+test('pause then resume during an in-flight send does not send it twice', async () => {
+  const { store } = env();
+  const clock = fakeClock();
+  const sent = [];
+  let release;
+  const gate = new Promise((r) => {
+    release = r;
+  });
+  let firstSend = true;
+
+  const runner = runnerWith(store, clock, async ({ toAddress }) => {
+    sent.push(toAddress);
+    // The first Relay call hangs — seconds in production, forever here.
+    if (firstSend) {
+      firstSend = false;
+      await gate;
+    }
+    return { hash: '0x' + 'a'.repeat(64) };
+  });
+
+  makeCampaign(store, { count: 4 });
+  runner.resumeAll();
+
+  // Fire the first timer WITHOUT awaiting it: the send is now in flight.
+  const inFlight = clock.tick();
+  await Promise.resolve();
+  assert.equal(sent.length, 1, 'the first send did not start');
+
+  // The operator decides it is stuck, pauses, and resumes — the whole sequence
+  // is two clicks, and the Relay call is still awaiting throughout.
+  runner.pause('u', 'c1');
+  runner.resume('u', 'c1');
+  await clock.drain();
+
+  // The re-armed timer must NOT start a second send. Nothing has been written
+  // yet, so the next pending transfer is still the one in flight: a second send
+  // would be the same amount to the same address, from the same funding wallet,
+  // on the same nonce — either a double-fund or a silent mempool replacement.
+  assert.equal(sent.length, 1, 'the in-flight transfer was sent a second time');
+
+  release();
+  await inFlight;
+  await clock.drain();
+
+  assert.equal(sent.length, 4);
+  assert.equal(new Set(sent).size, 4, 'a transfer was sent twice');
+  assert.equal(store.storeFor('u').get('c1').status, 'complete');
+});
+
+test('start checks the funding wallet on disk, not the one it was handed', () => {
+  const { store } = env();
+  const clock = fakeClock();
+  const runner = runnerWith(store, clock, async () => ({ hash: '0x' + 'a'.repeat(64) }));
+
+  makeCampaign(store, { id: 'c1', masterWalletId: 'm1', count: 2 });
+  const c2 = makeCampaign(store, { id: 'c2', masterWalletId: 'm1', count: 2 });
+  store.storeFor('u').update('c2', { status: 'paused' });
+  runner.resumeAll();
+
+  // c2 is on m1 and always will be — start() does not move a stored campaign to
+  // another funding wallet. A caller whose in-memory object claims otherwise
+  // must not be able to walk past the check on the strength of that claim, or
+  // the campaign is armed against a free wallet and then signs from a busy one.
+  assert.throws(() => runner.start('u', { ...c2, masterWalletId: 'm9' }), /m1|already/);
+
+  const s = store.storeFor('u');
+  assert.equal(s.running().length, 1);
+  assert.equal(s.get('c2').status, 'paused');
+  assert.equal(s.get('c2').masterWalletId, 'm1');
+});
+
+test('resumeAll refuses to arm two running campaigns on one funding wallet', async () => {
+  const { store } = env();
+  const clock = fakeClock();
+  const byCampaign = { c1: 0, c2: 0 };
+  const runner = runnerWith(store, clock, async ({ campaignId }) => {
+    byCampaign[campaignId]++;
+    return { hash: '0x' + 'a'.repeat(64) };
+  });
+
+  // The shape a crash between store.create and runner.start leaves on disk —
+  // or a restored backup. resumeAll is the one entry point that trusts a file
+  // rather than a live decision, so it has to make the check itself.
+  makeCampaign(store, { id: 'c1', masterWalletId: 'm1', count: 3 });
+  makeCampaign(store, { id: 'c2', masterWalletId: 'm1', count: 3 });
+  runner.resumeAll();
+  await clock.drain();
+
+  const s = store.storeFor('u');
+  assert.equal(byCampaign.c1 + byCampaign.c2, 3, 'more than one campaign sent from wallet m1');
+  assert.ok(byCampaign.c1 === 0 || byCampaign.c2 === 0, 'both campaigns sent from one funding wallet');
+
+  const parked = [s.get('c1'), s.get('c2')].filter((c) => c.status === 'paused');
+  assert.equal(parked.length, 1, 'the loser was not parked');
+  assert.match(parked[0].pauseReason, /m1/);
+  assert.equal(s.running().length, 0);
 });
 
 test('cancel is final — resume refuses it', () => {

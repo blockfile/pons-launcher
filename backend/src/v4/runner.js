@@ -200,6 +200,21 @@ function nextPending(campaign) {
   return next;
 }
 
+/**
+ * Oldest campaign first, ties broken by id.
+ *
+ * Used to decide which of two campaigns sharing a funding wallet keeps it at
+ * boot. Deterministic on purpose: an operator restarting the process twice must
+ * not get a different winner the second time, or the "loser" would have half a
+ * nonce sequence on chain from each run.
+ */
+function byStartedAt(a, b) {
+  const at = Date.parse(a?.startedAt || a?.createdAt || '') || 0;
+  const bt = Date.parse(b?.startedAt || b?.createdAt || '') || 0;
+  if (at !== bt) return at - bt;
+  return String(a?.id).localeCompare(String(b?.id));
+}
+
 function tally(campaign) {
   const counts = { total: 0, pending: 0, sent: 0, abandoned: 0 };
   for (const t of campaign.transfers || []) {
@@ -246,9 +261,31 @@ function createRunner(deps = {}) {
     if (job) job.timer = null;
   }
 
+  /**
+   * Drop a campaign's timer, and its job with it — UNLESS a send is in flight.
+   *
+   * THE JOB OBJECT IS THE SOLE HOLDER OF `inFlight`. Deleting it while a Relay
+   * call is still awaiting throws that flag away, and arm() then mints a fresh
+   * job with `inFlight: false` — so the next timer sails through fire()'s guard
+   * and a SECOND send leaves the same funding wallet on the same nonce. Worse,
+   * the first send has written nothing yet, so nextPending() still returns the
+   * same transfer: the same wallet is funded twice, or one deposit silently
+   * replaces the other in the mempool.
+   *
+   * It needs no exotic sequence. A Relay call takes seconds; an operator who
+   * thinks a campaign is stuck clicks pause and then resume.
+   *
+   * So an in-flight job survives with only its timer cleared, and fire()'s own
+   * tail is what finally deletes it — by which point `inFlight` is false and
+   * there is nothing left to protect.
+   */
   function forget(userId, campaignId) {
-    clearTimer(userId, campaignId);
-    jobs.delete(key(userId, campaignId));
+    const k = key(userId, campaignId);
+    const job = jobs.get(k);
+    if (!job) return;
+    if (job.timer) clearTimeoutFn(job.timer);
+    job.timer = null;
+    if (!job.inFlight) jobs.delete(k);
   }
 
   // ── reading and reporting ─────────────────────────────────────────────────
@@ -271,6 +308,8 @@ function createRunner(deps = {}) {
       completedAt: campaign.completedAt || null,
       haltedAt: campaign.haltedAt || null,
       haltReason: campaign.haltReason || null,
+      pausedAt: campaign.pausedAt || null,
+      pauseReason: campaign.pauseReason || null,
       armed: Boolean(job?.timer),
       inFlight: Boolean(job?.inFlight),
     };
@@ -340,13 +379,17 @@ function createRunner(deps = {}) {
 
     const campaign = storeForFn(userId).get(campaignId);
     if (!campaign || campaign.status !== 'running') {
-      jobs.delete(key(userId, campaignId));
+      forget(userId, campaignId);
       return null;
     }
 
     const next = nextPending(campaign);
     if (!next) return complete(userId, campaignId);
 
+    // Reuse the existing job wherever there is one, so an `inFlight` set by a
+    // send that is still awaiting is carried forward rather than reset. A fresh
+    // object here is only ever correct when nothing is in flight, which is
+    // exactly when there is no job in the map to reuse.
     const k = key(userId, campaignId);
     const job = jobs.get(k) || { userId, campaignId, timer: null, inFlight: false };
     jobs.set(k, job);
@@ -526,6 +569,9 @@ function createRunner(deps = {}) {
     // next, not the closure that started the send.
     const after = storeForFn(userId).get(campaignId);
     if (after && after.status === 'running') arm(userId, campaignId);
+    // Not running any more, and no longer in flight — so the job that forget()
+    // was made to preserve has nothing left to preserve, and is dropped here.
+    else forget(userId, campaignId);
   }
 
   // ── the public surface ────────────────────────────────────────────────────
@@ -551,27 +597,46 @@ function createRunner(deps = {}) {
 
   function start(userId, campaign) {
     if (!campaign || !campaign.id) throw new Error('a campaign with an id is required');
-    if (!campaign.masterWalletId) throw new Error(`campaign ${campaign.id} has no funding wallet`);
-    assertFundingWalletFree(userId, campaign.id, campaign.masterWalletId);
 
     const store = storeForFn(userId);
     const at = iso(nowFn());
     const existing = store.get(campaign.id);
+
+    // CHECK THE WALLET THAT WILL ACTUALLY SIGN, WHICH IS THE ONE ON DISK.
+    //
+    // For a campaign already in the store, `fresh` below deliberately does not
+    // overwrite masterWalletId — restarting a campaign must not silently move
+    // it to another funding wallet. So the stored value is what the sends will
+    // come from, and checking the caller's field instead lets an object that
+    // disagrees with disk walk straight past the invariant: `start` sees a free
+    // wallet, arms a campaign, and the campaign then signs from a busy one.
+    // Task 7's routes will build these objects from request bodies, which is
+    // exactly the shape that disagrees.
+    const masterWalletId = existing ? existing.masterWalletId : campaign.masterWalletId;
+    if (!masterWalletId) throw new Error(`campaign ${campaign.id} has no funding wallet`);
+    assertFundingWalletFree(userId, campaign.id, masterWalletId);
+
     const fresh = {
       status: 'running',
       startedAt: existing?.startedAt || campaign.startedAt || at,
       completedAt: null,
       haltedAt: null,
       haltReason: null,
+      pauseReason: null,
       consecutiveFailures: 0,
     };
     if (existing) store.update(campaign.id, fresh);
-    else store.create({ ...campaign, ...fresh, createdAt: campaign.createdAt || at });
+    // Deep-copied at the door. A shallow spread would put the CALLER's
+    // `transfers` array into the store, so the caller would still hold a live
+    // handle on the plan the runner is mutating. The round trip is lossless for
+    // anything the store could persist, because persist() serialises the same
+    // way.
+    else store.create(JSON.parse(JSON.stringify({ ...campaign, ...fresh, createdAt: campaign.createdAt || at })));
 
     const counts = tally(store.get(campaign.id));
     log(userId, `[v4] "${label(campaign, campaign.id)}" started — ${counts.pending} transfer(s) scheduled`, {
       campaignId: campaign.id,
-      masterWalletId: campaign.masterWalletId,
+      masterWalletId,
       ...counts,
     });
 
@@ -620,6 +685,7 @@ function createRunner(deps = {}) {
     store.update(campaignId, {
       status: 'running',
       pausedAt: null,
+      pauseReason: null,
       haltedAt: null,
       haltReason: null,
       consecutiveFailures: 0,
@@ -677,9 +743,52 @@ function createRunner(deps = {}) {
         // deployment from being re-armed.
         continue;
       }
-      for (const campaign of running) {
+
+      // THE NONCE INVARIANT AT THE ONE ENTRY POINT THAT TRUSTS A FILE.
+      //
+      // start() refuses a second campaign on a funding wallet, but boot never
+      // gets to make that decision — it re-arms whatever the file says. A crash
+      // between writing a campaign and arming it, a restored backup, or any
+      // caller that got the check wrong all leave two `running` campaigns
+      // sharing a master wallet, and arming both puts the process on two nonce
+      // sequences for one wallet within seconds of coming up. Boot is the worst
+      // place to discover that, because nobody is watching a boot.
+      //
+      // The EARLIEST-STARTED campaign keeps the wallet: it is the one whose
+      // sends are already on chain, so it owns the nonce sequence in progress.
+      // The other is parked as `paused` — not halted, because nothing failed,
+      // and not cancelled, because the operator will most likely want it on a
+      // different funding wallet rather than gone.
+      const claimed = new Map();
+
+      for (const campaign of running.slice().sort(byStartedAt)) {
         const campaignId = campaign.id;
         const name = label(campaign, campaignId);
+        const wallet = campaign.masterWalletId;
+        const holder = wallet ? claimed.get(wallet) : null;
+
+        if (holder) {
+          const reason =
+            `funding wallet ${wallet} is already running campaign "${holder}" — ` +
+            'two campaigns on one wallet share its nonce, so one of every pair of ' +
+            'simultaneous sends would silently disappear';
+          storeForFn(userId).update(campaignId, {
+            status: 'paused',
+            pausedAt: iso(nowFn()),
+            pauseReason: reason,
+          });
+          log(userId, `[v4] "${name}" was NOT resumed at boot — ${reason}. Give it its own funding wallet and resume it.`, {
+            campaignId,
+            masterWalletId: wallet,
+            heldBy: holder,
+            reason,
+          });
+          const parked = statusOf(userId, campaignId);
+          if (parked) resumed.push(parked);
+          continue;
+        }
+        if (wallet) claimed.set(wallet, name);
+
         const gap = reslotOverdue(userId, campaignId);
         if (gap.count) {
           log(
@@ -733,4 +842,13 @@ module.exports = singleton;
 module.exports.createRunner = createRunner;
 module.exports.MAX_ATTEMPTS = MAX_ATTEMPTS;
 module.exports.HALT_AFTER_CONSECUTIVE_FAILURES = HALT_AFTER_CONSECUTIVE_FAILURES;
-module.exports._private = { defaultUsers, defaultResolve, gapFor, gapRange, nextPending, tally, humanGap };
+module.exports._private = {
+  defaultUsers,
+  defaultResolve,
+  gapFor,
+  gapRange,
+  nextPending,
+  tally,
+  humanGap,
+  byStartedAt,
+};
