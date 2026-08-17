@@ -1,0 +1,483 @@
+'use strict';
+
+/**
+ * Every /api/v4/* endpoint — the seasoning campaigns' whole surface.
+ *
+ * SEPARATE FROM routes/wallets.js, routes/launch.js AND routes/v3.js BY DESIGN,
+ * and mounted beside them rather than inside them. A router that can be
+ * unmounted in one line is the strongest form of the isolation promise.
+ *
+ * THE BACKUP GATE IS THE MOST IMPORTANT REFUSAL IN THIS FILE. A campaign is
+ * about to send real ETH to hundreds of wallets over three weeks. If the
+ * keystore is lost before those keys have been exported even once, every wei is
+ * unrecoverable — there is no seed phrase behind these wallets, they are random
+ * keys in one encrypted file on one machine. So POST /v4/campaigns refuses to
+ * start until every seed wallet in the plan appears in a backup on record, and
+ * it names the ones that do not.
+ *
+ * PREVIEW AND COMMIT ARE SEPARATE CALLS ON PURPOSE. POST /v4/campaigns/preview
+ * returns the plan AND the seed that produced it, and never writes anything.
+ * POST /v4/campaigns posts that seed and those params back, and this file
+ * REGENERATES the plan from them server-side rather than trusting a transfer
+ * list a browser has had its hands on. Same seed and same params reproduce the
+ * same plan byte for byte (see v4/plan.js and v4/rng.js), so what an operator
+ * read in the preview is provably what starts.
+ *
+ * EVERY PARAMS OBJECT THIS FILE HANDS TO plan.generate() HAS BEEN THROUGH
+ * plan.normaliseParams() FIRST. A review of Task 4 proved that generate() can
+ * be handed a hand-built params object that skips normaliseParams entirely —
+ * it re-validates only the day-boundary invariant, not the rest of
+ * normaliseParams's coercion and bounds checks — and silently schedules
+ * transfers up to an hour outside their days. This route file is exactly where
+ * that mistake would be made, so resolveWalletIds/buildCampaignPreview/
+ * resolveCampaignStart below always run `plan.normaliseParams(body.params)`
+ * and never assemble a params object of their own.
+ */
+
+const crypto = require('crypto');
+const express = require('express');
+const { formatEther } = require('ethers');
+const { keystoreFor } = require('../wallets/keystore');
+const { activityFor } = require('../store/activity');
+const { requireApiKey, requireAuthConfigured } = require('../middleware/auth');
+const { provider } = require('../evm/provider');
+const { getFees, gasCost } = require('../evm/fees');
+const config = require('../config');
+const v4roles = require('../v4/roles');
+const plan = require('../v4/plan');
+const { storeFor } = require('../v4/store');
+const runner = require('../v4/runner');
+const rng = require('../v4/rng');
+
+const router = express.Router();
+
+/**
+ * BigInts out of the response.
+ *
+ * Copied rather than imported from another route module — see the header of
+ * routes/v3.js, which does the same for the same reason: importing a route
+ * module to borrow a seven-line helper pulls its whole router in as a side
+ * effect, and this file is meant to be detachable in one line.
+ */
+function jsonSafe(value) {
+  if (typeof value === 'bigint') return value.toString();
+  if (Array.isArray(value)) return value.map(jsonSafe);
+  if (value && typeof value === 'object' && value.constructor === Object) {
+    return Object.fromEntries(Object.entries(value).map(([k, v]) => [k, jsonSafe(v)]));
+  }
+  return value;
+}
+
+// ── the pure guards ───────────────────────────────────────────────────────
+// Exported on module.exports._private so they can be unit-tested without an
+// HTTP harness — this repo has no supertest dependency.
+
+function assertV4Role(role) {
+  if (!v4roles.isV4Role(role)) {
+    throw new Error(`role must be one of ${Object.values(v4roles.ROLES).join(', ')}`);
+  }
+}
+
+function assertConfirmed(body) {
+  if ((body || {}).confirm !== true) throw new Error('this requires { confirm: true }');
+}
+
+function assertMaster(walletId, masters) {
+  if (!masters.some((w) => w.id === walletId)) {
+    throw new Error(`wallet ${walletId} is not a v4master funding wallet`);
+  }
+}
+
+function assertUnclaimed(walletIds, claimed) {
+  const taken = walletIds.filter((id) => claimed.has(id));
+  if (taken.length) {
+    throw new Error(
+      `${taken.length} wallet(s) are already claimed by another campaign: ${taken.slice(0, 5).join(', ')}` +
+        `${taken.length > 5 ? '…' : ''}. A wallet funded twice has two funding edges.`
+    );
+  }
+}
+
+function assertBackedUp(walletIds, backedUpFn) {
+  const missing = backedUpFn(walletIds);
+  if (missing.length) {
+    throw new Error(
+      `${missing.length} of ${walletIds.length} seed wallets have no key backup on record. ` +
+        'Download the V4 backup first — these keys exist in one encrypted file and nowhere else, ' +
+        'and a campaign funds them with real ETH.'
+    );
+  }
+}
+
+// ── small pure helpers ────────────────────────────────────────────────────
+
+/**
+ * V4's own wallets, and nothing else. Used by the backup route so a V4 request
+ * can never put another tab's private keys on the wire — the keystore is
+ * shared, but the roles are not (see v4/roles.js).
+ */
+function onlyV4Wallets(wallets) {
+  return wallets.filter((w) => v4roles.isV4Role(w.role));
+}
+
+/**
+ * Which seed wallets a campaign will use.
+ *
+ * Explicit walletIds must all be known v4seed wallets in this keystore.
+ * Omitted means every v4seed wallet that currently exists — the same default
+ * v3's resolveRun takes for its bundle targets — so an operator who generated
+ * exactly the wallets they want does not have to list them by id.
+ */
+function resolveWalletIds(body, ks) {
+  const known = v4roles.seeds(ks);
+  if (Array.isArray(body.walletIds) && body.walletIds.length) {
+    const ids = body.walletIds.map(String);
+    const knownIds = new Set(known.map((w) => w.id));
+    const missing = ids.filter((id) => !knownIds.has(id));
+    if (missing.length) {
+      throw new Error(
+        `${missing.length} wallet id(s) are not v4seed wallets in this keystore: ` +
+          `${missing.slice(0, 5).join(', ')}${missing.length > 5 ? '…' : ''}`
+      );
+    }
+    return ids;
+  }
+  return known.map((w) => w.id);
+}
+
+// A rough per-transfer gas ceiling for the pre-flight balance check ONLY —
+// not the authoritative one. v4/relay.js reads the REAL deposit gas out of
+// each quote and re-checks the funding wallet's balance immediately before
+// every send. This number only has to be close enough that a campaign is not
+// accepted here, run for days, and then found short mid-way through.
+const PREVIEW_GAS_LIMIT = 80_000n;
+
+/** plan.estimateCost, with a live gas price folded in. */
+async function estimateCampaignCost(transfers, deps = {}) {
+  const getFeesFn = deps.getFeesFn || getFees;
+  const fees = await getFeesFn();
+  const perTransferGasWei = gasCost(fees, PREVIEW_GAS_LIMIT);
+  return plan.estimateCost(transfers, { gasWei: perTransferGasWei });
+}
+
+/**
+ * Validate a request body's params through plan.normaliseParams(), resolve
+ * which wallets it covers, and — only when that count fits the params —
+ * generate the plan. THIS IS THE ONE PLACE body.params IS ALLOWED TO REACH
+ * plan.generate(), and it always goes through normaliseParams first.
+ *
+ * Never throws on infeasibility: `feasible` is reported in the result rather
+ * than raised, so a preview can explain why a plan does not fit instead of
+ * just failing. Both POST /v4/campaigns/preview and (indirectly, via
+ * resolveCampaignStart) POST /v4/campaigns call this.
+ */
+function buildCampaignPreview(body, ks, deps = {}) {
+  const nowFn = deps.nowFn || Date.now;
+  const newSeedFn = deps.newSeedFn || rng.newSeed;
+
+  const params = plan.normaliseParams(body.params || {});
+  const walletIds = resolveWalletIds(body, ks);
+  const feasible = plan.feasible(walletIds.length, params);
+  const seed = body.seed || newSeedFn();
+
+  if (!feasible.ok) {
+    return { seed, params, walletIds, byDay: [], totalEth: '0', transfers: [], feasible };
+  }
+
+  const addresses = Object.fromEntries(v4roles.seeds(ks).map((w) => [w.id, w.address]));
+  const result = plan.generate({ walletIds, addresses, params, seed, now: nowFn() });
+  return { ...result, walletIds, feasible };
+}
+
+/**
+ * Everything POST /v4/campaigns needs before it may call runner.start(): the
+ * funding wallet, a normalised and regenerated plan, and a balance that covers
+ * it. Runs the guards in the order the spec fixes: assertMaster, then
+ * assertUnclaimed, then assertBackedUp, then plan.feasible, then the balance
+ * check — so when more than one thing is wrong, the operator is told about the
+ * first one in that list, not whichever the code happened to reach first.
+ */
+async function resolveCampaignStart(body = {}, ks, store, deps = {}) {
+  const getFeesFn = deps.getFeesFn || getFees;
+  const rpc = deps.rpc || provider;
+  const nowFn = deps.nowFn || Date.now;
+
+  if (!body.name) throw new Error('name is required');
+  if (!body.seed) {
+    throw new Error(
+      'seed is required — call POST /v4/campaigns/preview first and post its seed back, so the plan ' +
+        'that starts is provably the plan that was previewed'
+    );
+  }
+
+  const masters = v4roles.masters(ks);
+  assertMaster(body.masterWalletId, masters);
+  const master = masters.find((w) => w.id === body.masterWalletId);
+
+  // Every params object plan.generate() sees below has been through
+  // normaliseParams — see the file header for the bypass this closes.
+  const params = plan.normaliseParams(body.params || {});
+  const walletIds = resolveWalletIds(body, ks);
+
+  assertUnclaimed(walletIds, store.claimedSeedIds());
+  assertBackedUp(walletIds, store.backedUp);
+
+  const feasibility = plan.feasible(walletIds.length, params);
+  if (!feasibility.ok) throw new Error(feasibility.reason);
+
+  const addresses = Object.fromEntries(v4roles.seeds(ks).map((w) => [w.id, w.address]));
+  // REGENERATED from the seed and params posted back — never a transfer list
+  // the browser sent. Same seed and params reproduce the same plan byte for
+  // byte, so what the operator read in preview is provably what is about to
+  // start.
+  const result = plan.generate({ walletIds, addresses, params, seed: body.seed, now: nowFn() });
+
+  const cost = await estimateCampaignCost(result.transfers, { getFeesFn });
+  const balance = BigInt(await rpc.getBalance(master.address));
+  if (balance < cost.totalWei) {
+    throw new Error(
+      `funding wallet ${master.address} has ${formatEther(balance)} ETH but this campaign needs about ` +
+        `${cost.totalEth} ETH (${result.transfers.length} transfers, Relay fees and gas included) — fund it first`
+    );
+  }
+
+  return { master, params, walletIds, result, cost };
+}
+
+// ── wallets ─────────────────────────────────────────────────────────────────
+
+// GET /api/v4/wallets — V4's two groups. Never key material.
+router.get('/v4/wallets', requireApiKey, (req, res, next) => {
+  try {
+    const ks = keystoreFor(req.user.id);
+    const store = storeFor(req.user.id);
+
+    const masters = v4roles.masters(ks);
+    const seeds = v4roles.seeds(ks);
+
+    // "in a campaign" means any campaign not yet terminal — running, paused or
+    // halted all still hold a claim on the wallet worth flagging before the
+    // operator points a new campaign at it. complete/cancelled campaigns are
+    // over and their wallet is free.
+    const activeStatuses = new Set(['running', 'paused', 'halted']);
+    const busyMasters = new Set(
+      store
+        .campaigns()
+        .filter((c) => activeStatuses.has(c.status))
+        .map((c) => c.masterWalletId)
+    );
+
+    const claimed = store.claimedSeedIds();
+    const missingBackup = new Set(store.backedUp(seeds.map((w) => w.id)));
+    const now = Date.now();
+
+    res.json(
+      jsonSafe({
+        masters: masters.map((w) => ({ ...w, inCampaign: busyMasters.has(w.id) })),
+        seeds: seeds.map((w) => ({
+          ...w,
+          claimed: claimed.has(w.id),
+          backedUp: !missingBackup.has(w.id),
+          ageDays: Math.floor((now - Date.parse(w.createdAt)) / plan.DAY_MS),
+        })),
+        roles: v4roles.ROLES,
+      })
+    );
+  } catch (err) {
+    next(err);
+  }
+});
+
+// POST /api/v4/wallets/generate — fresh wallets in one of V4's two roles.
+router.post('/v4/wallets/generate', requireApiKey, (req, res, next) => {
+  try {
+    const { count = 1, role, label } = req.body || {};
+    assertV4Role(role);
+    const n = Number(count);
+    // A campaign funds hundreds of wallets over weeks; this ceiling is
+    // generous headroom for that, not a realistic single call's size.
+    if (!Number.isInteger(n) || n < 1 || n > 1000) throw new Error('count must be between 1 and 1000');
+
+    const made = keystoreFor(req.user.id).generate(n, { role, label });
+    activityFor(req.user.id).record('v4', `[v4] generated ${made.length} ${role} wallet(s)`, {
+      role,
+      addresses: made.map((w) => w.address),
+    });
+    res.json(jsonSafe(made));
+  } catch (err) {
+    next(err);
+  }
+});
+
+// POST /api/v4/wallets/backup — every V4 key at once, for an offline backup.
+// Same two locks as routes/wallets.js's whole-keystore backup, because the
+// risk is identical: whoever holds the file this produces controls every
+// wallet in it. requireAuthConfigured fails CLOSED rather than serving keys
+// from a deployment that never set up a credential.
+router.post(
+  '/v4/wallets/backup',
+  requireApiKey,
+  requireAuthConfigured,
+  (req, res, next) => {
+    try {
+      assertConfirmed(req.body);
+      const ks = keystoreFor(req.user.id);
+      const wallets = onlyV4Wallets(ks.exportAll());
+      const ids = wallets.map((w) => w.id);
+      storeFor(req.user.id).recordBackup(ids);
+
+      console.warn(`[pons-launcher] V4 KEYSTORE BACKUP EXPORTED — ${wallets.length} private keys`);
+      // The count and the fact, never the keys.
+      activityFor(req.user.id).record('export', `[v4] downloaded a backup of ${wallets.length} v4 private key(s)`, {
+        count: wallets.length,
+      });
+
+      res.json({
+        exportedAt: new Date().toISOString(),
+        chainId: config.chainId,
+        count: wallets.length,
+        warning:
+          'These private keys control real funds. Anyone holding this file can spend every wallet in it. ' +
+          'Store it offline. There are no mnemonics: the keystore holds private keys only.',
+        wallets,
+      });
+    } catch (err) {
+      next(err);
+    }
+  }
+);
+
+// ── campaigns ───────────────────────────────────────────────────────────────
+
+// GET /api/v4/campaigns — summaries, not full transfer lists.
+router.get('/v4/campaigns', requireApiKey, (req, res, next) => {
+  try {
+    const store = storeFor(req.user.id);
+    const summaries = store.campaigns().map((c) => ({
+      ...runner.status(req.user.id, c.id),
+      seed: c.seed,
+      params: c.params,
+      createdAt: c.createdAt,
+    }));
+    res.json(jsonSafe(summaries));
+  } catch (err) {
+    next(err);
+  }
+});
+
+// GET /api/v4/campaigns/:id — one campaign, transfers included.
+router.get('/v4/campaigns/:id', requireApiKey, (req, res, next) => {
+  try {
+    const campaign = storeFor(req.user.id).get(req.params.id);
+    if (!campaign) throw new Error(`no campaign ${req.params.id}`);
+    const live = runner.status(req.user.id, campaign.id) || {};
+    res.json(
+      jsonSafe({
+        ...campaign,
+        armed: live.armed,
+        inFlight: live.inFlight,
+        nextDueAt: live.nextDueAt,
+        nextDueIso: live.nextDueIso,
+      })
+    );
+  } catch (err) {
+    next(err);
+  }
+});
+
+// POST /api/v4/campaigns/preview — a dry run. Broadcasts and writes nothing;
+// returns the plan AND the seed that produced it, so the follow-up commit can
+// post the same seed back rather than a transfer list the browser generated.
+router.post('/v4/campaigns/preview', requireApiKey, async (req, res, next) => {
+  try {
+    const ks = keystoreFor(req.user.id);
+    const out = buildCampaignPreview(req.body || {}, ks);
+    const cost = out.feasible.ok ? await estimateCampaignCost(out.transfers) : null;
+    res.json(
+      jsonSafe({
+        seed: out.seed,
+        params: out.params,
+        walletIds: out.walletIds,
+        byDay: out.byDay,
+        totalEth: out.totalEth,
+        cost,
+        feasible: out.feasible,
+      })
+    );
+  } catch (err) {
+    next(err);
+  }
+});
+
+// POST /api/v4/campaigns — creates AND starts. Guard order: assertMaster,
+// assertUnclaimed, assertBackedUp, plan.feasible, the balance check — all
+// inside resolveCampaignStart — and only then runner.start(). The plan is
+// REGENERATED from the posted-back seed and params, never trusted from the
+// request as a transfer list.
+router.post('/v4/campaigns', requireApiKey, async (req, res, next) => {
+  try {
+    const body = req.body || {};
+    const ks = keystoreFor(req.user.id);
+    const store = storeFor(req.user.id);
+
+    const { master, params, walletIds, result } = await resolveCampaignStart(body, ks, store);
+
+    const campaign = {
+      id: crypto.randomUUID(),
+      name: body.name,
+      masterWalletId: master.id,
+      seed: result.seed,
+      params,
+      transfers: result.transfers,
+      byDay: result.byDay,
+      totalEth: result.totalEth,
+      createdAt: new Date().toISOString(),
+    };
+
+    // runner.start() logs its own "[v4] ... started" activity entry — nothing
+    // more is added here, or the log would carry two lines for one action.
+    const status = runner.start(req.user.id, campaign);
+    res.json(jsonSafe(status));
+  } catch (err) {
+    next(err);
+  }
+});
+
+router.post('/v4/campaigns/:id/pause', requireApiKey, (req, res, next) => {
+  try {
+    res.json(jsonSafe(runner.pause(req.user.id, req.params.id)));
+  } catch (err) {
+    next(err);
+  }
+});
+
+router.post('/v4/campaigns/:id/resume', requireApiKey, (req, res, next) => {
+  try {
+    res.json(jsonSafe(runner.resume(req.user.id, req.params.id)));
+  } catch (err) {
+    next(err);
+  }
+});
+
+router.post('/v4/campaigns/:id/cancel', requireApiKey, (req, res, next) => {
+  try {
+    res.json(jsonSafe(runner.cancel(req.user.id, req.params.id)));
+  } catch (err) {
+    next(err);
+  }
+});
+
+module.exports = router;
+module.exports._private = {
+  jsonSafe,
+  assertV4Role,
+  assertConfirmed,
+  assertMaster,
+  assertUnclaimed,
+  assertBackedUp,
+  onlyV4Wallets,
+  resolveWalletIds,
+  buildCampaignPreview,
+  estimateCampaignCost,
+  resolveCampaignStart,
+};
