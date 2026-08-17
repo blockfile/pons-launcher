@@ -731,9 +731,16 @@ function createRunner(deps = {}) {
    * pattern the campaign spent three weeks avoiding — an outage would undo the
    * seasoning rather than merely delay it. The gap is logged because it is the
    * one thing the operator cannot see from the plan.
+   *
+   * Returns `{ resumed, parked }`, kept as two separate arrays rather than one
+   * — a campaign in `parked` is NOT funding, and a caller (server.js's boot
+   * log) that folded the two together would tell an operator "N resumed" while
+   * some of those N were actually sitting paused. See the park branch below
+   * for why a parked campaign also has to `forget()` its job entry.
    */
   function resumeAll() {
     const resumed = [];
+    const parked = [];
     for (const userId of usersFn()) {
       let running;
       try {
@@ -772,6 +779,16 @@ function createRunner(deps = {}) {
             `funding wallet ${wallet} is already running campaign "${holder}" — ` +
             'two campaigns on one wallet share its nonce, so one of every pair of ' +
             'simultaneous sends would silently disappear';
+          // Clears any timer this campaign already held. Ordinarily there is
+          // none — this is the first resumeAll() of the process — but if
+          // resumeAll() ever runs twice in one process and the winner changes
+          // (a restored backup introducing an older campaign, say), the
+          // previous run may have armed THIS campaign before parking it now.
+          // Without forget() here, that old timer and job entry are stranded:
+          // fire()'s status guard still blocks the send, so it is a dead timer
+          // and a leaked job, not a double-send — but a dead timer is still a
+          // bug. Mirrors what pause() does for the same reason.
+          forget(userId, campaignId);
           storeForFn(userId).update(campaignId, {
             status: 'paused',
             pausedAt: iso(nowFn()),
@@ -783,8 +800,8 @@ function createRunner(deps = {}) {
             heldBy: holder,
             reason,
           });
-          const parked = statusOf(userId, campaignId);
-          if (parked) resumed.push(parked);
+          const view = statusOf(userId, campaignId);
+          if (view) parked.push(view);
           continue;
         }
         if (wallet) claimed.set(wallet, name);
@@ -808,7 +825,7 @@ function createRunner(deps = {}) {
         if (view) resumed.push(view);
       }
     }
-    return resumed;
+    return { resumed, parked };
   }
 
   function status(userId, campaignId) {

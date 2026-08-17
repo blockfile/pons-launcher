@@ -403,6 +403,59 @@ test('resumeAll refuses to arm two running campaigns on one funding wallet', asy
   assert.equal(s.running().length, 0);
 });
 
+test('resumeAll separates parked campaigns from resumed ones in its return value', async () => {
+  const { store } = env();
+  const clock = fakeClock();
+  const runner = runnerWith(store, clock, async () => ({ hash: '0x' + 'a'.repeat(64) }));
+
+  // Same clash as above — two running campaigns on one funding wallet — but
+  // this test is about what resumeAll() REPORTS, not what it does to the
+  // store. A caller (server.js's boot log) that only inspected one array must
+  // be able to tell "actually funding" apart from "sitting paused" without
+  // re-deriving it from campaign status itself.
+  makeCampaign(store, { id: 'c1', masterWalletId: 'm1', count: 3 });
+  makeCampaign(store, { id: 'c2', masterWalletId: 'm1', count: 3 });
+  const { resumed, parked } = runner.resumeAll();
+
+  assert.equal(resumed.length, 1, 'exactly one campaign actually resumed');
+  assert.equal(parked.length, 1, 'exactly one campaign was parked');
+  assert.equal(resumed[0].id, 'c1', 'the earlier-started campaign is the one that resumed');
+  assert.equal(parked[0].id, 'c2', 'the later-started campaign is the one that was parked');
+  assert.equal(parked[0].status, 'paused');
+
+  await clock.drain();
+});
+
+test('resumeAll forgets a parked loser, clearing any timer it already held', async () => {
+  const { store } = env();
+  const clock = fakeClock();
+  const runner = runnerWith(store, clock, async () => ({ hash: '0x' + 'a'.repeat(64) }));
+
+  // c2 starts out alone on m1, so the first resumeAll() arms it — a real
+  // timer goes into the fake clock's table.
+  makeCampaign(store, { id: 'c2', masterWalletId: 'm1', count: 3, now: clock.now() });
+  const first = runner.resumeAll();
+  assert.equal(first.resumed.length, 1);
+  assert.equal(clock.pending(), 1, 'c2 should hold one live timer after the first resumeAll');
+
+  // A restored backup introduces an OLDER campaign on the same wallet — the
+  // exact scenario the review flagged: resumeAll() runs twice in one process
+  // and the winner changes between runs.
+  makeCampaign(store, { id: 'c1', masterWalletId: 'm1', count: 3, now: clock.now() - 60_000 });
+  runner.resumeAll();
+
+  const s = store.storeFor('u');
+  assert.equal(s.get('c1').status, 'running', 'the earlier-started campaign should now hold the wallet');
+  assert.equal(s.get('c2').status, 'paused', 'the later-started campaign should be parked');
+
+  // c2's timer from the FIRST resumeAll must have been cleared, not left
+  // stranded. Only c1's freshly-armed timer should remain in the clock's
+  // table — a stranded timer here is a dead setTimeout in production that
+  // the process never needed, and a leaked entry in the runner's job map.
+  assert.equal(clock.pending(), 1, "c2's stale timer from the first resumeAll was not cleared");
+  assert.ok(!runner.armed().some((j) => j.campaignId === 'c2'), 'c2 should have no job entry left after being parked');
+});
+
 test('cancel is final — resume refuses it', () => {
   const { store } = env();
   const clock = fakeClock();
