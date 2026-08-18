@@ -1,0 +1,369 @@
+import { useState } from 'react';
+import { api } from '../api.js';
+import Step from '../components/Step.jsx';
+import { Busy } from '../components/Section.jsx';
+import Modal, { Fact } from '../components/Modal.jsx';
+import { plural } from './roles.js';
+
+// Where the form starts. The strategy's own numbers, mirrored from
+// v4/plan.js's DEFAULTS — not a limit, just the shape of a sensible campaign:
+// three weeks, ten to thirty wallets a day, a few thousandths of an ETH each.
+const DEFAULTS = {
+  name: '',
+  days: 20,
+  perDayMin: 10,
+  perDayMax: 30,
+  amountMinEth: '0.0031',
+  amountMaxEth: '0.0089',
+  // Minutes, not milliseconds. The backend's field is gapMinMs and nobody sizes
+  // a three-week schedule in milliseconds; the conversion happens at the door.
+  gapMinMin: 20,
+  gapMaxMin: 240,
+};
+
+const MINUTE_MS = 60_000;
+
+/** wei string -> ETH, for the two figures the cost breakdown subtracts. */
+function weiToEth(wei) {
+  return Number(BigInt(wei || 0)) / 1e18;
+}
+
+/**
+ * Step 3 — the plan, and the one button on this tab that spends anything.
+ *
+ * PREVIEW AND START ARE TWO CALLS AND THAT IS THE POINT. The preview returns
+ * the schedule AND the seed that produced it; start posts that same seed and
+ * those same params back, and the server REGENERATES the plan from them rather
+ * than trusting a transfer list a browser has had its hands on. Same seed and
+ * same params reproduce the same plan byte for byte, so what was read here is
+ * provably what starts.
+ *
+ * Which is why editing any field throws the preview away. A preview is a plan
+ * for a particular set of numbers; leaving it on screen beside changed ones
+ * would show a schedule and start a different one.
+ */
+export default function V4PlanPanel({ step, masters, seeds, campaigns, reload, report }) {
+  const [form, setForm] = useState(DEFAULTS);
+  const [master, setMaster] = useState('');
+  const [preview, setPreview] = useState(null);
+  // The server's own words when it refuses. Kept in state rather than left to
+  // the toast — see the notice below for why it has to survive on screen.
+  const [refusal, setRefusal] = useState('');
+  const [busy, setBusy] = useState('');
+  const [arming, setArming] = useState(false);
+
+  // Every field goes through here, so nothing can change a number without
+  // invalidating the plan drawn from the old one.
+  const set = (key) => (e) => {
+    setForm((f) => ({ ...f, [key]: e.target.value }));
+    setPreview(null);
+  };
+
+  const params = () => ({
+    days: Number(form.days),
+    perDayMin: Number(form.perDayMin),
+    perDayMax: Number(form.perDayMax),
+    amountMinEth: String(form.amountMinEth).trim(),
+    amountMaxEth: String(form.amountMaxEth).trim(),
+    gapMinMs: Math.round(Number(form.gapMinMin) * MINUTE_MS),
+    gapMaxMs: Math.round(Number(form.gapMaxMin) * MINUTE_MS),
+  });
+
+  async function act(what, fn) {
+    setBusy(what);
+    try {
+      const out = await fn();
+      report(out);
+      return out;
+    } catch (err) {
+      report(`ERROR: ${err.message}`);
+      throw err;
+    } finally {
+      setBusy('');
+    }
+  }
+
+  /**
+   * The wallets this campaign would cover: the ones no other campaign holds.
+   *
+   * Sent explicitly rather than left to the route's default, which is EVERY
+   * seed wallet in the keystore. After the first campaign that default includes
+   * wallets already spoken for, and the start would be refused for claiming
+   * them — a wallet funded twice has two funding edges, which is the one thing
+   * this whole strategy exists to avoid. Previewing the free ones means the
+   * plan on screen is the plan that can actually start.
+   *
+   * The list must never be sent empty: an empty walletIds falls back to that
+   * same all-wallets default, so Preview is disabled instead.
+   */
+  const freeIds = seeds.filter((w) => !w.claimed).map((w) => w.id);
+  const claimed = seeds.length - freeIds.length;
+  const free = freeIds.length;
+  // Counted over the wallets THIS campaign would cover, because that is what
+  // the gate checks — a claimed wallet's backup is last campaign's problem.
+  const unprotected = seeds.filter((w) => !w.claimed && !w.backedUp).length;
+  const chosen = masters.find((w) => w.id === master) || null;
+  const ready = Boolean(form.name.trim() && master && preview?.feasible?.ok);
+  const cost = preview?.cost || null;
+  const overhead = cost ? weiToEth(cost.totalWei) - weiToEth(cost.depositsWei) : 0;
+
+  return (
+    <Step {...step}>
+      <p className="lede">
+        How slowly the wallets are fed. Every dice is rolled once, here: which wallets land on which
+        day, how much each one gets to six decimals, and how long to wait between sends. The
+        schedule is written out in full before anything is sent, which is what makes a three-week
+        job survive a restart.
+      </p>
+
+      <div className="grid">
+        <label className="half">
+          campaign name
+          <input value={form.name} onChange={set('name')} placeholder="e.g. august seasoning" />
+        </label>
+        <label className="half">
+          funding wallet
+          <select
+            value={master}
+            onChange={(e) => {
+              setMaster(e.target.value);
+              setRefusal('');
+            }}
+          >
+            <option value="">choose one…</option>
+            {masters.map((w) => (
+              <option key={w.id} value={w.id}>
+                {w.address}
+                {w.balanceEth == null ? '' : ` — ${Number(w.balanceEth).toFixed(4)} ETH`}
+                {w.inCampaign ? ' (busy)' : ''}
+              </option>
+            ))}
+          </select>
+        </label>
+
+        <label className="half">
+          days
+          <input type="number" min="1" max="90" value={form.days} onChange={set('days')} />
+        </label>
+        <label>
+          per day, min
+          <input type="number" min="1" max="200" value={form.perDayMin} onChange={set('perDayMin')} />
+        </label>
+        <label>
+          per day, max
+          <input type="number" min="1" max="200" value={form.perDayMax} onChange={set('perDayMax')} />
+        </label>
+
+        <label>
+          amount min (ETH)
+          <input inputMode="decimal" value={form.amountMinEth} onChange={set('amountMinEth')} />
+        </label>
+        <label>
+          amount max (ETH)
+          <input inputMode="decimal" value={form.amountMaxEth} onChange={set('amountMaxEth')} />
+        </label>
+        <label>
+          gap min (minutes)
+          <input type="number" min="1" max="1440" value={form.gapMinMin} onChange={set('gapMinMin')} />
+        </label>
+        <label>
+          gap max (minutes)
+          <input type="number" min="1" max="1440" value={form.gapMaxMin} onChange={set('gapMaxMin')} />
+        </label>
+      </div>
+
+      <p className="hint">
+        The daily count is the column a filter would group by, so it wins over the gap: at thirty
+        wallets in a day the gaps must average under 48 minutes and the top of a four-hour range
+        simply will not be drawn. Amounts are quoted to six decimals so no two wallets share a
+        figure and none of them are round.
+      </p>
+
+      <div className="row">
+        <Busy
+          busy={busy === 'preview'}
+          className="ghost"
+          disabled={free === 0}
+          onClick={async () => {
+            try {
+              setPreview(
+                await act('preview', () =>
+                  api('/v4/campaigns/preview', 'POST', { params: params(), walletIds: freeIds })
+                )
+              );
+              setRefusal('');
+            } catch {
+              // act() has already reported it. Drop the stale plan rather than
+              // leave a schedule on screen that the current numbers no longer
+              // produce.
+              setPreview(null);
+            }
+          }}
+        >
+          Preview
+        </Busy>
+        <Busy busy={busy === 'start'} disabled={!ready} onClick={() => setArming(true)}>
+          Start campaign
+        </Busy>
+        <span className="spacer" />
+        <span className="hint">
+          {seeds.length === 0
+            ? 'generate seed wallets in step 2 first'
+            : free === 0
+              ? 'every seed wallet is already claimed by a campaign — generate more in step 2'
+              : `${plural(free, 'free seed wallet')}${claimed ? ` · ${claimed} already claimed` : ''}`}
+        </span>
+      </div>
+
+      {/* The gate, before it is reached. The verbatim refusal below is what
+          matters when it is reached anyway. */}
+      {unprotected > 0 && (
+        <div className="notice warn">
+          <h3>{plural(unprotected, 'seed wallet')} without a key backup</h3>
+          <p>
+            A campaign will be refused until every wallet in its plan is on record. Download the
+            backup in step 2 — it takes one click, and these keys have no other copy.
+          </p>
+        </div>
+      )}
+
+      {/*
+        THE SERVER'S OWN WORDS, NEVER REPLACED WITH "COULD NOT START".
+
+        The backup gate NAMES the wallets whose keys are not on record, and that
+        list is the entire value of the refusal: it is what the operator has to
+        act on, and there is nowhere else to get it. The same is true of every
+        other refusal this route makes — the funding wallet that is short says
+        by how much, the infeasible plan says which way to move which number,
+        the claimed wallets say which campaign already holds them. A generic
+        failure message would throw all of it away and leave a tab that says no
+        without saying what to do.
+
+        A toast is not enough either. It disappears, and this message is a list
+        of forty-two-character ids to be worked through.
+      */}
+      {refusal && (
+        <div className="notice danger">
+          <h3>The campaign was refused</h3>
+          <p style={{ overflowWrap: 'anywhere' }}>{refusal}</p>
+        </div>
+      )}
+
+      {preview && !preview.feasible?.ok && (
+        <div className="notice warn">
+          <h3>This plan does not fit</h3>
+          <p>{preview.feasible?.reason}</p>
+        </div>
+      )}
+
+      {preview?.feasible?.ok && (
+        <>
+          <div className="stats">
+            <div className="stat">
+              <span>Wallets</span>
+              <b>{preview.walletIds.length}</b>
+            </div>
+            <div className="stat">
+              <span>Days</span>
+              <b>{preview.params.days}</b>
+            </div>
+            <div className="stat">
+              <span>Reaching the wallets</span>
+              <b>{Number(preview.totalEth).toFixed(4)}</b>
+            </div>
+            <div className="stat">
+              <span>Cost to the funding wallet</span>
+              <b>{cost ? Number(cost.totalEth).toFixed(4) : '—'}</b>
+            </div>
+          </div>
+
+          {/* Not the sum of the amounts, and the difference is the whole reason
+              this figure is drawn separately: an EXACT_OUTPUT Relay order
+              charges its fee on the sender's side and every deposit costs gas,
+              so a campaign budgeted on the bare sum runs dry near the end —
+              when the wallets that go unfunded are the ones with the least time
+              left to season. */}
+          {cost && (
+            <p className="hint">
+              Relay fees and gas add about {overhead.toFixed(4)} ETH on top of the{' '}
+              {Number(preview.totalEth).toFixed(4)} ETH that reaches the wallets. The funding wallet
+              is checked against the total before the campaign is allowed to start.
+            </p>
+          )}
+
+          <div className="table-scroll" style={{ maxHeight: 320, overflowY: 'auto' }}>
+            <table>
+              <thead>
+                <tr>
+                  <th>Day</th>
+                  <th className="num">Wallets</th>
+                  <th className="num">ETH</th>
+                </tr>
+              </thead>
+              <tbody>
+                {preview.byDay.map((d) => (
+                  <tr key={d.day}>
+                    <td>{d.day}</td>
+                    <td className="num">{d.count}</td>
+                    <td className="num">{Number(d.totalEth).toFixed(6)}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        </>
+      )}
+
+      <Modal
+        open={arming}
+        title="Start this campaign?"
+        danger
+        question="It sends real ETH to every wallet in the plan, over the next few weeks."
+        onCancel={() => setArming(false)}
+        confirmLabel="Start it"
+        onConfirm={async () => {
+          setArming(false);
+          setRefusal('');
+          try {
+            await act('start', () =>
+              api('/v4/campaigns', 'POST', {
+                name: form.name.trim(),
+                masterWalletId: master,
+                // The seed and params the PREVIEW returned, not the form's own.
+                // The server regenerates the plan from these, so posting back
+                // exactly what it handed over is what makes the campaign that
+                // starts the campaign that was read.
+                seed: preview.seed,
+                params: preview.params,
+                walletIds: preview.walletIds,
+              })
+            );
+            setRefusal('');
+            setPreview(null);
+            setForm((f) => ({ ...f, name: '' }));
+            await reload();
+          } catch (err) {
+            setRefusal(err.message);
+          }
+        }}
+      >
+        <p>
+          Once started it runs unattended, across restarts, until every wallet has been funded or
+          given up on. It can be paused and resumed; cancelling is final.
+        </p>
+        <Fact label="Name">{form.name.trim()}</Fact>
+        <Fact label="Funding wallet" mono>
+          {chosen?.address}
+        </Fact>
+        <Fact label="Wallets">{preview ? plural(preview.walletIds.length, 'wallet') : '—'}</Fact>
+        <Fact label="Over">{preview ? plural(preview.params.days, 'day') : '—'}</Fact>
+        <Fact label="Costs about">{cost ? `${Number(cost.totalEth).toFixed(4)} ETH` : '—'}</Fact>
+        {campaigns.some((c) => c.status === 'running') && (
+          <Fact label="Already running">
+            {plural(campaigns.filter((c) => c.status === 'running').length, 'campaign')}
+          </Fact>
+        )}
+      </Modal>
+    </Step>
+  );
+}

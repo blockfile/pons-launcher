@@ -81,6 +81,12 @@ const DEFAULT_ID = 'default';
 // wallet passes through. add() resolves a role it does not recognise to
 // 'bundle', so leaving them out would not fail — it would silently create every
 // V3 wallet holding v1's bundle role, on v1's tab, spendable by v1's launcher.
+//
+// v4master / v4seed are the fifth owner — the seasoning campaigns. Their names
+// live in v4/roles.js, which is V4's own table and shares nothing with
+// variants.js or v3/roles.js. v4master is deliberately NOT in SINGLETON_ROLES:
+// campaigns run in parallel, one per funding wallet, so a singleton would cap
+// the whole feature at one campaign.
 const ROLES = new Set([
   'dev',
   'bundle',
@@ -93,6 +99,8 @@ const ROLES = new Set([
   'v3dev',
   'v3main',
   'v3bundle',
+  'v4master',
+  'v4seed',
 ]);
 // v3main joins the singletons: the chain sells from one position, and a second
 // main wallet would mean half the supply sitting somewhere the engine never
@@ -194,8 +202,18 @@ function vault(file) {
 
   function persist() {
     fs.mkdirSync(path.dirname(file), { recursive: true });
-    // 0600 — the keystore is only ever readable by the account running the app.
-    fs.writeFileSync(file, JSON.stringify(cache, null, 2), { mode: 0o600 });
+    // ATOMIC, and not merely tidy. add() calls this once per wallet, and each
+    // call rewrites the WHOLE keystore — every role, every user's own file.
+    // Generating a batch of V4 seed wallets is hundreds of consecutive full
+    // rewrites, and a process killed partway through a plain writeFileSync
+    // leaves a truncated file where every private key used to be. Writing to a
+    // sibling and renaming makes the swap a single filesystem operation: the
+    // path either holds the old complete file or the new complete file, never
+    // half of either. 0600 is set on the temp file so the keys are never even
+    // momentarily readable by another account.
+    const tmp = `${file}.tmp`;
+    fs.writeFileSync(tmp, JSON.stringify(cache, null, 2), { mode: 0o600 });
+    fs.renameSync(tmp, file);
   }
 
   function encrypt(plaintext) {
