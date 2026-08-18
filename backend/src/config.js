@@ -97,6 +97,15 @@ const config = {
   keystorePath:
     process.env.KEYSTORE_PATH || path.join(__dirname, '..', 'data', 'wallets.keystore.json'),
   historyPath: process.env.HISTORY_PATH || path.join(__dirname, '..', 'data', 'launches.json'),
+
+  // How many DELETED wallets the recovery archive keeps, per user, across every
+  // tab — see the header on MAX_ARCHIVED in wallets/keystore.js, which is the
+  // only place that reads this. Past it, the oldest deleted key is destroyed to
+  // make room, and there is no role filter: deleting V4 seed wallets in bulk
+  // can evict an archived v1 dev key. 100 was chosen when a keystore held tens
+  // of wallets; a deployment running V4 discards them by the hundred. The only
+  // cost of raising it is disk.
+  archiveMax: num(process.env.ARCHIVE_MAX, 100),
   // Beside the keystore: one users file for the whole deployment. Absent means
   // single-tenant, which is what every existing install is.
   usersPath: process.env.USERS_PATH || path.join(__dirname, '..', 'data', 'users.json'),

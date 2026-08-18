@@ -52,8 +52,21 @@ const VERSION = 1;
  * activity log (see the DELETE route in routes/wallets.js). That line may be the
  * only remaining evidence the key ever existed, so an eviction is never allowed
  * to pass silently.
+ *
+ * ONE ARCHIVE PER USER, SHARED BY EVERY TAB. archivePathFor keys on the user
+ * and nothing else, and the eviction above sorts by deletion time and slices —
+ * it has never looked at a role. So deleting a hundred V4 seed wallets can
+ * evict an archived v1 dev key, and that is not a V4 problem introduced by V4:
+ * it is what this cap has always meant, made reachable by a tab that deals in
+ * hundreds of wallets rather than tens. The number is what stands between a
+ * bulk delete and somebody else's key.
+ *
+ * SETTABLE FROM THE ENVIRONMENT for exactly that reason. A deployment running
+ * V4 generates and discards wallets by the hundred, and 100 is a ceiling from a
+ * time when a keystore held twenty. Raise it in .env; the only cost of a larger
+ * archive is disk, and the cost of a smaller one is measured in keys.
  */
-const MAX_ARCHIVED = 100;
+const MAX_ARCHIVED = Math.max(1, Math.round(config.archiveMax));
 
 const DEFAULT_ID = 'default';
 
