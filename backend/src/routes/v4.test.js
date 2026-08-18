@@ -40,6 +40,36 @@ test('a split refuses to pay its own source', () => {
   assert.doesNotThrow(() => guards.assertNotSelfFunding([], 'm1'));
 });
 
+test('a batch divides seeds evenly and leaves the remainder unclaimed', () => {
+  const seeds = ['s1', 's2', 's3', 's4', 's5', 's6', 's7'];
+  const funders = ['m1', 'm2', 'm3'];
+
+  // EVEN, because a plan's floor is days x perDayMin: a funder handed 1 wallet
+  // for a 2-day campaign is refused while its neighbour with 2 starts fine.
+  // One count means one set of params describes every campaign, so a batch
+  // either starts completely or refuses completely.
+  const out = guards.divideSeeds(seeds, funders, 2);
+  assert.equal(out.length, 3);
+  for (const slice of out) assert.equal(slice.walletIds.length, 2);
+  assert.deepEqual(
+    out.map((s) => s.funderId),
+    ['m1', 'm2', 'm3']
+  );
+  // The 7th is left for the next batch rather than making one campaign lopsided.
+  assert.deepEqual(out.flatMap((s) => s.walletIds), ['s1', 's2', 's3', 's4', 's5', 's6']);
+
+  // Fewer seeds than funders: only the funders that can be filled are used.
+  const short = guards.divideSeeds(['s1', 's2', 's3'], funders, 2);
+  assert.equal(short.length, 1);
+
+  // No wallet appears twice — the one-funding-edge rule, inside a single call.
+  const all = guards.divideSeeds(seeds, funders, 2).flatMap((s) => s.walletIds);
+  assert.equal(new Set(all).size, all.length);
+
+  assert.throws(() => guards.divideSeeds(['s1'], funders, 2), /not enough/);
+  assert.throws(() => guards.divideSeeds([], funders, 1), /not enough/);
+});
+
 test('a wallet a live campaign still needs cannot be deleted', () => {
   const live = (over) => ({
     id: 'c1',

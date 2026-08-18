@@ -76,6 +76,11 @@ export default function V4PlanPanel({ step, masters, seeds, campaigns, planDefau
   const [refusal, setRefusal] = useState('');
   const [busy, setBusy] = useState('');
   const [arming, setArming] = useState(false);
+  const [batching, setBatching] = useState(false);
+  // How many seed wallets each funder feeds in a batch. Every campaign gets the
+  // same count so one set of params describes all of them — see divideSeeds in
+  // routes/v4.js for why an uneven split refuses half the batch.
+  const [seedsPer, setSeedsPer] = useState(2);
 
   // Seed the form from the server's DEFAULTS once, on the first fetch that
   // carries them. ONCE is the whole of it: the wallet list is polled, and
@@ -139,6 +144,16 @@ export default function V4PlanPanel({ step, masters, seeds, campaigns, planDefau
   // the gate checks — a claimed wallet's backup is last campaign's problem.
   const unprotected = seeds.filter((w) => !w.claimed && !w.backedUp).length;
   const chosen = masters.find((w) => w.id === master) || null;
+  // Funders not already running something. The batch route filters the same
+  // way — a busy funder is not an error, it just is not available.
+  const busyFunders = new Set(
+    campaigns.filter((c) => c.status === 'running').map((c) => c.masterWalletId)
+  );
+  const freeFunders = masters.filter((w) => !busyFunders.has(w.id));
+  const batchCampaigns = Math.min(
+    freeFunders.length,
+    Math.floor(free / Math.max(1, Math.round(Number(seedsPer) || 0)))
+  );
   const ready = Boolean(form.name.trim() && master && preview?.feasible?.ok);
   const cost = preview?.cost || null;
   const overhead = cost ? weiToEth(cost.totalWei) - weiToEth(cost.depositsWei) : 0;
@@ -241,6 +256,21 @@ export default function V4PlanPanel({ step, masters, seeds, campaigns, planDefau
         <Busy busy={busy === 'start'} disabled={!ready} onClick={() => setArming(true)}>
           Start campaign
         </Busy>
+        {/* ONE PRESS FOR EVERY FUNDER, because a campaign is one funder feeding
+            its own wallets — two sharing a funder would collide on its nonce —
+            and that rule left an operator holding twenty funders setting up
+            twenty campaigns by hand. Which made the split that FILLS twenty
+            funders only half a feature. */}
+        {freeFunders.length > 1 && (
+          <Busy
+            busy={busy === 'batch'}
+            className="ghost"
+            disabled={free === 0}
+            onClick={() => setBatching(true)}
+          >
+            Start on all {freeFunders.length} funders
+          </Busy>
+        )}
         <span className="spacer" />
         <span className="hint">
           {seeds.length === 0
@@ -399,6 +429,53 @@ export default function V4PlanPanel({ step, masters, seeds, campaigns, planDefau
             {plural(campaigns.filter((c) => c.status === 'running').length, 'campaign')}
           </Fact>
         )}
+      </Modal>
+
+      {/* One campaign per funder, created in one call. Every one goes through
+          the same guards and the same regenerated plan as a single start — the
+          route loops, it does not take a shortcut. A funder short of ETH is
+          refused on its own and the rest still start, which is the whole reason
+          the expensive checks are per funder. */}
+      <Modal
+        open={batching}
+        title={`Start ${batchCampaigns} campaign${batchCampaigns === 1 ? '' : 's'}, one per funding wallet?`}
+        question={
+          batchCampaigns < 1
+            ? `Not enough unclaimed seed wallets — ${free} free, and ${seedsPer} each means a funder cannot be filled. Generate more in step 2.`
+            : `${batchCampaigns * Math.max(1, Math.round(Number(seedsPer) || 0))} seed wallets will be divided evenly across ${batchCampaigns} funder(s), ${seedsPer} each, on the schedule above. Each funder is checked for its own balance — one short of ETH is refused on its own and the others still start.`
+        }
+        confirmLabel={`Start ${batchCampaigns} campaigns`}
+        confirmDisabled={batchCampaigns < 1}
+        onConfirm={async () => {
+          setBatching(false);
+          await act('batch', async () => {
+            const out = await api('/v4/campaigns/batch', 'POST', {
+              params: params(),
+              seedsPerFunder: Math.max(1, Math.round(Number(seedsPer) || 0)),
+              name: form.name.trim() || undefined,
+            });
+            setPreview(null);
+            const refused = out.failed.length
+              ? ` ${out.failed.length} refused: ${out.failed[0].error}`
+              : '';
+            return `Started ${out.started.length} campaign(s).${refused}`;
+          });
+        }}
+        onCancel={() => setBatching(false)}
+      >
+        <label className="modal-type">
+          Seed wallets per funder
+          <input
+            data-autofocus
+            type="number"
+            min="1"
+            value={seedsPer}
+            onChange={(e) => setSeedsPer(e.target.value)}
+          />
+        </label>
+        <Fact label="Free funders">{freeFunders.length}</Fact>
+        <Fact label="Unclaimed seeds">{free}</Fact>
+        <Fact label="Days each">{form.days}</Fact>
       </Modal>
     </Step>
   );

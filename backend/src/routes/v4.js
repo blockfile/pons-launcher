@@ -664,6 +664,131 @@ router.get('/v4/campaigns/:id', requireApiKey, (req, res, next) => {
   }
 });
 
+/**
+ * Divide seed wallets across funding wallets, evenly and deterministically.
+ *
+ * EVENLY IS NOT A NICETY, it is what keeps every campaign feasible. A plan's
+ * floor is `days x perDayMin`, so a funder handed 1 wallet for a 2-day campaign
+ * is refused outright while its neighbour with 2 starts fine. Giving every
+ * funder the same count means one set of params describes all of them, and a
+ * batch either starts completely or refuses completely — never eleven of
+ * twenty, leaving an operator to work out which nine and why.
+ *
+ * Anything that does not divide is left unclaimed rather than pushed onto the
+ * last funder. Those wallets are still there for the next batch; a lopsided
+ * campaign is not.
+ */
+function divideSeeds(seedIds, funderIds, seedsPerFunder) {
+  const per = Math.max(1, Math.round(Number(seedsPerFunder) || 0));
+  const usable = Math.min(funderIds.length, Math.floor(seedIds.length / per));
+  if (usable < 1) {
+    throw new Error(
+      `${seedIds.length} unclaimed seed wallet(s) is not enough for even one funder at ` +
+        `${per} each — generate more in step 2, or lower the count.`
+    );
+  }
+  return funderIds.slice(0, usable).map((funderId, i) => ({
+    funderId,
+    walletIds: seedIds.slice(i * per, (i + 1) * per),
+  }));
+}
+
+/**
+ * POST /api/v4/campaigns/batch — one campaign per funding wallet, in one call.
+ *
+ * WHY THIS EXISTS. A campaign is one funder feeding its own wallets, because
+ * two campaigns sharing a funder would collide on that wallet's nonce. That is
+ * the right rule and it is not going away — but it meant an operator holding
+ * twenty funders had to set up twenty campaigns by hand, which made the split
+ * that fills twenty funders only half a feature.
+ *
+ * This loops. It is not a new kind of run: every campaign it creates goes
+ * through the same resolveCampaignStart as a single one, so every guard, the
+ * regenerated plan and the balance check all apply per funder exactly as they
+ * would have if the operator had typed each one.
+ *
+ * PARTIAL SUCCESS IS REPORTED, NOT HIDDEN. The whole point is that the
+ * expensive checks are per funder — one wallet short of ETH must not stop the
+ * other nineteen — so a failure is recorded against its funder and the loop
+ * continues. The response carries both lists and the console draws them.
+ */
+router.post('/v4/campaigns/batch', requireApiKey, async (req, res, next) => {
+  try {
+    const body = req.body || {};
+    const ks = keystoreFor(req.user.id);
+    const store = storeFor(req.user.id);
+
+    // Only funders that are free. A busy one would be refused by runner.start()
+    // anyway; excluding it here means the batch reports "18 started" rather than
+    // "18 started, 2 failed" for a state that is not an error.
+    const busy = new Set(store.running().map((c) => c.masterWalletId));
+    const requested = Array.isArray(body.funderIds) && body.funderIds.length ? body.funderIds : null;
+    const funders = v4roles
+      .masters(ks)
+      .filter((w) => !busy.has(w.id))
+      .filter((w) => !requested || requested.includes(w.id));
+    if (!funders.length) throw new Error('no free funding wallets — every one is already running a campaign');
+
+    const claimed = store.claimedSeedIds();
+    const seedIds = v4roles
+      .seeds(ks)
+      .filter((w) => !claimed.has(w.id))
+      .map((w) => w.id);
+
+    const slices = divideSeeds(seedIds, funders.map((w) => w.id), body.seedsPerFunder);
+    const stamp = new Date().toISOString().slice(0, 16).replace('T', ' ');
+
+    const started = [];
+    const failed = [];
+    for (const [i, slice] of slices.entries()) {
+      try {
+        // A seed of its own per campaign, or twenty funders would run the same
+        // schedule — same days, same amounts, same gaps — and the randomisation
+        // this feature exists for would be one plan copied twenty times.
+        const seed = rng.newSeed();
+        const perBody = {
+          ...body,
+          kind: 'season',
+          name: body.name ? `${body.name} ${i + 1}` : `batch ${stamp} · ${i + 1}`,
+          masterWalletId: slice.funderId,
+          walletIds: slice.walletIds,
+          seed,
+        };
+        const { master, kind, params, result } = await resolveCampaignStart(perBody, ks, store);
+        const status = runner.start(req.user.id, {
+          id: crypto.randomUUID(),
+          name: perBody.name,
+          kind,
+          masterWalletId: master.id,
+          seed: result.seed,
+          params,
+          transfers: result.transfers,
+          byDay: result.byDay,
+          totalEth: result.totalEth,
+          createdAt: new Date().toISOString(),
+        });
+        started.push(status);
+      } catch (err) {
+        failed.push({
+          masterWalletId: slice.funderId,
+          walletIds: slice.walletIds,
+          error: err.message,
+        });
+      }
+    }
+
+    activityFor(req.user.id).record(
+      'v4',
+      `[v4] batch started ${started.length} campaign(s)` +
+        (failed.length ? `, ${failed.length} refused` : ''),
+      { started: started.length, failed: failed.map((f) => f.error) }
+    );
+    res.json(jsonSafe({ started, failed, unusedSeeds: seedIds.length - slices.length * Math.max(1, Math.round(Number(body.seedsPerFunder) || 0)) }));
+  } catch (err) {
+    next(err);
+  }
+});
+
 // POST /api/v4/campaigns/preview — a dry run. Broadcasts and writes nothing;
 // returns the plan AND the seed that produced it, so the follow-up commit can
 // post the same seed back rather than a transfer list the browser generated.
@@ -762,6 +887,7 @@ module.exports._private = {
   resolveKind,
   assertNotSelfFunding,
   assertNotBusy,
+  divideSeeds,
   assertGenerateCount,
   MAX_GENERATE_COUNT,
   onlyV4Wallets,
