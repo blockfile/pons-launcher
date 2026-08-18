@@ -286,8 +286,14 @@ function createRunner(deps = {}) {
   function log(userId, summary, detail = {}) {
     try {
       activityForFn(userId).record('v4', summary, detail);
-    } catch (_err) {
-      /* nothing to do about it here, and nothing worth losing a campaign over */
+    } catch (err) {
+      // Swallowed on purpose: a campaign must not die because its own audit
+      // trail could not be written. But it must not vanish either. The store
+      // and the activity log share a directory, so the failure that silences
+      // one usually silences both — and then a campaign can stop with no
+      // record in ANY channel. stderr is the only sink that is not on the
+      // disk that just failed, so the last word goes there.
+      console.error(`[v4] could not record activity for ${userId}: ${errorMessage(err)} — ${summary}`);
     }
   }
 
@@ -548,6 +554,18 @@ function createRunner(deps = {}) {
       } catch (_err) {
         /* the map is in memory; there is nothing left to fall back to */
       }
+      // This is the worst branch in the file, and the one an operator most
+      // needs to see: the campaign has stopped but the store still says
+      // `running`, so the next boot will re-arm it and re-send whatever was in
+      // flight. That is the one path to a duplicate funding edge. It goes to
+      // stderr as well as the activity log, because the store and the activity
+      // log share a directory and this branch is usually reached because that
+      // directory is what failed.
+      console.error(
+        `[v4] campaign ${campaignId} STOPPED BUT COULD NOT BE MARKED HALTED — ${errorMessage(err)}. ` +
+          `Reason it stopped: ${reason}. The store still says running; reconcile this campaign by hand ` +
+          'before resuming, and check the last transfer on chain before trusting the record.'
+      );
       log(userId, `[v4] campaign ${campaignId} could not be marked halted — ${errorMessage(err)}`, {
         campaignId,
         reason,
