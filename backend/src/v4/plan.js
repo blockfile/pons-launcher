@@ -25,7 +25,14 @@ const DAY_MS = 24 * 60 * 60 * 1000;
 // The strategy's own numbers. Every one of them is a field on the campaign —
 // these are where the form starts, not what it is limited to.
 const DEFAULTS = {
-  days: 20,
+  // THREE, not the twenty the strategy was written around. Twenty is what the
+  // aging is FOR — it is what carries a wallet past the filters that ask how
+  // old it is — and three is a deliberate trade made for a first run, where
+  // watching the machinery work end to end matters more than the wallets being
+  // fully seasoned at the end of it. Raise it for any run whose output is
+  // meant to be used: this is the field that decides how old the wallets get,
+  // and nothing downstream compensates for it being small.
+  days: 3,
   perDayMin: 10,
   perDayMax: 30,
   amountMinEth: '0.0031',

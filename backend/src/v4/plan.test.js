@@ -29,16 +29,18 @@ function build(n, overrides = {}, seed = 'a'.repeat(32)) {
 }
 
 test('the same seed and params give the same plan', () => {
-  // 60 wallets is below the default feasibility floor of 200 (20 days x
-  // perDayMin 10) — use a wallet count that fits inside the defaults.
-  const a = build(300);
-  const b = build(300);
+  // days is passed explicitly rather than leaning on DEFAULTS: the default is
+  // now 3, and these two tests are about determinism, not about whatever the
+  // default happens to be this month. 300 wallets over 20 days sits inside
+  // 10-30/day with room either side.
+  const a = build(300, { days: 20 });
+  const b = build(300, { days: 20 });
   assert.deepEqual(a.transfers, b.transfers);
 });
 
 test('a different seed gives a different plan', () => {
-  const a = build(300, {}, 'a'.repeat(32));
-  const b = build(300, {}, 'b'.repeat(32));
+  const a = build(300, { days: 20 }, 'a'.repeat(32));
+  const b = build(300, { days: 20 }, 'b'.repeat(32));
   assert.notDeepEqual(a.transfers, b.transfers);
 });
 
@@ -79,7 +81,7 @@ test('per-day counts stay inside the configured range', () => {
 });
 
 test('amounts sit inside the range at six decimals, and are not round', () => {
-  const out = build(400);
+  const out = build(400, { days: 20 });
   const seen = new Set();
   for (const t of out.transfers) {
     const n = Number(t.amountEth);
@@ -93,7 +95,7 @@ test('amounts sit inside the range at six decimals, and are not round', () => {
 });
 
 test('transfers are ordered by due time and none share a moment', () => {
-  const out = build(400);
+  const out = build(400, { days: 20 });
   for (let i = 1; i < out.transfers.length; i++) {
     assert.ok(out.transfers[i].dueAt > out.transfers[i - 1].dueAt);
   }
@@ -143,7 +145,7 @@ test('a transfer starts pending with no attempts', () => {
 });
 
 test('cost includes relay fees and gas, not just the amounts', () => {
-  const out = build(400);
+  const out = build(400, { days: 20 });
   const cost = plan.estimateCost(out.transfers, { feePct: 3, gasWei: 50_000n * 2_000_000_000n });
   const deposits = cost.depositsWei;
   assert.ok(cost.totalWei > deposits, 'total must exceed the bare deposits');
