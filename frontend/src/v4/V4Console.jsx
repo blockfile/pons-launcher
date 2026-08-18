@@ -35,7 +35,7 @@ function signature(c) {
 }
 
 export default function V4Console({ health, credential, report, output, reportedAt }) {
-  const [wallets, setWallets] = useState({ masters: [], seeds: [] });
+  const [wallets, setWallets] = useState({ masters: [], seeds: [], planDefaults: null });
   const [campaigns, setCampaigns] = useState([]);
   // campaignId -> the whole campaign, transfers included. See loadCampaigns for
   // when this is refreshed and why it is not on the poll.
@@ -63,7 +63,13 @@ export default function V4Console({ health, credential, report, output, reported
   const loadWallets = useCallback(async () => {
     try {
       const out = await api('/v4/wallets');
-      setWallets({ masters: out.masters || [], seeds: out.seeds || [] });
+      setWallets({
+        masters: out.masters || [],
+        seeds: out.seeds || [],
+        // The plan form's starting numbers, from v4/plan.js rather than a copy
+        // in the console — see the note above PLACEHOLDER in V4PlanPanel.
+        planDefaults: out.planDefaults || null,
+      });
     } catch (err) {
       say.current(`ERROR: ${err.message}`);
     }
@@ -330,6 +336,7 @@ export default function V4Console({ health, credential, report, output, reported
         masters={masters}
         seeds={seeds}
         campaigns={campaigns}
+        planDefaults={wallets.planDefaults}
         reload={async () => {
           await loadCampaigns();
           await loadWallets();

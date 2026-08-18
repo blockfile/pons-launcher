@@ -1,16 +1,30 @@
-import { useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { api } from '../api.js';
 import Step from '../components/Step.jsx';
 import { Busy } from '../components/Section.jsx';
 import Modal, { Fact } from '../components/Modal.jsx';
 import { plural } from './roles.js';
 
-// Where the form starts. The strategy's own numbers, mirrored from
-// v4/plan.js's DEFAULTS — not a limit, just the shape of a sensible campaign:
-// three weeks, ten to thirty wallets a day, a few thousandths of an ETH each.
-const DEFAULTS = {
+const MINUTE_MS = 60_000;
+
+/**
+ * What the form shows before the server has answered.
+ *
+ * THESE NUMBERS ARE NOT THE DEFAULTS. The defaults live in v4/plan.js and
+ * arrive as `planDefaults` on GET /v4/wallets, which the console already
+ * fetches on mount; `seed()` below overwrites every one of these the moment
+ * they land, and the server would use its own values regardless of what this
+ * file said.
+ *
+ * They were a real second copy once, and they drifted the first time plan.js
+ * changed: the backend planned 3-day campaigns while this form still opened on
+ * 20, so the number an operator read was not the number that would have run.
+ * What is left here is placeholder text with a shape, kept only so the fields
+ * are not blank for the one frame before the fetch returns.
+ */
+const PLACEHOLDER = {
   name: '',
-  days: 20,
+  days: 3,
   perDayMin: 10,
   perDayMax: 30,
   amountMinEth: '0.0031',
@@ -21,7 +35,18 @@ const DEFAULTS = {
   gapMaxMin: 240,
 };
 
-const MINUTE_MS = 60_000;
+/** The server's DEFAULTS, in the shape this form edits. */
+function fromServer(d) {
+  return {
+    days: d.days,
+    perDayMin: d.perDayMin,
+    perDayMax: d.perDayMax,
+    amountMinEth: d.amountMinEth,
+    amountMaxEth: d.amountMaxEth,
+    gapMinMin: Math.round(d.gapMinMs / MINUTE_MS),
+    gapMaxMin: Math.round(d.gapMaxMs / MINUTE_MS),
+  };
+}
 
 /** wei string -> ETH, for the two figures the cost breakdown subtracts. */
 function weiToEth(wei) {
@@ -42,8 +67,8 @@ function weiToEth(wei) {
  * for a particular set of numbers; leaving it on screen beside changed ones
  * would show a schedule and start a different one.
  */
-export default function V4PlanPanel({ step, masters, seeds, campaigns, reload, report }) {
-  const [form, setForm] = useState(DEFAULTS);
+export default function V4PlanPanel({ step, masters, seeds, campaigns, planDefaults, reload, report }) {
+  const [form, setForm] = useState(PLACEHOLDER);
   const [master, setMaster] = useState('');
   const [preview, setPreview] = useState(null);
   // The server's own words when it refuses. Kept in state rather than left to
@@ -51,6 +76,17 @@ export default function V4PlanPanel({ step, masters, seeds, campaigns, reload, r
   const [refusal, setRefusal] = useState('');
   const [busy, setBusy] = useState('');
   const [arming, setArming] = useState(false);
+
+  // Seed the form from the server's DEFAULTS once, on the first fetch that
+  // carries them. ONCE is the whole of it: the wallet list is polled, and
+  // re-seeding on every poll would overwrite whatever an operator had typed —
+  // silently, mid-sentence, every sixty seconds.
+  const seeded = useRef(false);
+  useEffect(() => {
+    if (seeded.current || !planDefaults) return;
+    seeded.current = true;
+    setForm((f) => ({ ...f, ...fromServer(planDefaults) }));
+  }, [planDefaults]);
 
   // Every field goes through here, so nothing can change a number without
   // invalidating the plan drawn from the old one.

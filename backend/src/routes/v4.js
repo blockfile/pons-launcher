@@ -360,6 +360,14 @@ router.get('/v4/wallets', requireApiKey, async (req, res, next) => {
           ageDays: Math.floor((now - Date.parse(w.createdAt)) / plan.DAY_MS),
         })),
         roles: v4roles.ROLES,
+        // The form's starting numbers come from HERE, not from a copy in the
+        // console. They were duplicated in V4PlanPanel and drifted the first
+        // time this file's DEFAULTS changed: the backend planned 3-day
+        // campaigns while the form still opened on 20, so the number an
+        // operator read was not the number the server would have used had they
+        // left the field alone. One source, shipped with the data the panel
+        // already fetches on mount.
+        planDefaults: plan.DEFAULTS,
       })
     );
   } catch (err) {
