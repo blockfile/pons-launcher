@@ -44,6 +44,19 @@ const LIMITS = {
 // values across the whole campaign, which is not randomness, it is a category.
 const AMOUNT_DECIMALS = 6;
 
+// The smallest amount that survives that quantisation — one microether.
+//
+// Anything below it is not "a very small campaign", it is a campaign that
+// cannot run: amountFor() quotes every draw with .toFixed(AMOUNT_DECIMALS), so
+// a range whose floor rounds to '0.000000' produces zero-value transfers. That
+// is silent all the way through the screen the preview/commit contract exists
+// to make trustworthy — the cost preview reads 0 ETH, the pre-flight balance
+// check can never fail against a zero total — and then v4/relay.js refuses
+// every send with "transfer needs a positive amount", which names nothing the
+// operator typed. Three refusals in a row halt the campaign, unattended, on
+// day one. So it is rejected here, at the door, naming the field.
+const MIN_AMOUNT_ETH = '0.000001';
+
 // How much of each day the transfers are allowed to occupy. Leaving a margin
 // means the last transfer of a day cannot collide with the first of the next.
 const DAY_FILL = 0.95;
@@ -97,6 +110,15 @@ function normaliseParams(raw = {}) {
   const amountMinEth = ethString(raw.amountMinEth ?? DEFAULTS.amountMinEth, 'amount minimum');
   const amountMaxEth = ethString(raw.amountMaxEth ?? DEFAULTS.amountMaxEth, 'amount maximum');
   if (parseEther(amountMinEth) <= 0n) throw new Error('amount minimum must be positive');
+  // Positive is not enough: it has to be positive AFTER the quantiser. This is
+  // the same expression amountFor() uses, so what is checked here is exactly
+  // the smallest figure the campaign can ever draw — see MIN_AMOUNT_ETH.
+  if (parseEther(Number(amountMinEth).toFixed(AMOUNT_DECIMALS)) <= 0n) {
+    throw new Error(
+      `amountMinEth of ${amountMinEth} ETH rounds to 0 at ${AMOUNT_DECIMALS} decimals — ` +
+        `amountMinEth must be at least ${MIN_AMOUNT_ETH} ETH`
+    );
+  }
   if (parseEther(amountMinEth) > parseEther(amountMaxEth)) {
     throw new Error('amount minimum cannot exceed the maximum');
   }
@@ -362,6 +384,8 @@ module.exports = {
   DAY_MS,
   DEFAULTS,
   LIMITS,
+  AMOUNT_DECIMALS,
+  MIN_AMOUNT_ETH,
   normaliseParams,
   feasible,
   generate,

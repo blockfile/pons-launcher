@@ -245,6 +245,15 @@ async function resolveCampaignStart(body = {}, ks, store, deps = {}) {
   const params = plan.normaliseParams(body.params || {});
   const walletIds = resolveWalletIds(body, ks);
 
+  // FIRST, NOT ONLY. Two awaits follow below — estimateCampaignCost and the
+  // balance read — before POST /v4/campaigns reaches runner.start(), and this
+  // check compares against OTHER campaigns only, so two requests that land
+  // inside that window both pass it and neither sees the other. With
+  // `walletIds` omitted both resolve to every v4seed wallet, so the overlap is
+  // total. runner.start() therefore re-runs the same check immediately before
+  // store.create(), where nothing can await between the check and the write.
+  // This one stays because it is what gives the operator the error in the
+  // documented guard order, before a fee estimate and an RPC round trip.
   assertUnclaimed(walletIds, store.claimedSeedIds());
   assertBackedUp(walletIds, store.backedUp);
 

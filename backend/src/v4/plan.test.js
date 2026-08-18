@@ -2,6 +2,7 @@
 
 const test = require('node:test');
 const assert = require('node:assert/strict');
+const { parseEther } = require('ethers');
 
 const plan = require('./plan');
 const rng = require('./rng');
@@ -155,6 +156,65 @@ test('normaliseParams refuses a zero-day campaign and a backwards range', () => 
   assert.throws(() => plan.normaliseParams({ perDayMin: 30, perDayMax: 10 }), /per-day/);
   assert.throws(() => plan.normaliseParams({ amountMinEth: '0.9', amountMaxEth: '0.1' }), /amount/);
   assert.throws(() => plan.normaliseParams({ gapMinMs: 0 }), /gap/);
+});
+
+test('normaliseParams refuses an amount minimum that the six-decimal quantiser rounds to zero', () => {
+  // parseEther('0.0000001') > 0n, so the "must be positive" guard passes it —
+  // and then amountFor()'s .toFixed(6) quantises EVERY draw to '0.000000'.
+  // The damage is entirely silent until day one: the cost preview reads 0 ETH
+  // on the very screen the preview/commit contract exists to make
+  // trustworthy, the pre-flight `balance < totalWei` check can never fail
+  // against a zero total, and then parseEther('0.000000') === 0n makes
+  // v4/relay.js throw "transfer needs a positive amount" on every single
+  // send. Three in a row halts the campaign, unattended, with an error
+  // naming nothing the operator typed.
+  assert.throws(
+    () => plan.normaliseParams({ amountMinEth: '0.0000001', amountMaxEth: '0.002' }),
+    (err) => {
+      // The refusal has to name the field and the minimum, or the operator is
+      // told a number is wrong without being told which one or what would be
+      // right.
+      assert.match(err.message, /amountMinEth/);
+      assert.match(err.message, /0\.000001/);
+      return true;
+    }
+  );
+
+  // Both sides of the line, so the guard cannot be "reject everything small".
+  assert.throws(() => plan.normaliseParams({ amountMinEth: '0.0000004', amountMaxEth: '0.002' }), /amountMinEth/);
+  assert.doesNotThrow(() =>
+    plan.normaliseParams({ amountMinEth: plan.MIN_AMOUNT_ETH, amountMaxEth: '0.002' })
+  );
+
+  // Zero is still caught by the older, blunter guard — and must keep its own
+  // message, which routes/v4.test.js pins.
+  assert.throws(() => plan.normaliseParams({ amountMinEth: '0' }), /amount minimum must be positive/);
+});
+
+test('an accepted amount range can never generate a zero-value transfer', () => {
+  // The property the guard above exists to hold, asserted against the real
+  // generator rather than against the guard's own arithmetic.
+  const ids = Array.from({ length: 20 }, (_, i) => `s${i}`);
+  const out = plan.generate({
+    walletIds: ids,
+    addresses: Object.fromEntries(ids.map((w, i) => [w, `0x${String(i + 1).padStart(40, '0')}`])),
+    params: plan.normaliseParams({
+      days: 1,
+      perDayMin: 20,
+      perDayMax: 20,
+      amountMinEth: plan.MIN_AMOUNT_ETH,
+      amountMaxEth: '0.00001',
+    }),
+    seed: 'fixed-seed',
+    now: 0,
+  });
+  for (const t of out.transfers) {
+    assert.ok(parseEther(t.amountEth) > 0n, `${t.amountEth} would be refused by v4/relay.js at send time`);
+  }
+  // And the cost preview reads as something rather than as free — the reading
+  // that made the pre-flight balance check unfalsifiable.
+  const cost = plan.estimateCost(out.transfers);
+  assert.ok(cost.totalWei > 0n, 'the campaign previewed as costing nothing');
 });
 
 test('the per-day/gap-floor guard sits exactly at its boundary, not somewhere near it', () => {

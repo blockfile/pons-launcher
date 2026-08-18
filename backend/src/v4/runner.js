@@ -247,12 +247,48 @@ function createRunner(deps = {}) {
    */
   const jobs = new Map();
 
+  /**
+   * Every transfer whose Relay call has RESOLVED SUCCESSFULLY in this process.
+   *
+   * THE ETH HAS LEFT AND NO LATER FACT CAN UNDO THAT. Everything else the
+   * runner knows lives on disk (see the file header), but "did this send
+   * happen" cannot: the disk is precisely the thing that has failed whenever
+   * this set matters. store.persist() rewrites the whole file on every
+   * transfer update — eight hundred-odd writes for a 400-wallet campaign — and
+   * on Windows fs.renameSync over an existing file transiently returns EPERM
+   * or EBUSY under an AV scanner or the search indexer. A send followed by a
+   * failed write leaves the transfer reading `pending`, and re-sending it gives
+   * one seed wallet TWO funding edges from one master, which is the single
+   * pattern this whole feature exists to erase.
+   *
+   * So this is the authority fire() consults before it sends, and it outranks
+   * the store. Bounded by the transfers this process has actually sent — a few
+   * hundred short strings per campaign — so it is never pruned: pruning it is
+   * the only way it could ever fail to answer, and what it answers is the one
+   * question that must never be got wrong.
+   */
+  const sentTransfers = new Set();
+
   function key(userId, campaignId) {
     return `${userId}:${campaignId}`;
   }
 
+  function sentKey(userId, campaignId, transferId) {
+    return `${userId}:${campaignId}:${transferId}`;
+  }
+
+  /**
+   * Activity logging, which must never itself be the thing that breaks a send
+   * path. Every caller below is either reporting money that has already moved
+   * or explaining why a campaign is stopping; an unwritable activity file is
+   * not a reason to turn either of those into an exception.
+   */
   function log(userId, summary, detail = {}) {
-    activityForFn(userId).record('v4', summary, detail);
+    try {
+      activityForFn(userId).record('v4', summary, detail);
+    } catch (_err) {
+      /* nothing to do about it here, and nothing worth losing a campaign over */
+    }
   }
 
   function clearTimer(userId, campaignId) {
@@ -383,7 +419,42 @@ function createRunner(deps = {}) {
       return null;
     }
 
-    const next = nextPending(campaign);
+    // A BACKLOG CAN APPEAR MID-RUN, WITH NO RESTART TO CLEAR IT.
+    //
+    // resume() and resumeAll() re-slot overdue transfers because those are the
+    // two moments a backlog is obvious. They are not the only two moments it
+    // exists. OS sleep, hibernate or a suspended VM stops the timers without
+    // stopping the process; a hung Relay fetch holds `job.inFlight` for its
+    // whole duration and Node's fetch has no default timeout. Neither
+    // restarts anything, so neither reaches the two call sites that used to
+    // be the only ones — and this function then schedules every overdue
+    // transfer at Math.max(0, …) = 0ms, with fire()'s tail re-arming straight
+    // away. An overnight suspend at 20min–4h gaps strands four or five
+    // transfers, which then leave the funding wallet back to back, in one
+    // burst, from one master: the batch-funding fingerprint the campaign has
+    // spent three weeks avoiding, reproduced in a minute.
+    //
+    // reslotOverdue() is idempotent — a no-op when nothing is overdue, which
+    // is every normal tick — so this is safe to run on every arm, and arming
+    // is the one thing that happens on every path into the timer.
+    const spread = reslotOverdue(userId, campaignId);
+    if (spread.count) {
+      log(
+        userId,
+        `[v4] "${label(campaign, campaignId)}" fell ${humanGap(spread.gapMs)} behind while running — ` +
+          `${spread.count} overdue transfer(s) re-slotted into the future rather than sent at once`,
+        {
+          campaignId,
+          reslotted: spread.count,
+          gapMs: spread.gapMs,
+          oldestDueAt: spread.oldestDueAt ? iso(spread.oldestDueAt) : null,
+        }
+      );
+    }
+
+    // Re-read rather than reuse `campaign`: reslotOverdue has just rewritten
+    // the very dueAt values nextPending sorts on.
+    const next = nextPending(storeForFn(userId).get(campaignId) || campaign);
     if (!next) return complete(userId, campaignId);
 
     // Reuse the existing job wherever there is one, so an `inFlight` set by a
@@ -404,7 +475,14 @@ function createRunner(deps = {}) {
         // in the runner rather than in the money path, and must still stop the
         // campaign — a runner that silently stopped re-arming would look like a
         // campaign that had simply gone quiet.
-        halt(userId, campaignId, errorMessage(err));
+        //
+        // safeHalt, NOT halt. halt() writes to the store, and the likeliest
+        // reason to be here at all is that the store is what failed. A throw
+        // from halt() inside this catch is a rejection from an async timer
+        // callback with nothing to catch it — an unhandled rejection, which
+        // Node >= 15 turns into process exit. That would take down every other
+        // campaign, and V1/V2/V3 with them, over one bad write.
+        safeHalt(userId, campaignId, errorMessage(err));
       }
     }, Math.max(0, next.dueAt - nowFn()));
     if (typeof job.timer?.unref === 'function') job.timer.unref();
@@ -448,6 +526,34 @@ function createRunner(deps = {}) {
       `[v4] "${name}" halted after ${HALT_AFTER_CONSECUTIVE_FAILURES} failures in a row — ${reason}`,
       { campaignId, reason, ...counts }
     );
+  }
+
+  /**
+   * halt(), with the one guarantee its callers on the failure paths need: it
+   * cannot throw.
+   *
+   * halt() writes — `store.update({ status: 'halted' })` — and every caller of
+   * this wrapper is already handling a store that has just refused a write. A
+   * second throw from the stop path leaves the timer callback rejecting with
+   * nothing above it, which is process exit. So the write is attempted, and if
+   * it will not go, the timer is dropped anyway: a campaign that cannot record
+   * that it stopped must at least actually stop.
+   */
+  function safeHalt(userId, campaignId, reason) {
+    try {
+      halt(userId, campaignId, reason);
+    } catch (err) {
+      try {
+        forget(userId, campaignId);
+      } catch (_err) {
+        /* the map is in memory; there is nothing left to fall back to */
+      }
+      log(userId, `[v4] campaign ${campaignId} could not be marked halted — ${errorMessage(err)}`, {
+        campaignId,
+        reason,
+        error: errorMessage(err),
+      });
+    }
   }
 
   function onSuccess(userId, campaignId, transferId, out) {
@@ -548,19 +654,110 @@ function createRunner(deps = {}) {
     const toAddress = transfer.address;
     const amountEth = transfer.amountEth;
     const masterWalletId = campaign.masterWalletId;
+    const sk = sentKey(userId, campaignId, transferId);
+
+    // THE LAST LINE OF DEFENCE, AND THE ONLY ONE THAT DOES NOT ASK THE DISK.
+    //
+    // nextPending() read the store, and a transfer whose send resolved but
+    // whose 'sent' write did not land still reads `pending` there. Sending it
+    // again would put a second funding edge between this master and this seed
+    // — the one outcome the feature cannot survive. So refuse, and stop the
+    // campaign rather than skip the transfer: skipping it would leave
+    // nextPending() returning the same row on every tick, for ever, while the
+    // console showed a campaign making progress.
+    if (sentTransfers.has(sk)) {
+      const reason =
+        `transfer ${transferId} to ${toAddress} has already been sent from this process, but the ` +
+        'campaign file still records it as pending — the store is not keeping up, and re-sending ' +
+        'would fund that wallet twice from one master';
+      log(userId, `[v4] "${label(campaign, campaignId)}" halted — ${reason}`, {
+        campaignId,
+        transferId,
+        walletId,
+        address: toAddress,
+        reason,
+      });
+      safeHalt(userId, campaignId, reason);
+      return;
+    }
 
     job.inFlight = true;
     try {
-      const ks = keystoreForFn(userId);
-      const fromWallet = rolesResolve(ks, masterWalletId);
-      const out = await transferFn(
-        { campaignId, walletId, toAddress, amountWei: parseEther(String(amountEth)), fromWallet },
-        { ...relayDeps, keystore: ks }
-      );
-      onSuccess(userId, campaignId, transferId, out);
-    } catch (err) {
-      onFailure(userId, campaignId, transferId, err);
+      let out = null;
+      let sendError = null;
+      try {
+        const ks = keystoreForFn(userId);
+        const fromWallet = rolesResolve(ks, masterWalletId);
+        out = await transferFn(
+          { campaignId, walletId, toAddress, amountWei: parseEther(String(amountEth)), fromWallet },
+          { ...relayDeps, keystore: ks }
+        );
+        // RECORDED BEFORE ANY BOOKKEEPING IS ATTEMPTED. From this line on the
+        // ETH has left, whatever happens next.
+        sentTransfers.add(sk);
+      } catch (err) {
+        sendError = err;
+      }
+
+      // THE SEND EITHER HAPPENED OR IT DID NOT, AND NOTHING BELOW MAY CHANGE
+      // THAT ANSWER.
+      //
+      // onSuccess() used to sit inside the same `try` as the send. A store
+      // write that failed AFTER the ETH had left therefore fell into the
+      // catch and was handled as a failed SEND: onFailure() re-slotted the
+      // transfer to `pending` and the next tick sent it again. The wallet was
+      // funded twice, from one master, and the campaign went on to report
+      // `complete` with nothing an operator could see. That is not exotic —
+      // persist() rewrites the whole file on every one of ~800 updates per
+      // campaign, and Windows returns EPERM/EBUSY from renameSync under an AV
+      // scanner. Bookkeeping failures are handled on their own branches now,
+      // and neither of them can reach onFailure().
+      if (!sendError) {
+        try {
+          onSuccess(userId, campaignId, transferId, out);
+        } catch (bookErr) {
+          const reason =
+            `${toAddress} WAS funded (${amountEth} ETH${out?.hash ? `, ${out.hash}` : ''}) but the ` +
+            `campaign file could not record it — ${errorMessage(bookErr)}`;
+          log(
+            userId,
+            `[v4] "${label(campaign, campaignId)}" halted — ${reason}. The transfer is NOT re-sent; ` +
+              'fix the disk and check this wallet by hand before resuming.',
+            {
+              campaignId,
+              transferId,
+              walletId,
+              address: toAddress,
+              amountEth,
+              hash: out?.hash ?? null,
+              requestId: out?.requestId ?? null,
+              error: errorMessage(bookErr),
+            }
+          );
+          safeHalt(userId, campaignId, reason);
+        }
+      } else {
+        try {
+          onFailure(userId, campaignId, transferId, sendError);
+        } catch (bookErr) {
+          // onFailure() writes too, so it can fail for the same reasons. This
+          // used to escape fire() entirely: arm()'s catch called halt(), which
+          // wrote to the same broken store and threw as well, and the async
+          // timer callback rejected with nothing above it — process exit on
+          // Node >= 15, taking every other campaign and every other tab's
+          // work with it.
+          safeHalt(
+            userId,
+            campaignId,
+            `${errorMessage(sendError)} (and the attempt could not be recorded — ${errorMessage(bookErr)})`
+          );
+        }
+      }
     } finally {
+      // Held across the bookkeeping above, not just the await: `inFlight` means
+      // "this campaign is part-way through a transfer", and it is forget()'s
+      // signal to preserve the job. Clearing it early would let halt()'s own
+      // forget() drop the job while fire() still had a tail to run.
       job.inFlight = false;
     }
 
@@ -595,6 +792,40 @@ function createRunner(deps = {}) {
     );
   }
 
+  /**
+   * The seed-wallet invariant, re-checked where nothing can await.
+   *
+   * routes/v4.js runs assertUnclaimed too — and then awaits twice before it
+   * gets here: a fee estimate and an RPC balance read. Two POST /v4/campaigns
+   * that land inside that window both pass the route's check and both reach
+   * this function, and because the check compares against OTHER campaigns
+   * only, neither sees the other. With different funding wallets the nonce
+   * guard above waves them both through; with `walletIds` omitted both resolve
+   * to "every v4seed wallet", so the overlap is total. Every seed in the
+   * intersection then gets two funding edges from two masters — the exact
+   * fingerprint the campaign exists to erase — and the console silently loses
+   * half of it, because V4Console keys a plain map on walletId on the stated
+   * assumption that at most one transfer anywhere ever names it.
+   *
+   * Parallel campaigns are this feature's headline capability, so an operator
+   * creating two back to back inside an RPC round trip is expected usage, not
+   * an edge case. Re-checking here closes the window because store.create()
+   * is the next statement and JavaScript cannot interleave between them.
+   */
+  function assertSeedsUnclaimed(store, campaign) {
+    const walletIds = [...new Set((campaign.transfers || []).map((t) => t.walletId).filter(Boolean))];
+    if (!walletIds.length) return;
+
+    const claimed = store.claimedSeedIds();
+    const taken = walletIds.filter((id) => claimed.has(id));
+    if (!taken.length) return;
+
+    throw new Error(
+      `${taken.length} wallet(s) are already claimed by another campaign: ${taken.slice(0, 5).join(', ')}` +
+        `${taken.length > 5 ? '…' : ''}. A wallet funded twice has two funding edges.`
+    );
+  }
+
   function start(userId, campaign) {
     if (!campaign || !campaign.id) throw new Error('a campaign with an id is required');
 
@@ -626,12 +857,19 @@ function createRunner(deps = {}) {
       consecutiveFailures: 0,
     };
     if (existing) store.update(campaign.id, fresh);
-    // Deep-copied at the door. A shallow spread would put the CALLER's
-    // `transfers` array into the store, so the caller would still hold a live
-    // handle on the plan the runner is mutating. The round trip is lossless for
-    // anything the store could persist, because persist() serialises the same
-    // way.
-    else store.create(JSON.parse(JSON.stringify({ ...campaign, ...fresh, createdAt: campaign.createdAt || at })));
+    else {
+      // Deep-copied at the door. A shallow spread would put the CALLER's
+      // `transfers` array into the store, so the caller would still hold a live
+      // handle on the plan the runner is mutating. The round trip is lossless
+      // for anything the store could persist, because persist() serialises the
+      // same way.
+      const created = JSON.parse(JSON.stringify({ ...campaign, ...fresh, createdAt: campaign.createdAt || at }));
+      // NOTHING MAY AWAIT BETWEEN THESE TWO LINES — that gap is the whole bug.
+      // Only on the create branch: an existing campaign's own transfers are
+      // already in claimedSeedIds(), so it would always collide with itself.
+      assertSeedsUnclaimed(store, created);
+      store.create(created);
+    }
 
     const counts = tally(store.get(campaign.id));
     log(userId, `[v4] "${label(campaign, campaign.id)}" started — ${counts.pending} transfer(s) scheduled`, {
@@ -848,9 +1086,10 @@ function createRunner(deps = {}) {
       job.timer = null;
     }
     jobs.clear();
+    sentTransfers.clear();
   }
 
-  return { start, pause, resume, cancel, resumeAll, status, armed, _reset, _jobs: jobs };
+  return { start, pause, resume, cancel, resumeAll, status, armed, _reset, _jobs: jobs, _sent: sentTransfers };
 }
 
 const singleton = createRunner();

@@ -21,6 +21,17 @@ function fakeClock(start = 1_000_000) {
       return { id, unref() {} };
     },
     clearTimeout: (h) => h && timers.delete(h.id),
+    /**
+     * Move the clock forward WITHOUT running anything that was due in between.
+     *
+     * This is what OS sleep, hibernate, a suspended VM and a hung Relay fetch
+     * all look like from inside the process: time passed, timers did not fire,
+     * and nothing restarted. It is the only way to reproduce a mid-run backlog
+     * without going through resumeAll(), which re-slots one for free.
+     */
+    advance(ms) {
+      now += ms;
+    },
     /** Advance to the next due timer and run it. Returns false when idle. */
     async tick() {
       const due = [...timers.entries()].sort((a, b) => a[1].at - b[1].at)[0];
@@ -108,6 +119,13 @@ test('a campaign sends every transfer and completes', async () => {
 
   assert.equal(sent.length, 4);
   assert.equal(store.storeFor('u').get('c1').status, 'complete');
+  // THE REAPER, WHICH NOTHING ELSE PINS. fire()'s tail deletes the job on
+  // every terminal path; deleting that line leaves every other v4 test green,
+  // because the double-send guard it looks like is pinned separately (see
+  // 'pause then resume during an in-flight send'). What leaks without it is a
+  // job object per finished campaign and a stale armed() row claiming a timer
+  // that does not exist.
+  assert.equal(runner._jobs.size, 0, 'a finished campaign left its job behind');
 });
 
 test('a failed transfer is re-slotted and retried, not abandoned at once', async () => {
@@ -129,6 +147,7 @@ test('a failed transfer is re-slotted and retried, not abandoned at once', async
   const retried = c.transfers.find((t) => t.attempts.length > 0);
   assert.equal(retried.attempts.length, 1);
   assert.equal(retried.status, 'sent');
+  assert.equal(runner._jobs.size, 0, 'a finished campaign left its job behind');
 });
 
 test('three consecutive failures halt the campaign', async () => {
@@ -161,6 +180,7 @@ test('three consecutive failures halt the campaign', async () => {
   );
   // It must stop, not burn the remaining slots.
   assert.ok(c.transfers.filter((t) => t.status === 'pending').length > 0);
+  assert.equal(runner._jobs.size, 0, 'a finished campaign left its job behind');
 });
 
 test('a success resets the consecutive-failure counter', async () => {
@@ -230,6 +250,7 @@ test('a transfer is abandoned after three attempts, and the campaign goes on', a
   assert.equal(c.status, 'complete');
   // Abandoned, not silently retried forever, and not counted as funded.
   assert.equal(c.transfers.filter((t) => t.status === 'sent').length, 7);
+  assert.equal(runner._jobs.size, 0, 'a finished campaign left its job behind');
 });
 
 test('a restart re-arms from disk and does not fire a burst', async () => {
@@ -267,6 +288,7 @@ test('two campaigns on two funding wallets run in parallel', async () => {
 
   assert.equal(byCampaign.c1, 3);
   assert.equal(byCampaign.c2, 3);
+  assert.equal(runner._jobs.size, 0, 'a finished campaign left its job behind');
 });
 
 test('a campaign refuses to start on a funding wallet already running', () => {
@@ -352,6 +374,7 @@ test('pause then resume during an in-flight send does not send it twice', async 
   assert.equal(sent.length, 4);
   assert.equal(new Set(sent).size, 4, 'a transfer was sent twice');
   assert.equal(store.storeFor('u').get('c1').status, 'complete');
+  assert.equal(runner._jobs.size, 0, 'a finished campaign left its job behind');
 });
 
 test('start checks the funding wallet on disk, not the one it was handed', () => {
@@ -465,4 +488,248 @@ test('cancel is final — resume refuses it', () => {
   runner.cancel('u', 'c1');
   assert.equal(store.storeFor('u').get('c1').status, 'cancelled');
   assert.throws(() => runner.resume('u', 'c1'), /cancelled/);
+  assert.equal(runner._jobs.size, 0, 'a finished campaign left its job behind');
+});
+
+// ── a store that fails AFTER the money has left ─────────────────────────────
+
+/**
+ * Replace one store method with a failing one.
+ *
+ * The shape being reproduced is not exotic. store.persist() rewrites the WHOLE
+ * campaign file on every transfer update — a 400-wallet campaign does that
+ * eight hundred-odd times — and on Windows `fs.renameSync` over an existing
+ * file transiently returns EPERM or EBUSY under an AV scanner or the search
+ * indexer. ENOSPC does the same thing on any platform.
+ */
+function breakStore(store, method, when) {
+  const s = store.storeFor('u');
+  const real = s[method].bind(s);
+  s[method] = (...args) => {
+    if (when(...args)) {
+      const err = new Error('ENOSPC: no space left on device, write');
+      err.code = 'ENOSPC';
+      throw err;
+    }
+    return real(...args);
+  };
+  return real;
+}
+
+test('a store write that fails AFTER a successful send never re-sends that transfer', async () => {
+  const { store } = env();
+  const clock = fakeClock();
+  const sent = [];
+  const runner = runnerWith(store, clock, async ({ toAddress }) => {
+    sent.push(toAddress);
+    return { hash: '0x' + 'a'.repeat(64) };
+  });
+
+  makeCampaign(store, { count: 4 });
+
+  // The first `status: 'sent'` write refuses. The ETH has already gone.
+  let injected = false;
+  breakStore(store, 'updateTransfer', (_id, _tid, patch) => {
+    if (injected || patch.status !== 'sent') return false;
+    injected = true;
+    return true;
+  });
+
+  runner.resumeAll();
+  await clock.drain();
+
+  // THE ASSERTION THE WHOLE FINDING IS ABOUT. onSuccess() used to sit inside
+  // fire()'s `try`, so this threw into `catch (err) -> onFailure(...)`, which
+  // treated a completed send as a failed one: the transfer went back to
+  // `pending` and the next tick sent it again. One seed wallet then held two
+  // funding edges from one master — precisely the fingerprint this feature
+  // exists to erase — and the campaign carried on to report `complete`, with
+  // nothing an operator could see.
+  assert.equal(sent.length, 1, 'a transfer whose send had already succeeded was sent a second time');
+  assert.equal(new Set(sent).size, sent.length, 'one address was funded twice from one funding wallet');
+
+  const c = store.storeFor('u').get('c1');
+  assert.notEqual(c.status, 'complete', 'a campaign that lost the record of a send reported success');
+  assert.equal(c.status, 'halted');
+  assert.match(c.haltReason, /ENOSPC/);
+  assert.equal(runner._jobs.size, 0);
+
+  // And it must survive the operator's obvious next move. The store still
+  // records that transfer as `pending`, so nothing on disk can stop a resume
+  // from sending it again — only the in-process record of the send itself can.
+  runner.resume('u', 'c1');
+  await clock.drain();
+  assert.equal(sent.length, 1, 'resuming re-sent a transfer that had already left the funding wallet');
+  assert.equal(store.storeFor('u').get('c1').status, 'halted');
+});
+
+test('a store write that fails on the FAILURE path halts rather than crashing the process', async () => {
+  const { store } = env();
+  const clock = fakeClock();
+  const runner = runnerWith(store, clock, async () => {
+    throw new Error('relay is down');
+  });
+
+  makeCampaign(store, { count: 4 });
+  // onFailure() writes too, so it fails for exactly the same reasons.
+  breakStore(store, 'updateTransfer', (_id, _tid, patch) => Boolean(patch.attempts));
+
+  runner.resumeAll();
+  // The bug is that this REJECTS: the throw escaped fire(), arm()'s catch
+  // called halt(), halt() wrote to the same broken store and threw as well —
+  // and the timer callback is async, so that is an unhandled rejection, which
+  // Node >= 15 turns into process exit. Every other campaign, and every other
+  // tab's work, goes with it.
+  await clock.drain();
+
+  const c = store.storeFor('u').get('c1');
+  assert.equal(c.status, 'halted');
+  assert.match(c.haltReason, /relay is down/);
+  assert.match(c.haltReason, /could not be recorded/);
+  assert.equal(runner._jobs.size, 0);
+});
+
+test('a store that refuses the halt write too stops quietly instead of throwing out of the timer', async () => {
+  const { store } = env();
+  const clock = fakeClock();
+  let sends = 0;
+  const runner = runnerWith(store, clock, async () => {
+    sends++;
+    throw new Error('relay is down');
+  });
+
+  makeCampaign(store, { count: 4 });
+  // Nothing can be written at all: not the attempt, not the re-slot, not the
+  // halt. There is then no way to record that the campaign stopped — so it
+  // has to at least actually stop, without taking the process with it.
+  breakStore(store, 'updateTransfer', () => true);
+  breakStore(store, 'update', () => true);
+
+  runner.resumeAll();
+  await clock.drain();
+
+  assert.ok(sends >= 1, 'the campaign never even tried');
+  assert.equal(runner._jobs.size, 0, 'the runner kept a job for a campaign it could not stop');
+  assert.equal(clock.pending(), 0, 'a campaign that could not be halted was left armed');
+});
+
+// ── a backlog that appears mid-run, with no restart ─────────────────────────
+
+test('a mid-run backlog is spread, not fired as a burst, with no restart to re-slot it', async () => {
+  const { store } = env();
+  const clock = fakeClock();
+  const times = [];
+  let stalled = false;
+  const runner = runnerWith(store, clock, async () => {
+    times.push(clock.now());
+    // The first send hangs for eight hours and the process never restarts: an
+    // OS sleep, a suspended VM, or a Relay fetch with no timeout holding
+    // job.inFlight for its whole duration. resumeAll() — which was the only
+    // caller that re-slotted a backlog — is never reached.
+    if (!stalled) {
+      stalled = true;
+      clock.advance(8 * 60 * 60 * 1000);
+    }
+    return { hash: '0x' + 'a'.repeat(64) };
+  });
+
+  const built = makeCampaign(store, { count: 6 });
+
+  // The premise, asserted rather than assumed: the stall really does strand
+  // several transfers. If plan.js ever schedules this campaign so that nothing
+  // is overdue after eight hours, the test below would keep passing while
+  // testing nothing at all.
+  const stallEnd = built.transfers[0].dueAt + 8 * 60 * 60 * 1000;
+  const stranded = built.transfers.slice(1).filter((t) => t.dueAt <= stallEnd).length;
+  assert.ok(stranded >= 3, `the stall only stranded ${stranded} transfer(s) — that is not a backlog`);
+
+  runner.resumeAll();
+  await clock.drain();
+
+  assert.equal(times.length, 6, 'not every transfer was sent');
+
+  // arm() schedules at Math.max(0, dueAt - now) — zero for anything overdue —
+  // and fire()'s tail re-arms straight away, so without a re-slot here the
+  // transfers stranded by the stall leave the funding wallet on the same
+  // millisecond, one after another. That is the batch-funding pattern the
+  // campaign spends three weeks avoiding, reproduced in a single tick.
+  const gaps = times.slice(1).map((t, i) => t - times[i]);
+  assert.equal(new Set(times).size, times.length, `sends bunched onto one instant: gaps ${gaps.join(', ')}`);
+  assert.equal(
+    gaps.filter((g) => g < 60_000).length,
+    0,
+    `sends left the funding wallet less than a minute apart: gaps ${gaps.join(', ')}`
+  );
+
+  assert.equal(store.storeFor('u').get('c1').status, 'complete');
+  assert.equal(runner._jobs.size, 0);
+});
+
+// ── two campaigns racing for the same seed wallets ──────────────────────────
+
+test('start refuses seed wallets another campaign has already claimed', () => {
+  const { store } = env();
+  const clock = fakeClock();
+  const runner = runnerWith(store, clock, async () => ({ hash: '0x' + 'a'.repeat(64) }));
+
+  // c1 claims s0…s3 on funding wallet m1.
+  makeCampaign(store, { id: 'c1', masterWalletId: 'm1', count: 4 });
+  runner.resumeAll();
+
+  // THE RACE routes/v4.js cannot close on its own. It runs assertUnclaimed and
+  // then awaits twice — a fee estimate and an RPC balance read — before
+  // reaching this call. Two POST /v4/campaigns inside that window both pass the
+  // route's check, because it compares against OTHER campaigns only and
+  // neither is in the store yet. Different funding wallets, so the nonce guard
+  // waves both through; and with `walletIds` omitted both resolve to "every
+  // v4seed wallet", so the overlap is total. Parallel campaigns are this
+  // feature's headline capability, so two created back to back is expected
+  // usage, not an edge case.
+  const clash = {
+    id: 'c2',
+    name: 'c2',
+    masterWalletId: 'm2',
+    consecutiveFailures: 0,
+    transfers: [
+      {
+        id: '1-1',
+        walletId: 's2',
+        address: '0x' + '3'.padStart(40, '0'),
+        amountEth: '0.001',
+        dueAt: clock.now() + 60_000,
+        status: 'pending',
+        attempts: [],
+      },
+    ],
+  };
+  assert.throws(() => runner.start('u', clash), /claimed/i);
+
+  const s = store.storeFor('u');
+  assert.equal(s.get('c2'), null, 'the clashing campaign was written to the store anyway');
+  assert.equal(s.running().length, 1);
+  // s2 must still have exactly one funding edge, from exactly one master.
+  const owners = s.campaigns().filter((c) => c.transfers.some((t) => t.walletId === 's2'));
+  assert.equal(owners.length, 1);
+
+  // The other direction, so the guard cannot be "refuse every second
+  // campaign": fresh seed wallets on a free funding wallet still start.
+  const fine = {
+    id: 'c3',
+    name: 'c3',
+    masterWalletId: 'm2',
+    consecutiveFailures: 0,
+    transfers: [
+      {
+        id: '1-1',
+        walletId: 'brand-new',
+        address: '0x' + '9'.repeat(40),
+        amountEth: '0.001',
+        dueAt: clock.now() + 60_000,
+        status: 'pending',
+        attempts: [],
+      },
+    ],
+  };
+  assert.doesNotThrow(() => runner.start('u', fine));
+  assert.equal(s.get('c3').status, 'running');
 });
