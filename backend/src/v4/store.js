@@ -118,15 +118,24 @@ function build(userId) {
   }
 
   /**
-   * Every seed wallet spoken for by any campaign, in any state.
+   * Every seed wallet spoken for by any SEASONING campaign, in any state.
    *
    * Not just the running ones. A wallet funded by a completed campaign has a
    * funding edge already; funding it again from a second source would give it
    * two, which is worse than one.
+   *
+   * SPLIT CAMPAIGNS ARE EXCLUDED, and the asymmetry is the point. The claim
+   * rule protects the property that makes a seed wallet worth seasoning: one
+   * transfer, from one place, ever. A split pays FUNDING wallets, which are
+   * plumbing — an operator will legitimately top the same funder up again next
+   * month, and a claim would block that forever in exchange for protecting
+   * nothing. `kind` is absent on every campaign written before splits existed,
+   * so it reads as 'season', which is what those campaigns were.
    */
   function claimedSeedIds() {
     const claimed = new Set();
     for (const c of load().campaigns) {
+      if ((c.kind || 'season') !== 'season') continue;
       for (const t of c.transfers) claimed.add(t.walletId);
     }
     return claimed;

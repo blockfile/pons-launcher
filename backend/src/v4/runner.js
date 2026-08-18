@@ -340,6 +340,10 @@ function createRunner(deps = {}) {
     return {
       id: campaign.id,
       name: campaign.name || campaign.id,
+      // 'season' for everything written before splits existed, which is what
+      // those campaigns were. Carried out to the console so a split is not read
+      // as a very short seasoning run that fed the wrong wallets.
+      kind: campaign.kind || 'season',
       status: campaign.status,
       masterWalletId: campaign.masterWalletId,
       ...tally(campaign),

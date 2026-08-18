@@ -17,6 +17,29 @@ test('generate refuses a role V4 does not own', () => {
   assert.doesNotThrow(() => guards.assertV4Role('v4seed'));
 });
 
+test('kind defaults to season and refuses anything it does not know', () => {
+  // Absent means season, because every campaign written before splits existed
+  // had no kind and every one of them was a season. A default of anything else
+  // would change what those stored campaigns mean.
+  assert.equal(guards.resolveKind({}), 'season');
+  assert.equal(guards.resolveKind({ kind: 'season' }), 'season');
+  assert.equal(guards.resolveKind({ kind: 'split' }), 'split');
+  assert.throws(() => guards.resolveKind({ kind: 'seed' }), /season.*split/);
+  assert.throws(() => guards.resolveKind({ kind: 'SPLIT' }), /season.*split/);
+});
+
+test('a split refuses to pay its own source', () => {
+  // Relaying a wallet to itself burns a fee and a gas payment to move ETH in a
+  // circle. The source dropdown and the target list are drawn from the same
+  // set of wallets, so this is an easy mistake to make and a silent one to
+  // suffer — the campaign would look like it worked.
+  assert.throws(() => guards.assertNotSelfFunding(['m1', 'm2'], 'm1'), /m1/);
+  assert.throws(() => guards.assertNotSelfFunding(['m1', 'm2'], 'm1'), /itself|cannot Relay to itself/i);
+  assert.doesNotThrow(() => guards.assertNotSelfFunding(['m2', 'm3'], 'm1'));
+  // Empty targets are somebody else's error to report, not this guard's.
+  assert.doesNotThrow(() => guards.assertNotSelfFunding([], 'm1'));
+});
+
 test('import accepts a funding wallet and refuses a seed', () => {
   // The whole reason the import route checks a role. A seed wallet earns its
   // value by having no history before the transfer that funds it; an imported

@@ -105,6 +105,11 @@ export default function V4CampaignsPanel({ step, campaigns, details, lastSent, e
           <div className={`notice ${TONE[c.status] || ''}`.trim()} key={c.id}>
             <h3>
               {c.name}
+              {/* A split pays FUNDING wallets, not seeds, and takes an
+                  afternoon rather than weeks. Unlabelled it reads as a very
+                  short seasoning run that funded the wrong things — and the
+                  reason it does not claim its targets would look like a bug. */}
+              {c.kind === 'split' && <span className="hint">· split</span>}
               <span className="hint">
                 {c.status}
                 {c.inFlight ? ' · sending' : ''}

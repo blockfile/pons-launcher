@@ -31,6 +31,11 @@ export default function V4FundingPanel({ step, wallets, campaignFor, explorer, r
   // thing you go and open rather than a thing sitting under the cursor.
   const [showImport, setShowImport] = useState(false);
   const [keys, setKeys] = useState('');
+  const [showSplit, setShowSplit] = useState(false);
+  const [source, setSource] = useState('');
+  const [amountMinEth, setAmountMinEth] = useState('0.028');
+  const [amountMaxEth, setAmountMaxEth] = useState('0.035');
+  const [split, setSplit] = useState(null);
 
   async function act(what, fn) {
     setBusy(what);
@@ -117,6 +122,170 @@ export default function V4FundingPanel({ step, wallets, campaignFor, explorer, r
     </div>
   );
 
+  // Every funding wallet except the one paying. The backend excludes the source
+  // too — this is only so the count on screen matches what will actually be
+  // funded, rather than promising one more wallet than the plan contains.
+  const targets = wallets.filter((w) => w.id !== source);
+
+  /**
+   * A split's shape, which is a campaign's shape with the dials turned down.
+   *
+   * ONE DAY, and every target on it. A seasoning campaign is slow because the
+   * wallets it feeds have to look unrelated to each other; the funders being
+   * filled here are about to spend openly through Relay anyway, so the only
+   * thing worth buying is that they do not all arrive in one block from one
+   * address. Ten minutes to an hour between them does that in an afternoon.
+   */
+  const splitParams = () => ({
+    days: 1,
+    perDayMin: targets.length,
+    perDayMax: targets.length,
+    amountMinEth,
+    amountMaxEth,
+    gapMinMs: 10 * 60_000,
+    gapMaxMs: 60 * 60_000,
+  });
+
+  /**
+   * Spread one funding wallet across the others, through Relay.
+   *
+   * WHY THIS EXISTS RATHER THAN TWELVE MANUAL SENDS. One address paying twelve
+   * fresh wallets, which then all start depositing to Relay, is the most
+   * recognisable pattern this whole feature otherwise leaves behind — and it is
+   * on the one hop nothing else randomises. Routed through Relay a solver pays
+   * each funder, so there is no on-chain line from the source to any of them.
+   *
+   * It costs a Relay fee on this hop that a direct transfer would not, and it
+   * puts both hops in one solver's records. Neither is hidden from the operator
+   * — see the note under the button.
+   */
+  const splitter = (
+    <div className="notice">
+      <h3>Split one wallet across the others</h3>
+      <p>
+        Fills the other funding wallets from this one, through Relay, at random amounts ten minutes
+        to an hour apart. A solver pays each of them, so nothing on chain connects them to the
+        source.
+      </p>
+      {wallets.length < 2 ? (
+        <p className="hint">
+          Needs at least two funding wallets — one to pay and one to be paid. Create another first.
+        </p>
+      ) : (
+        <>
+          <div className="row">
+            <label>
+              from
+              <select
+                value={source}
+                onChange={(e) => {
+                  setSource(e.target.value);
+                  setSplit(null);
+                }}
+              >
+                <option value="">choose one…</option>
+                {wallets.map((w) => (
+                  <option key={w.id} value={w.id}>
+                    {w.address.slice(0, 10)}… · {w.balanceEth == null ? 'unreadable' : `${Number(w.balanceEth).toFixed(4)} ETH`}
+                  </option>
+                ))}
+              </select>
+            </label>
+            <label>
+              each gets, min
+              <input
+                value={amountMinEth}
+                onChange={(e) => {
+                  setAmountMinEth(e.target.value);
+                  setSplit(null);
+                }}
+              />
+            </label>
+            <label>
+              max
+              <input
+                value={amountMaxEth}
+                onChange={(e) => {
+                  setAmountMaxEth(e.target.value);
+                  setSplit(null);
+                }}
+              />
+            </label>
+          </div>
+
+          <p className="hint">
+            {source
+              ? `${targets.length} wallet(s) will be funded — every funding wallet except the one paying.`
+              : 'Pick the wallet holding the ETH.'}
+          </p>
+
+          {split && (
+            <div className="notice">
+              <b>{split.walletIds.length}</b> transfer(s), <b>{split.totalEth}</b> ETH before Relay
+              fees and gas. The plan below is the plan that starts — same seed, regenerated on the
+              server.
+            </div>
+          )}
+
+          <div className="row">
+            <Busy
+              busy={busy === 'split-preview'}
+              disabled={!source || targets.length === 0}
+              onClick={() =>
+                act('split-preview', async () => {
+                  const out = await api('/v4/campaigns/preview', 'POST', {
+                    kind: 'split',
+                    masterWalletId: source,
+                    walletIds: targets.map((w) => w.id),
+                    params: splitParams(),
+                  });
+                  if (!out.feasible?.ok) throw new Error(out.feasible.reason);
+                  setSplit(out);
+                  return `Split preview: ${out.walletIds.length} transfer(s), ${out.totalEth} ETH.`;
+                })
+              }
+            >
+              Preview split
+            </Busy>
+            <Busy
+              busy={busy === 'split-start'}
+              disabled={!split}
+              onClick={() =>
+                act('split-start', async () => {
+                  const out = await api('/v4/campaigns', 'POST', {
+                    kind: 'split',
+                    name: `split ${new Date().toISOString().slice(0, 16).replace('T', ' ')}`,
+                    masterWalletId: source,
+                    walletIds: split.walletIds,
+                    // The seed and params the preview returned, posted back so
+                    // the server regenerates the same plan rather than trusting
+                    // the transfer list this browser is holding.
+                    seed: split.seed,
+                    params: splitParams(),
+                  });
+                  setSplit(null);
+                  setShowSplit(false);
+                  return out;
+                })
+              }
+            >
+              Start split
+            </Busy>
+            <button className="link" onClick={() => setShowSplit(false)}>
+              cancel
+            </button>
+          </div>
+
+          <p className="hint">
+            The Relay hop costs a fee a direct transfer would not, and it puts this hop and the
+            seasoning that follows in the same solver's records. What it buys is that no one reading
+            the chain can tell these wallets came from you.
+          </p>
+        </>
+      )}
+    </div>
+  );
+
   return (
     <Step {...step}>
       <p className="lede">
@@ -125,6 +294,7 @@ export default function V4FundingPanel({ step, wallets, campaignFor, explorer, r
       </p>
 
       {showImport && importer}
+      {showSplit && splitter}
 
       {/* Empty is where this tab STARTS, not a failure. It says what the wallet
           is for and what to do next rather than drawing an empty table. */}
@@ -149,6 +319,11 @@ export default function V4FundingPanel({ step, wallets, campaignFor, explorer, r
             <button className="link" onClick={() => setShowImport((v) => !v)}>
               or import one
             </button>
+            {wallets.length > 1 && (
+              <button className="link" onClick={() => setShowSplit((v) => !v)}>
+                split one across the rest
+              </button>
+            )}
             <span className="spacer" />
             <span className="hint">one campaign at a time per wallet — make another to run two</span>
           </div>

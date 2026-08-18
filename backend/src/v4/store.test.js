@@ -114,6 +114,33 @@ test('claimed seed ids span every campaign, running or not', () => {
   assert.deepEqual([...s.claimedSeedIds()].sort(), ['s1', 's2']);
 });
 
+test('a split does not claim its targets, and a season still does', () => {
+  const { store } = freshStore();
+  const s = store.storeFor('u');
+  // The asymmetry the whole `kind` field exists for. A seed wallet is worth
+  // seasoning because it is funded once, from one place, ever — so a season
+  // claims. A split pays FUNDING wallets, which an operator tops up again next
+  // month, so claiming them would block that forever and protect nothing.
+  s.create(campaign({ id: 'split-1', kind: 'split', status: 'complete' }));
+  assert.deepEqual([...s.claimedSeedIds()], [], 'a split claimed its targets');
+
+  s.create(campaign({ id: 'season-1', kind: 'season' }));
+  assert.deepEqual([...s.claimedSeedIds()].sort(), ['s1', 's2']);
+});
+
+test('a campaign with no kind reads as a season', () => {
+  const { store } = freshStore();
+  const s = store.storeFor('u');
+  // Every campaign written before splits existed has no `kind`, and every one
+  // of them was a season. If absent read as anything else, those stored
+  // campaigns would silently stop claiming and their seed wallets could be
+  // funded a second time from another source.
+  const legacy = campaign({ id: 'legacy' });
+  delete legacy.kind;
+  s.create(legacy);
+  assert.deepEqual([...s.claimedSeedIds()].sort(), ['s1', 's2']);
+});
+
 test('backedUp names the wallets with no backup on record', () => {
   const { store } = freshStore();
   const s = store.storeFor('u');

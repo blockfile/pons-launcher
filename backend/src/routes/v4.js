@@ -163,8 +163,52 @@ function onlyV4Wallets(wallets) {
  * v3's resolveRun takes for its bundle targets — so an operator who generated
  * exactly the wallets they want does not have to list them by id.
  */
+/**
+ * Which kind of campaign a body describes, validated.
+ *
+ * 'season' feeds fresh seed wallets over weeks and is what every campaign was
+ * before splits existed — so an absent `kind` reads as 'season', and nothing
+ * written by an older console changes meaning.
+ *
+ * 'split' spreads one funding wallet across the others, through the same Relay
+ * hop, so twelve funders can be filled without twelve hand-made transfers from
+ * one address — which is the single most recognisable pattern this feature
+ * otherwise leaves behind.
+ */
+function resolveKind(body) {
+  const kind = (body || {}).kind || 'season';
+  if (kind !== 'season' && kind !== 'split') {
+    throw new Error(`kind must be "season" or "split", not "${kind}"`);
+  }
+  return kind;
+}
+
+/**
+ * A split may not pay its own source.
+ *
+ * Relaying a wallet to itself burns a fee and a gas payment to move ETH in a
+ * circle. It is always a mistake, and it is an easy one to make when the source
+ * dropdown and the target list are drawn from the same set of wallets.
+ */
+function assertNotSelfFunding(walletIds, masterWalletId) {
+  if (walletIds.includes(masterWalletId)) {
+    throw new Error(
+      `wallet ${masterWalletId} is the source of this split and cannot also be one of its ` +
+        'targets — a wallet cannot Relay to itself.'
+    );
+  }
+}
+
 function resolveWalletIds(body, ks) {
-  const known = v4roles.seeds(ks);
+  // A split's targets are the OTHER funding wallets; a season's are the seeds.
+  // The source is excluded from the default set rather than being refused
+  // later, so "all of them" means what an operator means by it.
+  const kind = resolveKind(body);
+  const known =
+    kind === 'split'
+      ? v4roles.masters(ks).filter((w) => w.id !== body.masterWalletId)
+      : v4roles.seeds(ks);
+  const roleName = kind === 'split' ? v4roles.ROLES.master : v4roles.ROLES.seed;
   if (Array.isArray(body.walletIds) && body.walletIds.length) {
     // Deduplicated before anything downstream sees it. assertUnclaimed only
     // compares against wallets OTHER campaigns have already claimed — a
@@ -173,11 +217,12 @@ function resolveWalletIds(body, ks) {
     // the "two funding edges" assertUnclaimed's own message warns about,
     // reachable straight from a request body.
     const ids = [...new Set(body.walletIds.map(String))];
+    if (kind === 'split') assertNotSelfFunding(ids, body.masterWalletId);
     const knownIds = new Set(known.map((w) => w.id));
     const missing = ids.filter((id) => !knownIds.has(id));
     if (missing.length) {
       throw new Error(
-        `${missing.length} wallet id(s) are not v4seed wallets in this keystore: ` +
+        `${missing.length} wallet id(s) are not ${roleName} wallets in this keystore: ` +
           `${missing.slice(0, 5).join(', ')}${missing.length > 5 ? '…' : ''}`
       );
     }
@@ -216,18 +261,24 @@ function buildCampaignPreview(body, ks, deps = {}) {
   const nowFn = deps.nowFn || Date.now;
   const newSeedFn = deps.newSeedFn || rng.newSeed;
 
+  const kind = resolveKind(body);
   const params = plan.normaliseParams(body.params || {});
   const walletIds = resolveWalletIds(body, ks);
   const feasible = plan.feasible(walletIds.length, params);
   const seed = body.seed || newSeedFn();
 
   if (!feasible.ok) {
-    return { seed, params, walletIds, byDay: [], totalEth: '0', transfers: [], feasible };
+    return { seed, kind, params, walletIds, byDay: [], totalEth: '0', transfers: [], feasible };
   }
 
-  const addresses = Object.fromEntries(v4roles.seeds(ks).map((w) => [w.id, w.address]));
+  // The address map must be drawn from the SAME set resolveWalletIds drew from.
+  // Built from seeds alone, a split's ids find no address here and every
+  // transfer is generated with `address: undefined` — which surfaces not at
+  // preview, not at start, but on the day that transfer comes due.
+  const pool = kind === 'split' ? v4roles.masters(ks) : v4roles.seeds(ks);
+  const addresses = Object.fromEntries(pool.map((w) => [w.id, w.address]));
   const result = plan.generate({ walletIds, addresses, params, seed, now: nowFn() });
-  return { ...result, walletIds, feasible };
+  return { ...result, kind, walletIds, feasible };
 }
 
 /**
@@ -251,6 +302,7 @@ async function resolveCampaignStart(body = {}, ks, store, deps = {}) {
     );
   }
 
+  const kind = resolveKind(body);
   const masters = v4roles.masters(ks);
   assertMaster(body.masterWalletId, masters);
   const master = masters.find((w) => w.id === body.masterWalletId);
@@ -259,6 +311,9 @@ async function resolveCampaignStart(body = {}, ks, store, deps = {}) {
   // normaliseParams — see the file header for the bypass this closes.
   const params = plan.normaliseParams(body.params || {});
   const walletIds = resolveWalletIds(body, ks);
+  // Re-checked here as well as inside resolveWalletIds, because that function
+  // only sees the self-funding case when walletIds was supplied explicitly.
+  if (kind === 'split') assertNotSelfFunding(walletIds, body.masterWalletId);
 
   // FIRST, NOT ONLY. Two awaits follow below — estimateCampaignCost and the
   // balance read — before POST /v4/campaigns reaches runner.start(), and this
@@ -269,13 +324,18 @@ async function resolveCampaignStart(body = {}, ks, store, deps = {}) {
   // store.create(), where nothing can await between the check and the write.
   // This one stays because it is what gives the operator the error in the
   // documented guard order, before a fee estimate and an RPC round trip.
-  assertUnclaimed(walletIds, store.claimedSeedIds());
+  // Only a season claims. A split pays funding wallets, which an operator will
+  // top up again — see claimedSeedIds in store.js for why claiming them would
+  // block that forever and protect nothing. The backup gate applies to both:
+  // every wallet about to receive real ETH needs its key on record first.
+  if (kind === 'season') assertUnclaimed(walletIds, store.claimedSeedIds());
   assertBackedUp(walletIds, store.backedUp);
 
   const feasibility = plan.feasible(walletIds.length, params);
   if (!feasibility.ok) throw new Error(feasibility.reason);
 
-  const addresses = Object.fromEntries(v4roles.seeds(ks).map((w) => [w.id, w.address]));
+  const pool = kind === 'split' ? masters : v4roles.seeds(ks);
+  const addresses = Object.fromEntries(pool.map((w) => [w.id, w.address]));
   // REGENERATED from the seed and params posted back — never a transfer list
   // the browser sent. Same seed and params reproduce the same plan byte for
   // byte, so what the operator read in preview is provably what is about to
@@ -291,7 +351,7 @@ async function resolveCampaignStart(body = {}, ks, store, deps = {}) {
     );
   }
 
-  return { master, params, walletIds, result, cost };
+  return { master, kind, params, walletIds, result, cost };
 }
 
 // ── wallets ─────────────────────────────────────────────────────────────────
@@ -551,11 +611,15 @@ router.post('/v4/campaigns', requireApiKey, async (req, res, next) => {
     const ks = keystoreFor(req.user.id);
     const store = storeFor(req.user.id);
 
-    const { master, params, result } = await resolveCampaignStart(body, ks, store);
+    const { master, kind, params, result } = await resolveCampaignStart(body, ks, store);
 
     const campaign = {
       id: crypto.randomUUID(),
       name: body.name,
+      // Persisted so claimedSeedIds can tell the two apart forever after — a
+      // split that read back as a season would silently claim twelve funding
+      // wallets and refuse to ever top them up again.
+      kind,
       masterWalletId: master.id,
       seed: result.seed,
       params,
@@ -607,6 +671,8 @@ module.exports._private = {
   assertUnclaimed,
   assertBackedUp,
   assertImportRole,
+  resolveKind,
+  assertNotSelfFunding,
   assertGenerateCount,
   MAX_GENERATE_COUNT,
   onlyV4Wallets,
