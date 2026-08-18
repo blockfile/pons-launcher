@@ -400,10 +400,23 @@ async function main() {
     const rows = transfers.filter((t) => t.day === day).sort((a, b) => a.dueAt - b.dueAt);
     const gaps = rows.slice(1).map((t, i) => t.dueAt - rows[i].dueAt);
     const dayEth = rows.reduce((s, t) => s + Number(t.amountEth), 0);
+    // A day can legitimately hold ONE transfer — the daily count is drawn from
+    // [perDayMin, perDayMax] and perDayMin can be 1 — and one transfer has no
+    // gaps at all. Math.min of nothing is Infinity and Math.max of nothing is
+    // -Infinity, which printed as `Infinity:NaN:NaN–00:00:00`: a summary line
+    // that looked like a scheduling fault on a day the scheduler got right.
+    // Two sends collapse to a single figure for the same reason — a range
+    // whose ends are the same number is not a range.
+    const gapText =
+      gaps.length === 0
+        ? 'gaps —        '
+        : gaps.length === 1 || Math.min(...gaps) === Math.max(...gaps)
+          ? `gap  ${hhmmss(gaps[0])}`
+          : `gaps ${hhmmss(Math.min(...gaps))}–${hhmmss(Math.max(...gaps))}`;
     console.log(
       `  day ${String(day).padStart(2)}  ${String(rows.length).padStart(3)} sends  ` +
         `${offset(rows[0].dueAt - campaignStart)} → ${offset(rows[rows.length - 1].dueAt - campaignStart)}  ` +
-        `gaps ${hhmmss(Math.min(...gaps))}–${hhmmss(Math.max(...gaps))}  ${dayEth.toFixed(6)} ETH`
+        `${gapText}  ${dayEth.toFixed(6)} ETH`
     );
   }
 
