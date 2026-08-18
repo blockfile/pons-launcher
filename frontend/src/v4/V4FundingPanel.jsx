@@ -456,10 +456,9 @@ export default function V4FundingPanel({
                   return (
                     <tr key={w.id}>
                       <td>
-                        <Address
-                          value={w.address}
-                          href={explorer ? `${explorer}/address/${w.address}` : ''}
-                        />
+                        {/* Plain text, not a link — see the note in V4SeedPanel.
+                            The copy button still carries the full address. */}
+                        <Address value={w.address} />
                       </td>
                       {/* null is "the RPC did not answer", which is not the same
                           statement as zero — a wallet drawn at 0.000000 when it
