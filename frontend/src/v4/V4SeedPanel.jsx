@@ -42,6 +42,7 @@ export default function V4SeedPanel({ step, wallets, masters, facts, explorer, r
   const [ticked, setTicked] = useState([]);
   const [bulk, setBulk] = useState(null);
   const [progress, setProgress] = useState('');
+  const [page, setPage] = useState(0);
 
   async function act(what, fn) {
     setBusy(what);
@@ -66,6 +67,29 @@ export default function V4SeedPanel({ step, wallets, masters, facts, explorer, r
   // Intersected with what is still on screen, so a wallet deleted or claimed
   // since it was ticked cannot be carried into the next run by a stale id.
   const tickedHere = wallets.filter((w) => ticked.includes(w.id));
+
+  /**
+   * One screen at a time.
+   *
+   * A campaign funds hundreds of these and the table was drawing every one, so
+   * step 3 ended up somewhere below a thousand rows of scroll. Twenty-five is
+   * about a screen without the panel growing a scrollbar of its own.
+   *
+   * PAGING IS PRESENTATION AND NOTHING ELSE. The counts above the table, the
+   * backup gate and the tick list all read the FULL set — a wallet does not
+   * stop being unclaimed because it is on page four. The only thing scoped to
+   * the page is the header checkbox, which ticks what is visible, because a
+   * box that silently selected four hundred rows an operator could not see is
+   * the one shape of this control that deletes something by surprise.
+   */
+  const PAGE = 25;
+  const pages = Math.max(1, Math.ceil(wallets.length / PAGE));
+  // Clamped rather than reset: deleting the last row of the last page should
+  // land on the new last page, not throw the operator back to the first.
+  const current = Math.min(page, pages - 1);
+  const from = current * PAGE;
+  const shown = wallets.slice(from, from + PAGE);
+  const pageAllTicked = shown.length > 0 && shown.every((w) => ticked.includes(w.id));
 
   /**
    * Delete the ticked wallets, one request each.
@@ -212,10 +236,18 @@ export default function V4SeedPanel({ step, wallets, masters, facts, explorer, r
                       count beside the button says what it will act on. */}
                   <input
                     type="checkbox"
-                    checked={ticked.length > 0 && ticked.length === wallets.length}
-                    onChange={(e) => setTicked(e.target.checked ? wallets.map((w) => w.id) : [])}
+                    checked={pageAllTicked}
+                    onChange={(e) => {
+                      const ids = shown.map((w) => w.id);
+                      setTicked((cur) =>
+                        e.target.checked
+                          ? [...new Set([...cur, ...ids])]
+                          : cur.filter((id) => !ids.includes(id))
+                      );
+                    }}
                   />
                 </th>
+                <th className="num">No.</th>
                 <th>Address</th>
                 <th className="num">Funded</th>
                 <th>Campaign</th>
@@ -226,7 +258,7 @@ export default function V4SeedPanel({ step, wallets, masters, facts, explorer, r
               </tr>
             </thead>
             <tbody>
-              {wallets.map((w) => {
+              {shown.map((w, i) => {
                 const fact = facts[w.id];
                 return (
                   <tr key={w.id}>
@@ -241,6 +273,10 @@ export default function V4SeedPanel({ step, wallets, masters, facts, explorer, r
                         }
                       />
                     </td>
+                    {/* Counted across the whole set, not the page. On page four
+                        this reads 76, which is the number an operator means when
+                        they say "the seventy-sixth wallet". */}
+                    <td className="num hint">{from + i + 1}</td>
                     <td>
                       {/* Still a link — `plain` drops only the decoration. A
                           hundred blue underlined rows is noise; the address is
@@ -315,6 +351,50 @@ export default function V4SeedPanel({ step, wallets, masters, facts, explorer, r
               hundreds of RPC calls a minute. Age is counted from the moment the
               key was created, which is what "how long has this wallet existed"
               means to anything looking at it from outside. */}
+          {pages > 1 && (
+            <div className="pager">
+              <span className="hint">
+                showing <b>{from + 1}</b>–<b>{Math.min(from + PAGE, wallets.length)}</b> of{' '}
+                <b>{wallets.length}</b>
+              </span>
+              <span className="spacer" />
+              <button disabled={current === 0} onClick={() => setPage(0)} title="first">
+                ‹‹
+              </button>
+              <button disabled={current === 0} onClick={() => setPage(current - 1)} title="previous">
+                ‹
+              </button>
+              {/* A window around the current page, not every page. At four
+                  hundred wallets that is sixteen numbers, and a pager wider
+                  than the thing it pages is furniture. */}
+              {Array.from({ length: pages }, (_, i) => i)
+                .filter((i) => Math.abs(i - current) <= 2)
+                .map((i) => (
+                  <button
+                    key={i}
+                    className={i === current ? 'is-on' : ''}
+                    onClick={() => setPage(i)}
+                  >
+                    {i + 1}
+                  </button>
+                ))}
+              <button
+                disabled={current >= pages - 1}
+                onClick={() => setPage(current + 1)}
+                title="next"
+              >
+                ›
+              </button>
+              <button
+                disabled={current >= pages - 1}
+                onClick={() => setPage(pages - 1)}
+                title="last"
+              >
+                ››
+              </button>
+            </div>
+          )}
+
           <p className="hint">
             Funded is what the campaign sent, not a balance read back — these wallets receive once
             and are not spent from here. Age counts from when the key was made.

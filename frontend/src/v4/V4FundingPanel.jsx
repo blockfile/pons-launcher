@@ -440,7 +440,12 @@ export default function V4FundingPanel({
             <span className="hint">one campaign at a time per wallet — make another to run two</span>
           </div>
 
-          <div className="table-scroll">
+          {/* Capped rather than paged. Funding wallets are counted in tens, not
+              hundreds, and a pager over twenty rows is more machinery than the
+              problem — but twenty-one of them still pushed step 2 off the
+              screen. About nine rows before it scrolls, which keeps the whole
+              step visible while every wallet stays reachable. */}
+          <div className="table-scroll" style={{ maxHeight: 340, overflowY: 'auto' }}>
             <table>
               <thead>
                 <tr>

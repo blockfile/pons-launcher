@@ -1198,6 +1198,43 @@ td input[type='number'] {
    but the href is still worth having, so this keeps the navigation and drops
    the decoration. It reveals itself on hover, which is where a reader looks
    when they want to know whether something is clickable. */
+/* Pager for a table that outgrew one screen. Deliberately quiet: it is
+   navigation, and the palette's amber belongs to the action a step is FOR —
+   the same rule the tab strip follows. The current page is marked by ink and
+   a border rather than a fill, so nothing on the page competes with a button
+   that spends money. */
+.pager {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
+  margin-top: 10px;
+}
+.pager button {
+  min-width: 30px;
+  padding: 3px 7px;
+  font: inherit;
+  font-size: 0.82rem;
+  color: var(--dim);
+  background: none;
+  border: 1px solid transparent;
+  border-radius: 5px;
+  cursor: pointer;
+}
+.pager button:hover:not(:disabled) {
+  color: var(--ink);
+  border-color: var(--rule);
+}
+.pager button.is-on {
+  color: var(--ink);
+  border-color: var(--rule);
+  background: var(--rule-soft);
+}
+.pager button:disabled {
+  opacity: 0.35;
+  cursor: default;
+}
+
 a.addr-text.is-plain {
   color: inherit;
   text-decoration: none;
