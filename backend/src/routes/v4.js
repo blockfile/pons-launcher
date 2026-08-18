@@ -122,6 +122,42 @@ function assertImportRole(role) {
   }
 }
 
+/**
+ * A wallet may not be deleted while a campaign still needs it.
+ *
+ * V4 originally exposed no delete at all, on the reasoning that any wallet in
+ * these tables might be halfway through a three-week schedule. That is true of
+ * SOME of them and was too blunt for the rest: a funding wallet created by
+ * mistake, or one an operator has finished with, has nothing to protect and no
+ * way out of the console.
+ *
+ * So the refusal is narrowed to what actually breaks. A wallet is busy if it
+ * funds a campaign that could still run, or is owed a transfer by one — halted
+ * counts, because halted is resumable and resuming would then find the wallet
+ * gone. Complete and cancelled campaigns hold nothing.
+ *
+ * @param {object[]} campaigns every campaign in the store
+ */
+function assertNotBusy(walletId, campaigns) {
+  const LIVE = new Set(['running', 'paused', 'halted']);
+  for (const c of campaigns) {
+    if (!LIVE.has(c.status)) continue;
+    if (c.masterWalletId === walletId) {
+      throw new Error(
+        `wallet is funding campaign "${c.name || c.id}" (${c.status}) and cannot be deleted. ` +
+          'Cancel that campaign first — cancelling is final, so read what it has already sent.'
+      );
+    }
+    const owed = (c.transfers || []).some((t) => t.walletId === walletId && t.status === 'pending');
+    if (owed) {
+      throw new Error(
+        `campaign "${c.name || c.id}" (${c.status}) still owes this wallet a transfer and cannot ` +
+          'pay a wallet that does not exist. Cancel that campaign first.'
+      );
+    }
+  }
+}
+
 function assertUnclaimed(walletIds, claimed) {
   const taken = walletIds.filter((id) => claimed.has(id));
   if (taken.length) {
@@ -454,6 +490,58 @@ router.post('/v4/wallets/generate', requireApiKey, (req, res, next) => {
   }
 });
 
+// DELETE /api/v4/wallets/:id — archive a V4 wallet.
+//
+// The key is NOT destroyed: keystore.remove() moves the wallet into the
+// encrypted archive beside the keystore, recoverable with `npm run
+// archive:restore`. It can still be destroyed indirectly — the archive is
+// capped, so an old entry may be evicted to make room, and each eviction is
+// logged by address because that line is very likely the only remaining trace
+// the key ever existed.
+//
+// REFUSES WHILE A CAMPAIGN STILL NEEDS THE WALLET. See assertNotBusy: a funder
+// mid-schedule, or a wallet a live campaign still owes a transfer to, would
+// leave that campaign unable to complete and no way to tell why.
+//
+// ETH IN THE WALLET IS NOT A REFUSAL, only a warning the console shows before
+// asking. The balance may be the reason for deleting it — a wallet being
+// retired after a sweep — and a route that refused would leave dust permanently
+// undeletable.
+router.delete('/v4/wallets/:id', requireApiKey, (req, res, next) => {
+  try {
+    const ks = keystoreFor(req.user.id);
+    const wallet = v4roles
+      .all(ks)
+      .masters.concat(v4roles.all(ks).seeds)
+      .find((w) => w.id === req.params.id);
+    if (!wallet) {
+      throw new Error(`wallet ${req.params.id} is not a V4 wallet — this route deletes V4's only`);
+    }
+    assertNotBusy(req.params.id, storeFor(req.user.id).campaigns());
+
+    const out = ks.remove(req.params.id);
+    activityFor(req.user.id).record(
+      'v4',
+      `[v4] archived ${wallet.role} wallet ${out.address} — recoverable from the server until purged`,
+      { role: wallet.role, address: out.address }
+    );
+    // One line per evicted address, never a count. The archive is capped, so
+    // this delete may have destroyed an OLDER key to make room — an
+    // irreversible loss nobody asked for, on a request about a different
+    // wallet, and an address is the only thing an operator can act on.
+    for (const gone of out.evicted || []) {
+      activityFor(req.user.id).record(
+        'v4',
+        `evicted wallet ${gone.address} from a full archive — its key is destroyed`,
+        { address: gone.address, deletedAt: gone.deletedAt, reason: 'archive full' }
+      );
+    }
+    res.json(jsonSafe(out));
+  } catch (err) {
+    next(err);
+  }
+});
+
 // POST /api/v4/wallets/import — an existing key, as a FUNDING wallet only.
 //
 // SEEDS CANNOT BE IMPORTED, and that refusal is the only reason this route
@@ -673,6 +761,7 @@ module.exports._private = {
   assertImportRole,
   resolveKind,
   assertNotSelfFunding,
+  assertNotBusy,
   assertGenerateCount,
   MAX_GENERATE_COUNT,
   onlyV4Wallets,

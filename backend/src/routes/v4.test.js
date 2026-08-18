@@ -40,6 +40,41 @@ test('a split refuses to pay its own source', () => {
   assert.doesNotThrow(() => guards.assertNotSelfFunding([], 'm1'));
 });
 
+test('a wallet a live campaign still needs cannot be deleted', () => {
+  const live = (over) => ({
+    id: 'c1',
+    name: 'august',
+    status: 'running',
+    masterWalletId: 'm1',
+    transfers: [{ walletId: 's1', status: 'pending' }],
+    ...over,
+  });
+
+  // Funding a campaign that could still run.
+  assert.throws(() => guards.assertNotBusy('m1', [live()]), /funding campaign/);
+  // Owed a transfer by one.
+  assert.throws(() => guards.assertNotBusy('s1', [live()]), /still owes/);
+
+  // HALTED COUNTS. A halted campaign is resumable, and resuming would find the
+  // wallet gone — the one status where "not running" and "finished" differ, and
+  // the easy one to get wrong.
+  assert.throws(() => guards.assertNotBusy('m1', [live({ status: 'halted' })]), /halted/);
+  assert.throws(() => guards.assertNotBusy('m1', [live({ status: 'paused' })]), /paused/);
+
+  // Terminal campaigns hold nothing.
+  for (const status of ['complete', 'cancelled']) {
+    assert.doesNotThrow(() => guards.assertNotBusy('m1', [live({ status })]));
+    assert.doesNotThrow(() => guards.assertNotBusy('s1', [live({ status })]));
+  }
+  // A transfer already sent is not owed.
+  assert.doesNotThrow(() =>
+    guards.assertNotBusy('s1', [live({ transfers: [{ walletId: 's1', status: 'sent' }] })])
+  );
+  // An unrelated wallet is free even while a campaign runs.
+  assert.doesNotThrow(() => guards.assertNotBusy('m9', [live()]));
+  assert.doesNotThrow(() => guards.assertNotBusy('m1', []));
+});
+
 test('import accepts a funding wallet and refuses a seed', () => {
   // The whole reason the import route checks a role. A seed wallet earns its
   // value by having no history before the transfer that funds it; an imported

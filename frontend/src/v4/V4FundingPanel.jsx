@@ -3,6 +3,7 @@ import { api } from '../api.js';
 import Step from '../components/Step.jsx';
 import { Busy } from '../components/Section.jsx';
 import Address from '../components/Address.jsx';
+import Modal from '../components/Modal.jsx';
 import { ROLES, eth } from './roles.js';
 
 /**
@@ -36,6 +37,10 @@ export default function V4FundingPanel({ step, wallets, campaignFor, explorer, r
   const [amountMinEth, setAmountMinEth] = useState('0.028');
   const [amountMaxEth, setAmountMaxEth] = useState('0.035');
   const [split, setSplit] = useState(null);
+  // The wallet a delete is being asked about, or null. Held as the whole record
+  // rather than an id so the dialog can state its balance — which is the fact
+  // that decides whether deleting it is a tidy-up or a mistake.
+  const [deleting, setDeleting] = useState(null);
 
   async function act(what, fn) {
     setBusy(what);
@@ -296,6 +301,32 @@ export default function V4FundingPanel({ step, wallets, campaignFor, explorer, r
       {showImport && importer}
       {showSplit && splitter}
 
+      {/* The key is archived, not destroyed — `npm run archive:restore` brings
+          it back. Said plainly, because a delete dialog that implies
+          irreversibility teaches an operator to fear a safe action, and then
+          not to believe the one place this really is irreversible: the archive
+          is capped, so a delete can evict an OLDER key to make room. */}
+      <Modal
+        open={Boolean(deleting)}
+        danger
+        title={`Archive funding wallet ${deleting ? deleting.address.slice(0, 10) : ''}…?`}
+        question={
+          deleting && deleting.balanceEth != null && Number(deleting.balanceEth) > 0
+            ? `It still holds ${Number(deleting.balanceEth).toFixed(6)} ETH. Archiving does not move the ETH — sweep it first, or the balance sits at an address this console no longer lists.`
+            : 'Its key moves to the encrypted archive beside the keystore and can be restored from the server. A campaign that still needs this wallet will refuse the delete.'
+        }
+        confirmLabel="Archive wallet"
+        onConfirm={() => {
+          const w = deleting;
+          setDeleting(null);
+          act('delete', async () => {
+            const out = await api(`/v4/wallets/${w.id}`, 'DELETE');
+            return `Archived ${out.address}. Restore it with: npm run archive:restore ${out.address}`;
+          });
+        }}
+        onCancel={() => setDeleting(null)}
+      />
+
       {/* Empty is where this tab STARTS, not a failure. It says what the wallet
           is for and what to do next rather than drawing an empty table. */}
       {wallets.length === 0 ? (
@@ -319,11 +350,14 @@ export default function V4FundingPanel({ step, wallets, campaignFor, explorer, r
             <button className="link" onClick={() => setShowImport((v) => !v)}>
               or import one
             </button>
-            {wallets.length > 1 && (
-              <button className="link" onClick={() => setShowSplit((v) => !v)}>
-                split one across the rest
-              </button>
-            )}
+            {/* Shown from the FIRST wallet, not the second. Gated on having
+                two, the panel's own "needs at least two" explanation could
+                never be reached — so an operator holding one funded wallet saw
+                no link, no message, and no reason to think splitting was
+                possible. Which is exactly the moment they need to know. */}
+            <button className="link" onClick={() => setShowSplit((v) => !v)}>
+              split one across the rest
+            </button>
             <span className="spacer" />
             <span className="hint">one campaign at a time per wallet — make another to run two</span>
           </div>
@@ -335,6 +369,7 @@ export default function V4FundingPanel({ step, wallets, campaignFor, explorer, r
                   <th>Address</th>
                   <th className="num">Balance</th>
                   <th>Campaign</th>
+                  <th />
                 </tr>
               </thead>
               <tbody>
@@ -365,6 +400,17 @@ export default function V4FundingPanel({ step, wallets, campaignFor, explorer, r
                         ) : (
                           <span className="hint">free</span>
                         )}
+                      </td>
+                      <td className="num">
+                        {/* Offered on every row. The backend decides whether a
+                            wallet is actually free — it reads the campaigns,
+                            which this table only partly reflects — and refuses
+                            with the campaign's name and status. Hiding the
+                            control on a guess would leave an operator unable to
+                            delete a wallet the server would happily archive. */}
+                        <button className="link" onClick={() => setDeleting(w)}>
+                          delete
+                        </button>
                       </td>
                     </tr>
                   );
