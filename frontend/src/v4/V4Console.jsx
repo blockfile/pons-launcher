@@ -313,6 +313,11 @@ export default function V4Console({ health, credential, report, output, reported
       <V4FundingPanel
         step={step('funding')}
         wallets={masters}
+        // Only so the export dialog can state the whole file's contents. The
+        // backup is all of V4 whichever step it is taken from, and a dialog
+        // that counted just the funders would imply a smaller scope than the
+        // file it produces.
+        seeds={seeds}
         campaignFor={campaignFor}
         explorer={explorer}
         reload={loadWallets}

@@ -2,9 +2,8 @@ import { useState } from 'react';
 import { api } from '../api.js';
 import Step from '../components/Step.jsx';
 import { Busy } from '../components/Section.jsx';
-import Modal from '../components/Modal.jsx';
 import Address from '../components/Address.jsx';
-import { downloadV4Backup } from './backup.js';
+import V4BackupControls from './V4BackupControls.jsx';
 import { MAX_GENERATE, ROLES, clock, eth } from './roles.js';
 
 /**
@@ -31,10 +30,6 @@ import { MAX_GENERATE, ROLES, clock, eth } from './roles.js';
 export default function V4SeedPanel({ step, wallets, masters, facts, explorer, reload, report }) {
   const [busy, setBusy] = useState('');
   const [count, setCount] = useState(50);
-  // Whatever has been typed into the export confirmation, and whether it is
-  // open. Nothing is downloaded until the word matches.
-  const [exporting, setExporting] = useState(false);
-  const [typed, setTyped] = useState('');
 
   async function act(what, fn) {
     setBusy(what);
@@ -52,22 +47,6 @@ export default function V4SeedPanel({ step, wallets, masters, facts, explorer, r
   // a number the server has already decided to refuse.
   const wanted = Math.min(MAX_GENERATE, Math.max(1, Math.round(Number(count) || 0)));
   const unprotected = wallets.filter((w) => !w.backedUp);
-
-  /**
-   * How many keys the download actually contains: BOTH of V4's roles.
-   *
-   * The route exports onlyV4Wallets(exportAll()), and isV4Role accepts v4master
-   * as well as v4seed — so the file carries the funding wallets too, and this
-   * panel's own `wallets` prop is only the seeds. Counting the slice this step
-   * happens to draw is the exact mistake BackupControls documents having
-   * already made once: the dialog has to count what the file will hold, or the
-   * number in the title is a smaller promise than the file keeps.
-   *
-   * It is also what the button is enabled on. An operator who has created a
-   * funding wallet and no seeds yet must still be able to back that key up —
-   * it is the one holding the ETH, and the route would export it happily.
-   */
-  const exported = masters.length + wallets.length;
 
   return (
     <Step {...step}>
@@ -99,17 +78,10 @@ export default function V4SeedPanel({ step, wallets, masters, facts, explorer, r
         >
           Generate wallets
         </Busy>
-        <Busy
-          busy={busy === 'backup'}
-          className="ghost"
-          disabled={!exported}
-          onClick={() => {
-            setTyped('');
-            setExporting(true);
-          }}
-        >
-          Download backup
-        </Busy>
+        {/* One implementation, drawn here and in step 1 beside the funding
+            wallets' deletes — see the header of V4BackupControls for why a
+            backup belongs wherever a wallet can be deleted. */}
+        <V4BackupControls masters={masters} seeds={wallets} report={report} reload={reload} />
         <span className="spacer" />
         <span className="hint">
           {MAX_GENERATE} at a time is the ceiling — the keystore is rewritten in full for every
@@ -227,35 +199,6 @@ export default function V4SeedPanel({ step, wallets, masters, facts, explorer, r
         </div>
       )}
 
-      <Modal
-        open={exporting}
-        danger
-        title={`This downloads the PRIVATE KEY of all ${exported} V4 wallets.`}
-        question={null}
-        confirmLabel="Download"
-        confirmDisabled={typed !== 'EXPORT'}
-        onConfirm={() => {
-          setExporting(false);
-          act('backup', downloadV4Backup);
-        }}
-        onCancel={() => setExporting(false)}
-      >
-        <p>
-          Anyone who opens that file can spend every one of them. It is V4's wallets only — all{' '}
-          {masters.length} funding {masters.length === 1 ? 'wallet' : 'wallets'} and all{' '}
-          {wallets.length} {wallets.length === 1 ? 'seed' : 'seeds'} — and never another tab's keys.
-        </p>
-        <label className="modal-type">
-          Type EXPORT to continue.
-          <input
-            data-autofocus
-            value={typed}
-            autoComplete="off"
-            spellCheck="false"
-            onChange={(e) => setTyped(e.target.value)}
-          />
-        </label>
-      </Modal>
     </Step>
   );
 }

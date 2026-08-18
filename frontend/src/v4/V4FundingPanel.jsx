@@ -4,6 +4,7 @@ import Step from '../components/Step.jsx';
 import { Busy } from '../components/Section.jsx';
 import Address from '../components/Address.jsx';
 import Modal from '../components/Modal.jsx';
+import V4BackupControls from './V4BackupControls.jsx';
 import { ROLES, eth } from './roles.js';
 
 /**
@@ -25,7 +26,15 @@ import { ROLES, eth } from './roles.js';
  * the wallet in this table may be halfway through signing a three-week
  * schedule, and there is no seed phrase behind it to recover from.
  */
-export default function V4FundingPanel({ step, wallets, campaignFor, explorer, reload, report }) {
+export default function V4FundingPanel({
+  step,
+  wallets,
+  seeds = [],
+  campaignFor,
+  explorer,
+  reload,
+  report,
+}) {
   const [busy, setBusy] = useState('');
   // Import is folded away by default. Generating is the ordinary path and the
   // one with no caveat attached; pasting a private key is neither, so it is a
@@ -356,8 +365,19 @@ export default function V4FundingPanel({ step, wallets, campaignFor, explorer, r
                 no link, no message, and no reason to think splitting was
                 possible. Which is exactly the moment they need to know. */}
             <button className="link" onClick={() => setShowSplit((v) => !v)}>
-              split one across the rest
+              split one across the others
             </button>
+            {/* Beside the deletes, not only in step 2. These are the wallets
+                that hold the ETH, and the row's own delete tells the operator
+                the key is recoverable — which stops being true once the capped
+                archive evicts it. The file is what makes that promise good. */}
+            <V4BackupControls
+              masters={wallets}
+              seeds={seeds}
+              report={report}
+              reload={reload}
+              label="Export keys"
+            />
             <span className="spacer" />
             <span className="hint">one campaign at a time per wallet — make another to run two</span>
           </div>
