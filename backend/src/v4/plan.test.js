@@ -152,6 +152,49 @@ test('cost includes relay fees and gas, not just the amounts', () => {
   assert.ok(cost.feesWei > 0n && cost.gasWei > 0n);
 });
 
+test('promptStart drops the wait before the first send, and only when asked', () => {
+  const ids = Array.from({ length: 20 }, (_, i) => `m${i}`);
+  const addresses = Object.fromEntries(ids.map((w, i) => [w, `0x${String(i + 1).padStart(40, '0')}`]));
+  const shape = { days: 1, perDayMin: 20, perDayMax: 20, gapMinMs: 600_000, gapMaxMs: 3_600_000 };
+  const now = Date.parse('2026-09-01T00:00:00.000Z');
+
+  // The default keeps the offset: a seasoning campaign starting at the same
+  // hour every day is a column a filter could group by.
+  let sawAWait = false;
+  for (let s = 0; s < 40; s++) {
+    const out = plan.generate({
+      walletIds: ids,
+      addresses,
+      params: plan.normaliseParams(shape),
+      seed: `off-${s}`,
+      now,
+    });
+    if (out.transfers[0].dueAt - now > 2 * 3_600_000) sawAWait = true;
+  }
+  assert.ok(sawAWait, 'without promptStart some seed should wait hours before the first send');
+
+  // With it, the first send is one gap away — never more — on EVERY seed. This
+  // is the property a split needs: it fills plumbing, and sitting idle for
+  // twenty-two hours before paying the first wallet is pure cost.
+  for (let s = 0; s < 40; s++) {
+    const out = plan.generate({
+      walletIds: ids,
+      addresses,
+      params: plan.normaliseParams({ ...shape, promptStart: true }),
+      seed: `on-${s}`,
+      now,
+    });
+    const wait = out.transfers[0].dueAt - now;
+    assert.ok(wait <= shape.gapMaxMs, `first send waited ${wait}ms, more than one gap`);
+    assert.ok(wait >= shape.gapMinMs, `first send came ${wait}ms in, sooner than the gap floor`);
+  }
+
+  // A JSON round-trip between preview and commit must not turn it on or off.
+  assert.equal(plan.normaliseParams({ ...shape }).promptStart, false);
+  assert.equal(plan.normaliseParams({ ...shape, promptStart: 'false' }).promptStart, false);
+  assert.equal(plan.normaliseParams({ ...shape, promptStart: true }).promptStart, true);
+});
+
 test('normaliseParams refuses a zero-day campaign and a backwards range', () => {
   assert.throws(() => plan.normaliseParams({ days: 0 }), /days/);
   assert.throws(() => plan.normaliseParams({ days: 200 }), /days/);

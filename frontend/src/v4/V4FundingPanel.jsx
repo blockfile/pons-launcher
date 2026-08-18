@@ -202,6 +202,12 @@ export default function V4FundingPanel({
     amountMaxEth: sizing.maxEth,
     gapMinMs: 10 * 60_000,
     gapMaxMs: 60 * 60_000,
+    // No random wait before the first send. A seasoning campaign earns that
+    // offset — starting at the same hour daily is a pattern. A split does not:
+    // these wallets spend openly through Relay within hours, and the offset was
+    // costing up to twenty-two hours of doing nothing before the first funder
+    // was paid.
+    promptStart: true,
   });
 
   /**

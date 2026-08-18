@@ -144,7 +144,21 @@ function normaliseParams(raw = {}) {
   // there — the alternative is a day silently running over into the next.
   // generate() re-checks the same thing (see densityFits) for callers that
   // build a params object by hand instead of going through here.
-  const params = { days, perDayMin, perDayMax, amountMinEth, amountMaxEth, gapMinMs, gapMaxMs };
+  // Coerced to a real boolean rather than passed through: it reaches dayTimes
+  // as a truthiness test, and a params object that round-trips through JSON
+  // between preview and commit must not be able to arrive as the string
+  // "false" and read as true.
+  const promptStart = raw.promptStart === true || raw.promptStart === 'true';
+  const params = {
+    days,
+    perDayMin,
+    perDayMax,
+    amountMinEth,
+    amountMaxEth,
+    gapMinMs,
+    gapMaxMs,
+    promptStart,
+  };
   if (!densityFits(params)) throw densityError(params);
 
   return params;
@@ -281,7 +295,16 @@ function dayTimes(dayStart, count, params, r) {
   // dayStart + DAY_MS here would be tempting insurance, but it is the wrong
   // kind: clamping several tail transfers to the same instant would produce
   // duplicate dueAt values, trading a day-overflow bug for a worse one.)
-  const slack = Math.max(0, DAY_MS - total);
+  //
+  // promptStart drops the offset to zero, and is meant for ONE case: a split,
+  // which fills funding wallets rather than seeding fresh ones. The offset
+  // earns its cost on a seasoning campaign, where landing at the same hour
+  // every day is a pattern a filter could group by. A split's wallets are about
+  // to spend openly through Relay within hours, so disguising WHEN they were
+  // filled buys nothing — and the offset costs a great deal: with twenty
+  // transfers the slack is half a day, so a split could sit doing nothing for
+  // twenty-two hours before paying its first wallet. Observed, not theorised.
+  const slack = params.promptStart ? 0 : Math.max(0, DAY_MS - total);
   let at = dayStart + Math.floor(r.next() * slack);
 
   const times = [];
