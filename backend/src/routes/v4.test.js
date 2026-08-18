@@ -205,19 +205,27 @@ test('backup requires an explicit confirm', () => {
   assert.doesNotThrow(() => guards.assertConfirmed({ confirm: true }));
 });
 
-test('assertGenerateCount caps well below where keystore.persist() would stall the shared event loop', () => {
-  // keystore.generate(n) rewrites the WHOLE keystore file on every one of its
-  // n add() calls, so a single call is O(n^2) in bytes written and runs on
-  // the one event loop the runner's timers and every other tab share. 1000
-  // measured at ~10s of blocked event loop from an empty keystore.
+test('assertGenerateCount bounds how long the shared event loop may be blocked', () => {
+  // The cap is a budget for BLOCKED TIME, not a limit on wallets. Key
+  // generation is synchronous and runs on the one loop the runner's timers and
+  // a V1 launch also use, so the number tracks the measured cost per wallet
+  // rather than any property of the keystore. It moved from 200 to 5000 when
+  // that cost fell from ~4.8ms to ~0.7ms — one write per call instead of one
+  // per wallet, and keys straight from the CSPRNG rather than through a BIP-39
+  // mnemonic this keystore discards.
   assert.doesNotThrow(() => guards.assertGenerateCount(1));
   assert.doesNotThrow(() => guards.assertGenerateCount(guards.MAX_GENERATE_COUNT));
   assert.throws(
     () => guards.assertGenerateCount(guards.MAX_GENERATE_COUNT + 1),
     new RegExp(`count must be between 1 and ${guards.MAX_GENERATE_COUNT}`)
   );
-  assert.throws(() => guards.assertGenerateCount(1000), /count must be between/);
+  // A ceiling still exists so a typed 500000 is refused rather than freezing
+  // the box for minutes.
+  assert.throws(() => guards.assertGenerateCount(500_000), /count must be between/);
   assert.throws(() => guards.assertGenerateCount(0), /count must be between/);
+  assert.throws(() => guards.assertGenerateCount(-1), /count must be between/);
+  // Whole wallets only.
+  assert.throws(() => guards.assertGenerateCount(2.5), /count must be between/);
 });
 
 // ── onlyV4Wallets: never another tab's keys out of a V4 route ──────────────

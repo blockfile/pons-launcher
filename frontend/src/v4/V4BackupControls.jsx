@@ -33,6 +33,12 @@ export default function V4BackupControls({
   report,
   reload,
   label = 'Download backup',
+  // When set, the age is FIXED and the field is not offered. That is the
+  // difference between the two exports: the backup is a safety net and takes
+  // everything, so its filter is optional and starts blank; the usable export
+  // exists to answer one question — what can I spend today — and a filter an
+  // operator has to remember to type is not an answer.
+  fixedMinAge = 0,
 }) {
   const [busy, setBusy] = useState(false);
   const [open, setOpen] = useState(false);
@@ -42,7 +48,7 @@ export default function V4BackupControls({
   const [minAge, setMinAge] = useState('');
 
   const exported = masters.length + seeds.length;
-  const age = Math.max(0, Math.round(Number(minAge) || 0));
+  const age = fixedMinAge || Math.max(0, Math.round(Number(minAge) || 0));
   // Counted from each wallet's OWN funding, which is the only reading that is
   // useful: a wallet funded on the campaign's last day is young on the day the
   // campaign finishes, however old the run is.
@@ -110,16 +116,18 @@ export default function V4BackupControls({
             funding: in a five-day campaign the last day's wallets are three
             days behind the first day's, forever. Filtering here means the file
             you open on the day contains only what is safe to spend that day. */}
-        <label className="modal-type">
-          Only seed wallets funded at least this many days ago — blank for all
-          <input
-            type="number"
-            min="0"
-            placeholder="all"
-            value={minAge}
-            onChange={(e) => setMinAge(e.target.value)}
-          />
-        </label>
+        {!fixedMinAge && (
+          <label className="modal-type">
+            Only seed wallets funded at least this many days ago — blank for all
+            <input
+              type="number"
+              min="0"
+              placeholder="all"
+              value={minAge}
+              onChange={(e) => setMinAge(e.target.value)}
+            />
+          </label>
+        )}
         {age > 0 && (
           <p className="hint">
             <b>{wouldExport}</b> of {exported} — {seeds.length - (wouldExport - masters.length)} seed

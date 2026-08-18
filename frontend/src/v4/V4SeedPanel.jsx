@@ -70,6 +70,26 @@ export default function V4SeedPanel({ step, wallets, masters, facts, explorer, r
   const allTicked = wallets.length > 0 && ticked.length === wallets.length;
 
   /**
+   * How long a wallet has to sit before it is worth spending, and which ones
+   * have.
+   *
+   * COUNTED PER WALLET, FROM ITS OWN FUNDING. The campaign's age is not the
+   * wallet's: in a five-day run the last day's wallets are four days behind the
+   * first day's and stay that way, so "the batch is old enough" is never true
+   * of the batch — only of the part of it that was fed first.
+   *
+   * Three days is the default because it clears the "fresh wallet" filters this
+   * whole feature exists to get past, and it is a field rather than a constant
+   * because how long is long enough is a judgement about whoever is looking.
+   */
+  const [seasonDays, setSeasonDays] = useState(3);
+  const season = Math.max(1, Math.round(Number(seasonDays) || 0));
+  const usable = wallets.filter((w) => (w.daysSinceFunded ?? -1) >= season);
+  const waiting = wallets.filter(
+    (w) => w.daysSinceFunded != null && w.daysSinceFunded < season
+  );
+
+  /**
    * Delete the ticked wallets, one request each.
    *
    * ONE AT A TIME AND CARRYING ON PAST FAILURES. The server refuses a wallet a
@@ -135,6 +155,23 @@ export default function V4SeedPanel({ step, wallets, masters, facts, explorer, r
             wallets' deletes — see the header of V4BackupControls for why a
             backup belongs wherever a wallet can be deleted. */}
         <V4BackupControls masters={masters} seeds={wallets} report={report} reload={reload} />
+        {/* ONLY DRAWN WHEN SOMETHING IS ACTUALLY USABLE. This is not the backup
+            — that one takes everything and the gate in step 3 depends on it.
+            This is the file an operator opens on the day they intend to SPEND,
+            and it contains only wallets that have sat out the seasoning. A
+            button offering "usable wallets" on a day there are none would be
+            the console asserting something untrue about the very thing it
+            exists to keep track of. */}
+        {usable.length > 0 && (
+          <V4BackupControls
+            masters={masters}
+            seeds={wallets}
+            report={report}
+            reload={reload}
+            fixedMinAge={seasonDays}
+            label={`Export ${usable.length} usable`}
+          />
+        )}
         <span className="spacer" />
         <span className="hint">
           {MAX_GENERATE} at a time is the ceiling — the keystore is rewritten in full for every
@@ -163,6 +200,33 @@ export default function V4SeedPanel({ step, wallets, masters, facts, explorer, r
           <span className="hint">
             · <b>{funded}</b> funded
           </span>
+          {/* The two numbers an operator actually acts on once funding starts:
+              what can be spent, and what is still sitting. Drawn only after
+              something has been funded, because before that they are both zero
+              and say nothing. */}
+          {funded > 0 && (
+            <>
+              <span className="hint">
+                · <b>{usable.length}</b> usable
+              </span>
+              {waiting.length > 0 && (
+                <span className="hint">
+                  · <b>{waiting.length}</b> still aging
+                </span>
+              )}
+              <label className="hint" style={{ display: 'inline-flex', gap: 6, alignItems: 'center' }}>
+                · seasoned after
+                <input
+                  type="number"
+                  min="1"
+                  value={seasonDays}
+                  onChange={(e) => setSeasonDays(e.target.value)}
+                  style={{ width: 56 }}
+                />
+                days
+              </label>
+            </>
+          )}
           <span className="spacer" />
           {progress ? (
             <span className="hint">{progress}</span>

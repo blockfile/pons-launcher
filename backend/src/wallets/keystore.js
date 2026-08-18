@@ -27,7 +27,7 @@
 const crypto = require('crypto');
 const fs = require('fs');
 const path = require('path');
-const { Wallet, HDNodeWallet, getAddress } = require('ethers');
+const { Wallet, getAddress } = require('ethers');
 const config = require('../config');
 const history = require('../store/history');
 
@@ -56,6 +56,36 @@ const VERSION = 1;
 const MAX_ARCHIVED = 100;
 
 const DEFAULT_ID = 'default';
+
+// The order of the secp256k1 group. A private key must be in [1, n-1]; outside
+// that it is not a key and ethers refuses it.
+const SECP256K1_N = BigInt('0xfffffffffffffffffffffffffffffffebaaedce6af48a03bbfd25e8cd0364141');
+
+/**
+ * A fresh private key: 32 crypto-random bytes, checked against the curve order.
+ *
+ * NOT HDNodeWallet.createRandom(), which is what this used to be. That builds a
+ * BIP-39 mnemonic and stretches it through 2048 rounds of PBKDF2 to reach a
+ * seed — and this keystore stores private keys only and says so, so every one
+ * of those mnemonics was generated and thrown away. It cost 4.67ms a wallet
+ * against 0.29ms here, which is the whole reason generating a few hundred
+ * wallets blocked the event loop long enough to matter to a V1 launch.
+ *
+ * The entropy is identical in kind: both come from the platform CSPRNG. What is
+ * dropped is only the mnemonic encoding, which nothing here ever reads.
+ *
+ * The retry is for a value outside [1, n-1]. At roughly one chance in 2^128 it
+ * will not happen, but "will not happen" and "is handled" are different
+ * properties, and the alternative is a throw from deep inside ethers on a
+ * request that looked ordinary.
+ */
+function randomPrivateKey() {
+  for (;;) {
+    const bytes = crypto.randomBytes(32);
+    const value = BigInt(`0x${bytes.toString('hex')}`);
+    if (value > 0n && value < SECP256K1_N) return `0x${bytes.toString('hex')}`;
+  }
+}
 
 // v1 uses dev + bundle. v2 uses its own three so the strategies never share a
 // wallet — see the note above devWallet().
@@ -279,7 +309,7 @@ function build(userId) {
     return w;
   }
 
-  function add(privateKey, { label, role }) {
+  function add(privateKey, { label, role, defer = false }) {
     const wallet = new Wallet(privateKey);
     const store = load();
     if (store.wallets.some((w) => w.address.toLowerCase() === wallet.address.toLowerCase())) {
@@ -318,17 +348,43 @@ function build(userId) {
       ...encrypt(wallet.privateKey),
     };
     store.wallets.push(record);
-    persist();
+    // `defer` skips the write so a caller adding many wallets can pay for ONE
+    // rewrite instead of N. Nothing else changes: the record is already in the
+    // in-memory store above, and every deferring caller in this file persists
+    // before it returns. Default false, so every existing caller writes exactly
+    // when it always did.
+    if (!defer) persist();
     return publicView(record);
   }
 
   /** Generate `count` fresh wallets. Robinhood Chain is EVM — plain secp256k1. */
+  /**
+   * N fresh wallets, and ONE write.
+   *
+   * This used to persist per wallet, which made it quadratic in bytes: each
+   * add() rewrote the whole keystore, so generating into a file that was
+   * growing as you generated cost ~7ms a wallet and five hundred of them
+   * blocked the event loop for nearly four seconds. That loop is shared — the
+   * V4 runner's timers are on it, and so is a V1 launch, which is time-critical
+   * in a way none of this is. The cap that existed downstream was a guard
+   * against this function, not against wallets.
+   *
+   * Deferring is safe because add() has already put each record in the
+   * in-memory store; the write below is what makes them durable, and it happens
+   * before this returns. A throw partway through (a duplicate key, a singleton
+   * role already taken) leaves the earlier records in memory and unwritten —
+   * the same outcome the per-wallet version gave for the records it had not
+   * reached yet, and load() will re-read from disk on the next reset.
+   */
   function generate(count, { label, role } = {}) {
     const made = [];
     for (let i = 0; i < count; i++) {
-      const w = HDNodeWallet.createRandom();
-      made.push(add(w.privateKey, { label: label ? `${label}-${i + 1}` : undefined, role }));
+      const w = new Wallet(randomPrivateKey());
+      made.push(
+        add(w.privateKey, { label: label ? `${label}-${i + 1}` : undefined, role, defer: true })
+      );
     }
+    persist();
     return made;
   }
 

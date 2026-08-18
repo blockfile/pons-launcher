@@ -23,14 +23,18 @@ export const ROLES = {
 /**
  * How many seed wallets one generate call may ask for.
  *
- * The backend's own ceiling (MAX_GENERATE_COUNT in routes/v4.js): adding a
- * wallet rewrites the whole keystore file, so one call is quadratic in bytes
- * written and it runs on the event loop every other tab's requests share. The
- * field is capped here so the console never OFFERS a number the server will
+ * The backend's own ceiling (MAX_GENERATE_COUNT in routes/v4.js), which is a
+ * budget for how long the event loop may be blocked rather than a limit on
+ * wallets — key generation is synchronous and shares that loop with a V1
+ * launch. It was 200 while generating cost ~7ms a wallet; the write is now
+ * batched and the keys come straight from the CSPRNG instead of through a
+ * discarded BIP-39 mnemonic, so the same stall buys twenty-five times as many.
+ *
+ * The field is capped here so the console never OFFERS a number the server will
  * refuse. The refusal itself still lives on the server — this is the shape of
  * the form, not the guard.
  */
-export const MAX_GENERATE = 200;
+export const MAX_GENERATE = 5000;
 
 /** Balances and amounts arrive as decimal strings. Six places, the same precision v4/plan.js quotes at. */
 export const eth = (v) => (v == null || v === '' ? null : Number(v).toFixed(6));

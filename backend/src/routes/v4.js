@@ -84,16 +84,23 @@ function assertConfirmed(body) {
 
 // How many wallets one POST /v4/wallets/generate call may create.
 //
-// keystore.generate(n) calls add() n times, and add()'s persist() rewrites the
-// WHOLE keystore file synchronously on every single call — so a call is O(n^2)
-// in bytes written, not O(n), and it runs on the one event loop the runner's
-// timers and every other tab's requests share. v3's equivalent route caps at
-// 100 (routes/v3.js); V4 needs more per call since a campaign funds hundreds
-// of wallets, but 1000 measured at ~10s of BLOCKED event loop from an empty
-// keystore — long enough to stall a concurrent V1 launch on another tab,
-// which is the one thing this feature must never do. 200 keeps a single
-// call's worst case in the same ballpark as v3's.
-const MAX_GENERATE_COUNT = 200;
+// THIS NUMBER IS A BUDGET FOR BLOCKED TIME, NOT A LIMIT ON WALLETS. Key
+// generation runs on the one event loop the runner's timers and every other
+// tab's requests share, so a long call stalls a concurrent V1 launch — the one
+// thing this feature must never do.
+//
+// It was 200, because generating cost ~7ms a wallet: keystore.generate() wrote
+// the whole file once per wallet, and built each key through
+// HDNodeWallet.createRandom(), which mints a BIP-39 mnemonic this keystore
+// stores nowhere and immediately discards. Both are fixed — one write per call,
+// and keys straight from the CSPRNG — and the measured cost fell from 4815ms
+// per thousand to 725ms.
+//
+// So 5000 now buys roughly the same stall 200 used to: about four seconds at
+// the very top, and well under a second for the few hundred a campaign
+// actually wants. A ceiling still exists because a typed 500000 should be
+// refused rather than freezing the box for six minutes.
+const MAX_GENERATE_COUNT = 5000;
 
 function assertGenerateCount(n) {
   if (!Number.isInteger(n) || n < 1 || n > MAX_GENERATE_COUNT) {
