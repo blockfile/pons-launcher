@@ -1,5 +1,6 @@
 import { useState } from 'react';
 import { api } from '../api.js';
+import Modal from '../components/Modal.jsx';
 import Step from '../components/Step.jsx';
 import { Busy } from '../components/Section.jsx';
 import Address from '../components/Address.jsx';
@@ -30,6 +31,11 @@ import { MAX_GENERATE, ROLES, clock, eth } from './roles.js';
 export default function V4SeedPanel({ step, wallets, masters, facts, explorer, reload, report }) {
   const [busy, setBusy] = useState('');
   const [count, setCount] = useState(50);
+  // The wallet a delete is being asked about, or null. The whole record rather
+  // than an id, so the dialog can say whether a campaign already funded it —
+  // which is what decides whether deleting is tidying up or throwing away three
+  // days of aging.
+  const [deleting, setDeleting] = useState(null);
 
   async function act(what, fn) {
     setBusy(what);
@@ -47,6 +53,10 @@ export default function V4SeedPanel({ step, wallets, masters, facts, explorer, r
   // a number the server has already decided to refuse.
   const wanted = Math.min(MAX_GENERATE, Math.max(1, Math.round(Number(count) || 0)));
   const unprotected = wallets.filter((w) => !w.backedUp);
+  // What step 3 will actually work from. `claimed` means some campaign holds
+  // the wallet, in any state — so this is the count a batch can still divide.
+  const unclaimed = wallets.filter((w) => !w.claimed);
+  const funded = wallets.filter((w) => facts[w.id]?.status === 'sent').length;
 
   return (
     <Step {...step}>
@@ -90,6 +100,29 @@ export default function V4SeedPanel({ step, wallets, masters, facts, explorer, r
         </span>
       </div>
 
+      {/* THE FOUR NUMBERS THAT DECIDE THE NEXT ACTION, and the reason they are
+          up here rather than left to be counted off the table: how many exist
+          is not the number step 3 works from. A campaign takes the UNCLAIMED
+          ones, so an operator reading "100 wallets" off a table where sixty are
+          already spoken for will size the next batch wrong. Funded is what has
+          actually landed; unclaimed is what the next campaign can still use. */}
+      {wallets.length > 0 && (
+        <div className="row" style={{ marginBottom: 12 }}>
+          <span className="hint">
+            <b>{wallets.length}</b> seed wallet{wallets.length === 1 ? '' : 's'}
+          </span>
+          <span className="hint">
+            · <b>{wallets.length - unclaimed.length}</b> claimed by a campaign
+          </span>
+          <span className="hint">
+            · <b>{unclaimed.length}</b> free for the next one
+          </span>
+          <span className="hint">
+            · <b>{funded}</b> funded
+          </span>
+        </div>
+      )}
+
       {/* The gate, stated before it is hit rather than only as a refusal. Step 3
           will not start a campaign while this count is above zero. */}
       {unprotected.length > 0 && (
@@ -128,6 +161,7 @@ export default function V4SeedPanel({ step, wallets, masters, facts, explorer, r
                 <th>Funded at</th>
                 <th className="num">Age</th>
                 <th>Key</th>
+                <th />
               </tr>
             </thead>
             <tbody>
@@ -178,6 +212,18 @@ export default function V4SeedPanel({ step, wallets, masters, facts, explorer, r
                         {w.backedUp ? 'backed up' : 'no backup'}
                       </span>
                     </td>
+                    <td className="num">
+                      {/* Offered on every row, including claimed ones. The
+                          server reads the campaigns and refuses a wallet one
+                          still owes a transfer to, naming it — a rule this
+                          table cannot evaluate, since `claimed` says a campaign
+                          holds the wallet but not whether that campaign is
+                          still live. Hiding the link on `claimed` would block
+                          deleting wallets from a run that finished weeks ago. */}
+                      <button className="link" onClick={() => setDeleting(w)}>
+                        delete
+                      </button>
+                    </td>
                   </tr>
                 );
               })}
@@ -199,6 +245,32 @@ export default function V4SeedPanel({ step, wallets, masters, facts, explorer, r
         </div>
       )}
 
+      {/* A seed wallet is worth something only for having sat untouched since
+          it was funded, so the dialog leads with what deleting actually throws
+          away — the age, and the ETH already sent to it. The key is archived
+          rather than destroyed, which is said plainly for the same reason it is
+          in step 1: a dialog that implies irreversibility teaches an operator
+          to distrust the one place it really is. */}
+      <Modal
+        open={Boolean(deleting)}
+        danger
+        title={`Archive seed wallet ${deleting ? deleting.address.slice(0, 10) : ''}…?`}
+        question={
+          deleting && facts[deleting.id]?.status === 'sent'
+            ? `A campaign already funded this wallet — ${eth(facts[deleting.id].amountEth)} ETH, ${deleting.ageDays} day(s) ago. Archiving throws that aging away; the ETH stays at the address and is reachable only by restoring the key.`
+            : 'It has not been funded yet, so nothing is lost but the key itself — which is archived on the server, not destroyed. A campaign that still owes this wallet a transfer will refuse the delete.'
+        }
+        confirmLabel="Archive wallet"
+        onConfirm={() => {
+          const w = deleting;
+          setDeleting(null);
+          act('delete', async () => {
+            const out = await api(`/v4/wallets/${w.id}`, 'DELETE');
+            return `Archived ${out.address}. Restore it with: npm run archive:restore ${out.address}`;
+          });
+        }}
+        onCancel={() => setDeleting(null)}
+      />
     </Step>
   );
 }
