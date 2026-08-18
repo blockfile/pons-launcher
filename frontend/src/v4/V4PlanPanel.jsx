@@ -257,24 +257,31 @@ export default function V4PlanPanel({ step, masters, seeds, campaigns, planDefau
         >
           Preview
         </Busy>
-        <Busy busy={busy === 'start'} disabled={!ready} onClick={() => setArming(true)}>
-          Start campaign
-        </Busy>
         {/* ONE PRESS FOR EVERY FUNDER, because a campaign is one funder feeding
             its own wallets — two sharing a funder would collide on its nonce —
             and that rule left an operator holding twenty funders setting up
             twenty campaigns by hand. Which made the split that FILLS twenty
-            funders only half a feature. */}
+            funders only half a feature.
+            FIRST AND PRIMARY when it is available: with twenty funders this is
+            the ordinary action, and the single start below is the exception. */}
         {freeFunders.length > 1 && (
-          <Busy
-            busy={busy === 'batch'}
-            className="ghost"
-            disabled={free === 0}
-            onClick={() => setBatching(true)}
-          >
+          <Busy busy={busy === 'batch'} disabled={free === 0} onClick={() => setBatching(true)}>
             Start on all {freeFunders.length} funders
           </Busy>
         )}
+        {/* Demoted to the ghost once a batch exists. Styled as the primary it
+            read as the thing to press, and the funding-wallet dropdown it needs
+            then read as a required field on a form where it is optional. It
+            stays because a single campaign on a chosen wallet is how a trial
+            run is done — one funder, a few wallets, before committing twenty. */}
+        <Busy
+          busy={busy === 'start'}
+          className={freeFunders.length > 1 ? 'ghost' : ''}
+          disabled={!ready}
+          onClick={() => setArming(true)}
+        >
+          Start one campaign
+        </Busy>
         {/* Says what the batch does NOT need. The dropdown above it is the
             only control on this form the batch ignores, and an operator
             staring at "choose one…" has no way to know that. */}
