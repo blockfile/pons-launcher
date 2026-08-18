@@ -81,6 +81,10 @@ export default function V4PlanPanel({ step, masters, seeds, campaigns, planDefau
   // same count so one set of params describes all of them — see divideSeeds in
   // routes/v4.js for why an uneven split refuses half the batch.
   const [seedsPer, setSeedsPer] = useState(2);
+  // Which funders a batch will use. null means "every free one" — the state an
+  // operator who never opens the list should get, rather than an empty
+  // selection they have to fill in before the button does anything.
+  const [picked, setPicked] = useState(null);
 
   // Seed the form from the server's DEFAULTS once, on the first fetch that
   // carries them. ONCE is the whole of it: the wallet list is polled, and
@@ -150,10 +154,21 @@ export default function V4PlanPanel({ step, masters, seeds, campaigns, planDefau
     campaigns.filter((c) => c.status === 'running').map((c) => c.masterWalletId)
   );
   const freeFunders = masters.filter((w) => !busyFunders.has(w.id));
+  // The chosen ones, or all of them. Intersected with what is actually free, so
+  // a funder that started a campaign since the list was opened drops out rather
+  // than being sent to a route that would refuse it.
+  const chosenFunders = picked
+    ? freeFunders.filter((w) => picked.includes(w.id))
+    : freeFunders;
   const batchCampaigns = Math.min(
-    freeFunders.length,
+    chosenFunders.length,
     Math.floor(free / Math.max(1, Math.round(Number(seedsPer) || 0)))
   );
+  const toggle = (id) =>
+    setPicked((cur) => {
+      const base = cur ?? freeFunders.map((w) => w.id);
+      return base.includes(id) ? base.filter((x) => x !== id) : [...base, id];
+    });
   const ready = Boolean(form.name.trim() && master && preview?.feasible?.ok);
   const cost = preview?.cost || null;
   const overhead = cost ? weiToEth(cost.totalWei) - weiToEth(cost.depositsWei) : 0;
@@ -266,7 +281,8 @@ export default function V4PlanPanel({ step, masters, seeds, campaigns, planDefau
             the ordinary action, and the single start below is the exception. */}
         {freeFunders.length > 1 && (
           <Busy busy={busy === 'batch'} disabled={free === 0} onClick={() => setBatching(true)}>
-            Start on all {freeFunders.length} funders
+            Start on {chosenFunders.length === freeFunders.length ? 'all ' : ''}
+            {chosenFunders.length} funder{chosenFunders.length === 1 ? '' : 's'}
           </Busy>
         )}
         {/* Demoted to the ghost once a batch exists. Styled as the primary it
@@ -470,6 +486,11 @@ export default function V4PlanPanel({ step, masters, seeds, campaigns, planDefau
               params: params(),
               seedsPerFunder: Math.max(1, Math.round(Number(seedsPer) || 0)),
               name: form.name.trim() || undefined,
+              // Sent only when a subset was actually chosen. Omitted, the route
+              // takes every free funder — which is the same answer, but reached
+              // by the server reading the live list rather than by this tab
+              // sending one it may have read a minute ago.
+              funderIds: picked ? chosenFunders.map((w) => w.id) : undefined,
             });
             setPreview(null);
             const refused = out.failed.length
@@ -490,9 +511,51 @@ export default function V4PlanPanel({ step, masters, seeds, campaigns, planDefau
             onChange={(e) => setSeedsPer(e.target.value)}
           />
         </label>
-        <Fact label="Free funders">{freeFunders.length}</Fact>
         <Fact label="Unclaimed seeds">{free}</Fact>
         <Fact label="Days each">{form.days}</Fact>
+
+        {/* Every free funder, tickable. All on by default — an operator who
+            never opens this list wants all of them, and an empty selection
+            they have to fill in before anything happens is the wrong default
+            for the button they just pressed. Unticking is for the case that
+            actually comes up: holding one funder back, or skipping one that is
+            short of ETH. */}
+        <div className="row" style={{ marginTop: 12 }}>
+          <b>Funding wallets</b>
+          <span className="spacer" />
+          <button className="link" onClick={() => setPicked(freeFunders.map((w) => w.id))}>
+            all
+          </button>
+          <button className="link" onClick={() => setPicked([])}>
+            none
+          </button>
+        </div>
+        <div className="table-scroll" style={{ maxHeight: 220 }}>
+          <table>
+            <tbody>
+              {freeFunders.map((w) => {
+                const on = chosenFunders.some((x) => x.id === w.id);
+                return (
+                  <tr key={w.id}>
+                    <td style={{ width: 32 }}>
+                      <input type="checkbox" checked={on} onChange={() => toggle(w.id)} />
+                    </td>
+                    <td>
+                      <span className="mono">{w.address.slice(0, 14)}…</span>
+                    </td>
+                    <td className="num">
+                      {w.balanceEth == null ? (
+                        <span className="hint">unreadable</span>
+                      ) : (
+                        `${Number(w.balanceEth).toFixed(6)} ETH`
+                      )}
+                    </td>
+                  </tr>
+                );
+              })}
+            </tbody>
+          </table>
+        </div>
       </Modal>
     </Step>
   );

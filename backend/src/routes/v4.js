@@ -722,7 +722,12 @@ router.post('/v4/campaigns/batch', requireApiKey, async (req, res, next) => {
     // anyway; excluding it here means the batch reports "18 started" rather than
     // "18 started, 2 failed" for a state that is not an error.
     const busy = new Set(store.running().map((c) => c.masterWalletId));
-    const requested = Array.isArray(body.funderIds) && body.funderIds.length ? body.funderIds : null;
+    // An ARRAY means "these", even when it is empty — only a missing field
+    // means "all of them". Treating [] as absent would turn "none selected"
+    // into "every funder", which is the one misreading of this parameter that
+    // spends money the caller did not ask to spend.
+    const requested = Array.isArray(body.funderIds) ? body.funderIds : null;
+    if (requested && !requested.length) throw new Error('funderIds is empty — no funding wallet was chosen');
     const funders = v4roles
       .masters(ks)
       .filter((w) => !busy.has(w.id))
