@@ -164,6 +164,22 @@ export default function V4PlanPanel({ step, masters, seeds, campaigns, planDefau
     chosenFunders.length,
     Math.floor(free / Math.max(1, Math.round(Number(seedsPer) || 0)))
   );
+  /**
+   * Whether ONE campaign of `seedsPer` wallets fits the schedule above.
+   *
+   * The same arithmetic plan.feasible does on the server: a campaign's floor is
+   * days x perDayMin and its ceiling is days x perDayMax. Checked here because
+   * the batch's own numbers are set in this dialog while days and per-day live
+   * on the form behind it — so the combination that fails is one no single
+   * field looks wrong in. Five wallets over three days at ten a day minimum is
+   * refused by every campaign in the batch, and without this the operator finds
+   * that out from eight identical errors after pressing the button.
+   */
+  const perFunder = Math.max(1, Math.round(Number(seedsPer) || 0));
+  const batchFloor = Number(form.days) * Number(form.perDayMin);
+  const batchCeiling = Number(form.days) * Number(form.perDayMax);
+  const batchFits = perFunder >= batchFloor && perFunder <= batchCeiling;
+
   const toggle = (id) =>
     setPicked((cur) => {
       const base = cur ?? freeFunders.map((w) => w.id);
@@ -475,10 +491,12 @@ export default function V4PlanPanel({ step, masters, seeds, campaigns, planDefau
         question={
           batchCampaigns < 1
             ? `Not enough unclaimed seed wallets — ${free} free, and ${seedsPer} each means a funder cannot be filled. Generate more in step 2.`
-            : `${batchCampaigns * Math.max(1, Math.round(Number(seedsPer) || 0))} seed wallets will be divided evenly across ${batchCampaigns} funder(s), ${seedsPer} each, on the schedule above. Each funder is checked for its own balance — one short of ETH is refused on its own and the others still start.`
+            : !batchFits
+              ? `${perFunder} wallet(s) per funder does not fit ${form.days} day(s) at ${form.perDayMin}–${form.perDayMax} a day: each campaign must hold between ${batchFloor} and ${batchCeiling}. Every campaign in this batch would be refused. Change per-day to 1–${Math.max(1, perFunder)} on the form behind this, or change the count above.`
+              : `${batchCampaigns * perFunder} seed wallets will be divided evenly across ${batchCampaigns} funder(s), ${perFunder} each, on the schedule above. Each funder is checked for its own balance — one short of ETH is refused on its own and the others still start.`
         }
         confirmLabel={`Start ${batchCampaigns} campaigns`}
-        confirmDisabled={batchCampaigns < 1}
+        confirmDisabled={batchCampaigns < 1 || !batchFits}
         onConfirm={async () => {
           setBatching(false);
           await act('batch', async () => {
@@ -513,6 +531,12 @@ export default function V4PlanPanel({ step, masters, seeds, campaigns, planDefau
         </label>
         <Fact label="Unclaimed seeds">{free}</Fact>
         <Fact label="Days each">{form.days}</Fact>
+        <Fact label="Per day">
+          {form.perDayMin}–{form.perDayMax}
+        </Fact>
+        <Fact label="Each campaign holds">
+          {batchFits ? `${perFunder} wallet(s)` : `${batchFloor}–${batchCeiling} required`}
+        </Fact>
 
         {/* Every free funder, tickable. All on by default — an operator who
             never opens this list wants all of them, and an empty selection
