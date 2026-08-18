@@ -172,8 +172,12 @@ export default function V4PlanPanel({ step, masters, seeds, campaigns, planDefau
           campaign name
           <input value={form.name} onChange={set('name')} placeholder="e.g. august seasoning" />
         </label>
+        {/* Only the single-campaign path reads this. "Start on all N funders"
+            picks the free funders itself and ignores the dropdown entirely —
+            which is not something a form can be expected to imply, so the
+            label says it whenever a batch is actually available. */}
         <label className="half">
-          funding wallet
+          funding wallet{freeFunders.length > 1 ? ' — for one campaign only' : ''}
           <select
             value={master}
             onChange={(e) => {
@@ -270,6 +274,12 @@ export default function V4PlanPanel({ step, masters, seeds, campaigns, planDefau
           >
             Start on all {freeFunders.length} funders
           </Busy>
+        )}
+        {/* Says what the batch does NOT need. The dropdown above it is the
+            only control on this form the batch ignores, and an operator
+            staring at "choose one…" has no way to know that. */}
+        {freeFunders.length > 1 && free > 0 && (
+          <span className="hint">no funding wallet needed — it uses every free one</span>
         )}
         <span className="spacer" />
         <span className="hint">
