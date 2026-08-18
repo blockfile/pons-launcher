@@ -30,6 +30,7 @@ export default function V4FundingPanel({
   step,
   wallets,
   seeds = [],
+  planDefaults,
   campaignFor,
   explorer,
   reload,
@@ -43,8 +44,10 @@ export default function V4FundingPanel({
   const [keys, setKeys] = useState('');
   const [showSplit, setShowSplit] = useState(false);
   const [source, setSource] = useState('');
-  const [amountMinEth, setAmountMinEth] = useState('0.028');
-  const [amountMaxEth, setAmountMaxEth] = useState('0.035');
+  // What each funder is being filled FOR, rather than how much to send it. The
+  // amount is arithmetic on this, and it is arithmetic an operator should not
+  // be doing by hand — see splitSizing below.
+  const [seedsPer, setSeedsPer] = useState(4);
   const [split, setSplit] = useState(null);
   // The wallet a delete is being asked about, or null. Held as the whole record
   // rather than an id so the dialog can state its balance — which is the fact
@@ -150,12 +153,53 @@ export default function V4FundingPanel({
    * thing worth buying is that they do not all arrive in one block from one
    * address. Ten minutes to an hour between them does that in an afternoon.
    */
+  /**
+   * How much each funder needs, worked out from what it is being filled for.
+   *
+   * THE MINIMUM IS SIZED ON THE WORST CASE, NOT THE AVERAGE, and that is the
+   * whole reason this is computed rather than typed. A split hands every funder
+   * a RANDOM amount inside the range, and a seasoning campaign then costs
+   * whatever ITS dice rolled. Size the split on the average and roughly half
+   * the funders draw less than their campaign will cost — which does not fail
+   * here, at the split, where it would be obvious. It fails later, one funder
+   * at a time, when the campaign is started and the balance check refuses it.
+   *
+   * So: seeds × the largest amount a seed can draw, plus Relay's fee and gas.
+   * Every funder can then afford the most expensive campaign it could possibly
+   * be given. Whatever is left over stays in the funder and is still spendable
+   * — it funds the next batch rather than being lost.
+   */
+  const splitSizing = () => {
+    const seedMax = Number(planDefaults?.amountMaxEth ?? 0.0089);
+    const n = Math.max(1, Math.round(Number(seedsPer) || 0));
+    // 3% Relay fee, and a gas allowance per transfer with room to spare — the
+    // preview's own estimate is authoritative and will refuse if this is thin.
+    const perFunder = n * seedMax * 1.03 + n * 0.0002;
+    return {
+      seeds: n,
+      seedMax,
+      minEth: perFunder.toFixed(6),
+      // A spread, or every funder receives an identical figure — the one shape
+      // this feature exists to avoid, reintroduced at the hop above it.
+      maxEth: (perFunder * 1.18).toFixed(6),
+      // What the whole split will cost the source, near enough to warn on.
+      totalEth: (perFunder * 1.09 * targets.length * 1.033).toFixed(6),
+    };
+  };
+
+  const sizing = splitSizing();
+  const sourceWallet = wallets.find((w) => w.id === source);
+  const shortfall =
+    sourceWallet && sourceWallet.balanceEth != null
+      ? Number(sizing.totalEth) - Number(sourceWallet.balanceEth)
+      : 0;
+
   const splitParams = () => ({
     days: 1,
     perDayMin: targets.length,
     perDayMax: targets.length,
-    amountMinEth,
-    amountMaxEth,
+    amountMinEth: sizing.minEth,
+    amountMaxEth: sizing.maxEth,
     gapMinMs: 10 * 60_000,
     gapMaxMs: 60 * 60_000,
   });
@@ -206,32 +250,40 @@ export default function V4FundingPanel({
               </select>
             </label>
             <label>
-              each gets, min
+              seed wallets each will feed
               <input
-                value={amountMinEth}
+                type="number"
+                min="1"
+                max="200"
+                value={seedsPer}
                 onChange={(e) => {
-                  setAmountMinEth(e.target.value);
+                  setSeedsPer(e.target.value);
                   setSplit(null);
                 }}
-              />
-            </label>
-            <label>
-              max
-              <input
-                value={amountMaxEth}
-                onChange={(e) => {
-                  setAmountMaxEth(e.target.value);
-                  setSplit(null);
-                }}
+                style={{ width: 90 }}
               />
             </label>
           </div>
 
           <p className="hint">
             {source
-              ? `${targets.length} wallet(s) will be funded — every funding wallet except the one paying.`
+              ? `${targets.length} wallet(s) will be funded — every funding wallet except the one paying — ` +
+                `${sizing.minEth}–${sizing.maxEth} ETH each. That covers ${sizing.seeds} seed ` +
+                `wallet(s) per funder even if every one of them draws the top of the ${sizing.seedMax} ETH ` +
+                `range, so no campaign can be refused later for a funder that happened to draw low. ` +
+                `Anything unspent stays in the funder.`
               : 'Pick the wallet holding the ETH.'}
           </p>
+
+          {source && shortfall > 0 && (
+            <p className="hint">
+              This needs about <b>{sizing.totalEth}</b> ETH and the wallet holds{' '}
+              <b>{Number(sourceWallet.balanceEth).toFixed(6)}</b> — short by{' '}
+              <b>{shortfall.toFixed(6)}</b>. Feed fewer seed wallets per funder, delete a funding
+              wallet or two, or add ETH. The preview refuses rather than starting something that
+              runs dry.
+            </p>
+          )}
 
           {split && (
             <div className="notice">

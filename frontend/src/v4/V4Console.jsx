@@ -318,6 +318,9 @@ export default function V4Console({ health, credential, report, output, reported
         // that counted just the funders would imply a smaller scope than the
         // file it produces.
         seeds={seeds}
+        // The split sizes itself from the seed amount range a campaign will
+        // actually use, so it reads the same defaults step 3's form does.
+        planDefaults={wallets.planDefaults}
         campaignFor={campaignFor}
         explorer={explorer}
         reload={loadWallets}
