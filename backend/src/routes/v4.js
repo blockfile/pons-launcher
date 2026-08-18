@@ -138,6 +138,41 @@ function assertImportRole(role) {
  *
  * @param {object[]} campaigns every campaign in the store
  */
+/**
+ * When each seed wallet was actually funded, and how long ago.
+ *
+ * THE BACKUP FILE HAS TO CARRY THIS OR IT CANNOT BE USED SAFELY. The whole
+ * value of a seed wallet is its age, and a file of a hundred indistinguishable
+ * keys is exactly how an operator reaches for one funded yesterday while
+ * believing the batch is five days old. The console shows the age; the file
+ * people actually work from did not, and the file is what outlives the tab.
+ *
+ * `fundedAt` is the moment the transfer was SENT, not the moment the key was
+ * made. Those differ by however long the campaign took to reach that wallet —
+ * up to the whole length of the run — and it is the funding that starts the
+ * clock anything looking at the chain can see.
+ *
+ * A wallet with no record is `null` rather than zero: never funded and funded
+ * moments ago are different facts, and a zero would read as the second.
+ */
+function fundingFacts(campaigns, nowMs) {
+  const byWallet = new Map();
+  for (const c of campaigns) {
+    for (const t of c.transfers || []) {
+      if (t.status !== 'sent' || !t.sentAt) continue;
+      const at = Date.parse(t.sentAt);
+      byWallet.set(t.walletId, {
+        fundedAt: t.sentAt,
+        daysSinceFunded: Math.floor((nowMs - at) / plan.DAY_MS),
+        campaign: c.name || c.id,
+        campaignDay: t.day ?? null,
+        amountEth: t.amountEth ?? null,
+      });
+    }
+  }
+  return byWallet;
+}
+
 function assertNotBusy(walletId, campaigns) {
   const LIVE = new Set(['running', 'paused', 'halted']);
   for (const c of campaigns) {
@@ -441,6 +476,7 @@ router.get('/v4/wallets', requireApiKey, async (req, res, next) => {
     const claimed = store.claimedSeedIds();
     const missingBackup = new Set(store.backedUp(seeds.map((w) => w.id)));
     const now = Date.now();
+    const walletFacts = fundingFacts(store.campaigns(), now);
 
     const masterRows = await Promise.all(
       masters.map(async (w) => ({ ...(await withMasterBalance(w)), inCampaign: busyMasters.has(w.id) }))
@@ -453,7 +489,16 @@ router.get('/v4/wallets', requireApiKey, async (req, res, next) => {
           ...w,
           claimed: claimed.has(w.id),
           backedUp: !missingBackup.has(w.id),
+          // Since the key was made. Kept because it is what "this wallet has
+          // existed for N days" means to the keystore — but it is NOT the age
+          // anything reading the chain can see, and it is not what decides
+          // whether a wallet is safe to spend. See daysSinceFunded.
           ageDays: Math.floor((now - Date.parse(w.createdAt)) / plan.DAY_MS),
+          // THE AGE THAT MATTERS. Generating a key touches nothing on chain, so
+          // a wallet's visible life starts at the transfer that funds it — and
+          // in a five-day campaign the wallets fed on the last day are four days
+          // younger than the first day's, permanently. null until funded.
+          ...(walletFacts.get(w.id) || { fundedAt: null, daysSinceFunded: null }),
         })),
         roles: v4roles.ROLES,
         // The form's starting numbers come from HERE, not from a copy in the
@@ -601,9 +646,36 @@ router.post(
     try {
       assertConfirmed(req.body);
       const ks = keystoreFor(req.user.id);
-      const wallets = onlyV4Wallets(ks.exportAll());
+      const store = storeFor(req.user.id);
+      const now = Date.now();
+      const facts = fundingFacts(store.campaigns(), now);
+
+      // Every V4 key, each carrying WHEN it was funded — see fundingFacts for
+      // why a file without that cannot be used safely.
+      const all = onlyV4Wallets(ks.exportAll()).map((w) => ({
+        ...w,
+        ...(facts.get(w.id) || { fundedAt: null, daysSinceFunded: null }),
+      }));
+
+      // Optional: only wallets that have been sitting at least this long.
+      // Answers the question the file is opened to answer — "which of these is
+      // safe to use today" — rather than leaving an operator to sort a hundred
+      // rows by hand and get it wrong once. Funding wallets are never filtered
+      // out: they are not aged, they are plumbing, and a backup missing the
+      // wallet holding the ETH is the one gap this file must never have.
+      const minAge = Number((req.body || {}).minAgeDays);
+      const seasoned = Number.isFinite(minAge) && minAge > 0;
+      const wallets = seasoned
+        ? all.filter(
+            (w) => w.role === v4roles.ROLES.master || (w.daysSinceFunded ?? -1) >= minAge
+          )
+        : all;
+
+      // Recorded against what was EXPORTED, not what exists. A filtered
+      // download must not mark the wallets it left out as backed up — the gate
+      // in step 3 would then let a campaign start on keys that are in no file.
       const ids = wallets.map((w) => w.id);
-      storeFor(req.user.id).recordBackup(ids);
+      store.recordBackup(ids);
 
       console.warn(`[pons-launcher] V4 KEYSTORE BACKUP EXPORTED — ${wallets.length} private keys`);
       // The count and the fact, never the keys.
@@ -615,6 +687,14 @@ router.post(
         exportedAt: new Date().toISOString(),
         chainId: config.chainId,
         count: wallets.length,
+        minAgeDays: seasoned ? minAge : null,
+        // Said in the file, because the file is read months later by someone
+        // who no longer remembers which button produced it.
+        note: seasoned
+          ? `Filtered: seed wallets funded at least ${minAge} day(s) ago, plus every funding wallet. ` +
+            `${all.length - wallets.length} wallet(s) were left out and are NOT in this file.`
+          : 'Every V4 wallet. Each seed carries fundedAt and daysSinceFunded — a wallet is only ' +
+            'worth what its age is worth, so check that before spending one.',
         warning:
           'These private keys control real funds. Anyone holding this file can spend every wallet in it. ' +
           'Store it offline. There are no mnemonics: the keystore holds private keys only.',
@@ -893,6 +973,7 @@ module.exports._private = {
   assertNotSelfFunding,
   assertNotBusy,
   divideSeeds,
+  fundingFacts,
   assertGenerateCount,
   MAX_GENERATE_COUNT,
   onlyV4Wallets,

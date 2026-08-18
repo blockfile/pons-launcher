@@ -40,6 +40,45 @@ test('a split refuses to pay its own source', () => {
   assert.doesNotThrow(() => guards.assertNotSelfFunding([], 'm1'));
 });
 
+test('a backup can tell which wallets are old enough to use', () => {
+  const DAY = 86_400_000;
+  const now = Date.parse('2026-08-25T12:00:00.000Z');
+  const iso = (d) => new Date(now - d * DAY).toISOString();
+  const campaigns = [
+    {
+      id: 'c1',
+      name: 'august',
+      transfers: [
+        { walletId: 's-old', status: 'sent', sentAt: iso(5), day: 1, amountEth: '0.004' },
+        { walletId: 's-new', status: 'sent', sentAt: iso(1), day: 5, amountEth: '0.005' },
+        // Due but not sent: never funded is not the same fact as funded today.
+        { walletId: 's-pending', status: 'pending', dueAt: now + DAY, day: 6 },
+      ],
+    },
+  ];
+
+  const facts = guards.fundingFacts(campaigns, now);
+
+  // Age is counted from the SEND, not from when the key was made — those differ
+  // by however long the campaign took to reach that wallet.
+  assert.equal(facts.get('s-old').daysSinceFunded, 5);
+  assert.equal(facts.get('s-new').daysSinceFunded, 1);
+  assert.equal(facts.get('s-old').campaign, 'august');
+  assert.equal(facts.get('s-old').campaignDay, 1);
+
+  // A wallet that was never funded has no entry at all, so the route can write
+  // null rather than a zero that would read as "funded moments ago".
+  assert.equal(facts.get('s-pending'), undefined);
+
+  // The filter the file exists for: five days seasoned keeps the old one and
+  // drops the one funded yesterday.
+  const keep = (id, min) => (facts.get(id)?.daysSinceFunded ?? -1) >= min;
+  assert.equal(keep('s-old', 3), true);
+  assert.equal(keep('s-new', 3), false);
+  assert.equal(keep('s-pending', 3), false);
+  assert.equal(keep('s-new', 1), true);
+});
+
 test('a batch divides seeds evenly and leaves the remainder unclaimed', () => {
   const seeds = ['s1', 's2', 's3', 's4', 's5', 's6', 's7'];
   const funders = ['m1', 'm2', 'm3'];

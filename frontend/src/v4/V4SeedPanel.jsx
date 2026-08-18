@@ -298,7 +298,19 @@ export default function V4SeedPanel({ step, wallets, masters, facts, explorer, r
                         '—'
                       )}
                     </td>
-                    <td className="num">{w.ageDays}d</td>
+                    {/* Days since it was FUNDED, not since the key was made.
+                        Generating a key touches nothing on chain, so a wallet's
+                        visible life starts at the transfer — and this is the
+                        number that decides whether it is safe to spend. An
+                        unfunded wallet has no age at all, which is a different
+                        fact from "zero days old". */}
+                    <td className="num">
+                      {w.daysSinceFunded == null ? (
+                        <span className="hint">—</span>
+                      ) : (
+                        `${w.daysSinceFunded}d`
+                      )}
+                    </td>
                     <td>
                       <span className={`fund-state ${w.backedUp ? 'is-in' : 'is-part'}`}>
                         {w.backedUp ? 'backed up' : 'no backup'}
@@ -332,7 +344,10 @@ export default function V4SeedPanel({ step, wallets, masters, facts, explorer, r
               means to anything looking at it from outside. */}
           <p className="hint">
             Funded is what the campaign sent, not a balance read back — these wallets receive once
-            and are not spent from here. Age counts from when the key was made.
+            and are not spent from here. Age counts from the transfer that funded each wallet, not
+            from when its key was made: generating a key touches nothing on chain, so a wallet's
+            visible life starts when a solver pays it. In a five-day campaign the last day's
+            wallets stay four days younger than the first day's, permanently.
           </p>
         </div>
       )}
