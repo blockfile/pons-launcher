@@ -107,6 +107,21 @@ function assertMaster(walletId, masters) {
   }
 }
 
+/**
+ * Only funding wallets may be imported. Seeds may not — see the header on the
+ * import route for why an imported key is not a fresh wallet however long it
+ * then sits.
+ */
+function assertImportRole(role) {
+  if (role !== v4roles.ROLES.master) {
+    throw new Error(
+      `only ${v4roles.ROLES.master} wallets can be imported. A ${v4roles.ROLES.seed} wallet is ` +
+        'worth seasoning because its history starts with the transfer that funds it, and an ' +
+        'imported key already has one. Generate seed wallets instead.'
+    );
+  }
+}
+
 function assertUnclaimed(walletIds, claimed) {
   const taken = walletIds.filter((id) => claimed.has(id));
   if (taken.length) {
@@ -371,6 +386,52 @@ router.post('/v4/wallets/generate', requireApiKey, (req, res, next) => {
   }
 });
 
+// POST /api/v4/wallets/import — an existing key, as a FUNDING wallet only.
+//
+// SEEDS CANNOT BE IMPORTED, and that refusal is the only reason this route
+// checks a role at all. A seed wallet is worth seasoning because its entire
+// on-chain existence begins with the transfer that funds it: no history, no
+// counterparties, nothing to correlate against. A key imported from elsewhere
+// has already lived, and whatever it did it did with an address that is now
+// about to be aged as though it were new. That is not seasoning a fresh
+// wallet, it is seasoning an old one and calling it fresh.
+//
+// A funding wallet is a different case and is allowed. It is plumbing: it pays
+// and does nothing else, and an operator who already holds a clean funded
+// wallet saves the one transfer in this whole pipeline that nothing
+// randomises. The caveat is real and the console states it — a funder with
+// history hands that history to everything it pays for. The Relay hop breaks
+// the funder-to-seed edge and does nothing whatever about the funder's past.
+//
+// requireAuthConfigured for the same reason the backup route carries it: a
+// private key crosses the wire, and a deployment with no auth configured must
+// fail closed rather than accept one from anybody who can reach the port.
+router.post('/v4/wallets/import', requireApiKey, requireAuthConfigured, (req, res, next) => {
+  try {
+    const { privateKeys, label } = req.body || {};
+    const role = (req.body || {}).role || v4roles.ROLES.master;
+    assertImportRole(role);
+    const keys = (Array.isArray(privateKeys)
+      ? privateKeys
+      : String(privateKeys || '').split(/[\s,]+/)
+    )
+      .map((k) => String(k).trim())
+      .filter(Boolean);
+    if (!keys.length) throw new Error('privateKeys is required');
+
+    const made = keystoreFor(req.user.id).importKeys(keys, { role, label });
+    // The keys themselves are never logged — only what they resolved to, the
+    // same line routes/wallets.js writes for its own import.
+    activityFor(req.user.id).record('v4', `[v4] imported ${made.length} funding wallet(s)`, {
+      role,
+      addresses: made.map((w) => w.address),
+    });
+    res.json(jsonSafe(made));
+  } catch (err) {
+    next(err);
+  }
+});
+
 // POST /api/v4/wallets/backup — every V4 key at once, for an offline backup.
 // Same two locks as routes/wallets.js's whole-keystore backup, because the
 // risk is identical: whoever holds the file this produces controls every
@@ -537,6 +598,7 @@ module.exports._private = {
   assertMaster,
   assertUnclaimed,
   assertBackedUp,
+  assertImportRole,
   assertGenerateCount,
   MAX_GENERATE_COUNT,
   onlyV4Wallets,

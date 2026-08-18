@@ -17,6 +17,23 @@ test('generate refuses a role V4 does not own', () => {
   assert.doesNotThrow(() => guards.assertV4Role('v4seed'));
 });
 
+test('import accepts a funding wallet and refuses a seed', () => {
+  // The whole reason the import route checks a role. A seed wallet earns its
+  // value by having no history before the transfer that funds it; an imported
+  // key has one already, and no amount of sitting afterwards gives it back the
+  // property it never had. Funders are plumbing and may be imported.
+  assert.doesNotThrow(() => guards.assertImportRole('v4master'));
+  assert.throws(() => guards.assertImportRole('v4seed'), /v4seed/);
+  // The refusal has to say WHY, or the obvious next move is to import the seed
+  // under the funding role and move it across with setRole.
+  assert.throws(() => guards.assertImportRole('v4seed'), /history/i);
+  // Roles belonging to other tabs are refused by the same gate, not silently
+  // coerced into a funding wallet.
+  for (const other of ['bundle', 'v2bundle', 'v3main', 'dev']) {
+    assert.throws(() => guards.assertImportRole(other), /v4master/);
+  }
+});
+
 test('the backup gate refuses a campaign whose wallets have no backup', () => {
   // Strengthened from the brief's own `/s2|backup/i`: that regex is satisfied
   // by the literal word "backup" alone, so it passed even when the message
