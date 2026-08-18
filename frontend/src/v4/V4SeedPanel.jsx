@@ -242,12 +242,15 @@ export default function V4SeedPanel({ step, wallets, masters, facts, explorer, r
                       />
                     </td>
                     <td>
-                      {/* No href. These read as plain text with a copy button:
-                          a table of a hundred addresses drawn as a hundred blue
-                          links is noise, and the address is a label for a row
-                          here rather than somewhere to navigate. The copy
-                          button still carries the full value. */}
-                      <Address value={w.address} />
+                      {/* Still a link — `plain` drops only the decoration. A
+                          hundred blue underlined rows is noise; the address is
+                          a label for the row rather than the thing a reader
+                          came to click. Hover reveals it. */}
+                      <Address
+                        value={w.address}
+                        plain
+                        href={explorer ? `${explorer}/address/${w.address}` : ''}
+                      />
                     </td>
                     <td className="num">
                       {!fact ? (

@@ -1193,6 +1193,20 @@ td input[type='number'] {
 .addr-text {
   white-space: nowrap;
 }
+/* A link that does not announce itself. In a table of a hundred addresses the
+   blue-and-underlined treatment is noise — every row shouting the same thing —
+   but the href is still worth having, so this keeps the navigation and drops
+   the decoration. It reveals itself on hover, which is where a reader looks
+   when they want to know whether something is clickable. */
+a.addr-text.is-plain {
+  color: inherit;
+  text-decoration: none;
+}
+a.addr-text.is-plain:hover,
+a.addr-text.is-plain:focus-visible {
+  color: var(--ink);
+  text-decoration: underline;
+}
 /* Deliberately not shaped like the row's × delete. That is the one destructive
    control in the row and it must stay the dominant one, so this is half its
    size, borderless until hovered, drawn in the dimmest ink, and it sits inside

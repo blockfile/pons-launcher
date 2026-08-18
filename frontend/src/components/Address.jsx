@@ -68,7 +68,21 @@ export async function copyToClipboard(text) {
  * `href` turns the text into an explorer link; the href always carries the full
  * address, only the link TEXT is shortened.
  */
-export default function Address({ value, href, lead, tail, full = false, className = '' }) {
+/**
+ * `plain` keeps the href and drops the link styling — see a.addr-text.is-plain
+ * in styles.css. For tables where every row carries an address: the blue
+ * underline on a hundred rows is noise, and the address is a label for the row
+ * rather than the thing a reader came to click. Hovering still shows it.
+ */
+export default function Address({
+  value,
+  href,
+  lead,
+  tail,
+  full = false,
+  plain = false,
+  className = '',
+}) {
   // A brief tick on the button itself. The toast is the confirmation of record
   // — it restates the full address, so the copy is confirmed by a second read
   // of the whole string — and this is just the acknowledgement at the point of
@@ -104,7 +118,13 @@ export default function Address({ value, href, lead, tail, full = false, classNa
   return (
     <span className={`addr-cell ${className}`.trim()}>
       {href ? (
-        <a className="addr-text" href={href} target="_blank" rel="noreferrer" title={value}>
+        <a
+          className={`addr-text ${plain ? 'is-plain' : ''}`.trim()}
+          href={href}
+          target="_blank"
+          rel="noreferrer"
+          title={value}
+        >
           {text}
         </a>
       ) : (
