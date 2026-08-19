@@ -290,7 +290,7 @@ export default function V4PlanPanel({ step, masters, seeds, campaigns, planDefau
       <div className="row">
         <Busy
           busy={busy === 'preview'}
-          className="ghost"
+          className="btn-primary"
           disabled={free === 0}
           onClick={async () => {
             try {
@@ -579,15 +579,15 @@ export default function V4PlanPanel({ step, masters, seeds, campaigns, planDefau
         <div className="row" style={{ marginTop: 12 }}>
           <b>Funding wallets</b>
           <span className="spacer" />
-          <IconAction icon={LuListChecks} onClick={() => setPicked(freeFunders.map((w) => w.id))}>
+          <IconAction className="btn-primary" icon={LuListChecks} onClick={() => setPicked(freeFunders.map((w) => w.id))}>
             All
           </IconAction>
           {distributors.size > 0 && (
-            <IconAction icon={LuFilter} onClick={() => setPicked(byDefault.map((w) => w.id))}>
+            <IconAction className="btn-primary" icon={LuFilter} onClick={() => setPicked(byDefault.map((w) => w.id))}>
               All but the distributor
             </IconAction>
           )}
-          <IconAction icon={LuSquare} onClick={() => setPicked([])}>
+          <IconAction className="btn-primary" icon={LuSquare} onClick={() => setPicked([])}>
             None
           </IconAction>
         </div>

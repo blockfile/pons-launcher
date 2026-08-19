@@ -141,6 +141,7 @@ export default function V4SeedPanel({ step, wallets, masters, facts, explorer, r
         />
         <Busy
           busy={busy === 'generate'}
+          className="btn-primary"
           onClick={() =>
             act('generate', () =>
               api('/v4/wallets/generate', 'POST', {

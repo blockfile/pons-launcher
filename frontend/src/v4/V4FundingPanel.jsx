@@ -71,6 +71,7 @@ export default function V4FundingPanel({
   const create = (
     <Busy
       busy={busy === 'generate'}
+      className="btn-primary"
       onClick={() =>
         act('generate', () =>
           api('/v4/wallets/generate', 'POST', { count: 1, role: ROLES.master, label: 'v4 funding' })
@@ -116,6 +117,7 @@ export default function V4FundingPanel({
       <div className="row">
         <Busy
           busy={busy === 'import'}
+          className="btn-primary"
           disabled={!keys.trim()}
           onClick={() =>
             act('import', async () => {
@@ -304,6 +306,7 @@ export default function V4FundingPanel({
           <div className="row">
             <Busy
               busy={busy === 'split-preview'}
+              className="btn-primary"
               disabled={!source || targets.length === 0}
               onClick={() =>
                 act('split-preview', async () => {
