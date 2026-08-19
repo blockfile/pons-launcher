@@ -512,7 +512,9 @@ export default function V4PlanPanel({ step, masters, seeds, campaigns, planDefau
           batchCampaigns < 1
             ? `Not enough unclaimed seed wallets — ${free} free, and ${seedsPer} each means a funder cannot be filled. Generate more in step 2.`
             : !batchFits
-              ? `${perFunder} wallet(s) per funder does not fit ${form.days} day(s) at ${form.perDayMin}–${form.perDayMax} a day: each campaign must hold between ${batchFloor} and ${batchCeiling}. Every campaign in this batch would be refused. Change per-day to 1–${Math.max(1, perFunder)} on the form behind this, or change the count above.`
+              ? `${perFunder} wallet(s) per funder does not fit ${form.days} day(s) at ${form.perDayMin}–${form.perDayMax} a day: each campaign must hold between ${batchFloor} and ${batchCeiling}. Every campaign in this batch would be refused. Set per-day to 1–${Math.max(1, perFunder)} on the form behind this — that keeps all ${chosenFunders.length} funders. Raising the count above would fit too, but it would pile the wallets onto fewer funders.`
+              : batchCampaigns < chosenFunders.length
+                ? `Only ${batchCampaigns} of the ${chosenFunders.length} ticked funders would be used — ${free} unclaimed seed wallets divided ${perFunder} each does not reach the rest, and they would sit idle. Lower the count to ${Math.max(1, Math.floor(free / chosenFunders.length))} to use all of them, or untick the ones you mean to skip.`
               : `${batchCampaigns * perFunder} seed wallets will be divided evenly across ${batchCampaigns} funder(s), ${perFunder} each, on the schedule above. Each funder is checked for its own balance — one short of ETH is refused on its own and the others still start.`
         }
         confirmLabel={`Start ${batchCampaigns} campaigns`}
@@ -556,6 +558,14 @@ export default function V4PlanPanel({ step, masters, seeds, campaigns, planDefau
         </Fact>
         <Fact label="Each campaign holds">
           {batchFits ? `${perFunder} wallet(s)` : `${batchFloor}–${batchCeiling} required`}
+        </Fact>
+        {/* Ticked versus actually used. They differ whenever the count per
+            funder does not divide into the unclaimed seeds, and the gap is
+            invisible otherwise — the title says how many campaigns will start,
+            but not that nineteen wallets an operator deliberately ticked are
+            about to do nothing. */}
+        <Fact label="Funders used">
+          {batchCampaigns} of {chosenFunders.length} ticked
         </Fact>
 
         {/* Every free funder, tickable. All on by default — an operator who
