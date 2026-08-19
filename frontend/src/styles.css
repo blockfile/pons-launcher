@@ -140,15 +140,17 @@
   --indigo-dim: #c7d2fe;
   --tint-indigo: rgba(99, 102, 241, 0.1);
 
-  /* Deeper, so they read as text and small marks on white while still filling
-     a button cleanly. */
-  --amber: #c67c11;
-  --amber-dim: #f3d9a6;
+  /* Deeper still, so they read as SMALL TEXT on white — a status pill's label
+     sits on a 12%-opacity tint of its own colour, and a mid-tone accent there
+     goes chalky. These deepen to roughly a 4:1 text contrast while still
+     filling a button as recognisably amber, red, green. */
+  --amber: #a5620a;
+  --amber-dim: #f0d3a0;
   --vermilion: #dc2626;
   --vermilion-dim: #f7c4c0;
-  --jade: #0f9d6b;
-  --jade-dim: #bdeed9;
-  --sky: #2563eb;
+  --jade: #0a7d52;
+  --jade-dim: #b6e9d2;
+  --sky: #1d63d8;
   --ink-danger: #b42318;
 
   --tint-amber: rgba(198, 124, 17, 0.12);

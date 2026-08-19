@@ -258,14 +258,25 @@
   color: var(--vermilion);
 }
 
-/* ── the live signature: the frame goes red when funds can move ───────────*/
+/* ── the live signature: the frame goes red when funds can move ───────────
+   FULL vermilion, not the dim variant, and a 2px inner edge on every side. The
+   dim red is a brick tone that reads on near-black but vanishes to pale pink on
+   white — and the whole point of this frame is that it cannot be missed in
+   either theme. The inner edge is a box-shadow, not a wider border, so it adds
+   presence without shifting the layout by a pixel. */
 .app-shell.is-live .side,
 .app-shell.is-live .topbar,
 .app-shell.is-live .statusbar {
-  border-color: var(--vermilion-dim);
+  border-color: var(--vermilion);
 }
 .app-shell.is-live .side {
-  box-shadow: inset -1px 0 0 var(--vermilion-dim);
+  box-shadow: inset -2px 0 0 var(--vermilion);
+}
+.app-shell.is-live .topbar {
+  box-shadow: inset 0 -2px 0 var(--vermilion);
+}
+.app-shell.is-live .statusbar {
+  box-shadow: inset 0 2px 0 var(--vermilion);
 }
 .app-shell.is-live .side-item.is-on {
   background: var(--tint-vermilion);
