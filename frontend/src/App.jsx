@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import { LazyMotion, MotionConfig, domMax } from 'framer-motion';
+import { LuRocket, LuArrowRightLeft, LuLink, LuClock } from 'react-icons/lu';
 import { api, getApiKey, setApiKey } from './api.js';
 import { shortAddress } from './format.js';
 // The console and the backend's preflight run the SAME arithmetic, out of one
@@ -38,6 +39,17 @@ const short = (a) => shortAddress(a, 8, 4);
 const plural = (n, one, many = `${one}s`) => `${n} ${n === 1 ? one : many}`;
 const andList = (xs) =>
   xs.length < 2 ? xs.join('') : `${xs.slice(0, -1).join(', ')} and ${xs[xs.length - 1]}`;
+
+// The current tab's name for the top bar. Presentation only: a lookup keyed by
+// the same `tab` state the sidebar switches, rendering a label and nothing else.
+// It is the tab buttons' own text, lifted out so the frame can title the page
+// without re-deriving it.
+const TAB_TITLE = {
+  v1: 'Launcher',
+  v2: 'V2 · external funding',
+  v3: 'V3 · relay chain',
+  v4: 'V4 · seasoning',
+};
 
 // What a launch cannot be armed without, in the order step 5 asks for it, and
 // how the sequence names each one when it is not there yet.
@@ -388,108 +400,141 @@ export default function App() {
     <LazyMotion features={animation} strict>
       <MotionConfig reducedMotion="user">
         <Toaster />
-        <header className={`strip ${live ? 'is-live' : ''}`}>
-          <h1 className="mark">
-            pons<b>·</b>launcher
-          </h1>
-
-          {health && (
-            <div className="readout">
-              <span>
-                chain <b>{health.chainId}</b>
+        {/* The SOLARBA-chrome shell. Presentation only: the same header, tabs
+            and panels reparented into a sidebar + top bar + content + status bar
+            frame. `live` (already in scope) turns the whole frame vermilion the
+            instant the server can spend — see shell.css for the signature. */}
+        <div className={`app-shell ${live ? 'is-live' : ''}`}>
+          {/* The sidebar of destinations. The four launcher tabs move here as
+              nav items — the same onClick and the same is-on condition, restyled
+              from quiet chips into a rail. Choosing a tab is navigation, so the
+              active item wears indigo (the neutral primary), never the amber a
+              step spends. */}
+          <aside className="side">
+            <div className="side-brand">
+              <span className="glyph">p</span>
+              <span className="word">
+                pons<b>·</b>launcher
               </span>
-              {health.multiUser && (
-                <span>
-                  signed in as <b>{health.user || 'nobody'}</b>
-                </span>
-              )}
             </div>
-          )}
+            <nav className="side-nav">
+              <div className="side-label">Consoles</div>
+              <button
+                type="button"
+                className={tab === 'v1' ? 'side-item is-on' : 'side-item'}
+                onClick={() => setTab('v1')}
+              >
+                <LuRocket size={16} aria-hidden="true" />
+                Launcher
+              </button>
+              <button
+                type="button"
+                className={tab === 'v2' ? 'side-item is-on' : 'side-item'}
+                onClick={() => setTab('v2')}
+              >
+                <LuArrowRightLeft size={16} aria-hidden="true" />
+                V2 · external funding
+              </button>
+              <button
+                type="button"
+                className={tab === 'v3' ? 'side-item is-on' : 'side-item'}
+                onClick={() => setTab('v3')}
+              >
+                <LuLink size={16} aria-hidden="true" />
+                V3 · relay chain
+              </button>
+              <button
+                type="button"
+                className={tab === 'v4' ? 'side-item is-on' : 'side-item'}
+                onClick={() => setTab('v4')}
+              >
+                <LuClock size={16} aria-hidden="true" />
+                V4 · seasoning
+              </button>
+            </nav>
+          </aside>
 
-          <div className={`mode ${!health ? '' : live ? 'live' : 'dry'}`}>
-            {!health ? 'connecting' : live ? 'live · spends real funds' : 'dry run · broadcasts nothing'}
-          </div>
+          {/* The top bar. The chain/user readout becomes chips, the dry/live
+              mode becomes the mode-chip, and the API-key field and its forget
+              button move here unchanged — same handlers, same needsKey gate. */}
+          <header className="topbar">
+            <div className="topbar-title">
+              {TAB_TITLE[tab]}
+              <span className="sub">
+                {tab === 'v1'
+                  ? `the ${steps.length}-step sequence — dev wallet funds everything`
+                  : tab === 'v2'
+                    ? `${steps.length} steps, no disperser — funded from outside this console`
+                    : tab === 'v3'
+                      ? 'not a launcher — distributes a live token, one wallet at a time'
+                      : 'not a launcher — drips ETH into fresh wallets over weeks'}
+              </span>
+            </div>
 
-          {needsKey && (
-            <>
-              <input
-                type="password"
-                placeholder="API key"
-                autoComplete="off"
-                value={key}
-                onChange={(e) => {
-                  setKey(e.target.value);
-                  setApiKey(e.target.value);
-                }}
-              />
-              {/* A key that survives a refresh needs a way out that is not
-                  "close every tab" — a shared screen is the usual reason. */}
-              {key && (
-                <button
-                  className="link"
-                  title="clear the key from this tab"
-                  onClick={() => {
-                    setKey('');
-                    setApiKey('');
+            <span className="spacer" />
+
+            {health && (
+              <span className="chip">
+                <span className="chip-dot ok" />
+                <span className="k">chain</span>
+                <b className="v">{health.chainId}</b>
+              </span>
+            )}
+            {health && health.multiUser && (
+              <span className="chip">
+                <span className="k">signed in</span>
+                <b className="v">{health.user || 'nobody'}</b>
+              </span>
+            )}
+
+            <div className={`mode-chip ${live ? 'is-live' : ''}`}>
+              {!health ? 'connecting' : live ? 'live' : 'dry run'}
+            </div>
+
+            {needsKey && (
+              <>
+                <input
+                  type="password"
+                  placeholder="API key"
+                  autoComplete="off"
+                  value={key}
+                  onChange={(e) => {
+                    setKey(e.target.value);
+                    setApiKey(e.target.value);
                   }}
-                >
-                  forget
-                </button>
-              )}
-            </>
-          )}
+                />
+                {/* A key that survives a refresh needs a way out that is not
+                    "close every tab" — a shared screen is the usual reason. */}
+                {key && (
+                  <button
+                    className="link"
+                    title="clear the key from this tab"
+                    onClick={() => {
+                      setKey('');
+                      setApiKey('');
+                    }}
+                  >
+                    forget
+                  </button>
+                )}
+              </>
+            )}
 
-          {/* Multi-user deployments proxy through nginx, which overwrites this
-              field's header with the key mapped to your login — if that map is
-              missing an entry, the key you paste here is silently ignored. */}
-          {health && health.multiUser && !health.user && (
-            <div className="hint">not signed in — nginx may be swallowing the key field; ask whoever runs this deployment to check the login map</div>
-          )}
-        </header>
+            {/* Multi-user deployments proxy through nginx, which overwrites this
+                field's header with the key mapped to your login — if that map is
+                missing an entry, the key you paste here is silently ignored. */}
+            {health && health.multiUser && !health.user && (
+              <div className="hint">not signed in — nginx may be swallowing the key field; ask whoever runs this deployment to check the login map</div>
+            )}
+          </header>
 
-        <main>
-          {/* Which launcher is on screen. Quiet chips rather than filled
-              buttons: choosing a tab is navigation, and the palette's amber is
-              spent on the action a step is FOR, never on getting there. */}
-          <div className="tabs">
-            <button
-              type="button"
-              className={tab === 'v1' ? 'quiet is-on' : 'quiet'}
-              onClick={() => setTab('v1')}
-            >
-              Launcher
-            </button>
-            <button
-              type="button"
-              className={tab === 'v2' ? 'quiet is-on' : 'quiet'}
-              onClick={() => setTab('v2')}
-            >
-              V2 · external funding
-            </button>
-            <button
-              type="button"
-              className={tab === 'v3' ? 'quiet is-on' : 'quiet'}
-              onClick={() => setTab('v3')}
-            >
-              V3 · relay chain
-            </button>
-            <button
-              type="button"
-              className={tab === 'v4' ? 'quiet is-on' : 'quiet'}
-              onClick={() => setTab('v4')}
-            >
-              V4 · seasoning
-            </button>
-            <span className="hint">
-              {tab === 'v1'
-                ? `the ${steps.length}-step sequence — dev wallet funds everything`
-                : tab === 'v2'
-                  ? `${steps.length} steps, no disperser — funded from outside this console`
-                  : tab === 'v3'
-                    ? 'not a launcher — distributes a live token, one wallet at a time'
-                    : 'not a launcher — drips ETH into fresh wallets over weeks'}
-            </span>
-          </div>
+          {/* The working area. The same <main> as before — its grid, its
+              panels, its records — only reparented into the shell's scrolling
+              content column. The .tabs row is gone from here: its buttons are
+              the sidebar nav now, and its per-tab hint is the top bar's
+              subtitle. Everything below is byte-for-byte the old flow. */}
+          <div className="content">
+            <main>
 
           {/* V3 replaces the whole flow rather than adding to it: it does not
               launch, so it has no step in common with the tree below beyond
@@ -701,7 +746,36 @@ export default function App() {
             admin={Boolean(health?.admin)}
             me={health?.user || ''}
           />
-        </main>
+            </main>
+          </div>
+
+          {/* The status bar. Built only from values already in scope — the
+              chain, the signed-in user, and `live` — with the dry/live
+              indicator as its point: jade while nothing broadcasts, vermilion
+              the moment the console can spend. No new fetch, no new hook. */}
+          <footer className="statusbar">
+            {health && (
+              <span>
+                <span className="k">chain</span>
+                <b>{health.chainId}</b>
+              </span>
+            )}
+            {health && health.multiUser && (
+              <span>
+                <span className="k">user</span>
+                <b>{health.user || 'nobody'}</b>
+              </span>
+            )}
+            <span className="spacer" />
+            <span className={!health ? '' : live ? 'live' : 'ok'}>
+              {!health
+                ? 'connecting…'
+                : live
+                  ? 'live · spends real funds'
+                  : 'dry run · broadcasts nothing'}
+            </span>
+          </footer>
+        </div>
       </MotionConfig>
     </LazyMotion>
   );
