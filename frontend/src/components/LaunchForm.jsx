@@ -24,11 +24,19 @@ const BLANK = {
   website: '',
   farcaster: '',
   devBuyEth: '0.05',
-  // 50 bps = 0.5%. A default of zero means every launch that forgets the field
-  // earns the creator nothing, permanently — creatorTaxBps is immutable once
-  // launched. Traders pay this on top of the config's 1% curve fee, so it is
-  // kept light on purpose.
-  creatorTaxBps: '50',
+  // ZERO BY DEFAULT, AND THE COST OF THAT IS PERMANENT. creatorTaxBps is
+  // immutable once launched, so a token that goes out at 0 earns its creator
+  // nothing from trading for as long as it exists — there is no later edit.
+  // This defaulted to 50 (0.5%) for exactly that reason: a field left alone by
+  // an operator in a hurry is the one most likely to be wrong, and the wrong
+  // value here cannot be corrected.
+  //
+  // Set to 0 deliberately: the tax is a fee traders pay on top of the config's
+  // 1% curve fee, and a launch that does not want to charge one should not have
+  // to remember to turn it off. Type a value in the field for any launch that
+  // does — it is still there, and it still refuses anything above the factory's
+  // maximum.
+  creatorTaxBps: '0',
   buybackEnabled: false,
 };
 
