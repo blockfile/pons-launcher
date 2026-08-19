@@ -3,6 +3,8 @@ import { api } from '../api.js';
 import Step from '../components/Step.jsx';
 import { Busy } from '../components/Section.jsx';
 import Modal, { Fact } from '../components/Modal.jsx';
+import { LuListChecks, LuSquare, LuFilter } from 'react-icons/lu';
+import { IconAction } from './IconButton.jsx';
 import { plural } from './roles.js';
 
 const MINUTE_MS = 60_000;
@@ -577,17 +579,17 @@ export default function V4PlanPanel({ step, masters, seeds, campaigns, planDefau
         <div className="row" style={{ marginTop: 12 }}>
           <b>Funding wallets</b>
           <span className="spacer" />
-          <button className="link" onClick={() => setPicked(freeFunders.map((w) => w.id))}>
-            all
-          </button>
+          <IconAction icon={LuListChecks} onClick={() => setPicked(freeFunders.map((w) => w.id))}>
+            All
+          </IconAction>
           {distributors.size > 0 && (
-            <button className="link" onClick={() => setPicked(byDefault.map((w) => w.id))}>
-              all but the distributor
-            </button>
+            <IconAction icon={LuFilter} onClick={() => setPicked(byDefault.map((w) => w.id))}>
+              All but the distributor
+            </IconAction>
           )}
-          <button className="link" onClick={() => setPicked([])}>
-            none
-          </button>
+          <IconAction icon={LuSquare} onClick={() => setPicked([])}>
+            None
+          </IconAction>
         </div>
         <div className="table-scroll" style={{ maxHeight: 220 }}>
           <table>

@@ -4,6 +4,8 @@ import Step from '../components/Step.jsx';
 import { Busy } from '../components/Section.jsx';
 import Modal, { Fact } from '../components/Modal.jsx';
 import Address from '../components/Address.jsx';
+import { LuChevronDown, LuChevronUp, LuCalendarDays } from 'react-icons/lu';
+import { IconAction } from './IconButton.jsx';
 import { ago, clock, eth, plural } from './roles.js';
 
 // Which notice a status paints itself as. Halted is vermilion because it is the
@@ -210,12 +212,12 @@ export default function V4CampaignsPanel({ step, campaigns, details, lastSent, e
                 the controls and the schedule are what you open when the answer
                 is no. A campaign that has halted opens itself, because that one
                 is not a scanning problem. */}
-            <button
-              className="link"
-              onClick={() => setCard((s) => ({ ...s, [c.id]: !cardOpen(c) }))}
+            <IconAction
+              icon={cardOpen(c) ? LuChevronUp : LuChevronDown}
+              onClick={() => setCard((st) => ({ ...st, [c.id]: !cardOpen(c) }))}
             >
-              {cardOpen(c) ? 'less' : `${c.sent} of ${c.total} sent · details`}
-            </button>
+              {cardOpen(c) ? 'Less' : `${c.sent} of ${c.total} sent · details`}
+            </IconAction>
 
             {cardOpen(c) && (
               <>
@@ -271,13 +273,13 @@ export default function V4CampaignsPanel({ step, campaigns, details, lastSent, e
                 Cancel
               </button>
               <span className="spacer" />
-              <button
-                className="link"
+              <IconAction
+                icon={LuCalendarDays}
                 onClick={() => setOpen((o) => ({ ...o, [c.id]: !o[c.id] }))}
                 disabled={!full}
               >
-                {open[c.id] ? 'hide the schedule' : 'the schedule'}
-              </button>
+                {open[c.id] ? 'Hide the schedule' : 'The schedule'}
+              </IconAction>
             </div>
 
             {open[c.id] && full && (

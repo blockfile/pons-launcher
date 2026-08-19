@@ -4,6 +4,8 @@ import Step from '../components/Step.jsx';
 import { Busy } from '../components/Section.jsx';
 import Address from '../components/Address.jsx';
 import Modal from '../components/Modal.jsx';
+import { LuTrash2, LuX, LuKeyRound, LuSplit } from 'react-icons/lu';
+import IconButton, { IconAction } from './IconButton.jsx';
 import V4BackupControls from './V4BackupControls.jsx';
 import { ROLES, eth } from './roles.js';
 
@@ -132,9 +134,9 @@ export default function V4FundingPanel({
         >
           Import funding wallet
         </Busy>
-        <button className="link" onClick={() => setShowImport(false)}>
-          cancel
-        </button>
+        <IconAction icon={LuX} onClick={() => setShowImport(false)}>
+          Cancel
+        </IconAction>
       </div>
     </div>
   );
@@ -343,9 +345,9 @@ export default function V4FundingPanel({
             >
               Start split
             </Busy>
-            <button className="link" onClick={() => setShowSplit(false)}>
-              cancel
-            </button>
+            <IconAction icon={LuX} onClick={() => setShowSplit(false)}>
+              Cancel
+            </IconAction>
           </div>
 
           <p className="hint">
@@ -405,26 +407,26 @@ export default function V4FundingPanel({
           </p>
           <div className="row">
             {create}
-            <button className="link" onClick={() => setShowImport((v) => !v)}>
-              or import one
-            </button>
+            <IconAction icon={LuKeyRound} onClick={() => setShowImport((v) => !v)}>
+              Import one
+            </IconAction>
           </div>
         </div>
       ) : (
         <>
           <div className="row">
             {create}
-            <button className="link" onClick={() => setShowImport((v) => !v)}>
-              or import one
-            </button>
+            <IconAction icon={LuKeyRound} onClick={() => setShowImport((v) => !v)}>
+              Import one
+            </IconAction>
             {/* Shown from the FIRST wallet, not the second. Gated on having
                 two, the panel's own "needs at least two" explanation could
                 never be reached — so an operator holding one funded wallet saw
                 no link, no message, and no reason to think splitting was
                 possible. Which is exactly the moment they need to know. */}
-            <button className="link" onClick={() => setShowSplit((v) => !v)}>
-              split one across the others
-            </button>
+            <IconAction icon={LuSplit} onClick={() => setShowSplit((v) => !v)}>
+              Split one across the others
+            </IconAction>
             {/* Beside the deletes, not only in step 2. These are the wallets
                 that hold the ETH, and the row's own delete tells the operator
                 the key is recoverable — which stops being true once the capped
@@ -494,9 +496,12 @@ export default function V4FundingPanel({
                             with the campaign's name and status. Hiding the
                             control on a guess would leave an operator unable to
                             delete a wallet the server would happily archive. */}
-                        <button className="link" onClick={() => setDeleting(w)}>
-                          delete
-                        </button>
+                        <IconButton
+                          icon={LuTrash2}
+                          danger
+                          label={`Archive funding wallet ${w.address}`}
+                          onClick={() => setDeleting(w)}
+                        />
                       </td>
                     </tr>
                   );

@@ -1198,6 +1198,78 @@ td input[type='number'] {
    but the href is still worth having, so this keeps the navigation and drops
    the decoration. It reveals itself on hover, which is where a reader looks
    when they want to know whether something is clickable. */
+/* ── icon controls ────────────────────────────────────────────────────────
+   Replacing the text-link buttons that used to sit in rows and toolbars. A
+   button styled as prose reads as prose; these read as controls, which is what
+   they are. Both stay in the grey band until hovered — the amber belongs to the
+   forward action of a step, and a toolbar that competed with it would break the
+   one-amber-per-panel rule this stylesheet opens with. */
+.icon-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 26px;
+  height: 26px;
+  padding: 0;
+  color: var(--dim);
+  background: none;
+  border: 1px solid transparent;
+  border-radius: 6px;
+  cursor: pointer;
+  transition: color 0.12s, border-color 0.12s, background 0.12s;
+}
+.icon-btn:hover:not(:disabled),
+.icon-btn:focus-visible {
+  color: var(--ink);
+  border-color: var(--rule);
+  background: var(--panel-hi);
+}
+/* Vermilion only on hover — see the stylesheet header. A delete drawn red in
+   every row of a hundred-row table would make a list of ordinary wallets look
+   like a page of warnings, and then the colour would mean nothing where it
+   matters. */
+.icon-btn.is-danger:hover:not(:disabled),
+.icon-btn.is-danger:focus-visible {
+  color: var(--vermilion);
+  border-color: var(--vermilion-dim);
+  background: var(--tint-vermilion);
+}
+.icon-btn:disabled {
+  opacity: 0.3;
+  cursor: default;
+}
+
+.icon-action {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 5px 10px;
+  font: inherit;
+  font-size: 0.86rem;
+  color: var(--dim);
+  background: none;
+  border: 1px solid var(--rule-soft);
+  border-radius: 6px;
+  cursor: pointer;
+  transition: color 0.12s, border-color 0.12s, background 0.12s;
+}
+.icon-action:hover:not(:disabled),
+.icon-action:focus-visible {
+  color: var(--ink);
+  border-color: var(--rule);
+  background: var(--panel-hi);
+}
+.icon-action.is-danger:hover:not(:disabled),
+.icon-action.is-danger:focus-visible {
+  color: var(--vermilion);
+  border-color: var(--vermilion-dim);
+  background: var(--tint-vermilion);
+}
+.icon-action:disabled {
+  opacity: 0.4;
+  cursor: default;
+}
+
 /* Scrollbars inside the console's own scrolling regions — the wallet tables and
    the campaign list. The platform default is a light-grey slab that reads as a
    piece of the operating system dropped onto a dark panel; this is the same

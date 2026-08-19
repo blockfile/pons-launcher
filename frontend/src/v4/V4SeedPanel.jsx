@@ -4,6 +4,8 @@ import Modal from '../components/Modal.jsx';
 import Step from '../components/Step.jsx';
 import { Busy } from '../components/Section.jsx';
 import Address from '../components/Address.jsx';
+import { LuTrash2 } from 'react-icons/lu';
+import IconButton from './IconButton.jsx';
 import V4BackupControls from './V4BackupControls.jsx';
 import { MAX_GENERATE, ROLES, clock, eth } from './roles.js';
 
@@ -388,9 +390,12 @@ export default function V4SeedPanel({ step, wallets, masters, facts, explorer, r
                           holds the wallet but not whether that campaign is
                           still live. Hiding the link on `claimed` would block
                           deleting wallets from a run that finished weeks ago. */}
-                      <button className="link" onClick={() => setDeleting(w)}>
-                        delete
-                      </button>
+                      <IconButton
+                        icon={LuTrash2}
+                        danger
+                        label={`Archive seed wallet ${w.address}`}
+                        onClick={() => setDeleting(w)}
+                      />
                     </td>
                   </tr>
                 );
