@@ -154,12 +154,32 @@ export default function V4PlanPanel({ step, masters, seeds, campaigns, planDefau
     campaigns.filter((c) => c.status === 'running').map((c) => c.masterWalletId)
   );
   const freeFunders = masters.filter((w) => !busyFunders.has(w.id));
-  // The chosen ones, or all of them. Intersected with what is actually free, so
-  // a funder that started a campaign since the list was opened drops out rather
-  // than being sent to a route that would refuse it.
+
+  /**
+   * Wallets that have paid a split, which makes them the distributor.
+   *
+   * OFF BY DEFAULT, AND TICKABLE ANYWAY. A distributor is the hub: in Relay's
+   * records it already links to every funder it filled, so using it a second
+   * time as a seasoning funder hangs a set of seed wallets off the one address
+   * that ties the whole tree together. It has done its job.
+   *
+   * Derived rather than declared, because nothing marks a wallet as the
+   * distributor — they are all v4master, and the only thing that distinguishes
+   * one is that a split campaign named it as its source. It also tends to be
+   * the wallet with ETH left in it, which is exactly why it keeps turning up in
+   * a list of funders that can afford a campaign.
+   */
+  const distributors = new Set(
+    campaigns.filter((c) => c.kind === 'split').map((c) => c.masterWalletId)
+  );
+  const byDefault = freeFunders.filter((w) => !distributors.has(w.id));
+
+  // The chosen ones, or the default set. Intersected with what is actually
+  // free, so a funder that started a campaign since the list was opened drops
+  // out rather than being sent to a route that would refuse it.
   const chosenFunders = picked
     ? freeFunders.filter((w) => picked.includes(w.id))
-    : freeFunders;
+    : byDefault;
   const batchCampaigns = Math.min(
     chosenFunders.length,
     Math.floor(free / Math.max(1, Math.round(Number(seedsPer) || 0)))
@@ -182,7 +202,7 @@ export default function V4PlanPanel({ step, masters, seeds, campaigns, planDefau
 
   const toggle = (id) =>
     setPicked((cur) => {
-      const base = cur ?? freeFunders.map((w) => w.id);
+      const base = cur ?? byDefault.map((w) => w.id);
       return base.includes(id) ? base.filter((x) => x !== id) : [...base, id];
     });
   const ready = Boolean(form.name.trim() && master && preview?.feasible?.ok);
@@ -550,6 +570,11 @@ export default function V4PlanPanel({ step, masters, seeds, campaigns, planDefau
           <button className="link" onClick={() => setPicked(freeFunders.map((w) => w.id))}>
             all
           </button>
+          {distributors.size > 0 && (
+            <button className="link" onClick={() => setPicked(byDefault.map((w) => w.id))}>
+              all but the distributor
+            </button>
+          )}
           <button className="link" onClick={() => setPicked([])}>
             none
           </button>
@@ -566,6 +591,9 @@ export default function V4PlanPanel({ step, masters, seeds, campaigns, planDefau
                     </td>
                     <td>
                       <span className="mono">{w.address.slice(0, 14)}…</span>
+                      {distributors.has(w.id) && (
+                        <span className="hint"> · distributor</span>
+                      )}
                     </td>
                     <td className="num">
                       {w.balanceEth == null ? (
