@@ -425,7 +425,7 @@ export default function LaunchForm({
       <div className={`arm ${live ? 'is-live' : ''}`}>
         <Busy
           busy={busy === 'preflight'}
-          className="ghost"
+          className="btn-primary"
           disabled={!ready}
           title={ready ? 'signs everything, broadcasts nothing' : 'fill in name, symbol and a logo'}
           onClick={() => act('preflight', () => api(isV2 ? '/v2/preflight' : '/preflight', 'POST', body()))}

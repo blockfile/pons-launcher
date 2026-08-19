@@ -118,6 +118,7 @@ export default function DevWalletPanel({ step, wallets, explorer, reload, report
             this was drawn as a grey ghost beside an equally grey Import — two
             identical controls, neither of which looked like the thing to do. */}
         <Busy
+          className="btn-primary"
           busy={busy === 'dev'}
           disabled={Boolean(dev) || busy === 'delete'}
           title={dev ? 'a dev wallet already exists' : ''}

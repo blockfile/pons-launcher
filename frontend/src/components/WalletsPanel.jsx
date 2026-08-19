@@ -355,6 +355,7 @@ export default function WalletsPanel({ step, wallets, rows, setRow, share, reloa
         {/* Amber, for the same reason step 1's generate is: this is the forward
             action of step 3, and it sat grey among four other grey controls. */}
         <Busy
+          className="btn-primary"
           busy={busy === 'bundle'}
           disabled={bundleRoom === 0}
           title={bundleRoom === 0 ? `at the ${MAX_BUNDLE}-wallet limit — delete some to add more` : ''}

@@ -67,6 +67,7 @@ export default function V3BundlePanel({ step, wallets, explorer, reload, report,
           disabled={locked}
         />
         <Busy
+          className="btn-primary"
           busy={busy === 'generate'}
           disabled={locked}
           onClick={() =>

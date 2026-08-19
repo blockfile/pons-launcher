@@ -152,7 +152,7 @@ export default function V3ChainPanel({
         <span className="spacer" />
         <Busy
           busy={busy === 'plan'}
-          className="ghost"
+          className="btn-primary"
           disabled={!ready || running}
           onClick={() =>
             act('plan', async () => {

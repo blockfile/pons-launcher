@@ -83,6 +83,7 @@ export default function V3MainPanel({ step, wallet, treasury, explorer, reload, 
       ) : (
         <div className="row">
           <Busy
+            className="btn-primary"
             busy={busy === 'generate'}
             onClick={() =>
               act('generate', () =>

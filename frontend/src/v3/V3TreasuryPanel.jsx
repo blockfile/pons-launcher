@@ -58,6 +58,7 @@ export default function V3TreasuryPanel({ step, wallet, explorer, reload, report
       ) : (
         <div className="row">
           <Busy
+            className="btn-primary"
             busy={busy === 'generate'}
             onClick={() =>
               act('generate', () =>

@@ -315,7 +315,7 @@ export default function SellPanel({
         <div className={`arm ${live ? 'is-live' : ''}`}>
           <Busy
             busy={busy === 'preflight'}
-            className="ghost"
+            className="btn-primary"
             disabled={!token}
             title={token ? 'reads balances and builds the sells, broadcasts nothing' : 'pick a token'}
             onClick={preflight}
