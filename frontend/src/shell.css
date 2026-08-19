@@ -320,3 +320,82 @@ button.btn-primary:hover:not(:disabled),
     padding: 16px;
   }
 }
+
+/* ── theme toggle (sidebar footer) ────────────────────────────────────────*/
+.theme-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  padding: 8px 11px;
+  color: var(--dim);
+  background: var(--panel);
+  border: 1px solid var(--rule);
+  border-radius: 9px;
+  font: 500 12.5px/1 var(--sans);
+  cursor: pointer;
+  transition: color 0.12s, border-color 0.12s, background 0.12s;
+}
+.theme-toggle:hover {
+  color: var(--ink);
+  border-color: var(--indigo);
+  background: var(--panel-hi);
+}
+.theme-toggle svg {
+  flex: none;
+}
+
+/* ── mobile polish for the shell chrome ───────────────────────────────────
+   The primitives (rows, stat grids, the station row, tables, modals) already
+   collapse on their own; this only tidies the frame the redesign added. */
+@media (max-width: 820px) {
+  .side-brand {
+    height: 52px;
+  }
+  .side-nav {
+    padding: 8px 10px;
+    gap: 6px;
+  }
+  .side-label {
+    width: 100%;
+    padding: 4px 4px 2px;
+  }
+  .side-item {
+    width: auto;
+  }
+  .side-foot {
+    margin: 0;
+    border-top: 0;
+    padding: 0 10px 10px;
+  }
+  .theme-toggle {
+    width: auto;
+  }
+  /* the top bar wraps rather than pushing its chips off-screen */
+  .topbar {
+    flex-wrap: wrap;
+    gap: 8px 10px;
+    padding: 10px 14px;
+    height: auto;
+  }
+  .topbar-title {
+    width: 100%;
+  }
+  .topbar .spacer {
+    display: none;
+  }
+  .chip,
+  .mode-chip {
+    height: 30px;
+  }
+  /* the status bar scrolls sideways instead of clipping its figures */
+  .statusbar {
+    overflow-x: auto;
+    white-space: nowrap;
+    gap: 14px;
+  }
+  /* keep a modal off the very edges on a small screen */
+  .modal {
+    width: min(560px, 92vw);
+  }
+}

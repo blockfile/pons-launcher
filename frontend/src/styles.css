@@ -90,6 +90,11 @@
   --tint-sky: rgba(90, 169, 255, 0.13);
   --tint-grey: rgba(150, 164, 186, 0.12);
 
+  /* A softer danger ink than full vermilion, for body text inside a danger
+     card (the h3 keeps the full red). Tokenised so it flips in light mode —
+     light pink on white is invisible. */
+  --ink-danger: #f0b3ad;
+
   /* Space Grotesk carries the display voice (brand, step titles, big figures);
      Inter is the workhorse body/UI face; JetBrains Mono is the data face, with
      the tabular figures every number in this app is compared against. */
@@ -101,6 +106,59 @@
   --radius: 8px;
   --radius-lg: 13px;
   --shadow-card: 0 1px 0 rgba(255, 255, 255, 0.03) inset, 0 10px 30px -18px rgba(0, 0, 0, 0.75);
+  /* Tells the browser to draw native controls (scrollbars, date pickers, the
+     checkbox tick) in the matching scheme. Flipped in the light block below. */
+  color-scheme: dark;
+}
+
+/* ── LIGHT THEME ───────────────────────────────────────────────────────────
+   The same console on a white ground. Set on <html data-theme="light"> by the
+   toggle in the sidebar; the whole app is token-driven, so this one block
+   recolours every tab without touching a single component.
+
+   THE MONEY SEMANTICS SURVIVE THE FLIP, which is the only hard part. amber,
+   vermilion and jade are tuned for text-on-dark; on white they would wash out,
+   so each drops to a deeper, more saturated value that still reads as the same
+   signal — armed, live, done — and still works as a button fill with light or
+   dark text. Indigo needs no change; it was already a mid-tone that holds on
+   either ground. The live-frame red stays unmistakable. */
+:root[data-theme='light'] {
+  color-scheme: light;
+
+  --void: #f5f6fa;
+  --panel: #ffffff;
+  --panel-2: #ffffff;
+  --panel-hi: #eef1f7;
+  --rule: #e2e6ef;
+  --rule-soft: #eef1f6;
+  --ink: #0f172a;
+  --dim: #586274;
+  --dimmer: #8a94a6;
+
+  --indigo: #5b5ef0;
+  --indigo-bright: #4f46e5;
+  --indigo-dim: #c7d2fe;
+  --tint-indigo: rgba(99, 102, 241, 0.1);
+
+  /* Deeper, so they read as text and small marks on white while still filling
+     a button cleanly. */
+  --amber: #c67c11;
+  --amber-dim: #f3d9a6;
+  --vermilion: #dc2626;
+  --vermilion-dim: #f7c4c0;
+  --jade: #0f9d6b;
+  --jade-dim: #bdeed9;
+  --sky: #2563eb;
+  --ink-danger: #b42318;
+
+  --tint-amber: rgba(198, 124, 17, 0.12);
+  --tint-jade: rgba(15, 157, 107, 0.12);
+  --tint-vermilion: rgba(220, 38, 38, 0.1);
+  --tint-sky: rgba(37, 99, 235, 0.1);
+  --tint-grey: rgba(88, 98, 116, 0.09);
+
+  /* Soft, cool card shadow instead of the dark-mode glow. */
+  --shadow-card: 0 1px 2px rgba(16, 24, 40, 0.06), 0 8px 24px -14px rgba(16, 24, 40, 0.16);
 }
 
 * {
@@ -829,7 +887,7 @@ button:disabled {
   color: inherit;
 }
 .station:hover {
-  background: #151c26;
+  background: var(--panel-hi);
 }
 .station:focus-visible {
   outline: 2px solid var(--amber);
@@ -1593,7 +1651,7 @@ a.addr-text.is-plain:focus-visible {
   color: var(--vermilion);
 }
 .notice.danger li {
-  color: #f0b3ad;
+  color: var(--ink-danger);
 }
 
 /* The one clause in a warning that IS the warning.

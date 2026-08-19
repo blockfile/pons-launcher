@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import { LazyMotion, MotionConfig, domMax } from 'framer-motion';
 import { LuRocket, LuArrowRightLeft, LuLink, LuClock } from 'react-icons/lu';
+import ThemeToggle from './ThemeToggle.jsx';
 import { api, getApiKey, setApiKey } from './api.js';
 import { shortAddress } from './format.js';
 // The console and the backend's preflight run the SAME arithmetic, out of one
@@ -452,6 +453,9 @@ export default function App() {
                 V4 · seasoning
               </button>
             </nav>
+            <div className="side-foot">
+              <ThemeToggle />
+            </div>
           </aside>
 
           {/* The top bar. The chain/user readout becomes chips, the dry/live

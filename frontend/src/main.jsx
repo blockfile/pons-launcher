@@ -17,6 +17,17 @@ import App from './App.jsx';
 import './styles.css';
 import './shell.css';
 
+// Apply the saved theme BEFORE React paints, so a light-mode operator does not
+// get a dark flash on every load. Dark is the default — it is what the console
+// has always been and what a long arming session wants. Presentation only:
+// this sets an attribute the stylesheet reads, nothing else.
+try {
+  const saved = localStorage.getItem('pons-launcher.theme');
+  if (saved === 'light' || saved === 'dark') document.documentElement.dataset.theme = saved;
+} catch {
+  // Storage can be disabled; the console just stays on the default theme.
+}
+
 createRoot(document.getElementById('root')).render(
   <StrictMode>
     <App />
