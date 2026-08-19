@@ -48,22 +48,32 @@
  */
 
 :root {
-  /* Layered dark — a deep blued base with panels that read as raised cards, not
-     flat regions. Kept dark for a long arming session, warmer and rounder than
-     the old instrument black so the console feels like a modern workspace. */
-  --void: #090d15;
-  --panel: #141c28;
-  --panel-2: #0f151f;
-  --panel-hi: #1b2534;
-  --rule: #243141;
-  --rule-soft: #1a2431;
-  --ink: #eaf1fb;
-  --dim: #96a4ba;
+  /* Layered dark, dashboard-grade. A deep blued base with cards that read as
+     raised surfaces the way a modern ops console does — lifted a shade and
+     turned a touch bluer than the old instrument black so the panels feel like
+     a workspace rather than a readout. */
+  --void: #0a0e16;
+  --panel: #121a2b;
+  --panel-2: #0d1420;
+  --panel-hi: #1b2436;
+  --rule: #263147;
+  --rule-soft: #1a2331;
+  --ink: #eef2fb;
+  --dim: #97a4bb;
   --dimmer: #64748b;
 
-  /* Amber stays the signature — it is the pons mark and it reads as the same
-     warm gold as the sun in the reference. vermilion = danger, jade = done,
-     sky = a neutral-positive accent for figures and info. */
+  /* TWO PRIMARIES, AND THE SPLIT IS THE POINT. Indigo is the NEUTRAL primary —
+     navigation, links, focus, and any forward action that does NOT move money
+     (Preview, Create wallet, the sidebar's active tab). Amber is reserved now
+     for the one action per step that actually spends. That resolves the old
+     tension where amber meant both "primary" and "armed" at once: a screen can
+     have an indigo primary and still keep amber for the single control that
+     matters when funds are at stake. vermilion = live/irreversible, jade =
+     done, sky = a neutral figure/info accent. */
+  --indigo: #6366f1;
+  --indigo-bright: #818cf8;
+  --indigo-dim: #312e81;
+  --tint-indigo: rgba(99, 102, 241, 0.14);
   --amber: #f6b23e;
   --amber-dim: #8a6318;
   --vermilion: #ff5648;
