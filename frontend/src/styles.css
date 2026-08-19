@@ -1201,38 +1201,49 @@ td input[type='number'] {
 /* ── icon controls ────────────────────────────────────────────────────────
    Replacing the text-link buttons that used to sit in rows and toolbars. A
    button styled as prose reads as prose; these read as controls, which is what
-   they are. Both stay in the grey band until hovered — the amber belongs to the
-   forward action of a step, and a toolbar that competed with it would break the
-   one-amber-per-panel rule this stylesheet opens with. */
+   they are.
+
+   FILLED, NOT TRANSPARENT. They match button.ghost's treatment — a raised panel
+   fill with a hairline border — so a control is visible as a control before the
+   pointer finds it, rather than appearing on hover. That is a deliberate
+   departure from the one-amber-per-panel rule this stylesheet opens with, which
+   kept secondary controls flat so the step's forward action was the only thing
+   with weight. The trade is legibility for that signal; the amber solid is
+   still the loudest thing on any panel, which is what the rule was protecting.
+
+   Destructive controls carry their vermilion ALWAYS rather than on hover, so a
+   delete is identifiable without probing it. */
 .icon-btn {
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  width: 26px;
-  height: 26px;
+  width: 28px;
+  height: 28px;
   padding: 0;
   color: var(--dim);
-  background: none;
-  border: 1px solid transparent;
+  background: var(--panel-hi);
+  border: 1px solid var(--rule);
   border-radius: 6px;
+  box-shadow: 0 1px 0 rgba(255, 255, 255, 0.03) inset;
   cursor: pointer;
   transition: color 0.12s, border-color 0.12s, background 0.12s;
 }
 .icon-btn:hover:not(:disabled),
 .icon-btn:focus-visible {
   color: var(--ink);
-  border-color: var(--rule);
+  border-color: var(--amber);
   background: var(--panel-hi);
 }
-/* Vermilion only on hover — see the stylesheet header. A delete drawn red in
-   every row of a hundred-row table would make a list of ordinary wallets look
-   like a page of warnings, and then the colour would mean nothing where it
-   matters. */
+.icon-btn.is-danger {
+  color: var(--vermilion);
+  background: var(--tint-vermilion);
+  border-color: var(--vermilion-dim);
+}
 .icon-btn.is-danger:hover:not(:disabled),
 .icon-btn.is-danger:focus-visible {
-  color: var(--vermilion);
-  border-color: var(--vermilion-dim);
-  background: var(--tint-vermilion);
+  color: #1a0603;
+  background: var(--vermilion);
+  border-color: var(--vermilion);
 }
 .icon-btn:disabled {
   opacity: 0.3;
@@ -1242,32 +1253,53 @@ td input[type='number'] {
 .icon-action {
   display: inline-flex;
   align-items: center;
-  gap: 6px;
-  padding: 5px 10px;
+  gap: 7px;
+  padding: 7px 12px;
   font: inherit;
   font-size: 0.86rem;
-  color: var(--dim);
-  background: none;
-  border: 1px solid var(--rule-soft);
-  border-radius: 6px;
+  font-weight: 600;
+  color: var(--ink);
+  background: var(--panel-hi);
+  border: 1px solid var(--rule);
+  border-radius: var(--radius);
+  box-shadow: 0 1px 0 rgba(255, 255, 255, 0.03) inset;
   cursor: pointer;
   transition: color 0.12s, border-color 0.12s, background 0.12s;
 }
 .icon-action:hover:not(:disabled),
 .icon-action:focus-visible {
-  color: var(--ink);
-  border-color: var(--rule);
-  background: var(--panel-hi);
+  color: var(--amber);
+  border-color: var(--amber);
+}
+.icon-action.is-danger {
+  color: var(--vermilion);
+  background: var(--tint-vermilion);
+  border-color: var(--vermilion-dim);
 }
 .icon-action.is-danger:hover:not(:disabled),
 .icon-action.is-danger:focus-visible {
-  color: var(--vermilion);
-  border-color: var(--vermilion-dim);
-  background: var(--tint-vermilion);
+  color: #1a0603;
+  background: var(--vermilion);
+  border-color: var(--vermilion);
 }
 .icon-action:disabled {
   opacity: 0.4;
   cursor: default;
+}
+
+/* The two facts inside a sentence that an operator is actually reading for.
+   Sky for the ordinary one — a time, a figure, the thing you came to check —
+   and vermilion for the one that needs a hand. Applied to the WORDS, not the
+   paragraph: a whole line in colour is a line nobody reads twice, and the point
+   is that "next due 15:12" and "overdue since 09:04" should not look alike at a
+   glance across twenty cards. */
+.is-next {
+  color: var(--sky);
+  font-weight: 600;
+}
+.is-bad {
+  color: var(--vermilion);
+  font-weight: 600;
 }
 
 /* Scrollbars inside the console's own scrolling regions — the wallet tables and

@@ -234,7 +234,14 @@ export default function V4SeedPanel({ step, wallets, masters, facts, explorer, r
             <span className="hint">{progress}</span>
           ) : (
             tickedHere.length > 0 && (
-              <Busy busy={busy === 'delete'} className="ghost" onClick={() => setBulk(tickedHere)}>
+              // Vermilion, matching the per-row deletes beside it. This one
+              // archives a hundred keys in a press, so it is the last control
+              // in this panel that should read as ordinary.
+              <Busy
+                busy={busy === 'delete'}
+                className="ghost danger"
+                onClick={() => setBulk(tickedHere)}
+              >
                 Delete {tickedHere.length} selected
               </Busy>
             )

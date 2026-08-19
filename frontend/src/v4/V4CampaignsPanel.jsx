@@ -185,17 +185,39 @@ export default function V4CampaignsPanel({ step, campaigns, details, lastSent, e
                   because polling is off and nothing retries until the operator
                   acts. That is precisely the stopped campaign this line exists
                   to expose, so it is the one place it must not guess. */}
-              {!full
-                ? 'last send not read yet'
-                : sentAt
-                  ? `last sent ${ago(sentAt, now)}`
-                  : 'nothing sent yet'}
+              {!full ? (
+                'last send not read yet'
+              ) : sentAt ? (
+                <>
+                  last sent <b className="is-next">{ago(sentAt, now)}</b>
+                </>
+              ) : (
+                'nothing sent yet'
+              )}
+              {/* COLOUR BY WHAT THE FACT MEANS, not to decorate. Three states
+                  and three readings: sky for the ordinary answer (it is moving,
+                  here is when next), vermilion for the two that need a hand —
+                  a due time already past, and a running campaign with no timer,
+                  which is a runner that has stopped re-arming rather than one
+                  that is waiting. Anything grey is prose around them. */}
               {c.status === 'running' && c.nextDueIso && (
-                <> · {overdue ? `overdue since ${clock(c.nextDueIso, now)}` : `next due ${clock(c.nextDueIso, now)}`}</>
+                <>
+                  {' · '}
+                  <b className={overdue ? 'is-bad' : 'is-next'}>
+                    {overdue
+                      ? `overdue since ${clock(c.nextDueIso, now)}`
+                      : `next due ${clock(c.nextDueIso, now)}`}
+                  </b>
+                </>
               )}
               {c.status === 'running' && !c.nextDueIso && <> · nothing left to send</>}
               {c.status !== 'running' && <> · {c.status}, nothing scheduled</>}
-              {stalled && <> · no timer armed</>}
+              {stalled && (
+                <>
+                  {' · '}
+                  <b className="is-bad">no timer armed</b>
+                </>
+              )}
             </p>
 
             {/* A halt or pause reason is NEVER folded away. It is the sentence
