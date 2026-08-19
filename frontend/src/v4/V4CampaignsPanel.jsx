@@ -55,6 +55,13 @@ export default function V4CampaignsPanel({ step, campaigns, details, lastSent, e
     }
   }
 
+  // Rolled up from the summaries, which carry their own counts — no transfer
+  // list needed, so these are right on first paint rather than filling in as
+  // details arrive.
+  const halted = campaigns.filter((c) => c.status === 'halted').length;
+  const totalSent = campaigns.reduce((n, c) => n + (c.sent || 0), 0);
+  const totalPlanned = campaigns.reduce((n, c) => n + (c.total || 0), 0);
+
   if (!campaigns.length) {
     return (
       <Step {...step}>
@@ -79,6 +86,40 @@ export default function V4CampaignsPanel({ step, campaigns, details, lastSent, e
         changes nothing: the schedule lives on the server and survives a restart.
       </p>
 
+      {/* THE ANSWER BEFORE THE DETAIL. A batch makes twenty campaigns, and
+          twenty cards is a page nobody reads to the end of — so the question
+          this step exists to answer, "is anything wrong", is stated once here
+          and the cards below are for the one that is. Halted is drawn even at
+          zero: an operator who has learnt to look for it needs to see that it
+          was looked for and was none, not to wonder whether it is missing. */}
+      {campaigns.length > 1 && (
+        <div className="row" style={{ marginBottom: 12 }}>
+          <span className="hint">
+            <b>{campaigns.length}</b> campaigns
+          </span>
+          {['running', 'complete', 'paused', 'cancelled'].map((s) => {
+            const n = campaigns.filter((c) => c.status === s).length;
+            return n ? (
+              <span className="hint" key={s}>
+                · <b>{n}</b> {s}
+              </span>
+            ) : null;
+          })}
+          <span className={halted > 0 ? 'crux' : 'hint'}>
+            · <b>{halted}</b> halted
+          </span>
+          <span className="spacer" />
+          <span className="hint">
+            <b>{totalSent}</b> of <b>{totalPlanned}</b> wallets funded
+          </span>
+        </div>
+      )}
+
+      {/* Capped, for the same reason the wallet tables are: twenty cards pushes
+          everything below this step off the page. Tall enough for two at a
+          time, which is what reading one and comparing it to its neighbour
+          takes. */}
+      <div style={{ maxHeight: 620, overflowY: 'auto' }}>
       {campaigns.map((c) => {
         const full = details[c.id];
         const transfers = full?.transfers || [];
@@ -314,6 +355,7 @@ export default function V4CampaignsPanel({ step, campaigns, details, lastSent, e
           </div>
         );
       })}
+      </div>
 
       <Modal
         open={Boolean(cancelling)}
