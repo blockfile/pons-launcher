@@ -1198,6 +1198,47 @@ td input[type='number'] {
    but the href is still worth having, so this keeps the navigation and drops
    the decoration. It reveals itself on hover, which is where a reader looks
    when they want to know whether something is clickable. */
+/* Scrollbars inside the console's own scrolling regions — the wallet tables and
+   the campaign list. The platform default is a light-grey slab that reads as a
+   piece of the operating system dropped onto a dark panel; this is the same
+   hairline vocabulary the rules and borders use, and it stays out of the way
+   until the pointer is over the thing it belongs to.
+
+   Firefox takes the two-value shorthand; WebKit needs its pseudo-elements, so
+   both are declared and each browser ignores the other's. */
+.table-scroll,
+.scroll-y {
+  scrollbar-width: thin;
+  scrollbar-color: var(--rule) transparent;
+}
+.table-scroll::-webkit-scrollbar,
+.scroll-y::-webkit-scrollbar {
+  width: 10px;
+  height: 10px;
+}
+.table-scroll::-webkit-scrollbar-track,
+.scroll-y::-webkit-scrollbar-track {
+  background: transparent;
+}
+.table-scroll::-webkit-scrollbar-thumb,
+.scroll-y::-webkit-scrollbar-thumb {
+  background: var(--rule);
+  border-radius: 99px;
+  /* Inset by a transparent border so the thumb reads as a slim bar with air
+     around it rather than filling the gutter edge to edge. */
+  border: 3px solid transparent;
+  background-clip: padding-box;
+}
+.table-scroll:hover::-webkit-scrollbar-thumb,
+.scroll-y:hover::-webkit-scrollbar-thumb {
+  background: var(--panel-hi);
+  background-clip: padding-box;
+}
+.table-scroll::-webkit-scrollbar-corner,
+.scroll-y::-webkit-scrollbar-corner {
+  background: transparent;
+}
+
 a.addr-text.is-plain {
   color: inherit;
   text-decoration: none;

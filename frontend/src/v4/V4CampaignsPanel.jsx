@@ -34,6 +34,12 @@ export default function V4CampaignsPanel({ step, campaigns, details, lastSent, e
   const [busy, setBusy] = useState('');
   const [cancelling, setCancelling] = useState(null);
   const [open, setOpen] = useState({});
+  // Which cards are expanded. Absent means folded — EXCEPT for a campaign that
+  // has halted, which opens itself: that one is not a scanning problem, and a
+  // stopped campaign hiding its own counts behind a click is the failure this
+  // panel is built to prevent, reintroduced by the thing that tidied it.
+  const [card, setCard] = useState({});
+  const cardOpen = (c) => card[c.id] ?? c.status === 'halted';
   // A clock, not a poll. It costs one state write every fifteen seconds and
   // nothing on the network, and it is what keeps "34m ago" honest after the
   // campaign it describes has stopped being fetched.
@@ -119,7 +125,7 @@ export default function V4CampaignsPanel({ step, campaigns, details, lastSent, e
           everything below this step off the page. Tall enough for two at a
           time, which is what reading one and comparing it to its neighbour
           takes. */}
-      <div style={{ maxHeight: 620, overflowY: 'auto' }}>
+      <div className="scroll-y" style={{ maxHeight: 620, overflowY: 'auto' }}>
       {campaigns.map((c) => {
         const full = details[c.id];
         const transfers = full?.transfers || [];
@@ -190,10 +196,29 @@ export default function V4CampaignsPanel({ step, campaigns, details, lastSent, e
               {stalled && <> · no timer armed</>}
             </p>
 
+            {/* A halt or pause reason is NEVER folded away. It is the sentence
+                that says why a campaign stopped, and hiding it behind a click
+                would make a stopped campaign look like a quiet one on the very
+                readout built to keep those apart. */}
             {(c.haltReason || c.pauseReason) && (
               <p style={{ overflowWrap: 'anywhere' }}>{c.haltReason || c.pauseReason}</p>
             )}
 
+            {/* Everything below is folded by default. Twenty campaigns is a
+                list to scan, not twenty things to read: the title and the
+                staleness line above answer "is this one fine", and the counts,
+                the controls and the schedule are what you open when the answer
+                is no. A campaign that has halted opens itself, because that one
+                is not a scanning problem. */}
+            <button
+              className="link"
+              onClick={() => setCard((s) => ({ ...s, [c.id]: !cardOpen(c) }))}
+            >
+              {cardOpen(c) ? 'less' : `${c.sent} of ${c.total} sent · details`}
+            </button>
+
+            {cardOpen(c) && (
+              <>
             <div className="stats" style={{ marginTop: 12 }}>
               <div className="stat ok">
                 <span>Sent</span>
@@ -351,6 +376,8 @@ export default function V4CampaignsPanel({ step, campaigns, details, lastSent, e
                   );
                 })}
               </div>
+            )}
+              </>
             )}
           </div>
         );
