@@ -39,4 +39,22 @@ function available(ks, store, now, { minHours = config.seasonedMinHours } = {}) 
     .sort((a, b) => b.hoursSinceFunded - a.hoursSinceFunded);
 }
 
-module.exports = { available, HOUR_MS, _private: { fundedAtByWallet } };
+/**
+ * Re-role available seasoned seeds into a target bundle role and record them as graduated.
+ * All-or-nothing: validates every id against available() before the first setRole.
+ */
+function claim(ks, store, ids, { toRole, toTab, now, minHours = config.seasonedMinHours }) {
+  if (!Array.isArray(ids) || ids.length === 0) throw new Error('ids[] is required');
+  const byId = new Map(available(ks, store, now, { minHours }).map((w) => [w.id, w]));
+  const picked = ids.map((id) => {
+    const w = byId.get(id);
+    if (!w) throw new Error(`wallet ${id} is not a claimable seasoned wallet`);
+    return w;
+  });
+  const graduatedAt = new Date(now).toISOString();
+  for (const w of picked) ks.setRole(w.id, toRole);
+  store.recordGraduated(picked.map((w) => ({ id: w.id, address: w.address, toTab, at: graduatedAt })));
+  return { claimed: picked.map((w) => ({ id: w.id, address: w.address, label: w.label })), graduatedAt };
+}
+
+module.exports = { available, claim, HOUR_MS, _private: { fundedAtByWallet } };
