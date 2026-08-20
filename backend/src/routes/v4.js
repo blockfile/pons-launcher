@@ -48,6 +48,7 @@ const plan = require('../v4/plan');
 const { storeFor } = require('../v4/store');
 const runner = require('../v4/runner');
 const rng = require('../v4/rng');
+const seasoned = require('../v4/seasoned');
 
 const router = express.Router();
 
@@ -518,6 +519,18 @@ router.get('/v4/wallets', requireApiKey, async (req, res, next) => {
         planDefaults: plan.DEFAULTS,
       })
     );
+  } catch (err) {
+    next(err);
+  }
+});
+
+// GET /api/v4/seasoned — the seed wallets aged enough for V1/V3 to claim.
+router.get('/v4/seasoned', requireApiKey, (req, res, next) => {
+  try {
+    const ks = keystoreFor(req.user.id);
+    const store = storeFor(req.user.id);
+    const wallets = seasoned.available(ks, store, Date.now());
+    res.json({ count: wallets.length, minHours: config.seasonedMinHours, wallets });
   } catch (err) {
     next(err);
   }

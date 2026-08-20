@@ -3,11 +3,30 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
 const { parseEther } = require('ethers');
+const fs = require('fs');
+const os = require('os');
+const path = require('path');
+
+// GET /v4/seasoned (below) is the one test in this file that needs a REAL
+// keystore and campaign store rather than the fakeKs/fakeStore doubles the
+// rest of the file uses — seasoned.available() reads both for real. Both
+// config.js and the store/keystore modules compute their file paths once, at
+// first require, so these env vars must be set before requiring './v4' (which
+// pulls in '../config', '../wallets/keystore' and '../v4/store' transitively)
+// or every other test in this process would be pointed at the real on-disk
+// keystore instead of this throwaway temp one.
+const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'v4-routes-'));
+process.env.KEYSTORE_PATH = path.join(tmpDir, 'wallets.keystore.json');
+process.env.KEYSTORE_PASSPHRASE = 'test-passphrase-for-v4-route-tests';
+process.env.HISTORY_PATH = path.join(tmpDir, 'launches.json');
 
 // These are unit tests over the route module's exported guards and pure
 // helpers, not an HTTP harness — the repo has no supertest dependency and
 // this plan does not add one.
-const guards = require('./v4')._private;
+const router = require('./v4');
+const guards = router._private;
+const { keystoreFor } = require('../wallets/keystore');
+const { storeFor } = require('../v4/store');
 
 // ── the brief's required tests, verbatim ────────────────────────────────────
 
@@ -472,4 +491,134 @@ test('resolveCampaignStart succeeds and regenerates the exact plan a matching pr
   assert.equal(started.result.seed, 'fixed');
   assert.deepEqual(started.result.transfers, preview.transfers);
   assert.deepEqual(started.walletIds, preview.walletIds);
+});
+
+// ── GET /v4/seasoned — the actual route handler ─────────────────────────────
+//
+// Everything above tests v4's exported pure guards through fakeKs/fakeStore
+// doubles. This route's whole body is a couple of lines calling straight into
+// seasoned.available() (already covered in depth by v4/seasoned.test.js) and
+// shaping the response — there is no comparable pure helper to pull out and
+// unit-test, and the repo has no supertest dependency for real HTTP. So this
+// pulls the handler directly off the mounted router's own stack and calls it
+// with fake req/res objects, against a real (temp-dir) keystore and campaign
+// store — seasoned.available() reads both for real, not through doubles.
+
+function findRouteHandler(method, routePath) {
+  const layer = router.stack.find(
+    (l) => l.route && l.route.path === routePath && l.route.methods[method]
+  );
+  if (!layer) throw new Error(`no route ${method.toUpperCase()} ${routePath}`);
+  // requireApiKey sits ahead of the handler in the route's own middleware
+  // stack; the handler itself is always last.
+  return layer.route.stack[layer.route.stack.length - 1].handle;
+}
+
+function fakeRes() {
+  return {
+    statusCode: 200,
+    body: undefined,
+    status(code) {
+      this.statusCode = code;
+      return this;
+    },
+    json(payload) {
+      this.body = payload;
+      return this;
+    },
+  };
+}
+
+test('GET /v4/seasoned returns the seed wallets aged past the gate', async () => {
+  // A user id of its own, so this test's keystore and campaign store files
+  // (wallets.route-seasoned-1.keystore.json / seasoning.route-seasoned-1.json
+  // in the temp dir set up above) never collide with any other test's.
+  const userId = 'route-seasoned-1';
+  const ks = keystoreFor(userId);
+  const store = storeFor(userId);
+
+  const [seed] = ks.generate(1, { role: 'v4seed', label: 'seed' });
+
+  // 3 days ago — comfortably past the default 24h gate regardless of how long
+  // this test takes to run.
+  const sentAt = new Date(Date.now() - 3 * 24 * 3600_000).toISOString();
+  store.create({
+    id: 'c1',
+    name: 'season one',
+    status: 'complete',
+    kind: 'season',
+    masterWalletId: 'm1',
+    seed: 'x',
+    params: {},
+    transfers: [
+      {
+        id: 't1',
+        walletId: seed.id,
+        address: seed.address,
+        amountEth: '0.004',
+        status: 'sent',
+        sentAt,
+        attempts: [],
+      },
+    ],
+    createdAt: sentAt,
+  });
+
+  const handler = findRouteHandler('get', '/v4/seasoned');
+  const req = { user: { id: userId } };
+  const res = fakeRes();
+  await handler(req, res, (err) => {
+    if (err) throw err;
+  });
+
+  assert.equal(res.body.count, 1);
+  assert.equal(res.body.minHours, 24);
+  assert.equal(res.body.wallets.length, 1);
+  const w = res.body.wallets[0];
+  assert.equal(w.id, seed.id);
+  assert.equal(w.address, seed.address);
+  // generate() numbers every label, even for a single wallet — see
+  // wallets/keystore.js's generate(), which appends "-${i + 1}".
+  assert.equal(w.label, 'seed-1');
+  assert.equal(w.fundedAt, sentAt);
+  assert.ok(w.hoursSinceFunded >= 24, `expected hoursSinceFunded >= 24, got ${w.hoursSinceFunded}`);
+});
+
+test('GET /v4/seasoned excludes a seed funded too recently', async () => {
+  const userId = 'route-seasoned-2';
+  const ks = keystoreFor(userId);
+  const store = storeFor(userId);
+
+  const [seed] = ks.generate(1, { role: 'v4seed', label: 'seed-young' });
+  const sentAt = new Date(Date.now() - 1 * 3600_000).toISOString(); // 1h ago
+  store.create({
+    id: 'c1',
+    name: 'season one',
+    status: 'running',
+    kind: 'season',
+    masterWalletId: 'm1',
+    seed: 'x',
+    params: {},
+    transfers: [
+      {
+        id: 't1',
+        walletId: seed.id,
+        address: seed.address,
+        amountEth: '0.004',
+        status: 'sent',
+        sentAt,
+        attempts: [],
+      },
+    ],
+    createdAt: sentAt,
+  });
+
+  const handler = findRouteHandler('get', '/v4/seasoned');
+  const res = fakeRes();
+  await handler({ user: { id: userId } }, res, (err) => {
+    if (err) throw err;
+  });
+
+  assert.equal(res.body.count, 0);
+  assert.deepEqual(res.body.wallets, []);
 });
