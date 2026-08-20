@@ -40,6 +40,30 @@ function fakeRpc() {
   };
 }
 
+// A keystore holding `n` distinct v2 bundle wallets, for exercising a run large
+// enough to span several quote batches.
+function fakeKeystoreN(n, sent = []) {
+  const wallets = [{ id: 'dev', role: 'v2dev', address: DEV }];
+  for (let i = 0; i < n; i += 1) {
+    wallets.push({
+      id: `v2b${i}`,
+      role: 'v2bundle',
+      address: `0x${String(i + 1).padStart(40, '0')}`,
+    });
+  }
+  return {
+    list: () => wallets,
+    walletWithRole: (role) => wallets.find((w) => w.role === role) || null,
+    walletsWithRole: (role) => wallets.filter((w) => w.role === role),
+    signer: () => ({
+      sendTransaction: async (tx) => {
+        sent.push(tx);
+        return { hash: HASH };
+      },
+    }),
+  };
+}
+
 function relayQuote({ from, recipient, amountWei }) {
   return {
     steps: [
@@ -147,6 +171,81 @@ test('fundV2Bundle rejects non-v2 bundle wallets before quoting Relay', async ()
     /not a v2 bundle wallet/
   );
   assert.equal(quoted, false);
+});
+
+test('a many-wallet run quotes in batches, never bursting, and keeps order and nonces', async () => {
+  const sent = [];
+  let inFlight = 0;
+  let maxInFlight = 0;
+  const targets = Array.from({ length: 7 }, (_, i) => ({ walletId: `v2b${i}`, amountEth: '0.01' }));
+
+  const out = await fundV2Bundle(targets, {
+    keystore: fakeKeystoreN(7, sent),
+    // Record peak concurrency so a regression back to Promise.all(all) is caught.
+    relayQuote: async (input) => {
+      inFlight += 1;
+      maxInFlight = Math.max(maxInFlight, inFlight);
+      await new Promise((r) => setImmediate(r));
+      inFlight -= 1;
+      return relayQuote(input);
+    },
+    rpc: fakeRpc(),
+    getFeesFn: async () => REFRESHED_FEES,
+    dryRun: false,
+    quoteBatchGapMs: 0, // keep the test instant; the batching itself is what matters
+  });
+
+  assert.equal(out.results.length, 7);
+  assert.ok(maxInFlight <= 3, `expected at most 3 concurrent quotes, saw ${maxInFlight}`);
+  // Order preserved end to end: results and the broadcast nonces follow the
+  // order the targets were given in.
+  assert.deepEqual(
+    out.results.map((r) => r.address),
+    targets.map((_, i) => `0x${String(i + 1).padStart(40, '0')}`)
+  );
+  assert.deepEqual(
+    sent.map((tx) => tx.nonce),
+    [7, 8, 9, 10, 11, 12, 13]
+  );
+});
+
+test('a transient Relay refusal is retried, not surfaced', async () => {
+  let calls = 0;
+  const out = await fundV2Bundle([{ walletId: 'v2b', amountEth: '0.01' }], {
+    keystore: fakeKeystore([]),
+    relayQuote: async (input) => {
+      calls += 1;
+      if (calls === 1) throw new Error('Could not process request. Please try again later.');
+      return relayQuote(input);
+    },
+    rpc: fakeRpc(),
+    getFeesFn: async () => REFRESHED_FEES,
+    dryRun: true,
+    quoteBatchGapMs: 0,
+  });
+
+  assert.equal(calls, 2, 'the first refusal should have been retried once');
+  assert.equal(out.results[0].requestId, REQUEST);
+});
+
+test('a specific Relay error is surfaced immediately, not retried', async () => {
+  let calls = 0;
+  await assert.rejects(
+    () =>
+      fundV2Bundle([{ walletId: 'v2b', amountEth: '0.01' }], {
+        keystore: fakeKeystore([]),
+        relayQuote: async () => {
+          calls += 1;
+          throw new Error('Invalid recipient address for chain 4663');
+        },
+        rpc: fakeRpc(),
+        getFeesFn: async () => REFRESHED_FEES,
+        dryRun: true,
+        quoteBatchGapMs: 0,
+      }),
+    /Invalid recipient address/
+  );
+  assert.equal(calls, 1, 'a non-transient error must not be retried');
 });
 
 test('dry run quotes Relay but does not broadcast deposits', async () => {

@@ -19,6 +19,52 @@ const NATIVE = '0x0000000000000000000000000000000000000000';
 const MAX_TARGETS = 31;
 const RELAY_FEE_BUMP_PCT = 50;
 
+// Relay's public API rate-limits a burst of quote requests made in the same
+// instant. Funding ten wallets at once fired ten /quote/v2 calls simultaneously,
+// and Relay answered every one with "Could not process request. Please try again
+// later." — a single quote sent on its own succeeds against the same route. So
+// the quote phase goes out in small batches with a short gap between them (three
+// at a time clears the limit, confirmed against the live API), and a transient
+// refusal is retried rather than surfaced. This paces requests only: the amounts,
+// the deposit transactions signed, and the order they are sent in are unchanged.
+const QUOTE_BATCH_SIZE = 3;
+const QUOTE_BATCH_GAP_MS = 300;
+const QUOTE_RETRIES = 2;
+const RELAY_TRANSIENT_RE = /try again later|could not process|rate.?limit|too many|timeout|temporar|\b(?:429|502|503|504)\b/i;
+
+const sleep = (ms) => (ms > 0 ? new Promise((resolve) => setTimeout(resolve, ms)) : Promise.resolve());
+
+// Run each planned target through `quoteOne`, at most `size` at a time, pausing
+// `gapMs` between batches. Order is preserved: batches run in order and each
+// batch's results keep their in-batch order, so the returned array matches
+// `planned` — which the nonce assignment downstream relies on.
+async function quoteInBatches(planned, quoteOne, { size = QUOTE_BATCH_SIZE, gapMs = QUOTE_BATCH_GAP_MS } = {}) {
+  const out = [];
+  for (let i = 0; i < planned.length; i += size) {
+    const batch = planned.slice(i, i + size);
+    out.push(...(await Promise.all(batch.map(quoteOne))));
+    if (i + size < planned.length) await sleep(gapMs);
+  }
+  return out;
+}
+
+// Retry a single quote on a transient Relay refusal ("try again later", a 429,
+// a gateway error) with a growing backoff. A specific error — an invalid
+// address, an unsupported route — is surfaced on the first try, not retried.
+async function withQuoteRetry(fn, { retries = QUOTE_RETRIES, gapMs = QUOTE_BATCH_GAP_MS } = {}) {
+  let lastErr;
+  for (let attempt = 0; attempt <= retries; attempt += 1) {
+    try {
+      return await fn();
+    } catch (err) {
+      lastErr = err;
+      if (attempt === retries || !RELAY_TRANSIENT_RE.test(err?.message || '')) throw err;
+      await sleep(gapMs * (attempt + 1));
+    }
+  }
+  throw lastErr;
+}
+
 function wei(value) {
   return BigInt(value || 0);
 }
@@ -165,7 +211,16 @@ function planTargets(targets, ks) {
 
 async function fundV2Bundle(
   targets,
-  { keystore: ks, relayQuote = quoteDeposit, rpc = provider, dryRun = config.dryRun, getFeesFn = getFees } = {}
+  {
+    keystore: ks,
+    relayQuote = quoteDeposit,
+    rpc = provider,
+    dryRun = config.dryRun,
+    getFeesFn = getFees,
+    quoteBatchSize = QUOTE_BATCH_SIZE,
+    quoteBatchGapMs = QUOTE_BATCH_GAP_MS,
+    quoteRetries = QUOTE_RETRIES,
+  } = {}
 ) {
   if (!ks) throw new Error('keystore is required');
 
@@ -173,17 +228,26 @@ async function fundV2Bundle(
   const planned = planTargets(targets, ks);
   const signer = ks.signer(dev.id, rpc);
 
-  const quoted = await Promise.all(
-    planned.map(async (target) => {
-      const quote = await relayQuote({
-        from: dev.address,
-        recipient: target.address,
-        amountWei: target.amountWei,
-        chainId: config.chainId,
-      });
+  // Quote in small batches so a many-wallet run does not fire every request at
+  // Relay in the same instant and trip its rate limiter — see the note on
+  // QUOTE_BATCH_SIZE above.
+  const quoted = await quoteInBatches(
+    planned,
+    async (target) => {
+      const quote = await withQuoteRetry(
+        () =>
+          relayQuote({
+            from: dev.address,
+            recipient: target.address,
+            amountWei: target.amountWei,
+            chainId: config.chainId,
+          }),
+        { retries: quoteRetries, gapMs: quoteBatchGapMs }
+      );
       const deposit = depositStep(quote, { expectedFrom: dev.address, expectedChainId: config.chainId });
       return { target, quote, deposit };
-    })
+    },
+    { size: quoteBatchSize, gapMs: quoteBatchGapMs }
   );
 
   // Relay quotes a concrete deposit transaction, including fee fields. On this
