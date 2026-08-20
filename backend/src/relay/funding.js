@@ -19,19 +19,21 @@ const NATIVE = '0x0000000000000000000000000000000000000000';
 const MAX_TARGETS = 31;
 const RELAY_FEE_BUMP_PCT = 50;
 
-// Relay's public API rate-limits per IP. Funding ten wallets at once fired ten
-// /quote/v2 calls in the same instant and Relay answered every one with "Could
-// not process request. Please try again later." — while a single quote from the
-// same IP succeeds, and a server that ALSO runs seasoning campaigns is spending
-// that shared per-IP budget the whole time. So the quote phase goes out a few at
-// a time with a gap between them, and a transient refusal is retried rather than
-// surfaced. The pace is env-tunable (RELAY_QUOTE_BATCH_SIZE / _GAP_MS / _RETRIES)
-// because the right spacing depends on how much other Relay traffic the box makes
-// — loosen it if a large run still trips the limit. This changes timing only: the
-// amounts, the deposits signed, and the order they are sent in are unchanged.
+// Relay's public API rate-limits per IP with a small budget — measured against
+// the live endpoint from the server: about five quotes land, then every further
+// request returns HTTP 429 "Could not process request. Please try again later.",
+// AND continuing to send while blocked keeps the block alive (each 429 refreshes
+// the penalty). That budget is shared with everything else this box asks of Relay
+// — v3 and the seasoning campaigns — so a many-wallet run cannot fire its quotes
+// in a burst. They go out one (by default) at a time with a wide gap, and a 429
+// is met with a LONG backoff so the bucket can refill, never a fast retry that
+// would just re-arm the block. Pace is env-tunable (RELAY_QUOTE_BATCH_SIZE /
+// _GAP_MS / _RETRIES / _BACKOFF_MS). Timing only: amounts, deposits and send
+// order are unchanged.
 const QUOTE_BATCH_SIZE = config.relayQuoteBatchSize;
 const QUOTE_BATCH_GAP_MS = config.relayQuoteGapMs;
 const QUOTE_RETRIES = config.relayQuoteRetries;
+const QUOTE_BACKOFF_MS = config.relayQuote429BackoffMs;
 const RELAY_TRANSIENT_RE = /try again later|could not process|rate.?limit|too many|timeout|temporar|\b(?:429|502|503|504)\b/i;
 
 const sleep = (ms) => (ms > 0 ? new Promise((resolve) => setTimeout(resolve, ms)) : Promise.resolve());
@@ -50,10 +52,12 @@ async function quoteInBatches(planned, quoteOne, { size = QUOTE_BATCH_SIZE, gapM
   return out;
 }
 
-// Retry a single quote on a transient Relay refusal ("try again later", a 429,
-// a gateway error) with a growing backoff. A specific error — an invalid
-// address, an unsupported route — is surfaced on the first try, not retried.
-async function withQuoteRetry(fn, { retries = QUOTE_RETRIES, gapMs = QUOTE_BATCH_GAP_MS } = {}) {
+// Retry a single quote on a transient Relay refusal (a 429 "try again later", a
+// gateway error) with a GROWING, DELIBERATELY LONG backoff — the rate limiter
+// stays tripped while it is being hit, so the retry has to wait out the window,
+// not poke at it. A specific error — an invalid address, an unsupported route —
+// is surfaced on the first try, not retried.
+async function withQuoteRetry(fn, { retries = QUOTE_RETRIES, backoffMs = QUOTE_BACKOFF_MS } = {}) {
   let lastErr;
   for (let attempt = 0; attempt <= retries; attempt += 1) {
     try {
@@ -61,7 +65,7 @@ async function withQuoteRetry(fn, { retries = QUOTE_RETRIES, gapMs = QUOTE_BATCH
     } catch (err) {
       lastErr = err;
       if (attempt === retries || !RELAY_TRANSIENT_RE.test(err?.message || '')) throw err;
-      await sleep(gapMs * (attempt + 1));
+      await sleep(backoffMs * (attempt + 1));
     }
   }
   throw lastErr;
@@ -231,6 +235,7 @@ async function fundV2Bundle(
     quoteBatchSize = QUOTE_BATCH_SIZE,
     quoteBatchGapMs = QUOTE_BATCH_GAP_MS,
     quoteRetries = QUOTE_RETRIES,
+    quoteBackoffMs = QUOTE_BACKOFF_MS,
   } = {}
 ) {
   if (!ks) throw new Error('keystore is required');
@@ -253,7 +258,7 @@ async function fundV2Bundle(
             amountWei: target.amountWei,
             chainId: config.chainId,
           }),
-        { retries: quoteRetries, gapMs: quoteBatchGapMs }
+        { retries: quoteRetries, backoffMs: quoteBackoffMs }
       );
       const deposit = depositStep(quote, { expectedFrom: dev.address, expectedChainId: config.chainId });
       return { target, quote, deposit };

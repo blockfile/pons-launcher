@@ -223,6 +223,7 @@ test('a transient Relay refusal is retried, not surfaced', async () => {
     getFeesFn: async () => REFRESHED_FEES,
     dryRun: true,
     quoteBatchGapMs: 0,
+    quoteBackoffMs: 0,
   });
 
   assert.equal(calls, 2, 'the first refusal should have been retried once');
@@ -243,6 +244,7 @@ test('a specific Relay error is surfaced immediately, not retried', async () => 
         getFeesFn: async () => REFRESHED_FEES,
         dryRun: true,
         quoteBatchGapMs: 0,
+        quoteBackoffMs: 0,
       }),
     /Invalid recipient address/
   );
