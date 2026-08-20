@@ -173,6 +173,10 @@ const config = {
   // Bundle buys are signed BEFORE the pool exists, so they cannot be estimated
   // against a live pool — this limit is used instead.
   buyGasLimit: num(process.env.BUY_GAS_LIMIT, 400000),
+
+  // A V4 seed wallet is claimable by V1/V3 once it has been funded and has aged
+  // at least this many hours — the "done seasoning" gate. 24h by default.
+  seasonedMinHours: num(process.env.SEASONED_MIN_HOURS, 24),
 };
 
 /**
