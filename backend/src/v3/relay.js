@@ -47,9 +47,13 @@ function relayUrl(path) {
 }
 
 async function relayRequest(path, { method = 'GET', body, fetchImpl = fetch } = {}) {
+  const headers = { 'content-type': 'application/json', accept: 'application/json' };
+  // The Relay API key (config.relayApiKey) lifts the shared per-IP /quote rate
+  // limit from ~5-per-window to 50/min. Sent when configured; anonymous otherwise.
+  if (config.relayApiKey) headers['x-api-key'] = config.relayApiKey;
   const res = await fetchImpl(relayUrl(path), {
     method,
-    headers: { 'content-type': 'application/json' },
+    headers,
     body: body ? JSON.stringify(body) : undefined,
   });
   const json = await res.json().catch(() => ({}));

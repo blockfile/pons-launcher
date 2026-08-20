@@ -79,19 +79,25 @@ function relayUrl(path) {
   return `${config.relayApiUrl}${path.startsWith('/') ? path : `/${path}`}`;
 }
 
+// Present a normal browser client, and authenticate with the API key when one is
+// configured. The key lifts the per-IP /quote rate limit from ~5-per-window to
+// 50/min; the User-Agent is belt-and-braces from when the bare Node fetch agent
+// drew generic refusals that curl on the same host did not.
+function relayHeaders() {
+  const headers = {
+    'content-type': 'application/json',
+    accept: 'application/json',
+    'user-agent':
+      'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
+  };
+  if (config.relayApiKey) headers['x-api-key'] = config.relayApiKey;
+  return headers;
+}
+
 async function relayRequest(path, { method = 'GET', body, fetchImpl = fetch } = {}) {
   const res = await fetchImpl(relayUrl(path), {
     method,
-    headers: {
-      'content-type': 'application/json',
-      accept: 'application/json',
-      // Relay's edge is stricter with an unidentified client than with a browser
-      // or curl. The bare Node fetch agent has drawn generic "could not process"
-      // refusals where the identical request from curl on the SAME host returns a
-      // quote — so present a normal browser User-Agent.
-      'user-agent':
-        'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
-    },
+    headers: relayHeaders(),
     body: body ? JSON.stringify(body) : undefined,
   });
   const json = await res.json().catch(() => ({}));

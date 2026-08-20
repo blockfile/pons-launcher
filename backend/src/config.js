@@ -64,6 +64,14 @@ const config = {
   // read this and v1 keeps its direct/disperser behaviour.
   relayApiUrl: (process.env.RELAY_API_URL || 'https://api.relay.link').replace(/\/$/, ''),
 
+  // Relay API key (dashboard.relay.link → API keys). Sent as `x-api-key` on every
+  // Relay request when set. Unauthenticated, the /quote endpoint rate-limits at
+  // ~5-per-window per IP — shared across v2, v3 and every seasoning campaign, so
+  // a many-wallet run trips it. A key lifts /quote to 50/min (10/s on request),
+  // which is why the pacing knobs above can be relaxed once this is set. Null =
+  // anonymous, the old behaviour.
+  relayApiKey: process.env.RELAY_API_KEY || null,
+
   // Pacing for the v2 bundle-funding quote requests to Relay. Measured against
   // the live API from the server: ~5 quotes land, then HTTP 429 "Could not
   // process request. Please try again later.", and hammering while blocked keeps
