@@ -4,6 +4,7 @@ import Step from '../components/Step.jsx';
 import { Busy } from '../components/Section.jsx';
 import Modal, { Fact } from '../components/Modal.jsx';
 import Address from '../components/Address.jsx';
+import V3BackupControls from './V3BackupControls.jsx';
 import { ROLES, eth } from './roles.js';
 
 /**
@@ -20,7 +21,7 @@ import { ROLES, eth } from './roles.js';
  * the first person to look would find the funder, and the funder funds
  * everything else too.
  */
-export default function V3MainPanel({ step, wallet, treasury, explorer, reload, report, locked }) {
+export default function V3MainPanel({ step, wallet, treasury, explorer, reload, report, locked, backupCount }) {
   const [busy, setBusy] = useState('');
   const [amount, setAmount] = useState('');
   const [showImport, setShowImport] = useState(false);
@@ -59,6 +60,7 @@ export default function V3MainPanel({ step, wallet, treasury, explorer, reload, 
               />
               <span className="spacer" />
               <b>{eth(wallet.balanceEth)} ETH</b>
+              <V3BackupControls count={backupCount} report={report} />
               <button className="ghost danger" onClick={() => setDeleting(true)} disabled={locked}>
                 delete
               </button>

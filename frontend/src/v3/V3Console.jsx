@@ -191,6 +191,7 @@ export default function V3Console({ health, credential, report, output, reported
         reload={loadWallets}
         report={report}
         locked={Boolean(job?.running)}
+        backupCount={backupCount}
       />
 
       <V3BundlePanel
@@ -212,6 +213,7 @@ export default function V3Console({ health, credential, report, output, reported
         reload={loadWallets}
         report={report}
         locked={Boolean(job?.running)}
+        backupCount={backupCount}
       />
 
       <V3ChainPanel

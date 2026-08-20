@@ -4,6 +4,7 @@ import Step from '../components/Step.jsx';
 import { Busy } from '../components/Section.jsx';
 import Modal, { Fact } from '../components/Modal.jsx';
 import Address from '../components/Address.jsx';
+import V3BackupControls from './V3BackupControls.jsx';
 import { ROLES, eth } from './roles.js';
 
 /**
@@ -18,7 +19,7 @@ import { ROLES, eth } from './roles.js';
  * exposure means deleting the one that is there. That control lives beside the
  * wallet it deletes.
  */
-export default function V3TreasuryPanel({ step, wallet, explorer, reload, report, locked }) {
+export default function V3TreasuryPanel({ step, wallet, explorer, reload, report, locked, backupCount }) {
   const [busy, setBusy] = useState('');
   const [showImport, setShowImport] = useState(false);
   const [key, setKey] = useState('');
@@ -49,6 +50,7 @@ export default function V3TreasuryPanel({ step, wallet, explorer, reload, report
             <Address value={wallet.address} href={explorer ? `${explorer}/address/${wallet.address}` : ''} />
             <span className="spacer" />
             <b>{eth(wallet.balanceEth)} ETH</b>
+            <V3BackupControls count={backupCount} report={report} />
             <button className="ghost danger" onClick={() => setDeleting(true)} disabled={locked}>
               delete
             </button>
