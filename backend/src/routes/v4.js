@@ -48,7 +48,7 @@ const plan = require('../v4/plan');
 const { storeFor } = require('../v4/store');
 const runner = require('../v4/runner');
 const rng = require('../v4/rng');
-const seasoned = require('../v4/seasoned');
+const seasonedWallets = require('../v4/seasoned');
 
 const router = express.Router();
 
@@ -529,7 +529,7 @@ router.get('/v4/seasoned', requireApiKey, (req, res, next) => {
   try {
     const ks = keystoreFor(req.user.id);
     const store = storeFor(req.user.id);
-    const wallets = seasoned.available(ks, store, Date.now());
+    const wallets = seasonedWallets.available(ks, store, Date.now());
     res.json({
       count: wallets.length,
       minHours: config.seasonedMinHours,

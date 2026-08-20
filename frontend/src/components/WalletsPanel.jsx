@@ -455,22 +455,34 @@ export default function WalletsPanel({ step, wallets, rows, setRow, share, reloa
             <input
               type="number"
               min="1"
-              max={seasoned.count || 1}
+              max={Math.min(seasoned.count, bundleRoom) || 1}
               value={seasonedCount}
               onChange={(e) => setSeasonedCount(e.target.value)}
               title="how many seasoned wallets to claim"
               style={{ width: 70 }}
             />
+            {/* A claim re-roles seasoned wallets INTO the bundle role, so it is
+                gated by the same 31-wallet exemption cap as Generate — it cannot
+                push the bundle past the limit any more than generating can. */}
             <Busy
               busy={busy === 'claim-seasoned'}
               className="ghost"
-              disabled={!seasoned.count}
-              title={seasoned.count ? '' : 'no seasoned wallets ready yet'}
+              disabled={bundleRoom === 0 || !seasoned.count}
+              title={
+                bundleRoom === 0
+                  ? `at the ${MAX_BUNDLE}-wallet limit — delete some to add more`
+                  : seasoned.count
+                    ? ''
+                    : 'no seasoned wallets ready yet'
+              }
               onClick={claimSeasoned}
             >
               Use {seasonedCount} seasoned wallets
             </Busy>
-            <span className="hint">{seasoned.count} seasoned ready</span>
+            <span className="hint">
+              {seasoned.count} seasoned ready
+              {bundleRoom > 0 ? ` · ${bundleRoom} bundle slot${bundleRoom === 1 ? '' : 's'} left` : ' · bundle full'}
+            </span>
           </>
         )}
 

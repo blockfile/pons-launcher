@@ -57,4 +57,4 @@ function claim(ks, store, ids, { toRole, toTab, now, minHours = config.seasonedM
   return { claimed: picked.map((w) => ({ id: w.id, address: w.address, label: w.label })), graduatedAt };
 }
 
-module.exports = { available, claim, HOUR_MS, _private: { fundedAtByWallet } };
+module.exports = { available, claim, HOUR_MS };
