@@ -165,7 +165,7 @@ test('recordGraduated persists and graduated() returns newest first', () => {
   const s = store.storeFor('grad-test');
   s.recordGraduated([{ id: 'a', address: '0xA', toTab: 'v3', at: '2026-08-21T00:00:00Z' }]);
   s.recordGraduated([{ id: 'b', address: '0xB', toTab: 'v1', at: '2026-08-21T01:00:00Z' }]);
-  store._reset();
+  s._reset();
   const g = s.graduated();
   assert.equal(g.length, 2);
   assert.equal(g[0].id, 'b', 'newest first');
