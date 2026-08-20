@@ -64,6 +64,19 @@ const config = {
   // read this and v1 keeps its direct/disperser behaviour.
   relayApiUrl: (process.env.RELAY_API_URL || 'https://api.relay.link').replace(/\/$/, ''),
 
+  // Pacing for the v2 bundle-funding quote requests to Relay. Relay rate-limits
+  // per IP, so a burst of quotes — ten wallets funded at once, on a box that also
+  // runs seasoning campaigns against the same API — draws "Could not process
+  // request. Please try again later." even though a lone quote from the same IP
+  // returns a quote. The quotes therefore go out `batchSize` at a time with
+  // `gapMs` between batches, and a transient refusal is retried up to `retries`
+  // times with a growing backoff. These are TIMING KNOBS ONLY — they change how
+  // fast the requests leave, never the amounts, the deposits, or their order.
+  // Loosen the gap or shrink the batch if a large run still trips the limit.
+  relayQuoteBatchSize: Math.max(1, num(process.env.RELAY_QUOTE_BATCH_SIZE, 2)),
+  relayQuoteGapMs: Math.max(0, num(process.env.RELAY_QUOTE_GAP_MS, 1500)),
+  relayQuoteRetries: Math.max(0, num(process.env.RELAY_QUOTE_RETRIES, 3)),
+
   // ethers' tx.wait() polls every 4s by default, which is forty blocks on this
   // chain. v2 reads the curve address out of the launch receipt, so that delay
   // would sit squarely in the critical path — poll for it directly instead.

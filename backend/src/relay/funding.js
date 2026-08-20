@@ -19,17 +19,19 @@ const NATIVE = '0x0000000000000000000000000000000000000000';
 const MAX_TARGETS = 31;
 const RELAY_FEE_BUMP_PCT = 50;
 
-// Relay's public API rate-limits a burst of quote requests made in the same
-// instant. Funding ten wallets at once fired ten /quote/v2 calls simultaneously,
-// and Relay answered every one with "Could not process request. Please try again
-// later." — a single quote sent on its own succeeds against the same route. So
-// the quote phase goes out in small batches with a short gap between them (three
-// at a time clears the limit, confirmed against the live API), and a transient
-// refusal is retried rather than surfaced. This paces requests only: the amounts,
-// the deposit transactions signed, and the order they are sent in are unchanged.
-const QUOTE_BATCH_SIZE = 3;
-const QUOTE_BATCH_GAP_MS = 300;
-const QUOTE_RETRIES = 2;
+// Relay's public API rate-limits per IP. Funding ten wallets at once fired ten
+// /quote/v2 calls in the same instant and Relay answered every one with "Could
+// not process request. Please try again later." — while a single quote from the
+// same IP succeeds, and a server that ALSO runs seasoning campaigns is spending
+// that shared per-IP budget the whole time. So the quote phase goes out a few at
+// a time with a gap between them, and a transient refusal is retried rather than
+// surfaced. The pace is env-tunable (RELAY_QUOTE_BATCH_SIZE / _GAP_MS / _RETRIES)
+// because the right spacing depends on how much other Relay traffic the box makes
+// — loosen it if a large run still trips the limit. This changes timing only: the
+// amounts, the deposits signed, and the order they are sent in are unchanged.
+const QUOTE_BATCH_SIZE = config.relayQuoteBatchSize;
+const QUOTE_BATCH_GAP_MS = config.relayQuoteGapMs;
+const QUOTE_RETRIES = config.relayQuoteRetries;
 const RELAY_TRANSIENT_RE = /try again later|could not process|rate.?limit|too many|timeout|temporar|\b(?:429|502|503|504)\b/i;
 
 const sleep = (ms) => (ms > 0 ? new Promise((resolve) => setTimeout(resolve, ms)) : Promise.resolve());
@@ -76,7 +78,16 @@ function relayUrl(path) {
 async function relayRequest(path, { method = 'GET', body, fetchImpl = fetch } = {}) {
   const res = await fetchImpl(relayUrl(path), {
     method,
-    headers: { 'content-type': 'application/json' },
+    headers: {
+      'content-type': 'application/json',
+      accept: 'application/json',
+      // Relay's edge is stricter with an unidentified client than with a browser
+      // or curl. The bare Node fetch agent has drawn generic "could not process"
+      // refusals where the identical request from curl on the SAME host returns a
+      // quote — so present a normal browser User-Agent.
+      'user-agent':
+        'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
+    },
     body: body ? JSON.stringify(body) : undefined,
   });
   const json = await res.json().catch(() => ({}));

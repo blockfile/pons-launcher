@@ -192,6 +192,7 @@ test('a many-wallet run quotes in batches, never bursting, and keeps order and n
     rpc: fakeRpc(),
     getFeesFn: async () => REFRESHED_FEES,
     dryRun: false,
+    quoteBatchSize: 3,
     quoteBatchGapMs: 0, // keep the test instant; the batching itself is what matters
   });
 
