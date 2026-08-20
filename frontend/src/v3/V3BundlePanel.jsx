@@ -36,6 +36,12 @@ export default function V3BundlePanel({ step, wallets, explorer, reload, report,
   const [showImport, setShowImport] = useState(false);
   const [keys, setKeys] = useState('');
   const [deleting, setDeleting] = useState(null);
+  // Ticked ids for a bulk delete, and the frozen list the confirmation asks
+  // about — frozen when the dialog opens so the count on screen is the count
+  // that runs even as the table re-polls behind it.
+  const [ticked, setTicked] = useState([]);
+  const [bulk, setBulk] = useState(null);
+  const [progress, setProgress] = useState('');
 
   async function act(what, fn) {
     setBusy(what);
@@ -47,6 +53,35 @@ export default function V3BundlePanel({ step, wallets, explorer, reload, report,
     } finally {
       setBusy('');
     }
+  }
+
+  // Ticked ids intersected with what is still on screen, so a wallet deleted
+  // since it was ticked cannot be carried in on a stale id.
+  const tickedHere = wallets.filter((w) => ticked.includes(w.id));
+  const allTicked = wallets.length > 0 && tickedHere.length === wallets.length;
+
+  /**
+   * Delete the ticked wallets, one request each, carrying on past failures.
+   * Sequential rather than parallel because every delete rewrites the whole
+   * keystore file — concurrent writes would race. A run in progress refuses
+   * every delete; that refusal is reported once rather than a hundred times.
+   */
+  async function deleteTicked(list) {
+    let done = 0;
+    const failures = [];
+    for (const w of list) {
+      setProgress(`deleting ${done + 1} of ${list.length}…`);
+      try {
+        await api(`/v3/wallets/${w.id}`, 'DELETE');
+        done += 1;
+      } catch (err) {
+        failures.push(err.message);
+      }
+    }
+    setProgress('');
+    setTicked([]);
+    const refused = failures.length ? ` ${failures.length} refused: ${failures[0]}` : '';
+    return `Deleted ${done} bundle wallet(s).${refused}`;
   }
 
   return (
@@ -87,11 +122,20 @@ export default function V3BundlePanel({ step, wallets, explorer, reload, report,
           import keys
         </button>
         <V3BackupControls count={backupCount} report={report} />
+        {tickedHere.length > 0 && (
+          <Busy busy={busy === 'delete'} className="ghost danger" onClick={() => setBulk(tickedHere)}>
+            Delete {tickedHere.length} selected
+          </Busy>
+        )}
         <span className="spacer" />
-        {wallets.length > 0 && (
-          <span className="hint">
-            {plural(wallets.length, 'wallet')} · {plural(wallets.length, 'cycle')} in the run
-          </span>
+        {progress ? (
+          <span className="hint">{progress}</span>
+        ) : (
+          wallets.length > 0 && (
+            <span className="hint">
+              {plural(wallets.length, 'wallet')} · {plural(wallets.length, 'cycle')} in the run
+            </span>
+          )
         )}
       </div>
 
@@ -100,6 +144,16 @@ export default function V3BundlePanel({ step, wallets, explorer, reload, report,
           <table>
             <thead>
               <tr>
+                <th style={{ width: 32 }}>
+                  {/* Every wallet, not a visible slice — the table scrolls, so
+                      everything this ticks is reachable. */}
+                  <input
+                    type="checkbox"
+                    checked={allTicked}
+                    disabled={locked}
+                    onChange={(e) => setTicked(e.target.checked ? wallets.map((w) => w.id) : [])}
+                  />
+                </th>
                 <th>#</th>
                 <th>Address</th>
                 <th className="num">Balance</th>
@@ -109,6 +163,18 @@ export default function V3BundlePanel({ step, wallets, explorer, reload, report,
             <tbody>
               {wallets.map((w, i) => (
                 <tr key={w.id}>
+                  <td>
+                    <input
+                      type="checkbox"
+                      checked={ticked.includes(w.id)}
+                      disabled={locked}
+                      onChange={() =>
+                        setTicked((cur) =>
+                          cur.includes(w.id) ? cur.filter((x) => x !== w.id) : [...cur, w.id]
+                        )
+                      }
+                    />
+                  </td>
                   <td>{i + 1}</td>
                   <td>
                     <Address
@@ -177,6 +243,30 @@ export default function V3BundlePanel({ step, wallets, explorer, reload, report,
             </Fact>
             <Fact label="Balance">{eth(deleting.balanceEth)} ETH</Fact>
           </>
+        )}
+      </Modal>
+
+      <Modal
+        open={Boolean(bulk)}
+        title={`Delete ${bulk ? bulk.length : 0} bundle wallet${bulk && bulk.length === 1 ? '' : 's'}?`}
+        danger
+        onCancel={() => setBulk(null)}
+        confirmLabel={`Delete ${bulk ? bulk.length : 0} wallets`}
+        onConfirm={async () => {
+          const list = bulk;
+          setBulk(null);
+          await act('delete', () => deleteTicked(list));
+        }}
+      >
+        <p>
+          Their keys are archived, not destroyed. Any wallet still holding ETH or tokens should be
+          swept first — nothing here will send from them again.
+        </p>
+        {bulk && bulk.some((w) => Number(w.balanceEth) > 0) && (
+          <p className="warn">
+            {bulk.filter((w) => Number(w.balanceEth) > 0).length} of them still hold ETH. Archiving
+            leaves that ETH at those addresses, reachable only by restoring the keys.
+          </p>
         )}
       </Modal>
     </Step>
