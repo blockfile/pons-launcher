@@ -129,3 +129,19 @@ A claimed wallet carries the small ETH it was seasoned with.
 
 V4's seasoning engine and schedule; the launch and chain trading math; v2; the
 keystore's role mechanics (we only call the existing `setRole`).
+
+## As-built deltas (2026-08-21)
+
+- `available()` returns `{ id, address, label, fundedAt, hoursSinceFunded }` — no
+  balance, so the helper stays pure over (ks, store, now) with no RPC. (As the
+  spec anticipated.)
+- The V4 graduated list is folded into the `GET /api/v4/seasoned` response as
+  `graduated: store.graduated()` rather than a separate `/v4/graduated` route.
+- Both claim endpoints short-circuit to `{ claimed: [], available, shortfall }`
+  when nothing is claimable, instead of surfacing `seasoned.claim`'s empty-`ids`
+  error (added in review).
+- The V1 claim control is gated to `variant === 'v1'` in the shared WalletsPanel,
+  so v2 never shows it (v2 has no claim endpoint).
+- A new `backend/src/routes/wallets.test.js` was created (there was none) using the
+  same router-stack + temp-keystore harness `v4.test.js` established.
+- Full backend suite: 610/610 pass.
