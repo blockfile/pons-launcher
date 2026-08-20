@@ -135,3 +135,50 @@ test('POST /wallets/claim-seasoned refuses when the bundle role is already at th
   // Refused BEFORE any re-role: the seed wallet must still be a v4seed, not bundle.
   assert.equal(ks.walletsWithRole('bundle').length, 31);
 });
+
+test('POST /wallets/claim-seasoned answers cleanly when nothing is available to claim', async () => {
+  const userId = 'claim-seasoned-3';
+  const ks = keystoreFor(userId);
+  const store = storeFor(userId);
+
+  // A seed wallet that exists but is not aged past the gate — still counts as
+  // "nothing available", not a claimable one.
+  const [young] = ks.generate(1, { role: 'v4seed', label: 'young' });
+  const sentAt = new Date(Date.now() - 3600_000).toISOString(); // 1h ago
+  store.create({
+    id: 'c1',
+    name: 'season young',
+    status: 'running',
+    kind: 'season',
+    masterWalletId: 'm1',
+    seed: 'x',
+    params: {},
+    transfers: [
+      {
+        id: 't1',
+        walletId: young.id,
+        address: young.address,
+        amountEth: '0.004',
+        status: 'sent',
+        sentAt,
+        attempts: [],
+      },
+    ],
+    createdAt: sentAt,
+  });
+
+  const handler = findRouteHandler('post', '/wallets/claim-seasoned');
+  const req = { user: { id: userId }, body: { count: 3 } };
+  const res = fakeRes();
+  await handler(req, res, (err) => {
+    if (err) throw err;
+  });
+
+  assert.deepEqual(res.body.claimed, []);
+  assert.equal(res.body.available, 0);
+  assert.equal(res.body.shortfall, 3);
+
+  // Nothing was re-roled: no bundle wallets exist, and the seed is still a seed.
+  assert.equal(ks.walletsWithRole('bundle').length, 0);
+  assert.equal(ks.walletsWithRole('v4seed').length, 1);
+});

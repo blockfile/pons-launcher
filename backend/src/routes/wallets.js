@@ -135,6 +135,9 @@ router.post('/wallets/claim-seasoned', requireApiKey, (req, res, next) => {
     const want = Math.max(1, Math.round(Number((req.body || {}).count) || 0));
     const pool = seasoned.available(ks, store, Date.now());
     const take = pool.slice(0, want);
+    if (take.length === 0) {
+      return res.json({ claimed: [], available: pool.length, shortfall: want });
+    }
     assertBundleRoom(ks, 'bundle', take.length); // refuses before any re-role
     const out = seasoned.claim(ks, store, take.map((w) => w.id), { toRole: 'bundle', toTab: 'v1', now: Date.now() });
     activityFor(req.user.id).record('wallets', `claimed ${out.claimed.length} seasoned wallet(s) into v1 bundle`, {
