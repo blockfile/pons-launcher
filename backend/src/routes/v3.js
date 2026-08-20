@@ -42,6 +42,8 @@ const sizing = require('../v3/sizing');
 const engine = require('../v3/engine');
 const exit = require('../v3/exit');
 const sweep = require('../v3/sweep');
+const { storeFor } = require('../v4/store');
+const seasoned = require('../v4/seasoned');
 
 const router = express.Router();
 
@@ -432,6 +434,35 @@ router.post('/v3/wallets/backup', requireApiKey, requireAuthConfigured, (req, re
         'Store it offline. There are no mnemonics: the keystore holds private keys only.',
       wallets,
     });
+  } catch (err) {
+    next(err);
+  }
+});
+
+// POST /api/v3/wallets/claim-seasoned — pull N finished-seasoning wallets into
+// V3's bundle role. Refused mid-run: the engine resolves wallets by id per cycle.
+router.post('/v3/wallets/claim-seasoned', requireApiKey, (req, res, next) => {
+  try {
+    if (engine.isRunning(req.user.id)) {
+      throw new Error('a v3 run is in progress — stop it before claiming wallets');
+    }
+    const ks = keystoreFor(req.user.id);
+    const store = storeFor(req.user.id);
+    const want = Math.max(1, Math.round(Number((req.body || {}).count) || 0));
+    const pool = seasoned.available(ks, store, Date.now());
+    const take = pool.slice(0, want);
+    if (take.length === 0) {
+      return res.json(jsonSafe({ claimed: [], available: pool.length, shortfall: want }));
+    }
+    const out = seasoned.claim(ks, store, take.map((w) => w.id), {
+      toRole: v3roles.ROLES.bundle,
+      toTab: 'v3',
+      now: Date.now(),
+    });
+    activityFor(req.user.id).record('v3', `[v3] claimed ${out.claimed.length} seasoned wallet(s) into the bundle`, {
+      count: out.claimed.length,
+    });
+    res.json(jsonSafe({ claimed: out.claimed, available: pool.length, shortfall: Math.max(0, want - take.length) }));
   } catch (err) {
     next(err);
   }

@@ -2,9 +2,88 @@
 
 const test = require('node:test');
 const assert = require('node:assert/strict');
+const fs = require('fs');
+const os = require('os');
+const path = require('path');
 const { parseEther } = require('ethers');
 
+// Mirrors routes/wallets.test.js and routes/v4.test.js: config.js and the
+// store/keystore modules compute their file paths once, at first require, so
+// these env vars must be set before requiring './v3' (which pulls in
+// '../config', '../wallets/keystore' and '../v4/store' transitively) or the
+// claim-seasoned route tests below would touch the real on-disk keystore.
+const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'v3-routes-'));
+process.env.KEYSTORE_PATH = path.join(tmpDir, 'wallets.keystore.json');
+process.env.KEYSTORE_PASSPHRASE = 'test-passphrase-for-v3-route-tests';
+process.env.HISTORY_PATH = path.join(tmpDir, 'launches.json');
+
+const router = require('./v3');
 const { _private: v3 } = require('./v3');
+const { keystoreFor } = require('../wallets/keystore');
+const { storeFor } = require('../v4/store');
+const engine = require('../v3/engine');
+
+// The claim-seasoned tests below are unit tests over the route module's own
+// handler, not an HTTP harness — the repo has no supertest dependency. The
+// handler is pulled directly off the mounted router's own stack and called
+// with fake req/res objects, against a real (temp-dir) keystore and campaign
+// store — seasoned.available()/claim() read both for real, not through
+// doubles.
+
+function findRouteHandler(method, routePath) {
+  const layer = router.stack.find(
+    (l) => l.route && l.route.path === routePath && l.route.methods[method]
+  );
+  if (!layer) throw new Error(`no route ${method.toUpperCase()} ${routePath}`);
+  // requireApiKey sits ahead of the handler in the route's own middleware
+  // stack; the handler itself is always last.
+  return layer.route.stack[layer.route.stack.length - 1].handle;
+}
+
+function fakeRes() {
+  return {
+    statusCode: 200,
+    body: undefined,
+    status(code) {
+      this.statusCode = code;
+      return this;
+    },
+    json(payload) {
+      this.body = payload;
+      return this;
+    },
+  };
+}
+
+// Seeds a v4seed wallet funded well past the seasoning gate, via a real
+// campaign in the v4 seasoning store. Mirrors seedAgedWallet in
+// routes/wallets.test.js.
+function seedAgedWallet(ks, store, { userTag, campaignId }) {
+  const [seed] = ks.generate(1, { role: 'v4seed', label: `seed-${userTag}` });
+  const sentAt = new Date(Date.now() - 3 * 24 * 3600_000).toISOString(); // 3 days ago
+  store.create({
+    id: campaignId,
+    name: `season ${userTag}`,
+    status: 'complete',
+    kind: 'season',
+    masterWalletId: 'm1',
+    seed: 'x',
+    params: {},
+    transfers: [
+      {
+        id: `t-${campaignId}`,
+        walletId: seed.id,
+        address: seed.address,
+        amountEth: '0.004',
+        status: 'sent',
+        sentAt,
+        attempts: [],
+      },
+    ],
+    createdAt: sentAt,
+  });
+  return seed;
+}
 
 const TOKEN = '0x3333333333333333333333333333333333333333';
 const CURVE = '0x2222222222222222222222222222222222222222';
@@ -247,4 +326,80 @@ test('parseAmount refuses what is not a number', () => {
   assert.throws(() => v3.parseAmount('abc', 'buy'), /buy/);
   assert.throws(() => v3.parseAmount('', 'buy'), /buy/);
   assert.equal(v3.parseAmount('1.5', 'buy'), parseEther('1.5'));
+});
+
+// ── POST /v3/wallets/claim-seasoned ────────────────────────────────────────
+
+test('POST /v3/wallets/claim-seasoned claims the aged seeds into v3bundle and reports the shortfall', async () => {
+  const userId = 'v3-claim-seasoned-1';
+  const ks = keystoreFor(userId);
+  const store = storeFor(userId);
+
+  const seed1 = seedAgedWallet(ks, store, { userTag: 'a', campaignId: 'v3c1' });
+  const seed2 = seedAgedWallet(ks, store, { userTag: 'b', campaignId: 'v3c2' });
+
+  const handler = findRouteHandler('post', '/v3/wallets/claim-seasoned');
+  const req = { user: { id: userId }, body: { count: 2 } };
+  const res = fakeRes();
+  await handler(req, res, (err) => {
+    if (err) throw err;
+  });
+
+  assert.equal(res.body.claimed.length, 2);
+  assert.equal(res.body.available, 2);
+  assert.equal(res.body.shortfall, 0);
+
+  const claimedAddresses = res.body.claimed.map((w) => w.address).sort();
+  assert.deepEqual(claimedAddresses, [seed1.address, seed2.address].sort());
+
+  const bundleWallets = keystoreFor(userId).walletsWithRole('v3bundle');
+  const bundleAddresses = bundleWallets.map((w) => w.address).sort();
+  assert.deepEqual(bundleAddresses, [seed1.address, seed2.address].sort());
+});
+
+test('POST /v3/wallets/claim-seasoned is refused mid-run and re-roles nothing', async () => {
+  const userId = 'v3-claim-seasoned-2';
+  const ks = keystoreFor(userId);
+  const store = storeFor(userId);
+
+  seedAgedWallet(ks, store, { userTag: 'mid-run', campaignId: 'v3c3' });
+
+  // Same seam the engine itself exposes for tests: a job map keyed by userId,
+  // read by isRunning(). No real run needs to be started to exercise the guard.
+  engine._jobs.set(userId, { status: 'running' });
+  try {
+    const handler = findRouteHandler('post', '/v3/wallets/claim-seasoned');
+    const req = { user: { id: userId }, body: { count: 1 } };
+    const res = fakeRes();
+    let caught = null;
+    await handler(req, res, (err) => {
+      caught = err;
+    });
+
+    assert.ok(caught, 'expected the route to pass an error to next()');
+    assert.match(caught.message, /a v3 run is in progress/);
+
+    // Refused before any re-role: the seed wallet must still be a v4seed.
+    assert.equal(ks.walletsWithRole('v3bundle').length, 0);
+    assert.equal(ks.walletsWithRole('v4seed').length, 1);
+  } finally {
+    engine._jobs.delete(userId);
+  }
+});
+
+test('POST /v3/wallets/claim-seasoned answers cleanly when nothing is available to claim', async () => {
+  const userId = 'v3-claim-seasoned-3';
+
+  const handler = findRouteHandler('post', '/v3/wallets/claim-seasoned');
+  const req = { user: { id: userId }, body: { count: 3 } };
+  const res = fakeRes();
+  await handler(req, res, (err) => {
+    if (err) throw err;
+  });
+
+  assert.deepEqual(res.body.claimed, []);
+  assert.equal(res.body.available, 0);
+  assert.equal(res.body.shortfall, 3);
+
+  assert.equal(keystoreFor(userId).walletsWithRole('v3bundle').length, 0);
 });
