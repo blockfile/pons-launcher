@@ -159,3 +159,15 @@ test('two users never see each others campaigns', () => {
   assert.equal(store.storeFor('alice').campaigns().length, 2);
   assert.equal(fs.existsSync(store.pathFor('bob')), false);
 });
+
+test('recordGraduated persists and graduated() returns newest first', () => {
+  const { store } = freshStore();
+  const s = store.storeFor('grad-test');
+  s.recordGraduated([{ id: 'a', address: '0xA', toTab: 'v3', at: '2026-08-21T00:00:00Z' }]);
+  s.recordGraduated([{ id: 'b', address: '0xB', toTab: 'v1', at: '2026-08-21T01:00:00Z' }]);
+  store._reset();
+  const g = s.graduated();
+  assert.equal(g.length, 2);
+  assert.equal(g[0].id, 'b', 'newest first');
+  assert.equal(g[1].toTab, 'v3');
+});

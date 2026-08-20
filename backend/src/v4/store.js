@@ -40,7 +40,7 @@ function build(userId) {
   function load() {
     if (cache) return cache;
     if (!fs.existsSync(file)) {
-      cache = { version: 1, campaigns: [], backups: [] };
+      cache = { version: 1, campaigns: [], backups: [], graduated: [] };
       return cache;
     }
     try {
@@ -49,12 +49,13 @@ function build(userId) {
         version: parsed.version || 1,
         campaigns: parsed.campaigns || [],
         backups: parsed.backups || [],
+        graduated: parsed.graduated || [],
       };
     } catch (_err) {
       // A corrupt file must not take the server down — but it must not be
       // silently overwritten either, so it is moved aside with a timestamp.
       fs.renameSync(file, `${file}.corrupt-${Date.now()}`);
-      cache = { version: 1, campaigns: [], backups: [] };
+      cache = { version: 1, campaigns: [], backups: [], graduated: [] };
     }
     return cache;
   }
@@ -160,6 +161,17 @@ function build(userId) {
     return walletIds.filter((id) => !seen.has(id));
   }
 
+  /** Record wallets handed off to another tab, and read them back newest-first. */
+  function recordGraduated(entries) {
+    const store = load();
+    store.graduated.unshift(...entries.map((e) => ({ ...e })));
+    persist();
+  }
+
+  function graduated() {
+    return load().graduated.slice();
+  }
+
   function _reset() {
     cache = null;
   }
@@ -174,6 +186,8 @@ function build(userId) {
     claimedSeedIds,
     recordBackup,
     backedUp,
+    recordGraduated,
+    graduated,
     _reset,
   };
 }
