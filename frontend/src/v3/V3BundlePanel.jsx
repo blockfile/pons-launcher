@@ -79,8 +79,8 @@ export default function V3BundlePanel({ step, wallets, explorer, reload, report,
       const out = await api('/v3/wallets/claim-seasoned', 'POST', { count: n });
       report(
         out.shortfall > 0
-          ? `claimed ${out.claimed} seasoned wallet(s), ${out.shortfall} short — only ${out.available} were ready`
-          : `claimed ${out.claimed} seasoned wallet(s)`
+          ? `claimed ${out.claimed.length} seasoned wallet(s), ${out.shortfall} short — only ${out.available} were ready`
+          : `claimed ${out.claimed.length} seasoned wallet(s)`
       );
       await reload();
       try {

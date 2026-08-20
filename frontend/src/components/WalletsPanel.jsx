@@ -152,8 +152,8 @@ export default function WalletsPanel({ step, wallets, rows, setRow, share, reloa
       const out = await api('/wallets/claim-seasoned', 'POST', { count: n });
       report(
         out.shortfall > 0
-          ? `claimed ${out.claimed} seasoned wallet(s), ${out.shortfall} short — only ${out.available} were ready`
-          : `claimed ${out.claimed} seasoned wallet(s)`
+          ? `claimed ${out.claimed.length} seasoned wallet(s), ${out.shortfall} short — only ${out.available} were ready`
+          : `claimed ${out.claimed.length} seasoned wallet(s)`
       );
       await reload();
       // The pool just shrank by what was claimed — re-read it rather than
