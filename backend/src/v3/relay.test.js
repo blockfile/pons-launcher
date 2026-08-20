@@ -164,3 +164,46 @@ test('a dry run quotes and validates but signs nothing', async () => {
 test('status refuses anything that is not a 32-byte request id', async () => {
   await assert.rejects(() => relay.status('nope'), /32-byte/);
 });
+
+// ── confirmFill: a broadcast deposit is not a delivered one ──────────────────
+
+test('confirmFill reports filled once Relay says success', async () => {
+  let calls = 0;
+  const statusFn = async () => {
+    calls += 1;
+    return { status: calls >= 2 ? 'success' : 'pending' };
+  };
+  const out = await relay.confirmFill(REQUEST, { statusFn, gapMs: 0 });
+  assert.deepEqual(out, { filled: true, status: 'success' });
+  assert.equal(calls, 2, 'kept polling until it filled');
+});
+
+test('confirmFill reports NOT filled on a refund or failure, without waiting out every try', async () => {
+  const refunded = await relay.confirmFill(REQUEST, { statusFn: async () => ({ status: 'refund' }), gapMs: 0 });
+  assert.deepEqual(refunded, { filled: false, status: 'refund' });
+
+  const failed = await relay.confirmFill(REQUEST, {
+    statusFn: async () => ({ status: 'failure' }),
+    gapMs: 0,
+  });
+  assert.deepEqual(failed, { filled: false, status: 'failure' });
+});
+
+test('confirmFill gives up as pending after its tries, and treats a status error as "not yet"', async () => {
+  let calls = 0;
+  const out = await relay.confirmFill(REQUEST, {
+    tries: 3,
+    gapMs: 0,
+    statusFn: async () => {
+      calls += 1;
+      throw new Error('status endpoint down');
+    },
+  });
+  assert.deepEqual(out, { filled: false, status: 'pending' });
+  assert.equal(calls, 3, 'a status read that throws is retried, never fatal');
+});
+
+test('confirmFill returns filled:null for a missing or malformed request id', async () => {
+  assert.deepEqual(await relay.confirmFill(null, { gapMs: 0 }), { filled: null, status: 'unknown' });
+  assert.deepEqual(await relay.confirmFill('nope', { gapMs: 0 }), { filled: null, status: 'unknown' });
+});

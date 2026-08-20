@@ -242,6 +242,40 @@ async function status(requestId, deps = {}) {
   });
 }
 
+const sleep = (ms) => (ms > 0 ? new Promise((r) => setTimeout(r, ms)) : Promise.resolve());
+
+/**
+ * Wait for a broadcast deposit to actually FILL, so an order that never settles
+ * is reported instead of passed off as a success.
+ *
+ * transfer() returns the moment the deposit is broadcast — but broadcasting is
+ * not delivery. A deposit whose order is never filled (Relay had no solver, the
+ * order expired, the request never registered under the rate limiter) leaves the
+ * ETH stranded at the deposit address, refundable but silent. Polling the status
+ * turns that silence into a `filled: false` the caller can surface with the
+ * requestId and deposit address needed to recover it. Read-only and best-effort:
+ * a status endpoint that errors is treated as "not yet", never as a failure of
+ * the transfer that already happened.
+ *
+ * @returns {Promise<{filled: boolean|null, status: string}>}
+ */
+async function confirmFill(requestId, { tries = 15, gapMs = 3000, statusFn = status } = {}) {
+  if (!/^0x[0-9a-fA-F]{64}$/.test(String(requestId || ''))) return { filled: null, status: 'unknown' };
+  for (let i = 0; i < tries; i += 1) {
+    let st = null;
+    try {
+      const s = await statusFn(requestId);
+      st = s?.status || s?.data?.status || null;
+    } catch {
+      st = null; // transient status read — keep waiting, do not fail the transfer
+    }
+    if (st === 'success') return { filled: true, status: st };
+    if (st === 'refund' || st === 'refunded' || st === 'failure') return { filled: false, status: st };
+    if (i < tries - 1) await sleep(gapMs);
+  }
+  return { filled: false, status: 'pending' };
+}
+
 module.exports = {
   NATIVE,
   FEE_BUMP_PCT,
@@ -249,5 +283,6 @@ module.exports = {
   depositStep,
   transfer,
   status,
+  confirmFill,
   _private: { normaliseTx, gasLimitOf, publicFees, publicDetails },
 };

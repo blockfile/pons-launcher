@@ -29,7 +29,7 @@ const express = require('express');
 const { formatEther, formatUnits, getAddress, parseEther } = require('ethers');
 const { keystoreFor } = require('../wallets/keystore');
 const { activityFor } = require('../store/activity');
-const { requireApiKey } = require('../middleware/auth');
+const { requireApiKey, requireAuthConfigured } = require('../middleware/auth');
 const { provider } = require('../evm/provider');
 const { getFees, gasCost } = require('../evm/fees');
 const config = require('../config');
@@ -380,12 +380,58 @@ router.post('/v3/fund', requireApiKey, async (req, res, next) => {
     const amountWei = parseAmount(req.body?.amountEth, 'the funding amount');
 
     const out = await relay.transfer({ fromWallet: from, toAddress: to.address, amountWei }, { keystore: ks });
+
+    // Broadcasting the deposit is not delivery. Wait for the order to actually
+    // fill, so a deposit that never settles is surfaced with everything needed to
+    // recover it — not returned as a bare success hash the way a stranded 0.1
+    // orphaned deposit was.
+    let fill = { filled: null, status: null };
+    if (out.hash && out.requestId) {
+      fill = await relay.confirmFill(out.requestId);
+    }
+    const result = { ...out, filled: fill.filled, relayStatus: fill.status };
+    if (fill.filled === false) {
+      result.warning =
+        `Deposit broadcast but Relay has not filled it (status: ${fill.status}). ` +
+        `The ${formatEther(amountWei)} ETH is at deposit address ${out.depositAddress} and is ` +
+        `refundable to the treasury ${from.address}. Keep requestId ${out.requestId} for a Relay ticket.`;
+    }
+
     activityFor(req.user.id).record(
       'v3',
-      `[v3] funded the main wallet with ${formatEther(amountWei)} ETH through Relay`,
-      { from: from.address, to: to.address, requestId: out.requestId, hash: out.hash }
+      `[v3] funded the main wallet with ${formatEther(amountWei)} ETH through Relay` +
+        (fill.filled === false ? ` — NOT filled (${fill.status})` : ''),
+      { from: from.address, to: to.address, requestId: out.requestId, hash: out.hash, filled: fill.filled }
     );
-    res.json(jsonSafe(out));
+    res.json(jsonSafe(result));
+  } catch (err) {
+    next(err);
+  }
+});
+
+// POST /api/v3/wallets/backup — every V3 key at once, for an offline backup.
+// V3's wallets only (v3dev/v3main/v3bundle), never another tab's — the same
+// scoping V4's backup uses. Same two locks as the whole-keystore export: an API
+// key, and a configured credential so a keyless deployment fails closed rather
+// than serving keys.
+router.post('/v3/wallets/backup', requireApiKey, requireAuthConfigured, (req, res, next) => {
+  try {
+    if ((req.body || {}).confirm !== true) throw new Error('backup requires { confirm: true }');
+    const ks = keystoreFor(req.user.id);
+    const wallets = ks.exportAll().filter((w) => v3roles.isV3Role(w.role));
+    console.warn(`[pons-launcher] V3 KEYSTORE BACKUP EXPORTED — ${wallets.length} private keys`);
+    activityFor(req.user.id).record('export', `[v3] downloaded a backup of ${wallets.length} v3 private key(s)`, {
+      count: wallets.length,
+    });
+    res.json({
+      exportedAt: new Date().toISOString(),
+      chainId: config.chainId,
+      count: wallets.length,
+      warning:
+        'These private keys control real funds. Anyone holding this file can spend every wallet in it. ' +
+        'Store it offline. There are no mnemonics: the keystore holds private keys only.',
+      wallets,
+    });
   } catch (err) {
     next(err);
   }

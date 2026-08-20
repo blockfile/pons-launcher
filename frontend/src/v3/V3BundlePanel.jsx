@@ -4,6 +4,7 @@ import Step from '../components/Step.jsx';
 import { Busy } from '../components/Section.jsx';
 import Modal, { Fact } from '../components/Modal.jsx';
 import Address from '../components/Address.jsx';
+import V3BackupControls from './V3BackupControls.jsx';
 import { ROLES, eth, plural } from './roles.js';
 
 /**
@@ -29,7 +30,7 @@ import { ROLES, eth, plural } from './roles.js';
  * launches, so the only cost of more wallets is a longer run and a smaller
  * average buy.
  */
-export default function V3BundlePanel({ step, wallets, explorer, reload, report, locked }) {
+export default function V3BundlePanel({ step, wallets, explorer, reload, report, locked, backupCount }) {
   const [busy, setBusy] = useState('');
   const [count, setCount] = useState(20);
   const [showImport, setShowImport] = useState(false);
@@ -85,6 +86,7 @@ export default function V3BundlePanel({ step, wallets, explorer, reload, report,
         <button className="ghost" onClick={() => setShowImport(true)} disabled={locked}>
           import keys
         </button>
+        <V3BackupControls count={backupCount} report={report} />
         <span className="spacer" />
         {wallets.length > 0 && (
           <span className="hint">

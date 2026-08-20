@@ -73,6 +73,8 @@ export default function V3Console({ health, credential, report, output, reported
 
   const bundle = wallets.bundle || [];
   const funded = bundle.filter((w) => Number(w.balanceEth) > 0).length;
+  // Every V3 wallet the backup would write, for the count on the confirm dialog.
+  const backupCount = [wallets.treasury, wallets.main, ...bundle].filter(Boolean).length;
 
   /**
    * The order of work, and where in it the operator is standing.
@@ -198,6 +200,7 @@ export default function V3Console({ health, credential, report, output, reported
         reload={loadWallets}
         report={report}
         locked={Boolean(job?.running)}
+        backupCount={backupCount}
       />
 
       <V3MainPanel
