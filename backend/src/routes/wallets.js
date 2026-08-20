@@ -26,6 +26,8 @@ const { fireSell } = require('../bundle/fireSell');
 const { jsonSafe } = require('./launch');
 const relayFunding = require('../relay/funding');
 const timedRelayFunding = require('../relay/timedFunding');
+const { storeFor } = require('../v4/store');
+const seasoned = require('../v4/seasoned');
 
 const router = express.Router();
 
@@ -119,6 +121,26 @@ router.post('/wallets/:id/role', requireApiKey, (req, res, next) => {
       role,
     });
     res.json(out);
+  } catch (err) {
+    next(err);
+  }
+});
+
+// POST /api/wallets/claim-seasoned — pull N of V4's finished-seasoning wallets
+// into V1's bundle role, most-aged first. They arrive pre-aged and pre-funded.
+router.post('/wallets/claim-seasoned', requireApiKey, (req, res, next) => {
+  try {
+    const ks = keystoreFor(req.user.id);
+    const store = storeFor(req.user.id);
+    const want = Math.max(1, Math.round(Number((req.body || {}).count) || 0));
+    const pool = seasoned.available(ks, store, Date.now());
+    const take = pool.slice(0, want);
+    assertBundleRoom(ks, 'bundle', take.length); // refuses before any re-role
+    const out = seasoned.claim(ks, store, take.map((w) => w.id), { toRole: 'bundle', toTab: 'v1', now: Date.now() });
+    activityFor(req.user.id).record('wallets', `claimed ${out.claimed.length} seasoned wallet(s) into v1 bundle`, {
+      count: out.claimed.length,
+    });
+    res.json({ claimed: out.claimed, available: pool.length, shortfall: Math.max(0, want - take.length) });
   } catch (err) {
     next(err);
   }
