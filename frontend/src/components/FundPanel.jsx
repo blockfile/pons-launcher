@@ -18,6 +18,14 @@ import Address from './Address.jsx';
  * answer and the answer is only visible at this moment.
  */
 const TIMED_INTERVALS = [
+  // Short intervals for pacing under Relay's per-IP quote limit — one wallet per
+  // minute is ~1 quote/min, far under it, and funds a bundle in minutes rather
+  // than the hours the seasoning-style intervals below take. The backend floor is
+  // 1 minute (timedFunding MIN_INTERVAL_MS).
+  { minutes: 1, label: '1 min' },
+  { minutes: 2, label: '2 min' },
+  { minutes: 5, label: '5 min' },
+  { minutes: 15, label: '15 min' },
   { minutes: 30, label: '30 min' },
   { minutes: 60, label: '1 hr' },
   { minutes: 120, label: '2 hrs' },
