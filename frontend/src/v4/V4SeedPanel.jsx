@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import { api } from '../api.js';
 import Modal from '../components/Modal.jsx';
 import Step from '../components/Step.jsx';
@@ -44,6 +44,23 @@ export default function V4SeedPanel({ step, wallets, masters, facts, explorer, r
   const [ticked, setTicked] = useState([]);
   const [bulk, setBulk] = useState(null);
   const [progress, setProgress] = useState('');
+  // How many seed wallets are aged past the gate right now, and which of them
+  // have already been handed off to V1/V3 — read-only, drawn beside the
+  // generate row so an operator sees where a wallet went without switching
+  // tabs. Polled the same way loadWallets is in V4Console: on mount and every
+  // 60s, quietly on failure.
+  const [seasoned, setSeasoned] = useState({ count: 0, graduated: [] });
+
+  useEffect(() => {
+    let alive = true;
+    const load = () => api('/v4/seasoned').then((s) => alive && setSeasoned(s)).catch(() => {});
+    load();
+    const t = setInterval(load, 60_000);
+    return () => {
+      alive = false;
+      clearInterval(t);
+    };
+  }, []);
 
   async function act(what, fn) {
     setBusy(what);
@@ -182,6 +199,25 @@ export default function V4SeedPanel({ step, wallets, masters, facts, explorer, r
           more.
         </span>
       </div>
+
+      {/* Read-only. Once a seed is claimed by V1 or V3 it re-roles out of this
+          table entirely — see routes/v4.js's /v4/seasoned response — so this is
+          the only place left in the V4 console that still shows where it went. */}
+      {seasoned.graduated.length > 0 && (
+        <div className="row" style={{ marginBottom: 12, flexDirection: 'column', alignItems: 'flex-start' }}>
+          <span className="hint">
+            <b>{seasoned.graduated.length}</b> handed off to another tab
+          </span>
+          <ul className="hint" style={{ margin: '4px 0 0', paddingLeft: 18 }}>
+            {seasoned.graduated.slice(0, 20).map((g) => (
+              <li key={g.id}>
+                {g.address} · {g.toTab} · {clock(g.at)}
+              </li>
+            ))}
+            {seasoned.graduated.length > 20 && <li>…and {seasoned.graduated.length - 20} more.</li>}
+          </ul>
+        </div>
+      )}
 
       {/* THE FOUR NUMBERS THAT DECIDE THE NEXT ACTION, and the reason they are
           up here rather than left to be counted off the table: how many exist

@@ -582,6 +582,8 @@ test('GET /v4/seasoned returns the seed wallets aged past the gate', async () =>
   assert.equal(w.label, 'seed-1');
   assert.equal(w.fundedAt, sentAt);
   assert.ok(w.hoursSinceFunded >= 24, `expected hoursSinceFunded >= 24, got ${w.hoursSinceFunded}`);
+  // Nothing has been handed off in this test's store yet.
+  assert.deepEqual(res.body.graduated, []);
 });
 
 test('GET /v4/seasoned excludes a seed funded too recently', async () => {
@@ -621,4 +623,5 @@ test('GET /v4/seasoned excludes a seed funded too recently', async () => {
 
   assert.equal(res.body.count, 0);
   assert.deepEqual(res.body.wallets, []);
+  assert.deepEqual(res.body.graduated, []);
 });

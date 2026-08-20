@@ -530,7 +530,15 @@ router.get('/v4/seasoned', requireApiKey, (req, res, next) => {
     const ks = keystoreFor(req.user.id);
     const store = storeFor(req.user.id);
     const wallets = seasoned.available(ks, store, Date.now());
-    res.json({ count: wallets.length, minHours: config.seasonedMinHours, wallets });
+    res.json({
+      count: wallets.length,
+      minHours: config.seasonedMinHours,
+      wallets,
+      // Newest-first, per store.graduated() — the V4 console's read-only record
+      // of every seed already handed off to V1/V3, so an operator can see where
+      // a wallet went without cross-referencing another tab's list.
+      graduated: store.graduated(),
+    });
   } catch (err) {
     next(err);
   }

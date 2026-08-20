@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import { api } from '../api.js';
 import Step from '../components/Step.jsx';
 import { Busy } from '../components/Section.jsx';
@@ -42,12 +42,52 @@ export default function V3BundlePanel({ step, wallets, explorer, reload, report,
   const [ticked, setTicked] = useState([]);
   const [bulk, setBulk] = useState(null);
   const [progress, setProgress] = useState('');
+  // V4's seasoned seed wallets ready to hand off into this bundle.
+  const [seasoned, setSeasoned] = useState({ count: 0 });
+  const [seasonedCount, setSeasonedCount] = useState(20);
 
   async function act(what, fn) {
     setBusy(what);
     try {
       report(await fn());
       await reload();
+    } catch (err) {
+      report(`ERROR: ${err.message}`);
+    } finally {
+      setBusy('');
+    }
+  }
+
+  // Read-only background poll, same shape as the rest of this console's
+  // quiet reads: guarded so an unreachable or disabled V4 just leaves this at
+  // 0 rather than surfacing an error in a panel that has nothing to do with it.
+  useEffect(() => {
+    let alive = true;
+    api('/v4/seasoned')
+      .then((s) => alive && setSeasoned(s))
+      .catch(() => {});
+    return () => {
+      alive = false;
+    };
+  }, []);
+
+  /** Hand N seasoned V4 seed wallets over into this v3 bundle (re-roled server-side to v3bundle). */
+  async function claimSeasoned() {
+    setBusy('claim-seasoned');
+    try {
+      const n = Math.max(1, Math.round(Number(seasonedCount) || 0));
+      const out = await api('/v3/wallets/claim-seasoned', 'POST', { count: n });
+      report(
+        out.shortfall > 0
+          ? `claimed ${out.claimed} seasoned wallet(s), ${out.shortfall} short — only ${out.available} were ready`
+          : `claimed ${out.claimed} seasoned wallet(s)`
+      );
+      await reload();
+      try {
+        setSeasoned(await api('/v4/seasoned'));
+      } catch {
+        // Background read — see the mount-time fetch above.
+      }
     } catch (err) {
       report(`ERROR: ${err.message}`);
     } finally {
@@ -121,6 +161,26 @@ export default function V3BundlePanel({ step, wallets, explorer, reload, report,
         <button className="ghost" onClick={() => setShowImport(true)} disabled={locked}>
           import keys
         </button>
+        <input
+          type="number"
+          min="1"
+          max={seasoned.count || 1}
+          value={seasonedCount}
+          onChange={(e) => setSeasonedCount(e.target.value)}
+          title="how many seasoned wallets to claim"
+          style={{ width: 70 }}
+          disabled={locked}
+        />
+        <Busy
+          busy={busy === 'claim-seasoned'}
+          className="ghost"
+          disabled={locked || !seasoned.count}
+          title={seasoned.count ? '' : 'no seasoned wallets ready yet'}
+          onClick={claimSeasoned}
+        >
+          Use {seasonedCount} seasoned wallets
+        </Busy>
+        <span className="hint">{seasoned.count} seasoned ready</span>
         <V3BackupControls count={backupCount} report={report} />
         {tickedHere.length > 0 && (
           <Busy busy={busy === 'delete'} className="ghost danger" onClick={() => setBulk(tickedHere)}>

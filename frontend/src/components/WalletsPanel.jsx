@@ -52,6 +52,11 @@ export default function WalletsPanel({ step, wallets, rows, setRow, share, reloa
   const [showImport, setShowImport] = useState(false);
   const [keys, setKeys] = useState('');
   const [busy, setBusy] = useState('');
+  // V4's seasoned seed wallets ready to hand off into this bundle. V1 only —
+  // v2 has no claim endpoint, because re-roling a wallet into v2's bundle role
+  // would spend a seasoned wallet on the wrong launcher with no way back.
+  const [seasoned, setSeasoned] = useState({ count: 0 });
+  const [seasonedCount, setSeasonedCount] = useState(5);
   // The native token's USD price, for showing a predicted market cap the way an
   // operator reads it ("15k MC"). Fetched live from the backend (which asks an
   // exchange server-side); auto-filled but editable. `manualRef` records that
@@ -96,6 +101,21 @@ export default function WalletsPanel({ step, wallets, rows, setRow, share, reloa
       alive = false;
     };
   }, []);
+
+  // How many V4-seasoned seed wallets are ready to claim into this bundle.
+  // Read-only background poll of a small figure, same shape as the eth-price
+  // and gas reads above; guarded quietly for the same reason — V4 may be
+  // unreachable or disabled and this control should just read 0, not error.
+  useEffect(() => {
+    if (variant !== 'v1') return;
+    let alive = true;
+    api('/v4/seasoned')
+      .then((s) => alive && setSeasoned(s))
+      .catch(() => {});
+    return () => {
+      alive = false;
+    };
+  }, [variant]);
   // Ticked wallet ids. Only ever bundle wallets reach a delete — see `chosen`.
   const [picked, setPicked] = useState(() => new Set());
   // The wallets the delete confirmation is asking about, frozen at the moment
@@ -113,6 +133,37 @@ export default function WalletsPanel({ step, wallets, rows, setRow, share, reloa
     try {
       report(await fn());
       await reload();
+    } catch (err) {
+      report(`ERROR: ${err.message}`);
+    } finally {
+      setBusy('');
+    }
+  }
+
+  /**
+   * Hand N seasoned V4 seed wallets over into this bundle. The backend
+   * re-roles them v4seed → bundle and this is the only place that happens for
+   * v1 — see the guard on the control below for why v2 never reaches this.
+   */
+  async function claimSeasoned() {
+    setBusy('claim-seasoned');
+    try {
+      const n = Math.max(1, Math.round(Number(seasonedCount) || 0));
+      const out = await api('/wallets/claim-seasoned', 'POST', { count: n });
+      report(
+        out.shortfall > 0
+          ? `claimed ${out.claimed} seasoned wallet(s), ${out.shortfall} short — only ${out.available} were ready`
+          : `claimed ${out.claimed} seasoned wallet(s)`
+      );
+      await reload();
+      // The pool just shrank by what was claimed — re-read it rather than
+      // subtracting locally, since another tab or another operator may have
+      // claimed from it too.
+      try {
+        setSeasoned(await api('/v4/seasoned'));
+      } catch {
+        // Background read — see the mount-time fetch above for why this stays quiet.
+      }
     } catch (err) {
       report(`ERROR: ${err.message}`);
     } finally {
@@ -395,6 +446,33 @@ export default function WalletsPanel({ step, wallets, rows, setRow, share, reloa
         >
           Refresh balances
         </Busy>
+
+        {/* V1 ONLY. V2 has no claim-seasoned endpoint — re-roling a V4 seed
+            into v2's bundle role would use the wrong role and there is no way
+            back short of the keystore archive. See the mount-time fetch above. */}
+        {variant === 'v1' && (
+          <>
+            <input
+              type="number"
+              min="1"
+              max={seasoned.count || 1}
+              value={seasonedCount}
+              onChange={(e) => setSeasonedCount(e.target.value)}
+              title="how many seasoned wallets to claim"
+              style={{ width: 70 }}
+            />
+            <Busy
+              busy={busy === 'claim-seasoned'}
+              className="ghost"
+              disabled={!seasoned.count}
+              title={seasoned.count ? '' : 'no seasoned wallets ready yet'}
+              onClick={claimSeasoned}
+            >
+              Use {seasonedCount} seasoned wallets
+            </Busy>
+            <span className="hint">{seasoned.count} seasoned ready</span>
+          </>
+        )}
 
         <span className="spacer" />
 
