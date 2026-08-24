@@ -140,10 +140,53 @@ async function getZapPrice({ buyToken, sellAmountWei, slippageBps = config.zapSl
     slippageBps: Number(slippageBps),
   };
   const json = await postZap(body, { fetchImpl: deps.fetch, timeoutMs: deps.timeoutMs });
-  if (!json || !json.quote) {
+  // A price preview answers under `.price` (no taker); a firm quote under
+  // `.quote`. Accept either so this doubles as a routability probe.
+  const priced = (json && (json.price || json.quote)) || null;
+  if (!priced) {
     throw new Error(`pons zap: no price — ${(json && json.error) || 'endpoint returned no route'}`);
   }
-  return { buyAmount: String(json.quote.buyAmount ?? '') };
+  return { buyAmount: String(priced.buyAmount ?? '') };
 }
 
-module.exports = { getZapBuyTx, getZapPrice, zapUrl };
+/**
+ * Poll the price preview until the aggregator can route to `buyToken`, or time
+ * out. A freshly-launched curve is not indexed by the zap aggregator for a beat
+ * or two after the launch confirms, so a quote fetched immediately answers "No
+ * route right now." — the bundle must WAIT for the route to appear, then blast,
+ * rather than firing once and giving up. Resolves as soon as a route exists;
+ * throws only if none appears within `timeoutMs`.
+ *
+ * A tiny fixed probe amount is used only to test routability; the real per-wallet
+ * amounts are quoted afterwards.
+ *
+ * @param {object} input { buyToken, sellAmountWei?, slippageBps? }
+ * @param {object} [deps] { fetch, timeoutMs?, intervalMs?, now?, sleep? }
+ * @returns {Promise<{waitedMs:number}>}
+ */
+async function waitForZapRoute(
+  { buyToken, sellAmountWei = '1000000000000000', slippageBps = config.zapSlippageBps },
+  deps = {}
+) {
+  const timeoutMs = deps.timeoutMs ?? 45_000;
+  const intervalMs = deps.intervalMs ?? 1_500;
+  const now = deps.now ?? (() => Date.now());
+  const sleep = deps.sleep ?? ((ms) => new Promise((r) => setTimeout(r, ms)));
+  const started = now();
+  let lastErr = 'no route';
+  // Each probe is a short-timeout price call; the OUTER budget is timeoutMs.
+  for (;;) {
+    try {
+      await getZapPrice({ buyToken, sellAmountWei, slippageBps }, { fetch: deps.fetch, timeoutMs: 6_000 });
+      return { waitedMs: now() - started };
+    } catch (err) {
+      lastErr = err.message;
+    }
+    if (now() - started + intervalMs >= timeoutMs) {
+      throw new Error(`pons zap: no route for the launched token after ${timeoutMs}ms (${lastErr})`);
+    }
+    await sleep(intervalMs);
+  }
+}
+
+module.exports = { getZapBuyTx, getZapPrice, waitForZapRoute, zapUrl };

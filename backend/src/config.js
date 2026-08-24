@@ -206,6 +206,12 @@ const config = {
   // is that a wallet buying its "entire balance" holds a little more ETH back for
   // gas. Raise it if a live zap ever runs out of gas.
   zapBuyGasLimit: num(process.env.PONS_ZAP_BUY_GAS_LIMIT, 900000),
+  // How long fireZap waits for the aggregator to index a freshly-launched curve
+  // before quoting the buys. A brand-new curve is not routable for a beat or two
+  // after the launch confirms; without this wait every buy answers "No route for
+  // that pair" and is lost, as a live launch showed. 45s covers the observed
+  // indexing lag with margin; the zap route's own ~6-min deadline is the ceiling.
+  zapRouteTimeoutMs: num(process.env.PONS_ZAP_ROUTE_TIMEOUT_MS, 45000),
 };
 
 /**

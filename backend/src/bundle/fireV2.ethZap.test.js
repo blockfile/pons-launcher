@@ -80,6 +80,10 @@ const baseDeps = (over = {}) => ({
   warmPool: async () => {},
   skipRecheck: true,
   parseLaunch: () => ({ token: TOKEN, curve: CURVE, pairToken: plan.pairToken }),
+  // The real wait polls the network; default it to an instant no-op so the
+  // money-path assertions below don't depend on timing. Tests that care about
+  // the wait override it.
+  waitForZapRoute: async () => ({ waitedMs: 0 }),
   ...over,
 });
 
@@ -192,6 +196,59 @@ test('a curve that does not match the prediction aborts the buys', async () => {
   assert.equal(quotes, 0, 'no buy may be quoted against the wrong curve');
   assert.match(res.mismatch, /refusing to zap-buy the wrong token/);
   assert.ok(res.buys.every((b) => b.status === 'skipped'));
+});
+
+test('fireZap WAITS for the aggregator route before quoting any wallet', async () => {
+  // A freshly-launched curve is not indexed for a beat; fireZap must poll for the
+  // route FIRST, then quote — never fire a quote that can only answer "No route".
+  const events = [];
+  const rpc = fakeProvider();
+  const waitForZapRoute = async ({ buyToken }) => {
+    events.push(`wait:${getAddress(buyToken)}`);
+    return { waitedMs: 2500 };
+  };
+  const getZapBuyTx = async ({ sellAmountWei, taker }) => {
+    events.push(`quote:${getAddress(taker)}`);
+    return { to: SETTLER, data: '0xzap', value: sellAmountWei };
+  };
+
+  const res = await fireZap(
+    plan,
+    baseDeps({ provider: rpc, keystore: fakeKeystore([]), waitForZapRoute, getZapBuyTx })
+  );
+
+  assert.equal(events[0], `wait:${TOKEN}`, 'the route is awaited before the first quote');
+  assert.ok(
+    events.slice(1).every((e) => e.startsWith('quote:')),
+    'every quote comes after the wait'
+  );
+  assert.equal(res.routeWaitedMs, 2500, 'the wait duration is reported');
+  assert.equal(res.confirmed, 2);
+});
+
+test('if the route never appears, all buys are skipped and nothing is signed', async () => {
+  const signed = [];
+  let quotes = 0;
+  const rpc = fakeProvider();
+  const waitForZapRoute = async () => {
+    throw new Error('pons zap: no route for the launched token after 45000ms (No route for that pair.)');
+  };
+  const getZapBuyTx = async ({ sellAmountWei }) => {
+    quotes += 1;
+    return { to: SETTLER, data: '0xzap', value: sellAmountWei };
+  };
+
+  const res = await fireZap(
+    plan,
+    baseDeps({ provider: rpc, keystore: fakeKeystore(signed), waitForZapRoute, getZapBuyTx })
+  );
+
+  assert.equal(quotes, 0, 'no quote is fetched once the route wait gives up');
+  assert.equal(signed.length, 0, 'nothing is signed');
+  assert.ok(res.buys.every((b) => b.status === 'skipped'));
+  assert.match(res.buys[0].reason, /zap route never appeared/);
+  assert.equal(res.confirmed, 0);
+  assert.equal(res.skipped, plan.buys.length);
 });
 
 test('the keystore is required — fireZap refuses to sign without one', async () => {

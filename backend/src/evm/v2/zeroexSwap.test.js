@@ -10,7 +10,7 @@
 const test = require('node:test');
 const assert = require('node:assert');
 const { getAddress } = require('ethers');
-const { getZapBuyTx, getZapPrice } = require('./zeroexSwap');
+const { getZapBuyTx, getZapPrice, waitForZapRoute } = require('./zeroexSwap');
 
 const TOKEN = getAddress('0x' + 'dd'.repeat(20));
 const TAKER = getAddress('0x' + '22'.repeat(20));
@@ -106,6 +106,78 @@ test('getZapPrice omits the taker and the intent — it is only a preview', asyn
   assert.equal('taker' in body, false, 'a price preview has no taker');
   assert.equal('intent' in body, false, 'a price preview omits intent');
   assert.equal(price.buyAmount, '123456');
+});
+
+test('getZapPrice reads buyAmount from a .price-shaped preview (the real preview shape)', async () => {
+  // The live endpoint answers a taker-less preview under `.price`, not `.quote`.
+  const { impl } = fakeFetch({ price: { buyAmount: '999', needsAllowance: false } });
+  const price = await getZapPrice({ buyToken: TOKEN, sellAmountWei: 1n }, { fetch: impl });
+  assert.equal(price.buyAmount, '999');
+});
+
+test('getZapPrice surfaces a no-route preview (.error, no .price) as a throw', async () => {
+  const { impl } = fakeFetch({ error: 'No route for that pair.' });
+  await assert.rejects(
+    () => getZapPrice({ buyToken: TOKEN, sellAmountWei: 1n }, { fetch: impl }),
+    /No route for that pair/
+  );
+});
+
+// A fetch that returns a different canned response on each call, so the poll can
+// see "no route" a few times and then a route appearing.
+function sequencedFetch(responses) {
+  let i = 0;
+  const calls = [];
+  const impl = async (url, opts) => {
+    const r = responses[Math.min(i, responses.length - 1)];
+    i += 1;
+    calls.push({ body: JSON.parse(opts.body) });
+    return { ok: true, status: 200, async json() { return r; } };
+  };
+  return { impl, calls, count: () => i };
+}
+
+// Deterministic clock: sleep advances it, now reads it — no wall time in the test.
+function fakeClock() {
+  let clock = 0;
+  return { now: () => clock, sleep: async (ms) => { clock += ms; } };
+}
+
+test('waitForZapRoute resolves as soon as the route appears, reporting the wait', async () => {
+  const seq = sequencedFetch([
+    { error: 'No route for that pair.' },
+    { error: 'No route for that pair.' },
+    { price: { buyAmount: '5' } },
+  ]);
+  const { now, sleep } = fakeClock();
+  const r = await waitForZapRoute(
+    { buyToken: TOKEN },
+    { fetch: seq.impl, timeoutMs: 45_000, intervalMs: 1_500, now, sleep }
+  );
+  assert.equal(seq.count(), 3, 'polled until the route appeared');
+  assert.equal(r.waitedMs, 3_000, 'reports the elapsed wait (two 1.5s intervals)');
+});
+
+test('waitForZapRoute is a routability probe — no taker, no intent in its body', async () => {
+  const seq = sequencedFetch([{ price: { buyAmount: '5' } }]);
+  const { now, sleep } = fakeClock();
+  await waitForZapRoute({ buyToken: TOKEN }, { fetch: seq.impl, now, sleep });
+  const body = seq.calls[0].body;
+  assert.equal('taker' in body, false, 'the probe never bakes a taker');
+  assert.equal('intent' in body, false, 'the probe never asks for a firm quote');
+});
+
+test('waitForZapRoute throws when the route never appears within the budget', async () => {
+  const seq = sequencedFetch([{ error: 'No route for that pair.' }]);
+  const { now, sleep } = fakeClock();
+  await assert.rejects(
+    () =>
+      waitForZapRoute(
+        { buyToken: TOKEN },
+        { fetch: seq.impl, timeoutMs: 5_000, intervalMs: 1_500, now, sleep }
+      ),
+    /no route for the launched token after 5000ms/
+  );
 });
 
 test('getZapBuyTx names a transport failure rather than leaking a raw fetch error', async () => {

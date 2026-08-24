@@ -352,6 +352,7 @@ async function fireZap(plan, deps = {}) {
   const rpc = deps.provider || provider;
   const ks = deps.keystore;
   const getZap = deps.getZapBuyTx || zeroexSwap.getZapBuyTx;
+  const waitRoute = deps.waitForZapRoute || zeroexSwap.waitForZapRoute;
   const awaitReceipt = deps.waitForReceipt || waitForReceipt;
   const parseLaunch = deps.parseLaunch || v2factory.parseLaunch;
   const warm = deps.warmPool || warmPool;
@@ -460,17 +461,49 @@ async function fireZap(plan, deps = {}) {
   // The fees prepareV2 baked (strings), carried with the plan's +25% headroom.
   const fees = plan.fees || {};
 
+  // The curve exists now, but the zap AGGREGATOR does not index a brand-new curve
+  // for a beat or two after the launch confirms — so a quote fetched immediately
+  // answers "No route for that pair" and every buy is lost, exactly as a live
+  // launch showed. Wait for the route to appear (usually a few seconds), THEN
+  // quote-and-blast. If it never appears within the budget, no buy could have
+  // succeeded anyway — skip them all with the reason rather than firing blind.
+  const routeTimeoutMs = Number(plan.zapRouteTimeoutMs ?? config.zapRouteTimeoutMs);
+  let routeWaitedMs = null;
+  try {
+    const r = await waitRoute({ buyToken, slippageBps }, { timeoutMs: routeTimeoutMs });
+    routeWaitedMs = r?.waitedMs ?? null;
+  } catch (err) {
+    return {
+      protocol: 'v2',
+      mode: 'ethZap',
+      token: buyToken,
+      curve: (actual && actual.curve) || plan.curve,
+      launch,
+      buys: skipAll(`zap route never appeared: ${err.message}`),
+      confirmed: 0,
+      skipped: plan.buys.length,
+      sentMs,
+      burstMs: Date.now() - t0,
+    };
+  }
+
   // One quote per wallet, taker = that wallet, all concurrent to shrink the gap
-  // between the launch landing and the buys firing. A failed quote skips ONLY its
-  // own wallet.
+  // between the route appearing and the buys firing. A failed quote skips ONLY its
+  // own wallet. Each wallet retries a couple of times: right at the edge of the
+  // route becoming routable, a firm per-taker quote can still momentarily miss.
   const quotes = await Promise.all(
     plan.buys.map(async (b) => {
-      try {
-        const zapTx = await getZap({ buyToken, sellAmountWei: b.amountIn, taker: b.address, slippageBps });
-        return { b, zapTx };
-      } catch (err) {
-        return { b, error: err.message };
+      let lastErr = 'no route';
+      for (let attempt = 0; attempt < 3; attempt++) {
+        try {
+          const zapTx = await getZap({ buyToken, sellAmountWei: b.amountIn, taker: b.address, slippageBps });
+          return { b, zapTx };
+        } catch (err) {
+          lastErr = err.message;
+          if (attempt < 2) await new Promise((res) => setTimeout(res, 800));
+        }
       }
+      return { b, error: lastErr };
     })
   );
 
@@ -535,6 +568,7 @@ async function fireZap(plan, deps = {}) {
     confirmed: results.filter((r) => r.status === 'confirmed').length,
     skipped: results.filter((r) => r.status === 'skipped').length,
     sentMs,
+    routeWaitedMs,
     burstMs,
   };
 }
