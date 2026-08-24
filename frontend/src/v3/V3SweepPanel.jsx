@@ -26,18 +26,24 @@ import { eth, plural } from './roles.js';
 export default function V3SweepPanel({ step, explorer, reload, report, locked }) {
   const [busy, setBusy] = useState('');
   const [destination, setDestination] = useState('main');
+  // The dust floor: wallets that would send less than this are left as dust.
+  // Empty = the backend default (0.002 ETH). Lower it to pull small balances,
+  // accepting that a Relay fee is then a big share of what moves.
+  const [minSweep, setMinSweep] = useState('');
   const [preview, setPreview] = useState(null);
   const [arming, setArming] = useState(false);
 
   const load = useCallback(async () => {
     try {
-      setPreview(await api(`/v3/sweep/preview?destination=${destination}`));
+      const qs = new URLSearchParams({ destination });
+      if (minSweep) qs.set('minSweepEth', minSweep);
+      setPreview(await api(`/v3/sweep/preview?${qs.toString()}`));
     } catch {
       // No wallets yet, or nothing to sweep. The panel says so from the empty
       // preview rather than raising a toast on a page load.
       setPreview(null);
     }
-  }, [destination]);
+  }, [destination, minSweep]);
 
   useEffect(() => {
     load();
@@ -72,6 +78,19 @@ export default function V3SweepPanel({ step, explorer, reload, report, locked })
             <option value="main">main wallet — ready for another run</option>
             <option value="treasury">treasury — parked, never trades</option>
           </select>
+        </label>
+        <label>
+          min sweep (ETH)
+          <input
+            type="number"
+            step="0.0001"
+            min="0"
+            value={minSweep}
+            onChange={(e) => setMinSweep(e.target.value)}
+            placeholder={preview?.minSweepEth ?? '0.002'}
+            style={{ width: 110 }}
+            title="wallets that would send less than this are left as dust — lower it to pull small balances"
+          />
         </label>
         <button className="ghost" onClick={load}>
           refresh
@@ -135,7 +154,9 @@ export default function V3SweepPanel({ step, explorer, reload, report, locked })
       {preview?.skipped?.length > 0 && (
         <p className="hint">
           {plural(preview.skipped.length, 'wallet')} skipped: {preview.skipped[0].reason}
-          {preview.skipped.length > 1 ? ' (and others)' : ''}.
+          {preview.skipped.length > 1 ? ' (and others)' : ''}. Lower <b>min sweep</b> above to pull
+          them — but on a balance that small the Relay fee is a big share of what moves, which is why
+          the floor is there.
         </p>
       )}
 
@@ -145,7 +166,9 @@ export default function V3SweepPanel({ step, explorer, reload, report, locked })
         onCancel={() => setArming(false)}
         confirmLabel="Sweep it"
         onConfirm={async () => {
-          await act('sweep', () => api('/v3/sweep', 'POST', { destination, confirm: true }));
+          await act('sweep', () =>
+            api('/v3/sweep', 'POST', { destination, minSweepEth: minSweep || undefined, confirm: true })
+          );
           setArming(false);
         }}
       >
