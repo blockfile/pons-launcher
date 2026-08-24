@@ -29,4 +29,21 @@ function readTokenBalance(token, owner) {
   return erc20(token).balanceOf(owner);
 }
 
-module.exports = { ERC20_ABI, erc20, getDecimals, readTokenBalance };
+const symbolCache = new Map();
+
+// Symbol is display-only, so a token that will not answer must never break a
+// caller — it falls back to a short form of its own address rather than throwing.
+async function getSymbol(address) {
+  const key = String(address).toLowerCase();
+  if (symbolCache.has(key)) return symbolCache.get(key);
+  let sym;
+  try {
+    sym = String(await erc20(address).symbol());
+  } catch (_err) {
+    sym = `${key.slice(0, 6)}…${key.slice(-4)}`;
+  }
+  symbolCache.set(key, sym);
+  return sym;
+}
+
+module.exports = { ERC20_ABI, erc20, getDecimals, getSymbol, readTokenBalance };

@@ -52,10 +52,19 @@ function withLaunchLock(handler) {
  * holding a raw signed buy could broadcast it, so it never leaves the server.
  */
 function publicPlan(plan) {
+  // Strip every signed raw before the plan leaves the server — the launch, the
+  // buys, AND the approves the ERC-20 pair path adds (a signed approve is just as
+  // broadcastable as a signed buy). The launch object may itself carry a dev
+  // approve; the buys may each carry one.
+  const stripApprove = (approve) => (approve ? { ...approve, raw: undefined } : approve);
   return jsonSafe({
     ...plan,
-    launch: { ...plan.launch, raw: undefined },
-    buys: plan.buys.map((b) => ({ ...b, raw: undefined })),
+    launch: { ...plan.launch, raw: undefined, ...(plan.launch?.approve ? { approve: stripApprove(plan.launch.approve) } : {}) },
+    buys: plan.buys.map((b) => ({
+      ...b,
+      raw: undefined,
+      ...(b.approve ? { approve: stripApprove(b.approve) } : {}),
+    })),
   });
 }
 
@@ -173,10 +182,19 @@ router.post('/launch', requireApiKey, withLaunchLock(async (req, res, next) => {
 // v2 has no dev buy and no address prediction: buys are signed after the launch
 // receipt names the curve. See prepareV2/fireV2 for why.
 
-// GET /api/v2/configs — launch configs, fee, and whether launching is even open.
+// GET /api/v2/configs — launch configs, fee, whether launching is even open, and
+// the quote assets the factory currently approves (native ETH first). The pair
+// list is resolved separately and best-effort, and it is cached, so a slow or
+// unhappy RPC on that read never blocks the rest of the config the form needs.
+// `?refresh=1` forces a fresh read of the (rarely-changing) approved list.
 router.get('/v2/configs', async (req, res, next) => {
   try {
-    res.json({ chainId: config.chainId, ...(await v2factory.getConfigs()) });
+    const refresh = ['1', 'true', 'yes'].includes(String(req.query.refresh || '').toLowerCase());
+    const [configs, pairTokens] = await Promise.all([
+      v2factory.getConfigs(),
+      v2factory.getPairTokens({ refresh }).catch(() => null),
+    ]);
+    res.json({ chainId: config.chainId, ...configs, pairTokens: pairTokens || undefined });
   } catch (err) {
     next(err);
   }

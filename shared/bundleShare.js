@@ -47,14 +47,19 @@ const BPS = 10_000n;
 const WEI = 10n ** 18n;
 
 /**
- * ETH as the operator typed it → wei.
+ * A decimal amount as the operator typed it → base units, at the asset's own
+ * decimals.
  *
- * Decimal string arithmetic rather than value * 1e18, because a double cannot
- * hold 0.6 ETH in wei exactly and this feeds a comparison against an on-chain
- * cap. ethers' parseEther would do it, but ethers cannot come into this file.
+ * Decimal string arithmetic rather than value * 10**decimals, because a double
+ * cannot hold 0.6 ETH in wei exactly and this feeds a comparison against an
+ * on-chain cap. ethers' parseUnits would do it, but ethers cannot come into this
+ * file. DECIMALS ARE THE ASSET'S, NOT ALWAYS 18: a v2 launch can be priced in a
+ * 6-decimal quote asset (USDG), and parsing its amounts as 18-dec would overstate
+ * every buy by twelve orders of magnitude.
  */
-function parseEthToWei(value) {
+function parseAmount(value, decimals = 18) {
   if (typeof value === 'bigint') return value;
+  const d = Number.isFinite(Number(decimals)) ? Number(decimals) : 18;
   const s = String(value ?? '').trim();
   if (!s) return 0n;
 
@@ -63,20 +68,32 @@ function parseEthToWei(value) {
     // Exponent notation and anything else a number input can emit. Precision
     // past a few decimals cannot matter to a figure that is drawn on a screen.
     const n = Number(s);
-    return Number.isFinite(n) && n > 0 ? BigInt(Math.round(n * 1e18)) : 0n;
+    return Number.isFinite(n) && n > 0 ? BigInt(Math.round(n * 10 ** d)) : 0n;
   }
   const whole = m[1] || '0';
-  const frac = (m[2] || '').slice(0, 18).padEnd(18, '0');
+  const frac = (m[2] || '').slice(0, d).padEnd(d, '0');
   return BigInt(whole + frac);
 }
 
-/** Base units → a decimal string, without ethers' formatUnits. */
-function formatWei(wei, places = 6) {
-  const v = toBig(wei);
-  const whole = v / WEI;
+/** The 18-decimal case, kept as its own name for every existing caller. */
+function parseEthToWei(value) {
+  return parseAmount(value, 18);
+}
+
+/** Base units → a decimal string, without ethers' formatUnits, at any decimals. */
+function formatUnitsStr(amount, decimals = 18, places = 6) {
+  const v = toBig(amount);
+  const d = Number.isFinite(Number(decimals)) ? Number(decimals) : 18;
+  const base = 10n ** BigInt(d);
+  const whole = v / base;
   if (places <= 0) return whole.toString();
-  const frac = (v % WEI).toString().padStart(18, '0').slice(0, places);
+  const frac = (v % base).toString().padStart(d, '0').slice(0, places);
   return `${whole}.${frac}`;
+}
+
+/** The 18-decimal case, kept as its own name for every existing caller. */
+function formatWei(wei, places = 6) {
+  return formatUnitsStr(wei, 18, places);
 }
 
 /** Anything the chain or the API hands us for a uint256 → BigInt, never a throw. */
@@ -323,13 +340,20 @@ function bundleRange({ quoteReserve, tokenReserve, feeBps = 0, weis }) {
   return { legs, totalIn, totalTokens: total.tokensOut };
 }
 
-/** wei for one leg, whichever way the caller happens to hold the amount. */
-function legWei(leg) {
+/**
+ * Base units for one leg, whichever way the caller happens to hold the amount.
+ *
+ * A raw amountWei is taken as-is — preflight has already scaled it to the quote
+ * asset's decimals before it gets here. Only a typed decimal string is parsed,
+ * and it is parsed at the QUOTE ASSET's decimals: 18 for native ETH, but 6 for a
+ * USDG-priced launch. See parseAmount.
+ */
+function legWei(leg, decimals = 18) {
   if (leg == null) return 0n;
   if (leg.amountWei !== undefined && leg.amountWei !== null && leg.amountWei !== '') {
     return toBig(leg.amountWei);
   }
-  return parseEthToWei(leg.amountEth);
+  return parseAmount(leg.amountEth, decimals);
 }
 
 /** bps of supply, to two decimal places, from base units on both sides. */
@@ -477,10 +501,29 @@ function shareV1({ launchConfig, devBuyWei, devBuyEth, buys = [] }) {
  * The curve arithmetic itself is untouched: same constantProductBuy, same fee
  * on the same leg, same sequential walk for the graduation threshold.
  */
-function shareV2({ launchConfig, creatorTaxBps = 0, devBuyWei, devBuyEth, buys = [] }) {
+function shareV2({
+  launchConfig,
+  creatorTaxBps = 0,
+  devBuyWei,
+  devBuyEth,
+  buys = [],
+  // The quote asset's decimals and symbol. Native ETH is 18/"ETH"; a launch
+  // priced in a custom pair uses that token's own decimals (USDG is 6) and
+  // label. EVERYTHING quote-denominated below — reserves, market cap, the
+  // graduation threshold, the raised total, every buy amount — is in these
+  // units. The TOKEN side (estTokens, supply, bps) stays 18-decimal: the launched
+  // token is minted by the factory at 18, whatever it is priced in.
+  pairDecimals = 18,
+  pairSymbol = 'ETH',
+} = {}) {
   const supply = toBig(launchConfig?.supply);
   const threshold = toBig(launchConfig?.graduationThreshold);
   const feeBps = Number(launchConfig?.curveFeeBps || 0) + Number(creatorTaxBps || 0);
+
+  // Quote-side formatting/parsing at the pair asset's decimals. The constant-
+  // product arithmetic itself (constantProductBuy) is decimals-agnostic — it is
+  // integer x*y=k — so only the edges, where base units meet strings, change.
+  const fmtQ = (wei) => formatUnitsStr(wei, pairDecimals);
 
   let quoteReserve = toBig(launchConfig?.phantomQuote);
   let tokenReserve = supply;
@@ -512,7 +555,7 @@ function shareV2({ launchConfig, creatorTaxBps = 0, devBuyWei, devBuyEth, buys =
     return r;
   };
 
-  const dev = legWei({ amountWei: devBuyWei, amountEth: devBuyEth });
+  const dev = legWei({ amountWei: devBuyWei, amountEth: devBuyEth }, pairDecimals);
   const devOut = dev > 0n ? step('dev', dev) : null;
   // The cap the dev buy alone reaches, before any bundle wallet. With no dev buy
   // this is the opening cap.
@@ -520,7 +563,7 @@ function shareV2({ launchConfig, creatorTaxBps = 0, devBuyWei, devBuyEth, buys =
 
   // The curve the bundle actually meets, once the launch transaction's own dev
   // buy has been taken off it.
-  const weis = buys.map((buy) => legWei(buy));
+  const weis = buys.map((buy) => legWei(buy, pairDecimals));
   const {
     legs: ranges,
     totalIn: bundleWei,
@@ -537,10 +580,10 @@ function shareV2({ launchConfig, creatorTaxBps = 0, devBuyWei, devBuyEth, buys =
     cumulative += r.tokensOut;
     legs.push({
       key: buy.key,
-      amountEth: formatWei(weis[i]),
+      amountEth: fmtQ(weis[i]),
       // The market cap the curve reaches once this wallet's buy has landed,
       // walking in order behind the dev buy. This is the per-row predicted MC.
-      mcEth: formatWei(mcWei()),
+      mcEth: fmtQ(mcWei()),
       // The top of the range — this wallet landing first, behind only the dev
       // buy. See shareV1 for why the top keeps the est* name.
       estTokens: Number(ranges[i].best) / 1e18,
@@ -558,8 +601,8 @@ function shareV2({ launchConfig, creatorTaxBps = 0, devBuyWei, devBuyEth, buys =
   const devLeg = devOut
     ? {
         key: 'dev',
-        amountEth: formatWei(dev),
-        mcEth: formatWei(devMcWei),
+        amountEth: fmtQ(dev),
+        mcEth: fmtQ(devMcWei),
         estTokens: Number(devOut.tokensOut) / 1e18,
         estTokensRaw: devOut.tokensOut.toString(),
         estBps: bpsOf(devOut.tokensOut, supply),
@@ -583,21 +626,29 @@ function shareV2({ launchConfig, creatorTaxBps = 0, devBuyWei, devBuyEth, buys =
     // Exact: the config fixes the curve before the launch, so this is the
     // curve's own arithmetic rather than a reading of it.
     exact: true,
+    // The quote asset every *Eth figure below is denominated in. Native leaves
+    // these at ETH/18/true and every number unchanged; a custom pair labels them
+    // with its own symbol so the console never calls a USDG amount "ETH". These
+    // are additive descriptors — the *Eth field NAMES are unchanged so no
+    // existing consumer breaks; they simply now carry the pair asset's amount.
+    pairSymbol,
+    pairDecimals,
+    isNative: pairSymbol === 'ETH' && Number(pairDecimals) === 18,
     dev: devLeg,
     buys: legs,
-    // Predicted market cap in native ETH: where it opens, and where the bundle
-    // leaves it. Per-row caps are on each leg as `mcEth`.
+    // Predicted market cap in the QUOTE asset: where it opens, and where the
+    // bundle leaves it. Per-row caps are on each leg as `mcEth`.
     marketCap: {
-      openingEth: formatWei(openingMcWei),
-      finalEth: formatWei(finalMcWei),
+      openingEth: fmtQ(openingMcWei),
+      finalEth: fmtQ(finalMcWei),
     },
     bundle: {
-      eth: formatWei(bundleWei),
+      eth: fmtQ(bundleWei),
       tokens: Number(bundleTokens) / 1e18,
       bps: bpsOf(bundleTokens, supply),
     },
     total: {
-      eth: formatWei(bundleWei + dev),
+      eth: fmtQ(bundleWei + dev),
       tokens: Number(totalTokens) / 1e18,
       bps: bpsOf(totalTokens, supply),
     },
@@ -605,8 +656,8 @@ function shareV2({ launchConfig, creatorTaxBps = 0, devBuyWei, devBuyEth, buys =
     caps: null,
     graduation: threshold > 0n
       ? {
-          thresholdEth: formatWei(threshold),
-          raisedEth: formatWei(raised),
+          thresholdEth: fmtQ(threshold),
+          raisedEth: fmtQ(raised),
           // Graduating on the way IN is the one state a bundle cannot sell out
           // of through the curve, so this is a warning and not a note.
           crosses: raised >= threshold,
@@ -629,18 +680,32 @@ function shareV2({ launchConfig, creatorTaxBps = 0, devBuyWei, devBuyEth, buys =
  *   as the curve fee, so it changes what every buy receives.
  * @param {Array<{key:string, amountEth?:string, amountWei?:string|bigint}>} input.buys
  *   IN EXECUTION ORDER.
+ * @param {number} [input.pairDecimals] v2 only; the quote asset's decimals (18
+ *   for native ETH, 6 for USDG). Every quote-denominated figure is scaled by it.
+ * @param {string} [input.pairSymbol] v2 only; the quote asset's label.
  * @returns {object} JSON-safe: numbers and strings, never a BigInt.
  */
-function bundleShare({ protocol, launchConfig, devBuyEth, devBuyWei, creatorTaxBps = 0, buys = [] }) {
+function bundleShare({
+  protocol,
+  launchConfig,
+  devBuyEth,
+  devBuyWei,
+  creatorTaxBps = 0,
+  buys = [],
+  pairDecimals = 18,
+  pairSymbol = 'ETH',
+}) {
   if (!launchConfig) return null;
   return protocol === 'v2'
-    ? shareV2({ launchConfig, creatorTaxBps, devBuyWei, devBuyEth, buys })
+    ? shareV2({ launchConfig, creatorTaxBps, devBuyWei, devBuyEth, buys, pairDecimals, pairSymbol })
     : shareV1({ launchConfig, devBuyWei, devBuyEth, buys });
 }
 
 module.exports = {
   parseEthToWei,
+  parseAmount,
   formatWei,
+  formatUnitsStr,
   rateFromTick,
   estimateTokensOut,
   capCheck,

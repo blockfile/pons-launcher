@@ -18,18 +18,30 @@
 //      only addresses that clear at the untaxed price during the opening
 //      window. Undeclared buyers pay a tax starting at 99%.
 
-const { parseEther, formatEther, getAddress, ZeroAddress } = require('ethers');
+const { parseEther, parseUnits, formatEther, formatUnits, getAddress, ZeroAddress, Contract } = require('ethers');
 const config = require('../config');
 const { provider } = require('../evm/provider');
 const { getFees, gasCost } = require('../evm/fees');
 const v2 = require('../evm/v2/factory');
 const { buildBuyTx } = require('../evm/v2/curve');
+const erc20mod = require('../evm/erc20');
 const { bundleShare } = require('../../../shared/bundleShare');
 const keystore = require('../wallets/keystore');
 const { DEFAULT_VARIANT, devWalletFor } = require('../wallets/variants');
 const { spendableFromBalance } = require('../wallets/funding');
 
 const FEE_BUMP_PCT = 25;
+
+// approve/allowance are not in evm/erc20.js — that module deliberately exposes
+// only the read and transfer surface the funding path needs. Approving a pair
+// token is a launch-path concern for ERC-20 quote assets, so the fragment lives
+// here, exactly as it does on the sell path (bundle/prepareSell.js).
+const APPROVE_ABI = ['function approve(address spender, uint256 amount) returns (bool)'];
+
+// A single SSTORE plus whatever the token does around it; generous, and cheap to
+// over-reserve since unused gas is refunded. Same figure the sell path uses. Only
+// spent on the ERC-20 pair path — a native launch signs no approvals.
+const APPROVE_GAS = 100_000n;
 
 /** Strip fields signTransaction rejects, and pin chainId. */
 function toSignable(tx, { nonce, gasLimit, fees, chainId }) {
@@ -89,6 +101,10 @@ async function prepareV2(input, deps = {}) {
     v2: v2mod = v2,
     getFees: getFeesFn = getFees,
     provider: prov = provider,
+    // Pair-token reads, injectable so the ERC-20 path can be exercised without a
+    // chain. Default to the real erc20 module.
+    readTokenBalance: readTokenBalanceFn = (t, o) => erc20mod.readTokenBalance(t, o),
+    getSymbol: getSymbolFn = (t) => erc20mod.getSymbol(t),
   } = deps;
   const { params, launchConfigId, pairToken = ZeroAddress, wallets = [], devBuyEth = 0 } = input;
 
@@ -98,6 +114,10 @@ async function prepareV2(input, deps = {}) {
   const dev = devWalletFor(ks, deps.variant || DEFAULT_VARIANT);
   const warnings = [];
   const pair = getAddress(pairToken);
+  // The one switch this whole feature turns on. EVERYTHING below that differs
+  // from a native launch is gated on it; when it is false the code path is the
+  // one that has always run, byte for byte.
+  const nonNative = pair !== ZeroAddress;
 
   // Resolve every referenced wallet through the CALLER's keystore before any
   // chain work, so a foreign wallet id fails as "no wallet" rather than being
@@ -119,6 +139,30 @@ async function prepareV2(input, deps = {}) {
 
   const gate = await v2mod.preflightGate({ launcher: dev.address, pairToken: pair });
   for (const problem of gate.problems) warnings.push(problem);
+
+  // An unapproved pair token would revert the launch (PairTokenNotApproved), and
+  // it would do so as a raw selector out of simulateLaunch. Reject it here, up
+  // front, with a message that names the token — but ONLY for a non-native pair.
+  // Native ETH is address(0), which the factory never checks and preflightGate
+  // always reports approved, so this branch never touches the native path.
+  if (nonNative && !gate.approved) {
+    throw new Error(
+      `pons v2 has not approved ${pair} as a pair token — the factory would revert ` +
+        'PairTokenNotApproved. Pick an approved quote asset (see /api/v2/configs pairTokens).'
+    );
+  }
+
+  // The pair token's authoritative economics and label. Only read for a non-
+  // native pair; native inherits the launch config's own phantomQuote/threshold
+  // and is 18-decimal ETH, so nothing here runs for it.
+  let pairDecimals = 18;
+  let pairSymbol = 'ETH';
+  let pairEconomics = null;
+  if (nonNative) {
+    pairEconomics = await v2mod.pairEconomics(pair);
+    pairDecimals = pairEconomics.decimals;
+    pairSymbol = await getSymbolFn(pair).catch(() => `${pair.slice(0, 6)}…${pair.slice(-4)}`);
+  }
 
   const cfgs = await v2mod.getConfigs();
   const launchConfig = cfgs.launchConfigs.find((c) => c.id === Number(launchConfigId));
@@ -158,7 +202,13 @@ async function prepareV2(input, deps = {}) {
   const fees = await getFeesFn(FEE_BUMP_PCT);
   const chainId = BigInt(config.chainId);
   const launchFee = BigInt(cfgs.launchFee);
-  const devBuy = parseEther(String(devBuyEth || 0));
+  // The dev buy is denominated in the QUOTE asset: native wei for ETH, the pair
+  // token's own units otherwise (a 6-decimal USDG dev buy of "5" is 5_000_000,
+  // not 5e18). Parsing at the wrong scale would over- or under-buy by orders of
+  // magnitude, so the decimals come from the factory's own economics.
+  const devBuy = nonNative
+    ? parseUnits(String(devBuyEth || 0), pairDecimals)
+    : parseEther(String(devBuyEth || 0));
 
   // ── who is exempt from the opening tax ────────────────────────────────────
   // The dev and the creator fee recipient are exempted by the factory itself.
@@ -212,6 +262,13 @@ async function prepareV2(input, deps = {}) {
   // With a dev buy it goes through the forwarder, which launches and buys in one
   // transaction — nothing can be in front of the dev. Without one, straight to
   // the factory, which rejects any msg.value that is not exactly the fee.
+  //
+  // THE NATIVE VALUE DIFFERS BY QUOTE ASSET. For a native launch the dev buy is
+  // paid in ETH, so the forwarder call carries launchFee + devBuy. For an ERC-20
+  // pair the dev buy is paid in the pair TOKEN, pulled by the forwarder via
+  // transferFrom, so the call carries only the launch fee and the dev must have
+  // approved the forwarder for the quoteIn first (built below).
+  const launchValue = nonNative ? launchFee : launchFee + devBuy;
   const launchTx =
     devBuy > 0n
       ? await v2mod.buildLaunchAndBuyTx({
@@ -222,7 +279,7 @@ async function prepareV2(input, deps = {}) {
           minTokensOut: 0n,
           recipient: dev.address,
           exemptions,
-          value: launchFee + devBuy,
+          value: launchValue,
           forwarderAddress: predicted.wiring.forwarder,
         })
       : await v2mod.buildLaunchTx({
@@ -233,67 +290,191 @@ async function prepareV2(input, deps = {}) {
           value: launchFee,
         });
 
-  const launchGas = await estimateLaunchGasOrThrow(launchTx, dev.address, { provider: prov });
+  // THE FAIL-SAFE, and the one place the ERC-20 path cannot reuse the native
+  // one. estimateGas is a real revert check: if the launch would revert, nothing
+  // downstream is signed (see estimateLaunchGasOrThrow). But an ERC-20
+  // launchAndBuy cannot be estimated before the dev's approve is mined — the
+  // transferFrom in it reverts on the missing allowance every time. So for that
+  // ONE case the fail-safe estimates the PLAIN launch (launchToken, no buy),
+  // which needs no allowance and proves the curve is created and the launch does
+  // not revert; the atomic buy then rides on a gas limit widened by one buy's
+  // worth of headroom. simulateLaunch above already cross-checked this same plain
+  // launch against the predicted address. Native — and ERC-20 with no dev buy —
+  // estimate the real launch tx exactly as before.
+  const estimateErc20DevBuy = nonNative && devBuy > 0n;
+  const estimateTx = estimateErc20DevBuy
+    ? await v2mod.buildLaunchTx({
+        params: fullParams,
+        launchConfigId,
+        pairToken: pair,
+        exemptions,
+        value: launchFee,
+      })
+    : launchTx;
+  const estimatedGas = await estimateLaunchGasOrThrow(estimateTx, dev.address, { provider: prov });
+  const launchGas = estimateErc20DevBuy ? estimatedGas + BigInt(config.buyGasLimit) : estimatedGas;
 
+  // ── what the dev wallet must hold ─────────────────────────────────────────
+  // Native and ERC-20 diverge here: an ERC-20 dev buy is paid in the pair token
+  // and only the fee + gas (+ the approve's gas) is native, so the native and
+  // token balances are checked separately.
   const devBalance = await prov.getBalance(dev.address);
-  const devNeeded = launchFee + devBuy + gasCost(fees, launchGas);
-  if (devBalance < devNeeded) {
-    throw new Error(
-      `dev wallet ${dev.address} has ${formatEther(devBalance)} ETH but the launch needs ` +
-        `${formatEther(devNeeded)} (fee ${formatEther(launchFee)}` +
-        (devBuy > 0n ? ` + dev buy ${formatEther(devBuy)}` : '') +
-        ' + gas)'
-    );
+  if (nonNative) {
+    const approveGasCost = devBuy > 0n ? gasCost(fees, APPROVE_GAS) : 0n;
+    const devNativeNeeded = launchFee + approveGasCost + gasCost(fees, launchGas);
+    if (devBalance < devNativeNeeded) {
+      throw new Error(
+        `dev wallet ${dev.address} has ${formatEther(devBalance)} ETH but the launch needs ` +
+          `${formatEther(devNativeNeeded)} native (fee ${formatEther(launchFee)} + gas` +
+          (devBuy > 0n ? ' + approve gas' : '') +
+          `) — the ${pairSymbol} dev buy is paid in the pair token`
+      );
+    }
+    if (devBuy > 0n) {
+      const devPairBalance = BigInt(await readTokenBalanceFn(pair, dev.address));
+      if (devPairBalance < devBuy) {
+        throw new Error(
+          `dev wallet ${dev.address} holds ${formatUnits(devPairBalance, pairDecimals)} ${pairSymbol} ` +
+            `but the dev buy needs ${formatUnits(devBuy, pairDecimals)} ${pairSymbol}`
+        );
+      }
+    }
+  } else {
+    const devNeeded = launchFee + devBuy + gasCost(fees, launchGas);
+    if (devBalance < devNeeded) {
+      throw new Error(
+        `dev wallet ${dev.address} has ${formatEther(devBalance)} ETH but the launch needs ` +
+          `${formatEther(devNeeded)} (fee ${formatEther(launchFee)}` +
+          (devBuy > 0n ? ` + dev buy ${formatEther(devBuy)}` : '') +
+          ' + gas)'
+      );
+    }
   }
 
   const devSigner = ks.signer(dev.id, provider);
   const devNonce = await prov.getTransactionCount(dev.address, 'pending');
+
+  // For an ERC-20 dev buy the forwarder pulls the pair token, so the dev signs
+  // approve(forwarder, devBuy) at nonce n and the launch at n+1 — the same
+  // consecutive-nonce, pre-signed shape the sell path uses. fireV2 broadcasts
+  // the approve first; the sequencer runs a wallet's nonces in order, so the
+  // allowance is always in place by the time the launch executes.
+  let devApprove = null;
+  let launchNonce = devNonce;
+  if (nonNative && devBuy > 0n) {
+    const forwarder = getAddress(predicted.wiring.forwarder);
+    const approveTx = await new Contract(pair, APPROVE_ABI, prov).approve.populateTransaction(
+      forwarder,
+      devBuy
+    );
+    devApprove = {
+      nonce: devNonce,
+      spender: forwarder,
+      raw: await devSigner.signTransaction(
+        toSignable(approveTx, { nonce: devNonce, gasLimit: APPROVE_GAS, fees, chainId })
+      ),
+    };
+    launchNonce = devNonce + 1;
+  }
+
   const signedLaunch = {
     walletId: dev.id,
     address: dev.address,
-    valueEth: formatEther(launchFee + devBuy),
-    devBuyEth: formatEther(devBuy),
-    nonce: devNonce,
+    // The NATIVE value the launch tx carries — fee only for an ERC-20 launch.
+    valueEth: formatEther(launchValue),
+    // The dev buy in the quote asset's own units and label.
+    devBuyEth: nonNative ? formatUnits(devBuy, pairDecimals) : formatEther(devBuy),
+    nonce: launchNonce,
     atomic: devBuy > 0n,
+    // Present only on the ERC-20 dev-buy path; its presence tells fireV2 to
+    // broadcast it before the launch and to skip the fire-time re-estimate (which
+    // would falsely revert on the not-yet-mined allowance).
+    ...(devApprove ? { approve: devApprove, needsApprove: true } : {}),
     raw: await devSigner.signTransaction(
-      toSignable(launchTx, { nonce: devNonce, gasLimit: launchGas, fees, chainId })
+      toSignable(launchTx, { nonce: launchNonce, gasLimit: launchGas, fees, chainId })
     ),
   };
 
   // ── the buys ──────────────────────────────────────────────────────────────
   // Signed here, against the predicted curve. Nothing is left to do at fire
   // time but broadcast.
+  //
+  // NATIVE vs ERC-20. A native buy is one transaction: curve.buy with the ETH
+  // sent as value, sized from the wallet's native balance. An ERC-20 buy is two,
+  // exactly like the sell path: approve(curve, amountIn) at nonce n and
+  // curve.buy(amountIn,…) with value 0 at n+1, sized from the wallet's PAIR-TOKEN
+  // balance — the pair token is not spent on gas, so its whole balance is
+  // available, while native is only checked against the two transactions' gas.
   const buyGas = BigInt(config.buyGasLimit);
   const buyCost = gasCost(fees, buyGas);
+  const approveCost = gasCost(fees, APPROVE_GAS);
   const buffer = parseEther(String(config.gasBufferEth));
+  // Native ETH needed per wallet just to broadcast: one buy for native, an
+  // approve plus a buy for ERC-20.
+  const nativeGasNeeded = nonNative ? approveCost + buyCost : buyCost;
 
   const buys = [];
   for (const w of wallets) {
     const wallet = known.get(w.walletId);
-    const balance = await prov.getBalance(wallet.address);
 
     let amountIn;
-    if (w.mode === 'all') {
-      amountIn = spendableFromBalance(balance, buyCost, buyGas, buffer);
-      if (amountIn === 0n) {
-        warnings.push(`${wallet.address}: balance ${formatEther(balance)} ETH does not cover gas + buffer — skipped`);
-        continue;
-      }
-    } else {
-      amountIn = parseEther(String(w.amountEth || 0));
-      if (amountIn <= 0n) {
-        warnings.push(`${wallet.address}: buy amount is zero — skipped`);
-        continue;
-      }
-      if (balance < amountIn + buyCost) {
+    if (nonNative) {
+      // The pair token pays for the buy; native only has to cover the two
+      // transactions' gas. Both are checked, separately.
+      const pairBalance = BigInt(await readTokenBalanceFn(pair, wallet.address));
+      const nativeBalance = await prov.getBalance(wallet.address);
+      if (nativeBalance < nativeGasNeeded + buffer) {
         warnings.push(
-          `${wallet.address}: has ${formatEther(balance)} ETH, needs ${formatEther(amountIn + buyCost)} (buy + gas) — skipped`
+          `${wallet.address}: native balance ${formatEther(nativeBalance)} ETH does not cover the ` +
+            `approve + buy gas (${formatEther(nativeGasNeeded)} ETH) + buffer — skipped`
         );
         continue;
       }
+      if (w.mode === 'all') {
+        amountIn = pairBalance; // no gas is taken out of the token balance
+        if (amountIn <= 0n) {
+          warnings.push(`${wallet.address}: holds no ${pairSymbol} to buy with — skipped`);
+          continue;
+        }
+      } else {
+        amountIn = parseUnits(String(w.amountEth || 0), pairDecimals);
+        if (amountIn <= 0n) {
+          warnings.push(`${wallet.address}: buy amount is zero — skipped`);
+          continue;
+        }
+        if (pairBalance < amountIn) {
+          warnings.push(
+            `${wallet.address}: holds ${formatUnits(pairBalance, pairDecimals)} ${pairSymbol}, needs ` +
+              `${formatUnits(amountIn, pairDecimals)} ${pairSymbol} — skipped`
+          );
+          continue;
+        }
+      }
+    } else {
+      const balance = await prov.getBalance(wallet.address);
+      if (w.mode === 'all') {
+        amountIn = spendableFromBalance(balance, buyCost, buyGas, buffer);
+        if (amountIn === 0n) {
+          warnings.push(`${wallet.address}: balance ${formatEther(balance)} ETH does not cover gas + buffer — skipped`);
+          continue;
+        }
+      } else {
+        amountIn = parseEther(String(w.amountEth || 0));
+        if (amountIn <= 0n) {
+          warnings.push(`${wallet.address}: buy amount is zero — skipped`);
+          continue;
+        }
+        if (balance < amountIn + buyCost) {
+          warnings.push(
+            `${wallet.address}: has ${formatEther(balance)} ETH, needs ${formatEther(amountIn + buyCost)} (buy + gas) — skipped`
+          );
+          continue;
+        }
+      }
     }
 
-    const nonce = await prov.getTransactionCount(wallet.address, 'pending');
+    const baseNonce = await prov.getTransactionCount(wallet.address, 'pending');
+    const buyNonce = nonNative ? baseNonce + 1 : baseNonce;
     const buyTx = await buildBuyTx({
       curveAddress: curve,
       amountIn,
@@ -303,15 +484,35 @@ async function prepareV2(input, deps = {}) {
     });
     const signer = ks.signer(wallet.id, provider);
 
+    // The ERC-20 approve, signed at the base nonce, one below the buy. Native
+    // wallets sign no approval — the buy carries its ETH as value.
+    let approve = null;
+    if (nonNative) {
+      const approveTx = await new Contract(pair, APPROVE_ABI, prov).approve.populateTransaction(
+        curve,
+        amountIn
+      );
+      approve = {
+        nonce: baseNonce,
+        spender: curve,
+        raw: await signer.signTransaction(
+          toSignable(approveTx, { nonce: baseNonce, gasLimit: APPROVE_GAS, fees, chainId })
+        ),
+      };
+    }
+
     buys.push({
       walletId: wallet.id,
       address: wallet.address,
-      amountEth: formatEther(amountIn),
+      // In the quote asset's own units and label — pair token for ERC-20, ETH
+      // for native.
+      amountEth: nonNative ? formatUnits(amountIn, pairDecimals) : formatEther(amountIn),
       amountIn: amountIn.toString(),
-      nonce,
+      nonce: buyNonce,
       exempt: true,
+      ...(approve ? { approve } : {}),
       raw: await signer.signTransaction(
-        toSignable(buyTx, { nonce, gasLimit: buyGas, fees, chainId })
+        toSignable(buyTx, { nonce: buyNonce, gasLimit: buyGas, fees, chainId })
       ),
     });
   }
@@ -322,12 +523,26 @@ async function prepareV2(input, deps = {}) {
   // curve's phantom reserve and supply before the launch, so walking the buys
   // through it in order — dev buy first, since it is inside the launch
   // transaction — is what the curve will do.
+  // For an ERC-20 pair the curve does NOT use the launch config's own
+  // phantomQuote/graduationThreshold — those are the native ones. It uses the
+  // pair token's economics, in the pair token's decimals, so the share must be
+  // walked against those. Native is unchanged: it inherits the config's values.
+  const shareLaunchConfig =
+    nonNative && pairEconomics
+      ? {
+          ...launchConfig,
+          phantomQuote: pairEconomics.phantomQuote.toString(),
+          graduationThreshold: pairEconomics.graduationThreshold.toString(),
+        }
+      : launchConfig;
   const share = bundleShare({
     protocol: 'v2',
-    launchConfig,
+    launchConfig: shareLaunchConfig,
     creatorTaxBps: fullParams.creatorTaxBps,
     devBuyWei: devBuy,
     buys: buys.map((b) => ({ key: b.walletId, amountWei: b.amountIn })),
+    pairDecimals,
+    pairSymbol,
   });
   const legByWallet = new Map(share.buys.map((l) => [l.key, l]));
   for (const b of buys) {
@@ -342,8 +557,8 @@ async function prepareV2(input, deps = {}) {
   // through the curve, so it is a warning rather than a line in the plan.
   if (share.graduation && share.graduation.crosses) {
     warnings.push(
-      `this bundle puts ${share.graduation.raisedEth} ETH into the curve, at or over the ` +
-        `${share.graduation.thresholdEth} ETH graduation threshold — the curve graduates on the way ` +
+      `this bundle puts ${share.graduation.raisedEth} ${pairSymbol} into the curve, at or over the ` +
+        `${share.graduation.thresholdEth} ${pairSymbol} graduation threshold — the curve graduates on the way ` +
         'in, and a graduated launch cannot be exited through the curve. Size down or expect to sell ' +
         'into the Uniswap v4 pool instead.'
     );
@@ -369,6 +584,11 @@ async function prepareV2(input, deps = {}) {
     predictedBy: 'salt',
     launchConfigId: Number(launchConfigId),
     pairToken: pair,
+    // The quote asset descriptors, so the console can label amounts correctly.
+    // Native leaves these at ETH/18 and the numbers below are byte-identical to
+    // what a native launch has always produced.
+    pairSymbol,
+    pairDecimals,
     launchFeeEth: formatEther(launchFee),
     params: fullParams,
     salt: fullParams.salt,
@@ -377,7 +597,13 @@ async function prepareV2(input, deps = {}) {
     launchEnabled: gate.enabled,
     pairApproved: gate.approved,
     supply: launchConfig.supply,
-    graduationThreshold: launchConfig.graduationThreshold,
+    // The threshold this launch actually graduates at, in the quote asset's
+    // units: the pair token's economics for an ERC-20 pair, the config's own for
+    // native ETH.
+    graduationThreshold:
+      nonNative && pairEconomics
+        ? pairEconomics.graduationThreshold.toString()
+        : launchConfig.graduationThreshold,
     curveFeeBps: launchConfig.curveFeeBps,
     creatorTaxBps: fullParams.creatorTaxBps,
     buybackEnabled: fullParams.buybackEnabled,
@@ -392,7 +618,11 @@ async function prepareV2(input, deps = {}) {
     },
     launch: signedLaunch,
     buys,
-    totalBuyEth: formatEther(buys.reduce((s, b) => s + BigInt(b.amountIn), 0n)),
+    // The bundle's total buy, in the quote asset's own units.
+    totalBuyEth: (() => {
+      const sum = buys.reduce((s, b) => s + BigInt(b.amountIn), 0n);
+      return nonNative ? formatUnits(sum, pairDecimals) : formatEther(sum);
+    })(),
     share,
     // Strings, not the BigInts getFees returns. This object is JSON-encoded
     // twice — once as the preflight response, once into the launch history —

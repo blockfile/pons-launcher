@@ -93,6 +93,14 @@ const FACTORY_V2_ABI = [
   'function getLaunchedToken(address token) view returns (tuple(address token, address curve, address deployer, address creatorFeeRecipient, address pairToken, uint256 graduationThreshold, uint24 poolFee, int24 tickSpacing, uint16 creatorTaxBps, bool buybackEnabled, uint8 phase, uint256 sweptQuote, uint256 sweptTokens, uint256 sweptAt, bool exists))',
 
   'event TokenLaunched(address indexed token, address indexed curve, address indexed deployer, address pairToken, uint256 launchConfigId, uint256 graduationThreshold)',
+
+  // The ONLY authoritative way to enumerate approved pair tokens — there is no
+  // getter that lists them. A token is a candidate the moment it appears here;
+  // whether it is CURRENTLY approved is decided by approvedPairTokens(), because
+  // an approval can later be flipped off (RIVN was) and this event's history
+  // still carries the old approve=true. So: discover from this event, confirm
+  // live with approvedPairTokens. See evm/v2/pairTokens.js.
+  'event PairTokenApprovalUpdated(address indexed pairToken, bool approved)',
 ];
 
 // The deployer is where the addresses come from, and the only reason the v2

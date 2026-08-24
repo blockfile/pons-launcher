@@ -104,12 +104,21 @@ async function fireV2(plan, deps = {}) {
         amountEth: b.amountEth,
         status: 'simulated',
         hash: null,
+        // Present only on the ERC-20 pair path — a native buy signs no approval.
+        ...(b.approve ? { approve: { hash: null, status: 'simulated' } } : {}),
       })),
     };
   }
 
   if (!plan.launch?.raw) throw new Error('plan has no signed launch');
-  const unsigned = plan.buys.filter((b) => !b.raw);
+  // An ERC-20 dev buy carries a pre-signed approve for the forwarder; if it is
+  // missing the launchAndBuy would revert on the allowance.
+  if (plan.launch.approve && !plan.launch.approve.raw) {
+    throw new Error('the dev approve is unsigned — re-run preflight');
+  }
+  // A buy is unsigned if its own raw is missing, or — on the ERC-20 path — if the
+  // approve it depends on is missing. Either way its sell/buy would be stranded.
+  const unsigned = plan.buys.filter((b) => !b.raw || (b.approve && !b.approve.raw));
   if (unsigned.length) {
     // Signing here would put key derivation back in the critical path, which is
     // the whole thing this rebuild removed.
@@ -124,7 +133,15 @@ async function fireV2(plan, deps = {}) {
   // out, and aborts only on a definitive revert — so a launch that turned
   // un-launchable since preflight (config disabled, fee changed, salt taken)
   // never fires its bundle at a curve that will not exist.
-  if (!deps.skipRecheck) {
+  //
+  // SKIPPED for an ERC-20 dev buy. Its launch tx is a forwarder launchAndBuy that
+  // pulls the pair token via transferFrom, and the dev's approve has not been
+  // broadcast yet — so an estimate would revert on the missing allowance every
+  // time and abort a perfectly good launch. prepareV2 already validated this
+  // launch against the plain launchToken (which needs no allowance) at
+  // prepare time, so the fail-safe is not lost; only this redundant fire-time
+  // pass is.
+  if (!deps.skipRecheck && !plan.launch.needsApprove) {
     let tx = null;
     try {
       const p = Transaction.from(plan.launch.raw);
@@ -147,6 +164,25 @@ async function fireV2(plan, deps = {}) {
   }
 
   const t0 = Date.now();
+  // On the ERC-20 dev-buy path the dev's approve(forwarder) is broadcast first,
+  // at the nonce just below the launch. The sequencer runs a wallet's nonces in
+  // order, so the allowance is in place by the time launchAndBuy executes — the
+  // same trick the buy pairs below use. No receipt is awaited between them.
+  let devApprove = null;
+  if (plan.launch.approve) {
+    try {
+      const resp = await rpc.broadcastTransaction(plan.launch.approve.raw);
+      devApprove = { hash: resp.hash, status: 'sent', nonce: plan.launch.approve.nonce };
+    } catch (err) {
+      // A dev approve that will not broadcast leaves the launch at n+1 queued
+      // behind a gap it can never fill. Abort loudly rather than send the launch
+      // (and the whole bundle) into a hole.
+      throw new Error(
+        `the dev approve for the ${plan.pairSymbol || 'pair'} launch failed to broadcast, so ` +
+          `nothing else was sent: ${rpcMessage(err)}`
+      );
+    }
+  }
   const launchResp = await rpc.broadcastTransaction(plan.launch.raw);
   const sentMs = Date.now() - t0;
 
@@ -162,6 +198,23 @@ async function fireV2(plan, deps = {}) {
         nonce: b.nonce,
         exempt: b.exempt,
       };
+      // ERC-20 pair: approve(curve) at nonce n, buy at n+1 — both broadcast
+      // without waiting for the approve's receipt, exactly as the sell path does.
+      // If the approve will not even broadcast, the buy at n+1 would sit behind a
+      // nonce gap forever, so it is NOT sent.
+      if (b.approve) {
+        entry.approve = { nonce: b.approve.nonce, hash: null, status: 'pending' };
+        try {
+          const resp = await rpc.broadcastTransaction(b.approve.raw);
+          entry.approve.hash = resp.hash;
+          entry.approve.status = 'sent';
+        } catch (err) {
+          entry.approve.status = 'failed';
+          entry.status = 'failed';
+          entry.error = rpcMessage(err);
+          return entry;
+        }
+      }
       try {
         const resp = await rpc.broadcastTransaction(b.raw);
         entry.hash = resp.hash;
@@ -181,7 +234,13 @@ async function fireV2(plan, deps = {}) {
     hash: launchResp.hash,
     status: !launchReceipt ? 'pending' : launchReceipt.status === 1 ? 'confirmed' : 'reverted',
     blockNumber: launchReceipt?.blockNumber ?? null,
+    // The dev's forwarder approve, on the ERC-20 dev-buy path only.
+    ...(devApprove ? { approve: devApprove } : {}),
   };
+  if (devApprove && devApprove.hash) {
+    const ar = await awaitReceipt(rpc, devApprove.hash);
+    launch.approve.status = !ar ? 'pending' : ar.status === 1 ? 'confirmed' : 'reverted';
+  }
 
   // The launch's own event is the authority. If it disagrees with what the buys
   // were signed against, every buy went somewhere else, and that has to be said
@@ -199,6 +258,13 @@ async function fireV2(plan, deps = {}) {
   }
 
   for (const r of results) {
+    // Resolve the approve's receipt too, for an honest per-wallet status on the
+    // ERC-20 path. It does not gate the buy (the sequencer already ran it first),
+    // it is only reported.
+    if (r.approve && r.approve.hash) {
+      const ar = await awaitReceipt(rpc, r.approve.hash);
+      r.approve.status = !ar ? 'pending' : ar.status === 1 ? 'confirmed' : 'reverted';
+    }
     if (r.status !== 'sent') continue;
     const receipt = await awaitReceipt(rpc, r.hash);
     r.status = !receipt ? 'pending' : receipt.status === 1 ? 'confirmed' : 'reverted';

@@ -32,6 +32,7 @@ const {
   MAX_SNIPE_TAX_EXEMPTIONS,
   MAX_EXEMPTIONS_VIA_FORWARDER,
 } = require('./abi');
+const { resolvePairTokens } = require('./pairTokens');
 
 // One interface holding every v2 custom error, so a revert selector coming back
 // from a failed launch is named rather than shown as raw bytes. The function
@@ -76,6 +77,34 @@ function factory(runner = provider) {
 /** A fresh salt. Any value works; it only has to be one nobody has used. */
 function newSalt() {
   return hexlify(randomBytes(32));
+}
+
+/**
+ * A pair token's economics as the factory enforces them: the phantom quote
+ * reserve and graduation threshold in the token's OWN decimals, and those
+ * decimals. Native ETH has no entry here — it uses the LaunchConfig's values —
+ * so this is only ever called for a non-native pair.
+ *
+ * The decimals returned are the authoritative ones: the launch reverts
+ * PairTokenDecimalsMismatch if the token disagrees with them, so this is the
+ * number every launch-sizing and share calculation must use, not the token's
+ * own decimals() read.
+ */
+async function pairEconomics(pairToken) {
+  const e = await factory().pairTokenEconomics(getAddress(pairToken));
+  return {
+    phantomQuote: e.phantomQuote,
+    graduationThreshold: e.graduationThreshold,
+    decimals: Number(e.decimals),
+  };
+}
+
+/**
+ * The pair tokens the factory currently accepts, native first. Thin wrapper over
+ * the cached resolver so callers have one import point on the factory module.
+ */
+function getPairTokens(opts = {}) {
+  return resolvePairTokens(opts);
 }
 
 /** Everything the console needs to render the v2 launch form. */
@@ -372,6 +401,8 @@ module.exports = {
   preflightGate,
   wiring,
   predictAddresses,
+  pairEconomics,
+  getPairTokens,
   simulateLaunch,
   buildLaunchTx,
   buildLaunchAndBuyTx,
