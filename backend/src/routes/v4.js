@@ -538,7 +538,53 @@ router.get('/v4/seasoned', requireApiKey, (req, res, next) => {
       // of every seed already handed off to V1/V3, so an operator can see where
       // a wallet went without cross-referencing another tab's list.
       graduated: store.graduated(),
+      // Seeds the operator has pulled from the pool by hand (keys exported for
+      // use elsewhere) — kept, backed up, but never offered for a claim.
+      withdrawn: store.withdrawn(),
     });
+  } catch (err) {
+    next(err);
+  }
+});
+
+// POST /api/v4/seasoned/withdraw — mark seed wallets as withdrawn from the
+// seasoning pool WITHOUT deleting them, so a V1/V3 claim can never grab a wallet
+// whose key the operator has exported to use elsewhere. Reversible via /restore.
+router.post('/v4/seasoned/withdraw', requireApiKey, (req, res, next) => {
+  try {
+    const ks = keystoreFor(req.user.id);
+    const store = storeFor(req.user.id);
+    const ids = Array.isArray((req.body || {}).ids) ? req.body.ids : [];
+    if (ids.length === 0) throw new Error('ids[] is required');
+    // Only real seed wallets can be withdrawn — anything else is meaningless in
+    // the pool and is refused rather than silently recorded.
+    const seeds = new Map(v4roles.all(ks).seeds.map((w) => [w.id, w]));
+    const at = new Date().toISOString();
+    const entries = ids.map((id) => {
+      const w = seeds.get(id);
+      if (!w) throw new Error(`wallet ${id} is not a v4 seed wallet`);
+      return { id: w.id, address: w.address, at };
+    });
+    store.withdraw(entries);
+    activityFor(req.user.id).record('v4', `[v4] withdrew ${entries.length} seed wallet(s) from seasoning`, {
+      addresses: entries.map((e) => e.address),
+    });
+    res.json({ withdrawn: store.withdrawn(), count: seasonedWallets.available(ks, store, Date.now()).length });
+  } catch (err) {
+    next(err);
+  }
+});
+
+// POST /api/v4/seasoned/restore — return withdrawn seed wallets to the pool.
+router.post('/v4/seasoned/restore', requireApiKey, (req, res, next) => {
+  try {
+    const ks = keystoreFor(req.user.id);
+    const store = storeFor(req.user.id);
+    const ids = Array.isArray((req.body || {}).ids) ? req.body.ids : [];
+    if (ids.length === 0) throw new Error('ids[] is required');
+    store.restoreWithdrawn(ids);
+    activityFor(req.user.id).record('v4', `[v4] returned ${ids.length} seed wallet(s) to seasoning`, {});
+    res.json({ withdrawn: store.withdrawn(), count: seasonedWallets.available(ks, store, Date.now()).length });
   } catch (err) {
     next(err);
   }

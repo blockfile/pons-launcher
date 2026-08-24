@@ -421,6 +421,20 @@ h2::after {
   max-width: 120px;
 }
 
+/* A neutral eyebrow that names a cluster of controls sharing a .row — the mono
+   tag the console uses everywhere for a label (h2, .stat, .distribute-title),
+   without .distribute-title's amber, since amber here means a spend and these
+   groups (create, utility) do not. Fixed width so the clusters stacked below
+   one another start their controls at the same left edge. */
+.ctl-label {
+  flex: none;
+  width: 74px;
+  font: 600 10px/1 var(--mono);
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  color: var(--dimmer);
+}
+
 .grid {
   display: grid;
   grid-template-columns: repeat(4, 1fr);

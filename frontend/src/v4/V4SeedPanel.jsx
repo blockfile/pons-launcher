@@ -4,7 +4,7 @@ import Modal from '../components/Modal.jsx';
 import Step from '../components/Step.jsx';
 import { Busy } from '../components/Section.jsx';
 import Address from '../components/Address.jsx';
-import { LuTrash2 } from 'react-icons/lu';
+import { LuTrash2, LuUndo2 } from 'react-icons/lu';
 import IconButton from './IconButton.jsx';
 import V4BackupControls from './V4BackupControls.jsx';
 import { MAX_GENERATE, ROLES, clock, eth } from './roles.js';
@@ -44,12 +44,16 @@ export default function V4SeedPanel({ step, wallets, masters, facts, explorer, r
   const [ticked, setTicked] = useState([]);
   const [bulk, setBulk] = useState(null);
   const [progress, setProgress] = useState('');
-  // How many seed wallets are aged past the gate right now, and which of them
-  // have already been handed off to V1/V3 — read-only, drawn beside the
-  // generate row so an operator sees where a wallet went without switching
-  // tabs. Polled the same way loadWallets is in V4Console: on mount and every
-  // 60s, quietly on failure.
-  const [seasoned, setSeasoned] = useState({ count: 0, graduated: [] });
+  // How many seed wallets are aged past the gate right now, which of them have
+  // already been handed off to V1/V3, and which the operator has pulled back out
+  // of the claimable pool by hand — read-only, drawn beside the generate row so
+  // an operator sees where a wallet went without switching tabs. Polled the same
+  // way loadWallets is in V4Console: on mount and every 60s, quietly on failure.
+  //
+  // `withdrawn` is the reversible "set this seed aside" mark: a wallet whose key
+  // has been exported to spend elsewhere stays here and stays backed up, but
+  // `count` already excludes it so a V1/V3 claim never grabs it.
+  const [seasoned, setSeasoned] = useState({ count: 0, graduated: [], withdrawn: [] });
 
   useEffect(() => {
     let alive = true;
@@ -61,6 +65,11 @@ export default function V4SeedPanel({ step, wallets, masters, facts, explorer, r
       clearInterval(t);
     };
   }, []);
+
+  // Which seed rows are currently held out of the claimable pool, looked up by
+  // wallet id. Defaulted so an older backend that has not started returning the
+  // field yet just shows nothing withdrawn rather than throwing.
+  const withdrawnIds = new Set((seasoned.withdrawn || []).map((w) => w.id));
 
   async function act(what, fn) {
     setBusy(what);
@@ -138,6 +147,58 @@ export default function V4SeedPanel({ step, wallets, masters, facts, explorer, r
     setTicked([]);
     const refused = failures.length ? ` ${failures.length} refused: ${failures[0]}` : '';
     return `Archived ${done} seed wallet(s).${refused}`;
+  }
+
+  // Re-read the seasoned pool after a change of our own, rather than editing the
+  // local copy. Another tab or operator may have claimed, withdrawn or restored
+  // from it since the last poll — the same reason claimSeasoned re-reads in
+  // WalletsPanel. Quiet on failure: the 60s poll will catch up regardless.
+  async function refreshSeasoned() {
+    try {
+      setSeasoned(await api('/v4/seasoned'));
+    } catch {
+      // Background read — see the mount-time fetch above for why this stays quiet.
+    }
+  }
+
+  /**
+   * Pull the ticked seed wallets out of the claimable pool. One request for the
+   * whole set — unlike the deletes, this rewrites no keystore, it only sets a
+   * mark, so there is no per-wallet file rewrite to serialise. The wallets stay
+   * here and stay backed up; `count` on the pool simply stops counting them, so
+   * a V1/V3 claim can never grab a seed whose key is already in use elsewhere.
+   * Reversible with Restore.
+   */
+  async function withdrawTicked(list) {
+    setBusy('withdraw');
+    try {
+      const out = await api('/v4/seasoned/withdraw', 'POST', { ids: list.map((w) => w.id) });
+      report(`Withdrew ${list.length} seed wallet(s) from seasoning — ${out.count} still claimable. Reversible with Restore.`);
+      setTicked([]);
+      await reload();
+      await refreshSeasoned();
+    } catch (err) {
+      report(`ERROR: ${err.message}`);
+    } finally {
+      setBusy('');
+    }
+  }
+
+  // Put withdrawn seeds back into the claimable pool. Per-row from the badge, so
+  // the id list is almost always one — but written to take a list so a future
+  // "restore ticked" can share it.
+  async function restoreWallets(ids) {
+    setBusy('restore');
+    try {
+      const out = await api('/v4/seasoned/restore', 'POST', { ids });
+      report(`Restored ${ids.length} seed wallet(s) to seasoning — ${out.count} claimable.`);
+      await reload();
+      await refreshSeasoned();
+    } catch (err) {
+      report(`ERROR: ${err.message}`);
+    } finally {
+      setBusy('');
+    }
   }
 
   return (
@@ -239,6 +300,15 @@ export default function V4SeedPanel({ step, wallets, masters, facts, explorer, r
           <span className="hint">
             · <b>{funded}</b> funded
           </span>
+          {/* Held out of the claimable pool by hand. Counted here beside the
+              other pool figures because it is the fifth thing that decides the
+              next action: these seeds exist and are backed up, but a claim will
+              pass over every one of them. */}
+          {withdrawnIds.size > 0 && (
+            <span className="hint">
+              · <b>{withdrawnIds.size}</b> withdrawn from seasoning
+            </span>
+          )}
           {/* The two numbers an operator actually acts on once funding starts:
               what can be spent, and what is still sitting. Drawn only after
               something has been funded, because before that they are both zero
@@ -271,19 +341,42 @@ export default function V4SeedPanel({ step, wallets, masters, facts, explorer, r
             <span className="hint">{progress}</span>
           ) : (
             tickedHere.length > 0 && (
-              // Vermilion, matching the per-row deletes beside it. This one
-              // archives a hundred keys in a press, so it is the last control
-              // in this panel that should read as ordinary.
-              <Busy
-                busy={busy === 'delete'}
-                className="ghost danger"
-                onClick={() => setBulk(tickedHere)}
-              >
-                Delete {tickedHere.length} selected
-              </Busy>
+              <>
+                {/* Set aside, not thrown away — the same ticked set as the
+                    delete, but nothing is archived and the wallets stay in the
+                    table. Ghost, without the danger tint: this is reversible and
+                    moves no keys, the opposite of the delete beside it. */}
+                <Busy
+                  busy={busy === 'withdraw'}
+                  className="ghost"
+                  onClick={() => withdrawTicked(tickedHere)}
+                >
+                  Withdraw {tickedHere.length} from seasoning
+                </Busy>
+                {/* Vermilion, matching the per-row deletes beside it. This one
+                    archives a hundred keys in a press, so it is the last control
+                    in this panel that should read as ordinary. */}
+                <Busy
+                  busy={busy === 'delete'}
+                  className="ghost danger"
+                  onClick={() => setBulk(tickedHere)}
+                >
+                  Delete {tickedHere.length} selected
+                </Busy>
+              </>
             )
           )}
         </div>
+      )}
+
+      {/* What Withdraw is for, said once beside the action rather than left to be
+          inferred from a badge. Drawn whenever there are seeds so the affordance
+          is discoverable before an operator needs it. */}
+      {wallets.length > 0 && (
+        <p className="hint" style={{ margin: '0 0 12px' }}>
+          Withdraw seeds whose keys you've exported to use elsewhere — they stay here and stay
+          backed up, but a V1/V3 claim will never grab them. Reversible.
+        </p>
       )}
 
       {/* The gate, stated before it is hit rather than only as a refusal. Step 3
@@ -422,8 +515,32 @@ export default function V4SeedPanel({ step, wallets, masters, facts, explorer, r
                       )}
                     </td>
                     <td>
-                      <span className={`fund-state ${w.backedUp ? 'is-in' : 'is-part'}`}>
-                        {w.backedUp ? 'backed up' : 'no backup'}
+                      <span
+                        style={{ display: 'inline-flex', alignItems: 'center', gap: 6, flexWrap: 'wrap' }}
+                      >
+                        <span className={`fund-state ${w.backedUp ? 'is-in' : 'is-part'}`}>
+                          {w.backedUp ? 'backed up' : 'no backup'}
+                        </span>
+                        {/* A neutral grey pill: withdrawn is a state the operator
+                            chose, not a shortfall (amber) or a good outcome
+                            (jade). The Restore beside it is the whole way back —
+                            reversible, so it sits right on the row it undoes. */}
+                        {withdrawnIds.has(w.id) && (
+                          <>
+                            <span
+                              className="fund-state"
+                              title="held out of the V1/V3 claim pool — reversible"
+                            >
+                              withdrawn
+                            </span>
+                            <IconButton
+                              icon={LuUndo2}
+                              label={`Restore ${w.address} to the claim pool`}
+                              disabled={busy === 'restore'}
+                              onClick={() => restoreWallets([w.id])}
+                            />
+                          </>
+                        )}
                       </span>
                     </td>
                     <td className="num">

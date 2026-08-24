@@ -25,11 +25,14 @@ function fundedAtByWallet(store) {
  */
 function available(ks, store, now, { minHours = config.seasonedMinHours } = {}) {
   const fundedAt = fundedAtByWallet(store);
+  // Seeds the operator has withdrawn from the pool (keys exported for use
+  // elsewhere) are still seed wallets, but must never be offered for a claim.
+  const withdrawn = typeof store.withdrawnSeedIds === 'function' ? store.withdrawnSeedIds() : new Set();
   return ks
     .walletsWithRole(roles.ROLES.seed)
     .map((w) => {
       const at = fundedAt.get(w.id);
-      if (!at) return null;
+      if (!at || withdrawn.has(w.id)) return null;
       const hoursSinceFunded = Math.floor((now - Date.parse(at)) / HOUR_MS);
       return hoursSinceFunded >= minHours
         ? { id: w.id, address: w.address, label: w.label, fundedAt: at, hoursSinceFunded }

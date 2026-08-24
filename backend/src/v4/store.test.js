@@ -171,3 +171,28 @@ test('recordGraduated persists and graduated() returns newest first', () => {
   assert.equal(g[0].id, 'b', 'newest first');
   assert.equal(g[1].toTab, 'v3');
 });
+
+test('withdraw records seed ids, exposes them, and survives a round trip', () => {
+  const { store } = freshStore();
+  const s = store.storeFor('u');
+  s.withdraw([{ id: 's1', address: '0x1', at: 'now' }, { id: 's2', address: '0x2', at: 'now' }]);
+  assert.deepEqual([...s.withdrawnSeedIds()].sort(), ['s1', 's2']);
+  s._reset();
+  assert.deepEqual([...store.storeFor('u').withdrawnSeedIds()].sort(), ['s1', 's2'], 'persisted across reload');
+});
+
+test('withdraw is idempotent — an id already withdrawn is not duplicated', () => {
+  const { store } = freshStore();
+  const s = store.storeFor('u');
+  s.withdraw([{ id: 's1', address: '0x1', at: 'now' }]);
+  s.withdraw([{ id: 's1', address: '0x1', at: 'later' }]);
+  assert.equal(s.withdrawn().length, 1);
+});
+
+test('restoreWithdrawn returns only the named ids to the pool', () => {
+  const { store } = freshStore();
+  const s = store.storeFor('u');
+  s.withdraw([{ id: 's1', address: '0x1', at: 'now' }, { id: 's2', address: '0x2', at: 'now' }]);
+  s.restoreWithdrawn(['s1']);
+  assert.deepEqual([...s.withdrawnSeedIds()], ['s2']);
+});

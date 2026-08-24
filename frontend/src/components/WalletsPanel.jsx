@@ -376,6 +376,10 @@ export default function WalletsPanel({ step, wallets, rows, setRow, share, reloa
           <b>
             {bundle.length} <span className="stat-of">/ {MAX_BUNDLE}</span>
           </b>
+          {/* The room-left context, moved off the Generate row and onto the card
+              that already carries the count — so how many more fit lives with how
+              many there are. Same figure the button's max is clamped to. */}
+          <span className="stat-of">{bundleRoom > 0 ? `room for ${bundleRoom} more` : 'full'}</span>
         </div>
         <div className="stat">
           <span>Funded</span>
@@ -402,7 +406,13 @@ export default function WalletsPanel({ step, wallets, rows, setRow, share, reloa
         </div>
       </div>
 
+      {/* One strip regrouped into three clusters — Create, Seasoned, Utility —
+          each its own row so they stop wrapping into a jumble. Nothing here
+          changed but the grouping: same controls, same wiring, same conditions. */}
+
+      {/* CREATE — bring bundle wallets into existence, by generating or import. */}
       <div className="row">
+        <span className="ctl-label">Create</span>
         {/* Amber, for the same reason step 1's generate is: this is the forward
             action of step 3, and it sat grey among four other grey controls. */}
         <Busy
@@ -430,14 +440,57 @@ export default function WalletsPanel({ step, wallets, rows, setRow, share, reloa
           onChange={(e) => setCount(e.target.value)}
           title="how many"
         />
-        <span className="hint">
-          {bundle.length}/{MAX_BUNDLE} bundle wallets{bundleRoom > 0 ? ` · room for ${bundleRoom} more` : ' · full'}
-        </span>
         <button className="ghost" onClick={() => setShowImport((v) => !v)}>
           Import bundle keys
         </button>
+      </div>
+
+      {/* SEASONED (V1 ONLY). V2 has no claim-seasoned endpoint — re-roling a V4
+          seed into v2's bundle role would use the wrong role and there is no way
+          back short of the keystore archive. See the mount-time fetch above. */}
+      {variant === 'v1' && (
+        <div className="row">
+          <span className="ctl-label">Seasoned</span>
+          <input
+            type="number"
+            min="1"
+            max={Math.min(seasoned.count, bundleRoom) || 1}
+            value={seasonedCount}
+            onChange={(e) => setSeasonedCount(e.target.value)}
+            title="how many seasoned wallets to claim"
+            style={{ width: 70 }}
+          />
+          {/* A claim re-roles seasoned wallets INTO the bundle role, so it is
+              gated by the same 31-wallet exemption cap as Generate — it cannot
+              push the bundle past the limit any more than generating can. */}
+          <Busy
+            busy={busy === 'claim-seasoned'}
+            className="ghost"
+            disabled={bundleRoom === 0 || !seasoned.count}
+            title={
+              bundleRoom === 0
+                ? `at the ${MAX_BUNDLE}-wallet limit — delete some to add more`
+                : seasoned.count
+                  ? ''
+                  : 'no seasoned wallets ready yet'
+            }
+            onClick={claimSeasoned}
+          >
+            Use {seasonedCount} seasoned wallets
+          </Busy>
+          <span className="hint">
+            {seasoned.count} seasoned ready
+            {bundleRoom > 0 ? ` · ${bundleRoom} bundle slot${bundleRoom === 1 ? '' : 's'} left` : ' · bundle full'}
+          </span>
+        </div>
+      )}
+
+      {/* UTILITY — read state back, and take the keys off the machine. Neither
+          moves a wallet in or out of the bundle. */}
+      <div className="row">
+        <span className="ctl-label">Utility</span>
         {/* .quiet: a pure re-read. It changes nothing on chain, on disk or in
-            the keystore, so it should not look like the two controls beside it
+            the keystore, so it should not look like the create controls above
             that generate and import keys. */}
         <Busy
           busy={busy === 'reload'}
@@ -446,48 +499,6 @@ export default function WalletsPanel({ step, wallets, rows, setRow, share, reloa
         >
           Refresh balances
         </Busy>
-
-        {/* V1 ONLY. V2 has no claim-seasoned endpoint — re-roling a V4 seed
-            into v2's bundle role would use the wrong role and there is no way
-            back short of the keystore archive. See the mount-time fetch above. */}
-        {variant === 'v1' && (
-          <>
-            <input
-              type="number"
-              min="1"
-              max={Math.min(seasoned.count, bundleRoom) || 1}
-              value={seasonedCount}
-              onChange={(e) => setSeasonedCount(e.target.value)}
-              title="how many seasoned wallets to claim"
-              style={{ width: 70 }}
-            />
-            {/* A claim re-roles seasoned wallets INTO the bundle role, so it is
-                gated by the same 31-wallet exemption cap as Generate — it cannot
-                push the bundle past the limit any more than generating can. */}
-            <Busy
-              busy={busy === 'claim-seasoned'}
-              className="ghost"
-              disabled={bundleRoom === 0 || !seasoned.count}
-              title={
-                bundleRoom === 0
-                  ? `at the ${MAX_BUNDLE}-wallet limit — delete some to add more`
-                  : seasoned.count
-                    ? ''
-                    : 'no seasoned wallets ready yet'
-              }
-              onClick={claimSeasoned}
-            >
-              Use {seasonedCount} seasoned wallets
-            </Busy>
-            <span className="hint">
-              {seasoned.count} seasoned ready
-              {bundleRoom > 0 ? ` · ${bundleRoom} bundle slot${bundleRoom === 1 ? '' : 's'} left` : ' · bundle full'}
-            </span>
-          </>
-        )}
-
-        <span className="spacer" />
-
         {/* The same control, and the same typed confirmation, as the one beside
             the dev wallet's delete in step 1 — one component, drawn in both
             places, because both delete dialogs name a backup as the thing that

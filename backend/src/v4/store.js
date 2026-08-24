@@ -40,7 +40,7 @@ function build(userId) {
   function load() {
     if (cache) return cache;
     if (!fs.existsSync(file)) {
-      cache = { version: 1, campaigns: [], backups: [], graduated: [] };
+      cache = { version: 1, campaigns: [], backups: [], graduated: [], withdrawn: [] };
       return cache;
     }
     try {
@@ -50,12 +50,13 @@ function build(userId) {
         campaigns: parsed.campaigns || [],
         backups: parsed.backups || [],
         graduated: parsed.graduated || [],
+        withdrawn: parsed.withdrawn || [],
       };
     } catch (_err) {
       // A corrupt file must not take the server down — but it must not be
       // silently overwritten either, so it is moved aside with a timestamp.
       fs.renameSync(file, `${file}.corrupt-${Date.now()}`);
-      cache = { version: 1, campaigns: [], backups: [], graduated: [] };
+      cache = { version: 1, campaigns: [], backups: [], graduated: [], withdrawn: [] };
     }
     return cache;
   }
@@ -172,6 +173,42 @@ function build(userId) {
     return load().graduated.slice();
   }
 
+  /**
+   * Withdraw seed wallets from the seasoning pool WITHOUT deleting them — an
+   * operator who has exported a wallet's key to use it elsewhere marks it here so
+   * a V1/V3 claim can never grab it out from under them. Unlike a claim it does
+   * NOT re-role or archive: the wallet stays in the keystore and its backups, it
+   * is only skipped by seasoned.available(). Reversible with restoreWithdrawn.
+   * Idempotent: an id already withdrawn is not added twice.
+   */
+  function withdraw(entries) {
+    const store = load();
+    const have = new Set(store.withdrawn.map((e) => e.id));
+    const fresh = entries.filter((e) => !have.has(e.id)).map((e) => ({ ...e }));
+    if (fresh.length === 0) return;
+    store.withdrawn.unshift(...fresh);
+    persist();
+  }
+
+  /** Return the given ids to the seasoning pool. */
+  function restoreWithdrawn(ids) {
+    const store = load();
+    const drop = new Set(ids);
+    const before = store.withdrawn.length;
+    store.withdrawn = store.withdrawn.filter((e) => !drop.has(e.id));
+    if (store.withdrawn.length !== before) persist();
+  }
+
+  /** The set of seed-wallet ids currently withdrawn from the pool. */
+  function withdrawnSeedIds() {
+    return new Set(load().withdrawn.map((e) => e.id));
+  }
+
+  /** The withdrawn records, newest-first. */
+  function withdrawn() {
+    return load().withdrawn.slice();
+  }
+
   function _reset() {
     cache = null;
   }
@@ -188,6 +225,10 @@ function build(userId) {
     backedUp,
     recordGraduated,
     graduated,
+    withdraw,
+    restoreWithdrawn,
+    withdrawnSeedIds,
+    withdrawn,
     _reset,
   };
 }

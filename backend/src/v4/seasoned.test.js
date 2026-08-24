@@ -29,6 +29,29 @@ test('available includes a funded seed aged past the gate, excludes a young one'
   assert.equal(out[0].hoursSinceFunded, 30);
 });
 
+test('available excludes a seed the operator has withdrawn from the pool', () => {
+  const ks = fakeKs([
+    { id: 's1', role: 'v4seed', address: '0x1', label: 'a' },
+    { id: 's2', role: 'v4seed', address: '0x2', label: 'b' },
+  ]);
+  // Both are aged past the gate, but s1 has been withdrawn (key exported).
+  const store = {
+    campaigns: () => [
+      {
+        id: 'c1',
+        kind: 'season',
+        transfers: [
+          { walletId: 's1', status: 'sent', sentAt: new Date(NOW - 30 * HOUR).toISOString() },
+          { walletId: 's2', status: 'sent', sentAt: new Date(NOW - 30 * HOUR).toISOString() },
+        ],
+      },
+    ],
+    withdrawnSeedIds: () => new Set(['s1']),
+  };
+  const out = seasoned.available(ks, store, NOW, { minHours: 24 });
+  assert.deepEqual(out.map((w) => w.id), ['s2'], 'the withdrawn seed is not offered; the other still is');
+});
+
 test('available excludes never-funded seeds and non-seed roles, and sorts most-aged first', () => {
   const ks = fakeKs([
     { id: 's1', role: 'v4seed', address: '0x1', label: 'a' },
