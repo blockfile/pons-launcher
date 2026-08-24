@@ -129,18 +129,51 @@ async function readDistributorOf(hf, runner, token) {
   return addr === ZeroAddress ? null : addr;
 }
 
-/** Pull the created distributor out of a createFor receipt's DistributorCreated log. */
-function distributorFromReceipt(receipt) {
+/**
+ * Pull the created distributor out of a createFor receipt's DistributorCreated
+ * log — but ONLY a log that is genuinely this factory's, for this token.
+ *
+ * The address this returns is fed to transferCreatorFeeRecipient, which the core
+ * factory does NOT validate: it will point the creator fee at whatever address it
+ * is given. So a look-alike DistributorCreated emitted by some other contract, or
+ * a real one for a DIFFERENT token in the same transaction, must never be
+ * adopted. Two filters make that airtight:
+ *   1. the log must be emitted BY the holder-fee factory (address match), and
+ *   2. the event's indexed token must equal the token we created for.
+ *
+ * @param {object} receipt
+ * @param {{token: string, factoryAddress: string}} opts
+ */
+function distributorFromReceipt(receipt, { token, factoryAddress } = {}) {
+  const wantToken = token ? getAddress(token) : null;
+  let wantFactory = null;
+  try {
+    wantFactory = factoryAddress ? getAddress(factoryAddress).toLowerCase() : null;
+  } catch (_err) {
+    wantFactory = null;
+  }
+
   for (const log of receipt?.logs || []) {
+    // Emitted by the holder-fee factory itself, or it is not ours to trust.
+    if (wantFactory) {
+      let from;
+      try {
+        from = log.address ? getAddress(log.address).toLowerCase() : null;
+      } catch (_err) {
+        from = null;
+      }
+      if (from !== wantFactory) continue;
+    }
     let parsed;
     try {
       parsed = HOLDER_FEE_IFACE.parseLog({ topics: [...(log.topics || [])], data: log.data });
     } catch (_err) {
       continue; // some other event
     }
-    if (parsed && parsed.name === 'DistributorCreated') {
-      return getAddress(parsed.args.distributor);
-    }
+    if (!parsed || parsed.name !== 'DistributorCreated') continue;
+    // The indexed token must be the one we asked to create the distributor for.
+    if (wantToken && getAddress(parsed.args.token) !== wantToken) continue;
+    return getAddress(parsed.args.distributor);
   }
   return null;
 }
@@ -246,15 +279,26 @@ async function enableHolderFeeSharing({ token, walletAddress }, deps = {}) {
   }
   const current = getAddress(rec.creatorFeeRecipient);
   if (current.toLowerCase() !== wallet.toLowerCase()) {
+    // Once sharing is on, the current recipient IS the distributor, not the
+    // launch wallet — so distinguish "already enabled" from "wrong signer"
+    // rather than tell the operator to sign from a contract.
+    const existingDist = await readDistributorOf(hf, runner, address);
+    if (existingDist && current.toLowerCase() === existingDist.toLowerCase()) {
+      throw new Error(
+        `holder fee sharing is already enabled for this token (distributor ${existingDist})`
+      );
+    }
     throw new Error(
       "holder fee sharing can only be enabled by the token's current creator-fee recipient " +
-        `(${current}); this token was launched with ${current}`
+        `(${current}) — sign from that wallet`
     );
   }
 
   // The signer for that recipient — resolved through the keystore, no new key
   // handling. Done before any transaction so a missing key fails fast.
   const signer = await resolveSigner(wallet, runner, deps);
+
+  const factoryAddress = deps.holderFeeFactoryAddress || config.holderFeeFactory;
 
   // ── (b) find or create the per-token distributor ────────────────────────────
   let distributor = await readDistributorOf(hf, runner, address);
@@ -267,7 +311,8 @@ async function enableHolderFeeSharing({ token, walletAddress }, deps = {}) {
       createTxHash = tx.hash;
       const receipt = await tx.wait(1); // create confirmed before the transfer is sent
       distributor =
-        distributorFromReceipt(receipt) || (await readDistributorOf(hf, runner, address));
+        distributorFromReceipt(receipt, { token: address, factoryAddress }) ||
+        (await readDistributorOf(hf, runner, address));
     } catch (err) {
       // A race: the distributor was created between the read above and now
       // (possibly by an earlier attempt of ours). The revert carries the address.
@@ -282,13 +327,28 @@ async function enableHolderFeeSharing({ token, walletAddress }, deps = {}) {
       }
     }
   }
-  if (!distributor) {
+
+  // Reject a missing or zero distributor explicitly — the string zero address is
+  // truthy, so `if (!distributor)` alone would let it through to the transfer.
+  if (!distributor || getAddress(distributor) === ZeroAddress) {
     throw new Error(
       `the holder-fee distributor for ${address} was not created and distributorOf still returns ` +
         'zero — refusing to transfer the creator-fee recipient to nothing'
     );
   }
   distributor = getAddress(distributor);
+
+  // AIRTIGHT: whatever source produced this address — the receipt event, a revert,
+  // or the getter — confirm it against a fresh distributorOf(token) before handing
+  // it to transferCreatorFeeRecipient, which the core factory does not validate.
+  // Only ever redirect the fee to the genuine on-chain distributor for THIS token.
+  const onChain = await readDistributorOf(hf, runner, address);
+  if (!onChain || getAddress(onChain) !== distributor) {
+    throw new Error(
+      `refusing to redirect the creator fee: the resolved distributor ${distributor} for ${address} ` +
+        `does not match the factory's distributorOf (${onChain || ZeroAddress}). No transfer was sent.`
+    );
+  }
 
   // ── (c) point the creator-fee recipient at the distributor ──────────────────
   // Idempotent: if the recipient already IS the distributor, sharing is on and

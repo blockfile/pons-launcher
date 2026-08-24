@@ -19,18 +19,26 @@ const holderFees = require('./holderFees');
 const IFACE = new Interface(HOLDER_FEE_FACTORY_ABI);
 
 const TOKEN = '0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa';
+const OTHER_TOKEN = '0xacacacacacacacacacacacacacacacacacacacac';
 const WALLET = '0x1111111111111111111111111111111111111111';
 const OTHER = '0x2222222222222222222222222222222222222222';
 const DIST = '0xdddddddddddddddddddddddddddddddddddddddd';
+const WRONG_DIST = '0xeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee';
 const FACTORY = '0x70e95cc5f03db2906081e7a8d16e4c4209291507';
+const NOT_FACTORY = '0xbadbadbadbadbadbadbadbadbadbadbadbadbad0';
 
-/** A createFor receipt carrying the DistributorCreated event the real one emits. */
-function createdReceipt(token, distributor) {
+/** One DistributorCreated log, emitted by `from` (default the real factory). */
+function createdLog({ token, distributor, from = FACTORY }) {
   const { topics, data } = IFACE.encodeEventLog('DistributorCreated', [
     getAddress(token),
     getAddress(distributor),
   ]);
-  return { status: 1, logs: [{ address: getAddress(FACTORY), topics, data }] };
+  return { address: getAddress(from), topics, data };
+}
+
+/** A createFor receipt carrying the DistributorCreated event the real one emits. */
+function createdReceipt(token, distributor) {
+  return { status: 1, logs: [createdLog({ token, distributor })] };
 }
 
 /** An error shaped like a reverted call carrying DistributorAlreadyExists(existing). */
@@ -46,6 +54,11 @@ function alreadyExistsRevert(existing) {
  */
 function makeDeps({ recipient = WALLET, distributorOf = ZeroAddress, createResult = null, taxBps = 500 } = {}) {
   const calls = { createFor: 0, transfer: 0, createArgs: null, transferArgs: null };
+  // The on-chain distributorOf value, mutable — a real createFor updates it, so
+  // the cross-check re-read after the create can see the genuine address. A test
+  // can pass createResult.becomes to say what distributorOf returns afterwards
+  // (a race sets it even when createFor reverts DistributorAlreadyExists).
+  let current = distributorOf;
 
   const coreFactory = () => ({
     async getLaunchedToken(addr) {
@@ -76,17 +89,20 @@ function makeDeps({ recipient = WALLET, distributorOf = ZeroAddress, createResul
 
   const holderFeeFactory = () => ({
     async distributorOf() {
-      return distributorOf;
+      return current;
     },
     async createFor(addr) {
       calls.createFor += 1;
       calls.createArgs = [getAddress(addr)];
+      // A create (or a racing create that reverts) makes the distributor real —
+      // reflect that in the on-chain getter the cross-check re-reads.
+      if (createResult && createResult.becomes) current = getAddress(createResult.becomes);
       if (createResult && createResult.throws) throw createResult.throws;
       return { hash: '0xcreate', async wait() { return createResult ? createResult.receipt : { status: 1, logs: [] }; } };
     },
   });
 
-  return { deps: { provider: {}, signer: {}, coreFactory, holderFeeFactory }, calls };
+  return { deps: { provider: {}, signer: {}, coreFactory, holderFeeFactory, holderFeeFactoryAddress: FACTORY }, calls };
 }
 
 // ── (a) recipient mismatch → throws, nothing is sent ────────────────────────
@@ -113,7 +129,7 @@ test('creates the distributor then transfers, reading the address from the event
   const { deps, calls } = makeDeps({
     recipient: WALLET,
     distributorOf: ZeroAddress,
-    createResult: { receipt: createdReceipt(TOKEN, DIST) },
+    createResult: { receipt: createdReceipt(TOKEN, DIST), becomes: DIST },
   });
 
   const out = await holderFees.enableHolderFeeSharing({ token: TOKEN, walletAddress: WALLET }, deps);
@@ -200,7 +216,7 @@ test('decodes a DistributorAlreadyExists revert and continues to the transfer', 
   const { deps, calls } = makeDeps({
     recipient: WALLET,
     distributorOf: ZeroAddress, // read says none, so createFor is attempted...
-    createResult: { throws: alreadyExistsRevert(DIST) }, // ...but it races and reverts
+    createResult: { throws: alreadyExistsRevert(DIST), becomes: DIST }, // ...but it races and reverts
   });
 
   const out = await holderFees.enableHolderFeeSharing({ token: TOKEN, walletAddress: WALLET }, deps);
@@ -223,7 +239,7 @@ test('decodes a DistributorAlreadyExists that ethers already turned into err.rev
   const { deps, calls } = makeDeps({
     recipient: WALLET,
     distributorOf: ZeroAddress,
-    createResult: { throws: err },
+    createResult: { throws: err, becomes: DIST },
   });
 
   const out = await holderFees.enableHolderFeeSharing({ token: TOKEN, walletAddress: WALLET }, deps);
@@ -246,6 +262,89 @@ test('a non-DistributorAlreadyExists create revert aborts before any transfer', 
     /UnknownLaunch/
   );
   assert.equal(calls.transfer, 0, 'a failed create must not fall through to a transfer');
+});
+
+// ── hardening: the distributor address must be verified before it feeds the
+//    unvalidated transferCreatorFeeRecipient ──────────────────────────────────
+
+test('a DistributorCreated for a different token, or from a non-factory address, is not adopted', async () => {
+  // Two spoof logs in the create receipt: one from the real factory but for
+  // ANOTHER token, one for the right token but from a NON-factory contract.
+  // Neither may be trusted — the module must fall back to the on-chain getter.
+  const { deps, calls } = makeDeps({
+    recipient: WALLET,
+    distributorOf: ZeroAddress,
+    createResult: {
+      becomes: DIST, // the genuine distributorOf, after the create
+      receipt: {
+        status: 1,
+        logs: [
+          createdLog({ token: OTHER_TOKEN, distributor: WRONG_DIST, from: FACTORY }),
+          createdLog({ token: TOKEN, distributor: WRONG_DIST, from: NOT_FACTORY }),
+        ],
+      },
+    },
+  });
+
+  const out = await holderFees.enableHolderFeeSharing({ token: TOKEN, walletAddress: WALLET }, deps);
+
+  assert.equal(out.distributor, getAddress(DIST), 'the genuine on-chain distributor, not the spoofed one');
+  assert.notEqual(out.distributor, getAddress(WRONG_DIST));
+  assert.deepEqual(calls.transferArgs, [getAddress(TOKEN), getAddress(DIST)], 'the fee is redirected only to the real distributor');
+});
+
+test('a resolved zero-address distributor is rejected and no transfer is sent', async () => {
+  // createFor "succeeds" but names nothing usable — its only log is a spoof for
+  // another token — and distributorOf still returns zero. The fee must NOT be
+  // redirected to the zero address.
+  const { deps, calls } = makeDeps({
+    recipient: WALLET,
+    distributorOf: ZeroAddress,
+    createResult: {
+      receipt: { status: 1, logs: [createdLog({ token: OTHER_TOKEN, distributor: WRONG_DIST })] },
+      // no `becomes` — distributorOf stays zero
+    },
+  });
+
+  await assert.rejects(
+    () => holderFees.enableHolderFeeSharing({ token: TOKEN, walletAddress: WALLET }, deps),
+    /returns zero|refusing to transfer/
+  );
+  assert.equal(calls.transfer, 0, 'a zero distributor never reaches transferCreatorFeeRecipient');
+});
+
+test('the cross-check refuses a distributor that disagrees with distributorOf', async () => {
+  // The revert names WRONG_DIST, but the on-chain getter says the real one is
+  // DIST — a mismatch must abort rather than redirect the fee to WRONG_DIST.
+  const { deps, calls } = makeDeps({
+    recipient: WALLET,
+    distributorOf: ZeroAddress,
+    createResult: { throws: alreadyExistsRevert(WRONG_DIST), becomes: DIST },
+  });
+
+  await assert.rejects(
+    () => holderFees.enableHolderFeeSharing({ token: TOKEN, walletAddress: WALLET }, deps),
+    /does not match the factory's distributorOf/
+  );
+  assert.equal(calls.transfer, 0);
+});
+
+test('the already-enabled path gives the clearer message, not "sign from the launch wallet"', async () => {
+  // Sharing is on: the recipient is the distributor. The operator retries with
+  // their launch wallet, which is no longer the recipient — say it is already
+  // enabled rather than tell them to sign from a contract.
+  const { deps, calls } = makeDeps({ recipient: DIST, distributorOf: getAddress(DIST) });
+
+  await assert.rejects(
+    () => holderFees.enableHolderFeeSharing({ token: TOKEN, walletAddress: WALLET }, deps),
+    (err) => {
+      assert.match(err.message, /already enabled/);
+      assert.match(err.message, new RegExp(getAddress(DIST)));
+      return true;
+    }
+  );
+  assert.equal(calls.createFor, 0);
+  assert.equal(calls.transfer, 0);
 });
 
 test('refuses a token the factory has no record of', async () => {
