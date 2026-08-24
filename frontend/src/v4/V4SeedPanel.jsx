@@ -208,6 +208,8 @@ export default function V4SeedPanel({ step, wallets, masters, facts, explorer, r
         nothing until a campaign starts feeding them, and the campaign is what takes weeks.
       </p>
 
+      {/* Create — the count and its one action alone, so the row reads as "make
+          N seed wallets" and nothing else. */}
       <div className="row">
         <input
           type="number"
@@ -232,17 +234,22 @@ export default function V4SeedPanel({ step, wallets, masters, facts, explorer, r
         >
           Generate wallets
         </Busy>
-        {/* One implementation, drawn here and in step 1 beside the funding
-            wallets' deletes — see the header of V4BackupControls for why a
-            backup belongs wherever a wallet can be deleted. */}
+      </div>
+      <p className="hint" style={{ margin: '0 0 12px' }}>
+        {MAX_GENERATE} at a time is the ceiling — the keystore is rewritten in full for every wallet
+        added, and a bigger call blocks the server for every other tab. Run it again for more.
+      </p>
+
+      {/* Backup / export — separate from create: these take wallets OUT, they do
+          not make them. One implementation, drawn here and in step 1 beside the
+          funding wallets' deletes (see V4BackupControls' header). */}
+      <div className="row">
         <V4BackupControls masters={masters} seeds={wallets} report={report} reload={reload} />
-        {/* ONLY DRAWN WHEN SOMETHING IS ACTUALLY USABLE. This is not the backup
-            — that one takes everything and the gate in step 3 depends on it.
-            This is the file an operator opens on the day they intend to SPEND,
-            and it contains only wallets that have sat out the seasoning. A
-            button offering "usable wallets" on a day there are none would be
-            the console asserting something untrue about the very thing it
-            exists to keep track of. */}
+        {/* ONLY DRAWN WHEN SOMETHING IS ACTUALLY USABLE — the file an operator
+            opens on the day they intend to SPEND, containing only wallets that
+            have sat out the seasoning. A button offering "usable wallets" on a
+            day there are none would assert something untrue about the very thing
+            this panel exists to track. */}
         {usable.length > 0 && (
           <V4BackupControls
             masters={masters}
@@ -253,12 +260,6 @@ export default function V4SeedPanel({ step, wallets, masters, facts, explorer, r
             label={`Export ${usable.length} usable`}
           />
         )}
-        <span className="spacer" />
-        <span className="hint">
-          {MAX_GENERATE} at a time is the ceiling — the keystore is rewritten in full for every
-          wallet added, and a bigger call blocks the server for every other tab. Run it again for
-          more.
-        </span>
       </div>
 
       {/* Read-only. Once a seed is claimed by V1 or V3 it re-roles out of this
@@ -323,17 +324,6 @@ export default function V4SeedPanel({ step, wallets, masters, facts, explorer, r
                   · <b>{waiting.length}</b> still aging
                 </span>
               )}
-              <label className="hint" style={{ display: 'inline-flex', gap: 6, alignItems: 'center' }}>
-                · seasoned after
-                <input
-                  type="number"
-                  min="1"
-                  value={seasonDays}
-                  onChange={(e) => setSeasonDays(e.target.value)}
-                  style={{ width: 56 }}
-                />
-                days
-              </label>
             </>
           )}
           <span className="spacer" />
@@ -366,6 +356,25 @@ export default function V4SeedPanel({ step, wallets, masters, facts, explorer, r
               </>
             )
           )}
+        </div>
+      )}
+
+      {/* The seasoning gate as its own control, not buried in the count sentence:
+          this number is what splits "usable" from "still aging" above, and step 3
+          will not start a campaign until every funded seed clears it. */}
+      {funded > 0 && (
+        <div className="row" style={{ marginBottom: 12 }}>
+          <label className="hint" style={{ display: 'inline-flex', gap: 6, alignItems: 'center' }}>
+            Seasoned after
+            <input
+              type="number"
+              min="1"
+              value={seasonDays}
+              onChange={(e) => setSeasonDays(e.target.value)}
+              style={{ width: 56 }}
+            />
+            days
+          </label>
         </div>
       )}
 
