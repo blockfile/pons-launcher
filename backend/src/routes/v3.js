@@ -182,6 +182,37 @@ function usd(wei, price) {
  * wallet count — is the difference between the panel's average slice being
  * roughly right and being confidently wrong.
  */
+/**
+ * Can this run fund every wallet? Replays the whole chain against the curve,
+ * sized against the SAME gas the engine reserves (engine.gasFigures). Used by
+ * both the plan (to warn) and start (to refuse) so the two never disagree.
+ */
+async function feasibilityOf(run, deps = {}) {
+  const s = deps.sizing || sizing;
+  const getFeesFn = deps.getFeesFn || getFees;
+  const curve = run.curveState;
+  const shape = {
+    quoteReserve: curve.quoteReserve,
+    tokenReserve: curve.tokenReserve,
+    feeBps: curve.feeBps,
+    creatorTaxBps: curve.creatorTaxBps,
+  };
+  const walletCount = run.targets.length;
+  if (walletCount === 0) return { feasible: false, sustainedWallets: 0, reason: 'no-wallets', atCycle: 1 };
+  const tokensBought = s.quoteBuyOut({ quoteIn: run.bigBuyWei, ...shape });
+  const fees = await getFeesFn(engine.FEE_BUMP_PCT);
+  const gas = engine.gasFigures(fees);
+  return s.simulateChain({
+    tokensBought,
+    ...shape,
+    walletCount,
+    mainGas: gas.mainGas,
+    buyGas: gas.buyGas,
+    buffer: gas.buffer,
+    relayFeePct: engine.RELAY_FEE_PCT,
+  });
+}
+
 async function buildPlan(body, ks, deps = {}) {
   const run = await resolveRun(body, ks, deps);
   const t = deps.trade || trade;
@@ -201,6 +232,12 @@ async function buildPlan(body, ks, deps = {}) {
   const positionWei = s.quoteSellOut({ tokensIn: tokensBought, ...shape });
   const walletCount = run.targets.length;
   const meanWei = walletCount > 0 ? positionWei / BigInt(walletCount) : 0n;
+
+  // Feasibility: replay the WHOLE chain against the curve (engine gas basis), so
+  // a run that would collapse mid-way ("slices too small") is caught HERE rather
+  // than a wallet or two into a live run. The headline meanWei above is a naive
+  // average that hides the sequential price impact; this does not.
+  const feasibility = await feasibilityOf(run, deps);
 
   const variancePct = Number(body.variancePct ?? sizing.DEFAULT_VARIANCE_PCT);
   const lowWei = (meanWei * BigInt(Math.round(10_000 - variancePct * 100))) / 10_000n;
@@ -234,6 +271,13 @@ async function buildPlan(body, ks, deps = {}) {
         'is large relative to the curve. A smaller big buy loses far less on the round trip.'
     );
   }
+  if (!feasibility.feasible) {
+    warnings.push(
+      `this position can fund about ${feasibility.sustainedWallets} of ${walletCount} wallets before a ` +
+        'cycle raises less than the gas the next one needs — the run would halt partway. Reduce the ' +
+        'wallet count (or increase the big buy, or pick a deeper-liquidity curve) so every wallet is served.'
+    );
+  }
   if (snipeTax.bps > 0) {
     warnings.push(
       `the opening snipe tax is still live at ${snipeTax.bps} bps and V3's wallets are NOT exempt — ` +
@@ -254,6 +298,10 @@ async function buildPlan(body, ks, deps = {}) {
     ethUsd: price,
     mainWallet: { walletId: run.main.id, address: run.main.address },
     walletCount,
+    // Whether the position can actually fund every wallet, and how many it can
+    // fund if not — the panel greys out Start and says which when this is false.
+    feasible: feasibility.feasible,
+    sustainedWallets: feasibility.sustainedWallets,
     targets: run.targets.map((x, i) => ({ index: i + 1, walletId: x.walletId, address: x.address })),
     // What the run has to hand out, after the round trip.
     position: {
@@ -500,6 +548,17 @@ router.post('/v3/chain/start', requireApiKey, async (req, res, next) => {
       );
     }
     const run = await resolveRun(req.body || {}, keystoreFor(req.user.id));
+    // Refuse a run the position cannot finish — the same feasibility the plan
+    // shows. { force: true } overrides it for an operator who means to run a
+    // partial chain anyway.
+    const feasibility = await feasibilityOf(run);
+    if (!feasibility.feasible && req.body?.force !== true) {
+      throw new Error(
+        `this position can fund about ${feasibility.sustainedWallets} of ${run.targets.length} wallets before a ` +
+          "cycle raises less than the next one's gas — the run would halt partway. Reduce the wallet count " +
+          '(or increase the big buy, or pick a deeper-liquidity curve), or pass { force: true } to run it anyway.'
+      );
+    }
     res.json(
       jsonSafe(
         await engine.start(req.user.id, {

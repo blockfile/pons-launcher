@@ -214,6 +214,95 @@ function sliceFor({ valueWei, remainingWallets, variancePct = DEFAULT_VARIANCE_P
   return slice > 0n ? slice : 1n;
 }
 
+/**
+ * Replay the WHOLE chain against the curve before committing to it, to catch a
+ * run that would collapse mid-way — the "slices too small" halt an operator
+ * otherwise only discovers a wallet or two in.
+ *
+ * The plan's headline number, positionWei ÷ walletCount, is a naive average that
+ * hides this: every sell moves the price down, so on a thin curve the value the
+ * later cycles draw from can fall to almost nothing while the average still looks
+ * healthy. This function does what the engine actually does each cycle — value
+ * the remaining position, take a slice, find the tokens that raises, sell them
+ * (advancing the reserves), and check the proceeds cover the main wallet's gas
+ * AND leave enough to fund the next buy after the Relay fee — and reports the
+ * first cycle that cannot.
+ *
+ * Pure arithmetic, like the rest of this file. Uses the MEAN slice (no jitter):
+ * the expected case, and a run infeasible at the mean cannot be rescued by
+ * variance. Reasons are short codes, not prose — the caller owns the wording and
+ * the wei→ETH formatting, so this stays dependency-light.
+ *
+ * @returns {{ feasible: boolean, sustainedWallets: number, reason: string|null,
+ *   atCycle: number|null }}
+ */
+function simulateChain({
+  tokensBought,
+  quoteReserve,
+  tokenReserve,
+  feeBps = 0,
+  creatorTaxBps = 0,
+  walletCount,
+  mainGas,
+  buyGas,
+  buffer,
+  relayFeePct = 3,
+}) {
+  let balance = BigInt(tokensBought);
+  let q = BigInt(quoteReserve);
+  let t = BigInt(tokenReserve);
+  const mg = BigInt(mainGas);
+  const bg = BigInt(buyGas);
+  const bf = BigInt(buffer);
+  const n = Number(walletCount);
+  if (!Number.isInteger(n) || n < 1) throw new Error('walletCount must be a positive integer');
+
+  const fail = (i, reason) => ({ feasible: false, sustainedWallets: i, reason, atCycle: i + 1 });
+
+  for (let i = 0; i < n; i++) {
+    const remainingWallets = n - i;
+    if (balance <= 0n) return fail(i, 'exhausted');
+
+    let tokensIn;
+    if (remainingWallets <= 1) {
+      tokensIn = balance; // the last wallet takes the remainder, as the engine does
+    } else {
+      const valueWei = quoteSellOut({ tokensIn: balance, quoteReserve: q, tokenReserve: t, feeBps, creatorTaxBps });
+      if (valueWei <= 0n) return fail(i, 'worthless');
+      let sliceWei;
+      try {
+        sliceWei = sliceFor({ valueWei, remainingWallets, variancePct: 0 });
+      } catch {
+        return fail(i, 'unsliceable');
+      }
+      try {
+        tokensIn = tokensToRaise({ targetWei: sliceWei, quoteReserve: q, tokenReserve: t, feeBps, creatorTaxBps, headroomPct: 0 });
+      } catch {
+        return fail(i, 'curve-cannot-pay');
+      }
+      if (tokensIn > balance) tokensIn = balance;
+    }
+
+    // Sell: `raised` is net (what arrives), `gross` is what leaves the quote
+    // reserve (raised plus the fee taken off the top).
+    const denom = t + tokensIn;
+    const gross = denom > 0n ? (q * tokensIn) / denom : 0n;
+    const raised = quoteSellOut({ tokensIn, quoteReserve: q, tokenReserve: t, feeBps, creatorTaxBps });
+
+    const spendable = raised - mg;
+    if (spendable <= 0n) return fail(i, 'slice-below-gas');
+    const transferWei = (spendable * BigInt(100 - relayFeePct)) / 100n;
+    if (transferWei <= bg + bf) return fail(i, 'buy-underfunded');
+
+    // Advance the curve and the position exactly as the sell would.
+    q -= gross;
+    t += tokensIn;
+    balance -= tokensIn;
+  }
+
+  return { feasible: true, sustainedWallets: n, reason: null, atCycle: null };
+}
+
 module.exports = {
   BPS,
   SELL_HEADROOM_PCT,
@@ -223,5 +312,6 @@ module.exports = {
   quoteBuyOut,
   tokensToRaise,
   sliceFor,
+  simulateChain,
   _private: { ceilDiv },
 };

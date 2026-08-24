@@ -65,7 +65,9 @@ function harness({
   graduatedAt = null, // cycle index at which the curve reports graduated
   clock = fakeClock(),
   cycleCostMs = 0, // how long each cycle's work takes on the fake clock
+  readFailTimes = 0, // make the FIRST readCurve throw this many times, then succeed
 } = {}) {
+  let readFails = 0;
   const calls = [];
   const logged = [];
   const balances = { [MAIN.address]: parseEther('50') };
@@ -109,7 +111,12 @@ function harness({
     },
     getFeesFn: async () => ({ type: 2, maxFeePerGas: 1_000_000_000n, maxPriorityFeePerGas: 1n }),
     trade: {
-      readCurve: async () => ({
+      readCurve: async () => {
+        if (readFails < readFailTimes) {
+          readFails += 1;
+          throw new Error('rpc read blip');
+        }
+        return {
         address: CURVE,
         token: TOKEN,
         isNativeQuote: true,
@@ -119,7 +126,8 @@ function harness({
         creatorTaxBps: 100,
         graduated: graduatedAt !== null && calls.filter((c) => c.step === 'buy').length >= graduatedAt,
         readyToGraduate: false,
-      }),
+        };
+      },
       buy: async ({ wallet }) => {
         const index = wallet.id === MAIN.id ? 0 : targets.findIndex((t) => t.id === wallet.id) + 1;
         note('buy', index, { walletId: wallet.id });
@@ -203,6 +211,29 @@ test('one cycle per target, in the order given, each sell then transfer then buy
     'sell3', 'transfer3', 'buy3',
   ]);
   assert.equal(h.engine.status(USER).status, 'complete');
+});
+
+test('a transient read blip is retried in place, and the run continues', async () => {
+  // readCurve throws twice, then succeeds — inside READ_RETRIES (3), so the cycle
+  // recovers without halting.
+  const h = harness({ readFailTimes: 2 });
+  await h.engine.start(USER, h.input);
+  await h.clock.drain();
+  assert.equal(h.engine.status(USER).status, 'complete', 'the run finished despite the read blips');
+  assert.deepEqual(steps(h.calls), [
+    'buy0',
+    'sell1', 'transfer1', 'buy1',
+    'sell2', 'transfer2', 'buy2',
+    'sell3', 'transfer3', 'buy3',
+  ]);
+});
+
+test('a read that keeps failing past the retry budget still halts the run', async () => {
+  const h = harness({ readFailTimes: 99 }); // never recovers
+  await h.engine.start(USER, h.input);
+  await h.clock.drain();
+  const st = h.engine.status(USER);
+  assert.equal(st.status, 'failed', 'a persistent read failure halts rather than spinning forever');
 });
 
 test('the run completes with every wallet marked done', async () => {

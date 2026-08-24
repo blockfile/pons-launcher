@@ -80,6 +80,29 @@ const RELAY_FEE_PCT = 3;
 // the ones the transactions will actually quote.
 const FEE_BUMP_PCT = 25;
 
+// SAFE AUTO-RETRY, and only here. The reads a cycle makes BEFORE it broadcasts
+// anything — the fees, the curve, the main wallet's token balance — are
+// idempotent: re-doing one changes nothing on chain, so a transient RPC blip on
+// one is retried in place instead of halting the whole run and waiting for a
+// manual resume. This is the ONE place a retry is safe. The broadcasts (sell,
+// deposit, buy) and the fill wait are NEVER retried — a failure there may have
+// actually landed, and re-running it would double-sell or double-send, which is
+// exactly why those still halt for a checked, manual resume.
+const READ_RETRIES = 3;
+const READ_BACKOFF_MS = 800;
+
+// The gas a cycle reserves, given a fees object. Module-level and pure so the
+// plan's feasibility check can size against the EXACT figures the engine's
+// gasFor() uses — a drift here would let the plan bless a run the engine then
+// halts (or refuse one it would have finished).
+function gasFigures(fees) {
+  return {
+    buyGas: gasCost(fees, BigInt(config.buyGasLimit)),
+    buffer: parseEther(String(config.gasBufferEth)),
+    mainGas: gasCost(fees, defaultTrade.APPROVE_GAS + defaultTrade.SELL_GAS + RELAY_DEPOSIT_GAS),
+  };
+}
+
 function iso(ms) {
   return new Date(ms).toISOString();
 }
@@ -253,17 +276,27 @@ function createEngine(deps = {}) {
    */
   async function gasFor() {
     const fees = await getFeesFn(FEE_BUMP_PCT);
-    return {
-      fees,
-      // What a bundle wallet needs to make its buy, plus the same small buffer
-      // prepareV2 leaves.
-      buyGas: gasCost(fees, BigInt(config.buyGasLimit)),
-      buffer: parseEther(String(config.gasBufferEth)),
-      // What the main wallet has to keep back out of each sale to pay for its
-      // own next approve, sell and deposit — or the run walks itself dry a few
-      // cycles in.
-      mainGas: gasCost(fees, defaultTrade.APPROVE_GAS + defaultTrade.SELL_GAS + RELAY_DEPOSIT_GAS),
-    };
+    // buyGas: what a bundle wallet needs to make its buy, plus prepareV2's buffer.
+    // mainGas: what the main wallet keeps back out of each sale for its own next
+    // approve, sell and deposit — or the run walks itself dry a few cycles in.
+    return { fees, ...gasFigures(fees) };
+  }
+
+  /**
+   * Retry an IDEMPOTENT read through a transient failure before letting it halt
+   * the run. Only ever wraps reads that broadcast nothing — see READ_RETRIES.
+   */
+  async function retryRead(fn) {
+    let lastErr;
+    for (let attempt = 1; attempt <= READ_RETRIES; attempt++) {
+      try {
+        return await fn();
+      } catch (err) {
+        lastErr = err;
+        if (attempt < READ_RETRIES) await sleepFn(READ_BACKOFF_MS * attempt);
+      }
+    }
+    throw lastErr;
   }
 
   /**
@@ -315,7 +348,7 @@ function createEngine(deps = {}) {
     const wallet = v3roles.bundle(ks).find((w) => w.id === target.walletId);
     if (!wallet) throw new Error(`wallet ${target.walletId} is no longer a v3 bundle wallet`);
 
-    const { buyGas, buffer, mainGas } = await gasFor();
+    const { buyGas, buffer, mainGas } = await retryRead(gasFor);
 
     // How many wallets, including this one, still have to be served. This is
     // the divisor the slice is drawn against, and recomputing it every cycle is
@@ -329,12 +362,12 @@ function createEngine(deps = {}) {
 
       // Read fresh every cycle: a curve that graduated mid-run must stop the
       // run here, before another sell is signed against it.
-      const curve = await trade.readCurve(job.curve, { ...tradeDeps, rpc });
+      const curve = await retryRead(() => trade.readCurve(job.curve, { ...tradeDeps, rpc }));
       if (curve.graduated) {
         throw new Error('the curve graduated mid-run — the remaining position cannot be sold here');
       }
 
-      const balance = await trade.tokenBalance(curve.token, main.address, { ...tradeDeps, rpc });
+      const balance = await retryRead(() => trade.tokenBalance(curve.token, main.address, { ...tradeDeps, rpc }));
       if (balance <= 0n) {
         throw new Error(
           'the main wallet holds none of this token — the position is already gone, so there is ' +
@@ -718,4 +751,7 @@ module.exports.MAX_JITTER_PCT = MAX_JITTER_PCT;
 module.exports.FILL_POLL_MS = FILL_POLL_MS;
 module.exports.FILL_TIMEOUT_MS = FILL_TIMEOUT_MS;
 module.exports.RELAY_DEPOSIT_GAS = RELAY_DEPOSIT_GAS;
+module.exports.RELAY_FEE_PCT = RELAY_FEE_PCT;
+module.exports.FEE_BUMP_PCT = FEE_BUMP_PCT;
+module.exports.gasFigures = gasFigures;
 module.exports._private = { publicJob, publicCycle };

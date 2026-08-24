@@ -9,6 +9,7 @@ const {
   quoteBuyOut,
   tokensToRaise,
   sliceFor,
+  simulateChain,
   SELL_HEADROOM_PCT,
   DEFAULT_VARIANCE_PCT,
   MAX_VARIANCE_PCT,
@@ -281,4 +282,57 @@ test('it refuses a variance above the cap', () => {
 
 test('it refuses a nonsense wallet count', () => {
   assert.throws(() => sliceFor({ valueWei: parseEther('1'), remainingWallets: 0 }), /positive integer/);
+});
+
+test('simulateChain: a deep curve sustains every wallet', () => {
+  const q = 100n * 10n ** 18n; // 100 ETH quote reserve
+  const t = 10n ** 27n; // deep token reserve
+  const feeBps = 100;
+  const tokensBought = quoteBuyOut({ quoteIn: parseEther('1'), quoteReserve: q, tokenReserve: t, feeBps });
+  const r = simulateChain({
+    tokensBought,
+    quoteReserve: q,
+    tokenReserve: t,
+    feeBps,
+    walletCount: 10,
+    mainGas: 10n ** 14n,
+    buyGas: 10n ** 14n,
+    buffer: 4n * 10n ** 14n,
+    relayFeePct: 3,
+  });
+  assert.equal(r.feasible, true);
+  assert.equal(r.sustainedWallets, 10);
+  assert.equal(r.reason, null);
+});
+
+test('simulateChain: a position too small for the wallet count is refused, not started', () => {
+  // Same deep curve, but the big buy is tiny relative to the gas each of 25
+  // wallets needs — the mean slice cannot clear the gas + buy floor.
+  const q = parseEther('0.1');
+  const t = 10n ** 24n;
+  const feeBps = 100;
+  const tokensBought = quoteBuyOut({ quoteIn: parseEther('0.05'), quoteReserve: q, tokenReserve: t, feeBps });
+  const g = parseEther('0.00035'); // gas floor above the per-slice value
+  const r = simulateChain({
+    tokensBought,
+    quoteReserve: q,
+    tokenReserve: t,
+    feeBps,
+    walletCount: 25,
+    mainGas: g,
+    buyGas: g,
+    buffer: g,
+    relayFeePct: 3,
+  });
+  assert.equal(r.feasible, false);
+  assert.ok(r.sustainedWallets < 25, `sustained ${r.sustainedWallets} of 25`);
+  assert.ok(r.reason, 'a reason code is set');
+  assert.equal(r.atCycle, r.sustainedWallets + 1);
+});
+
+test('simulateChain: refuses a non-positive wallet count', () => {
+  assert.throws(
+    () => simulateChain({ tokensBought: 1n, quoteReserve: 1n, tokenReserve: 1n, walletCount: 0, mainGas: 0n, buyGas: 0n, buffer: 0n }),
+    /walletCount must be a positive integer/
+  );
 });
