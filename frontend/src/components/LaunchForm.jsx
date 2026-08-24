@@ -142,8 +142,12 @@ export default function LaunchForm({
       launchConfig: lc || null,
       creatorTaxBps: isV2 ? Number(f.creatorTaxBps || 0) : 0,
       devBuyEth: f.devBuyEth,
+      // Whether this launch funds its bundle by ETH-zap. The wallet table sizes
+      // each buy's gas reserve against the 900k zap cost when it is, so it has
+      // to know here — see WalletsPanel / bundleReserve.js.
+      zapMode,
     });
-  }, [protocol, lc, isV2, f.creatorTaxBps, f.devBuyEth]);
+  }, [protocol, lc, isV2, f.creatorTaxBps, f.devBuyEth, zapMode]);
 
   /**
    * The three facts this step cannot be armed without, pushed up to App.

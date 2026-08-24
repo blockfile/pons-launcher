@@ -666,6 +666,9 @@ export default function App() {
             share={share}
             reload={loadWallets}
             report={report}
+            // Sized in the launch form (step 5) but read here: an ETH-zap launch
+            // reserves the 900k zap gas per buy, so the auto-fill must too.
+            zapMode={Boolean(sizing?.zapMode)}
           />
           <FundPanel
             variant={tab}

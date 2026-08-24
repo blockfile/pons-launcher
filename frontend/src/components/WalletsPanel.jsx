@@ -7,6 +7,7 @@ import Modal, { Fact } from './Modal.jsx';
 import Share, { pct, tokens } from './Share.jsx';
 import BackupControls from './BackupControls.jsx';
 import { rolesFor } from '../variant.js';
+import { SELL_RESERVE, perWalletReserve } from '../bundleReserve.js';
 
 // Balances arrive as decimal strings. Six places everywhere, so the column and
 // the dialog show the same number.
@@ -46,7 +47,7 @@ function usdMc(ethStr, price) {
   return `$${Math.round(v)}`;
 }
 
-export default function WalletsPanel({ step, wallets, rows, setRow, share, reload, report, variant = 'v1' }) {
+export default function WalletsPanel({ step, wallets, rows, setRow, share, reload, report, variant = 'v1', zapMode = false }) {
   const roles = rolesFor(variant);
   const [count, setCount] = useState(5);
   const [showImport, setShowImport] = useState(false);
@@ -68,7 +69,9 @@ export default function WalletsPanel({ step, wallets, rows, setRow, share, reloa
   // "Distribute a total across the bundle" — the amount typed at the top of the
   // table, and the live gas cost of a buy/sell so the fund reserve is exact.
   const [totalBuy, setTotalBuy] = useState('');
-  const [gas, setGas] = useState(null); // { buyGasEth, sellGasEth }
+  // { buyGasEth, sellGasEth, zapBuyGasEth, gasBufferEth } — the zap pair is used
+  // for the buy-gas reserve when this launch is an ETH-zap (see perWalletReserve).
+  const [gas, setGas] = useState(null);
 
   useEffect(() => {
     let alive = true;
@@ -187,10 +190,6 @@ export default function WalletsPanel({ step, wallets, rows, setRow, share, reloa
   // believing it is idle.
   const visible = wallets.filter((w) => w.role === roles.dev || w.role === roles.bundle);
 
-  // How many sells each wallet keeps gas for, deliberately generous — a wallet
-  // stuck holding tokens it cannot sell is worse than a slightly larger fund.
-  const SELL_RESERVE = 10;
-
   // The most bundle wallets a launch can exempt: the forwarder appends its own
   // buy recipient, so the factory's 32 leaves room for 31 of ours. A 32nd is the
   // ExemptionListTooLong revert that stranded a bundle — so the count is capped
@@ -205,7 +204,10 @@ export default function WalletsPanel({ step, wallets, rows, setRow, share, reloa
   // wallet's gas reserve. Shown live so a shortfall is a number seen up front
   // rather than a third of the bundle silently skipped at preflight for lack of
   // funds. The dev buy and the launch fee are on top of this and set elsewhere.
-  const reservePerWallet = Number(gas?.buyGasEth || 0) + SELL_RESERVE * Number(gas?.sellGasEth || 0);
+  // In ETH-zap mode the buy-gas portion is the 900k zap cost + buffer the
+  // backend reserves, not a plain curve.buy — otherwise a distributed buy is
+  // sized too large and preflight skips the wallet. See bundleReserve.js.
+  const reservePerWallet = perWalletReserve(gas, zapMode);
   const fundNeeded = Number(totalBuy) > 0 ? Number(totalBuy) + bundle.length * reservePerWallet : 0;
 
   // Split the typed total across the bundle wallets into a random, jittered
@@ -225,10 +227,12 @@ export default function WalletsPanel({ step, wallets, rows, setRow, share, reloa
         g = await api('/gas');
         setGas(g);
       } catch {
-        g = { buyGasEth: '0', sellGasEth: '0' };
+        g = { buyGasEth: '0', sellGasEth: '0', zapBuyGasEth: '0', gasBufferEth: '0' };
       }
     }
-    const reserve = Number(g.buyGasEth || 0) + SELL_RESERVE * Number(g.sellGasEth || 0);
+    // Zap mode reserves the 900k zap gas + buffer per buy, matching the backend
+    // preflight exactly, so each distributed buy leaves the room it requires.
+    const reserve = perWalletReserve(g, zapMode);
 
     // ±30% jitter around equal, normalised to the exact total; the rounding
     // drift is pushed onto the last wallet so the sum is exactly what was typed.
@@ -243,8 +247,9 @@ export default function WalletsPanel({ step, wallets, rows, setRow, share, reloa
       setRow(w.id, { mode: 'fixed', buy: String(buy), fund: (buy + reserve).toFixed(6) });
     });
     report(
-      `distributed ${total} ETH across ${bundle.length} wallets — each funded for its buy plus gas for ` +
-        `${SELL_RESERVE} sells. Nothing was sent; edit any row, then Fund and launch as usual.`
+      `distributed ${total} ETH across ${bundle.length} wallets — each funded for its buy plus ` +
+        `${zapMode ? 'the zap buy gas' : 'buy gas'} and gas for ${SELL_RESERVE} sells. ` +
+        `Nothing was sent; edit any row, then Fund and launch as usual.`
     );
     notify(`Filled ${bundle.length} wallets for ${total} ETH. No ETH moved — edit, then Fund.`, 'ok');
   }
@@ -545,8 +550,8 @@ export default function WalletsPanel({ step, wallets, rows, setRow, share, reloa
             Distribute across {bundle.length} wallet{bundle.length === 1 ? '' : 's'}
           </Busy>
           <span className="hint">
-            random split · each funded for its buy + gas for {SELL_RESERVE} sells · fields stay editable ·
-            moves no ETH
+            random split · each funded for its buy + {zapMode ? 'zap buy gas' : 'buy gas'} + gas for{' '}
+            {SELL_RESERVE} sells · fields stay editable · moves no ETH
           </span>
           {fundNeeded > 0 && (
             <div className="distribute-fund">
