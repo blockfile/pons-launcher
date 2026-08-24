@@ -207,3 +207,63 @@ test('confirmFill returns filled:null for a missing or malformed request id', as
   assert.deepEqual(await relay.confirmFill(null, { gapMs: 0 }), { filled: null, status: 'unknown' });
   assert.deepEqual(await relay.confirmFill('nope', { gapMs: 0 }), { filled: null, status: 'unknown' });
 });
+
+test('a rate-limited quote is retried (pre-broadcast) until it succeeds, then the deposit is sent once', async () => {
+  const h = harness();
+  let calls = 0;
+  h.deps.relayQuote = async () => {
+    calls += 1;
+    if (calls < 3) {
+      const e = new Error('Could not process request. Please try again later.');
+      e.status = 429;
+      e.retryable = true;
+      throw e;
+    }
+    return quote();
+  };
+  h.deps.sleepFn = async () => {}; // no real backoff in the test
+  const out = await transfer(h);
+  assert.equal(calls, 3, 'the quote retried through the rate limit');
+  assert.equal(h.sent.length, 1, 'the deposit is sent exactly once, only after the quote succeeds');
+  assert.ok(out.hash);
+});
+
+test('a quote that stays rate-limited past the retries halts, and broadcasts no deposit', async () => {
+  const h = harness();
+  let calls = 0;
+  h.deps.relayQuote = async () => {
+    calls += 1;
+    const e = new Error('Could not process request. Please try again later.');
+    e.status = 429;
+    throw e;
+  };
+  h.deps.sleepFn = async () => {};
+  h.deps.quoteRetries = 3;
+  await assert.rejects(() => transfer(h), /try again later/);
+  assert.equal(calls, 4, '1 attempt + 3 retries');
+  assert.equal(h.sent.length, 0, 'nothing is broadcast when the quote never succeeds');
+});
+
+test('a non-retryable quote rejection is thrown at once, not retried', async () => {
+  const h = harness();
+  let calls = 0;
+  h.deps.relayQuote = async () => {
+    calls += 1;
+    const e = new Error('invalid recipient');
+    e.status = 400;
+    e.retryable = false;
+    throw e;
+  };
+  h.deps.sleepFn = async () => {};
+  await assert.rejects(() => transfer(h), /invalid recipient/);
+  assert.equal(calls, 1, 'a 4xx that is not 429 is not retried');
+  assert.equal(h.sent.length, 0);
+});
+
+test('isRetryableQuoteError flags 429/rate-limit shapes, not a plain rejection', () => {
+  assert.equal(relay.isRetryableQuoteError({ retryable: true }), true);
+  assert.equal(relay.isRetryableQuoteError({ message: 'Could not process request. Please try again later.' }), true);
+  assert.equal(relay.isRetryableQuoteError({ message: 'rate limit exceeded' }), true);
+  assert.equal(relay.isRetryableQuoteError({ message: 'Relay returned 429' }), true);
+  assert.equal(relay.isRetryableQuoteError({ message: 'invalid recipient', retryable: false }), false);
+});

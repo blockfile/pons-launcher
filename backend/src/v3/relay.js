@@ -57,8 +57,27 @@ async function relayRequest(path, { method = 'GET', body, fetchImpl = fetch } = 
     body: body ? JSON.stringify(body) : undefined,
   });
   const json = await res.json().catch(() => ({}));
-  if (!res.ok) throw new Error(json.message || json.error || `Relay returned ${res.status}`);
+  if (!res.ok) {
+    const err = new Error(json.message || json.error || `Relay returned ${res.status}`);
+    err.status = res.status;
+    // A 429 (the shared per-IP /quote rate limit — "Could not process request.
+    // Please try again later.") or a 5xx is transient: the request never became
+    // an order, so a caller may safely retry it. A 4xx that is not 429 is a real
+    // rejection and must not be retried into.
+    err.retryable = res.status === 429 || res.status >= 500;
+    throw err;
+  }
   return json;
+}
+
+// Whether a thrown quote error is worth retrying: the flag relayRequest attaches,
+// or — for an injected relayQuote in tests, or an error that lost the flag — the
+// message shapes Relay uses for its rate limit.
+function isRetryableQuoteError(err) {
+  if (err && err.retryable === true) return true;
+  return /could not process request|try again later|rate.?limit|too many|\b429\b/i.test(
+    String((err && err.message) || '')
+  );
 }
 
 /** The order: exactly `amountWei` lands at `recipient`, and `from` pays for it. */
@@ -187,7 +206,24 @@ async function transfer({ fromWallet, toAddress, amountWei }, deps = {}) {
   const from = getAddress(fromWallet.address);
   const to = getAddress(toAddress);
 
-  const quote = await relayQuote(quoteBody({ from, recipient: to, amountWei: amount }));
+  // Retry the QUOTE — and ONLY the quote — through Relay's rate limit. This runs
+  // before any deposit is signed or sent, so re-requesting it moves nothing and
+  // cannot double-send; a rate-limited cycle recovers on its own instead of
+  // halting the run for a manual resume. A non-retryable rejection, or the last
+  // attempt, still throws and halts. The deposit broadcast below is NEVER retried.
+  const sleepFn = deps.sleepFn || sleep;
+  const retries = Math.max(0, Number(deps.quoteRetries ?? config.v3RelayQuoteRetries));
+  const backoffMs = Math.max(0, Number(deps.quoteBackoffMs ?? config.v3RelayQuoteBackoffMs));
+  let quote;
+  for (let attempt = 0; ; attempt++) {
+    try {
+      quote = await relayQuote(quoteBody({ from, recipient: to, amountWei: amount }));
+      break;
+    } catch (err) {
+      if (attempt >= retries || !isRetryableQuoteError(err)) throw err;
+      await sleepFn(backoffMs * 2 ** attempt);
+    }
+  }
   const deposit = depositStep(quote, { expectedFrom: from });
 
   const fees = await getFeesFn(FEE_BUMP_PCT);
@@ -284,5 +320,6 @@ module.exports = {
   transfer,
   status,
   confirmFill,
+  isRetryableQuoteError,
   _private: { normaliseTx, gasLimitOf, publicFees, publicDetails },
 };

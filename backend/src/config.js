@@ -96,6 +96,14 @@ const config = {
   relayQuoteRetries: Math.max(0, num(process.env.RELAY_QUOTE_RETRIES, 5)),
   relayQuote429BackoffMs: Math.max(0, num(process.env.RELAY_QUOTE_BACKOFF_MS, 20000)),
 
+  // V3's chain runner retries a rate-limited Relay QUOTE (pre-broadcast, so safe)
+  // rather than halting the run for a manual resume. Shorter than the v2 funding
+  // backoff above because a V3 cycle is ~7s and a 20s stall per blip would bunch
+  // the buys: exponential from 2s (2s, 4s, 8s, 16s) over up to 4 retries, then
+  // halt if Relay is still refusing. See v3/relay.js transfer().
+  v3RelayQuoteRetries: Math.max(0, num(process.env.V3_RELAY_QUOTE_RETRIES, 4)),
+  v3RelayQuoteBackoffMs: Math.max(0, num(process.env.V3_RELAY_QUOTE_BACKOFF_MS, 2000)),
+
   // ethers' tx.wait() polls every 4s by default, which is forty blocks on this
   // chain. v2 reads the curve address out of the launch receipt, so that delay
   // would sit squarely in the critical path — poll for it directly instead.
