@@ -84,6 +84,8 @@ const baseDeps = (over = {}) => ({
   // money-path assertions below don't depend on timing. Tests that care about
   // the wait override it.
   waitForZapRoute: async () => ({ waitedMs: 0 }),
+  // Backoff between throttled-quote retries: a no-op so retry tests run instantly.
+  sleep: async () => {},
   ...over,
 });
 
@@ -140,6 +142,73 @@ test('a wallet whose quote fails is skipped with a reason; the rest still fire',
   assert.equal(signed[0].id, 'b');
   assert.equal(res.skipped, 1);
   assert.equal(res.confirmed, 1);
+});
+
+test('a throttled quote (HTTP 409 "No price right now") is retried, not skipped', async () => {
+  // The endpoint throttles concurrent quotes; a 409 means "busy", not "no route".
+  const signed = [];
+  const rpc = fakeProvider();
+  const attemptsByTaker = {};
+  const getZapBuyTx = async ({ taker, sellAmountWei }) => {
+    const k = getAddress(taker);
+    attemptsByTaker[k] = (attemptsByTaker[k] || 0) + 1;
+    // WA is throttled twice, then served on the third attempt.
+    if (k === WA && attemptsByTaker[k] < 3) throw new Error('pons zap quote failed: No price right now.');
+    return { to: SETTLER, data: '0xzap', value: sellAmountWei };
+  };
+
+  const res = await fireZap(plan, baseDeps({ provider: rpc, keystore: fakeKeystore(signed), getZapBuyTx }));
+
+  assert.equal(attemptsByTaker[WA], 3, 'the throttled wallet retried until it was served');
+  assert.equal(res.confirmed, 2, 'both wallets bought — none was skipped for a transient throttle');
+  assert.equal(res.skipped, 0);
+});
+
+test('a quote that is genuinely un-routable (not a throttle) is not retried forever', async () => {
+  const signed = [];
+  const rpc = fakeProvider();
+  const attempts = {};
+  const getZapBuyTx = async ({ taker, sellAmountWei }) => {
+    const k = getAddress(taker);
+    attempts[k] = (attempts[k] || 0) + 1;
+    if (k === WA) throw new Error('getZapBuyTx: buyToken is required'); // not a throttle shape
+    return { to: SETTLER, data: '0xzap', value: sellAmountWei };
+  };
+
+  const res = await fireZap(plan, baseDeps({ provider: rpc, keystore: fakeKeystore(signed), getZapBuyTx }));
+
+  assert.equal(attempts[WA], 1, 'a non-throttle error is not retried');
+  const a = res.buys.find((b) => b.walletId === 'a');
+  assert.equal(a.status, 'skipped');
+});
+
+test('the buys go through a bounded concurrency pool, never all at once', async () => {
+  // With 4 wallets and a pool of 2, at most 2 quotes are ever in flight together.
+  const manyPlan = {
+    ...plan,
+    zapSendConcurrency: 2,
+    buys: [WA, WB, getAddress('0x' + 'cc'.repeat(20)), getAddress('0x' + 'dd'.repeat(20))].map((addr, i) => ({
+      walletId: `w${i}`,
+      address: addr,
+      amountEth: '0.1',
+      amountIn: (10n ** 17n).toString(),
+      exempt: true,
+      zap: true,
+    })),
+  };
+  let inFlight = 0;
+  let peak = 0;
+  const getZapBuyTx = async ({ sellAmountWei }) => {
+    inFlight += 1;
+    peak = Math.max(peak, inFlight);
+    await new Promise((r) => setTimeout(r, 5));
+    inFlight -= 1;
+    return { to: SETTLER, data: '0xzap', value: sellAmountWei };
+  };
+
+  const res = await fireZap(manyPlan, baseDeps({ provider: fakeProvider(), keystore: fakeKeystore([]), getZapBuyTx }));
+  assert.ok(peak <= 2, `never more than 2 quotes in flight (saw ${peak})`);
+  assert.equal(res.confirmed, 4, 'all four still complete');
 });
 
 test('a broadcast failure fails only its own wallet', async () => {

@@ -196,10 +196,30 @@ const config = {
   // so a quote can only be fetched AFTER the launch confirms — see
   // evm/v2/zeroexSwap.js and the ethZap branch of bundle/fireV2.js.
   zapUrl: process.env.PONS_ZAP_URL || 'https://www.ponsfamily.com/api/zeroex-swap',
-  // Slippage tolerance for a zap buy, in basis points. 1% by default: these fire
-  // just behind a launch into a curve whose opening price the config fixes, so
-  // the ETH→pair leg is the only place slippage really bites.
-  zapSlippageBps: num(process.env.PONS_ZAP_SLIPPAGE_BPS, 100),
+  // Slippage tolerance for a zap buy, in basis points. 3% by default. A whole
+  // bundle buys the SAME fresh, thin curve within a block or two, and every buy
+  // that lands ahead of another pushes the curve price up — so a wallet's quote
+  // (minus slippage) can be undercut by its own bundle-mates and revert with
+  // InsufficientOutput. A live 20-wallet launch reverted 7 buys at 1% on a ~0.65%
+  // self-competition move; 3% absorbs that with margin. The cost of the wider
+  // tolerance is only on the ETH→pair leg (a sandwich could take up to this much);
+  // for a launch bundle a filled buy is worth far more than shaving basis points.
+  // Raise it further if a thin curve still reverts; lower it if pair-leg slippage
+  // matters more than fill certainty for a given launch.
+  zapSlippageBps: num(process.env.PONS_ZAP_SLIPPAGE_BPS, 300),
+  // How many zap buys may be in flight at once. The pons zap endpoint THROTTLES
+  // concurrent quotes — ~20 at once returns HTTP 409 "No price right now." for
+  // most of them (a live launch skipped 12 of 20 this way), while the same
+  // requests spaced out succeed. Keep this low so quotes are served, and so the
+  // buys spread across blocks rather than all racing into one (which is what
+  // drives the self-competition slippage above). Not a tax concern: the bundle
+  // wallets are exempt whenever they land, so spreading them costs nothing there.
+  zapSendConcurrency: num(process.env.PONS_ZAP_SEND_CONCURRENCY, 3),
+  // A throttled quote (409 / "No price right now." / "No route") is retried with
+  // exponential backoff rather than skipped — the route already exists (fireZap
+  // waited for it), the endpoint is just busy. Attempts include the first try.
+  zapQuoteMaxAttempts: num(process.env.PONS_ZAP_QUOTE_MAX_ATTEMPTS, 5),
+  zapQuoteBackoffMs: num(process.env.PONS_ZAP_QUOTE_BACKOFF_MS, 500),
   // Gas limit for a zap buy. Higher than a plain curve.buy (buyGasLimit) because
   // the zap is a multi-hop settle: ETH → pair → curve.buy in one call. Unused gas
   // is refunded, so this is deliberately generous — the only cost of over-reserving

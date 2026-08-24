@@ -346,14 +346,45 @@ async function fireV2(plan, deps = {}) {
  *
  * @param {object} plan from prepareV2() in ethZap mode
  * @param {object} [deps] injectable for tests: { provider, keystore, getZapBuyTx,
- *   waitForReceipt, parseLaunch, warmPool, explainRevert, skipRecheck, recheckMs }
+ *   waitForZapRoute, waitForReceipt, parseLaunch, warmPool, sleep, explainRevert,
+ *   skipRecheck, recheckMs }
  */
+
+// A throttled quote is the endpoint being busy, NOT a missing route — fireZap has
+// already waited for the route to exist. These are the shapes the pons zap returns
+// under concurrent load (HTTP 409 "No price right now.", an occasional "No route",
+// or a 429): retry them with backoff instead of skipping the wallet.
+function isThrottleError(message) {
+  return /no price right now|no route for that pair|\b429\b|\b409\b|too many|rate.?limit|throttl/i.test(
+    String(message || '')
+  );
+}
+
+// Run `worker` over `items` with at most `limit` in flight at once, preserving
+// input order in the results. The zap endpoint throttles concurrent quotes, so
+// the buys go through a small pool rather than all at once — this both keeps the
+// quotes served and spreads the sends across blocks (less self-competition).
+async function mapWithConcurrency(items, limit, worker) {
+  const results = new Array(items.length);
+  let next = 0;
+  const runners = new Array(Math.max(1, Math.min(limit, items.length))).fill(0).map(async () => {
+    for (;;) {
+      const i = next++;
+      if (i >= items.length) return;
+      results[i] = await worker(items[i], i);
+    }
+  });
+  await Promise.all(runners);
+  return results;
+}
+
 async function fireZap(plan, deps = {}) {
   const rpc = deps.provider || provider;
   const ks = deps.keystore;
   const getZap = deps.getZapBuyTx || zeroexSwap.getZapBuyTx;
   const waitRoute = deps.waitForZapRoute || zeroexSwap.waitForZapRoute;
   const awaitReceipt = deps.waitForReceipt || waitForReceipt;
+  const sleep = deps.sleep || ((ms) => new Promise((res) => setTimeout(res, ms)));
   const parseLaunch = deps.parseLaunch || v2factory.parseLaunch;
   const warm = deps.warmPool || warmPool;
 
@@ -487,68 +518,76 @@ async function fireZap(plan, deps = {}) {
     };
   }
 
-  // One quote per wallet, taker = that wallet, all concurrent to shrink the gap
-  // between the route appearing and the buys firing. A failed quote skips ONLY its
-  // own wallet. Each wallet retries a couple of times: right at the edge of the
-  // route becoming routable, a firm per-taker quote can still momentarily miss.
-  const quotes = await Promise.all(
-    plan.buys.map(async (b) => {
-      let lastErr = 'no route';
-      for (let attempt = 0; attempt < 3; attempt++) {
-        try {
-          const zapTx = await getZap({ buyToken, sellAmountWei: b.amountIn, taker: b.address, slippageBps });
-          return { b, zapTx };
-        } catch (err) {
-          lastErr = err.message;
-          if (attempt < 2) await new Promise((res) => setTimeout(res, 800));
-        }
-      }
-      return { b, error: lastErr };
-    })
-  );
+  // Quote-and-send each wallet through a small concurrency pool. The zap endpoint
+  // throttles concurrent quotes (blasting all of them at once returns HTTP 409
+  // "No price right now." for most), so a bounded number are in flight at a time;
+  // a throttled quote is retried with backoff, not skipped, because the route is
+  // known to exist. Running them pooled also spreads the sends across blocks,
+  // which reduces the self-competition that reverts buys on the fresh curve.
+  // A wallet that still cannot be quoted, or whose broadcast fails, affects ONLY
+  // itself.
+  const sendConcurrency = Number(plan.zapSendConcurrency ?? config.zapSendConcurrency);
+  const maxAttempts = Math.max(1, Number(plan.zapQuoteMaxAttempts ?? config.zapQuoteMaxAttempts));
+  const backoffMs = Number(plan.zapQuoteBackoffMs ?? config.zapQuoteBackoffMs);
 
-  const results = await Promise.all(
-    quotes.map(async ({ b, zapTx, error }) => {
-      const entry = {
-        walletId: b.walletId,
-        address: b.address,
-        amountEth: b.amountEth,
-        exempt: b.exempt,
-        ...(b.isDev ? { isDev: true } : {}),
-      };
-      if (error || !zapTx) {
-        entry.status = 'skipped';
-        entry.reason = `zap quote failed: ${error || 'no route'}`;
-        return entry;
-      }
+  const buyOne = async (b) => {
+    const entry = {
+      walletId: b.walletId,
+      address: b.address,
+      amountEth: b.amountEth,
+      exempt: b.exempt,
+      ...(b.isDev ? { isDev: true } : {}),
+    };
+
+    // Fetch the firm per-taker quote, retrying a throttled response with backoff.
+    let zapTx = null;
+    let lastErr = 'no route';
+    for (let attempt = 0; attempt < maxAttempts; attempt++) {
       try {
-        const signer = ks.signer(b.walletId, rpc);
-        // Read AFTER the launch is mined, so the dev buyer's nonce is already its
-        // launch nonce + 1 — no special-casing.
-        const nonce = await rpc.getTransactionCount(b.address, 'pending');
-        const signable = {
-          to: zapTx.to,
-          data: zapTx.data,
-          value: BigInt(zapTx.value),
-          nonce,
-          gasLimit,
-          chainId,
-          ...fees,
-        };
-        const raw = await signer.signTransaction(signable);
-        const resp = await rpc.broadcastTransaction(raw);
-        entry.hash = resp.hash;
-        entry.nonce = nonce;
-        entry.status = 'sent';
-        entry.zapTo = zapTx.to;
-        entry.zapValue = BigInt(zapTx.value).toString();
+        zapTx = await getZap({ buyToken, sellAmountWei: b.amountIn, taker: b.address, slippageBps });
+        break;
       } catch (err) {
-        entry.status = 'failed';
-        entry.error = rpcMessage(err);
+        lastErr = err.message;
+        const retryable = isThrottleError(err.message);
+        if (!retryable || attempt === maxAttempts - 1) break;
+        await sleep(backoffMs * 2 ** attempt);
       }
+    }
+    if (!zapTx) {
+      entry.status = 'skipped';
+      entry.reason = `zap quote failed: ${lastErr}`;
       return entry;
-    })
-  );
+    }
+
+    try {
+      const signer = ks.signer(b.walletId, rpc);
+      // Read AFTER the launch is mined, so the dev buyer's nonce is already its
+      // launch nonce + 1 — no special-casing.
+      const nonce = await rpc.getTransactionCount(b.address, 'pending');
+      const signable = {
+        to: zapTx.to,
+        data: zapTx.data,
+        value: BigInt(zapTx.value),
+        nonce,
+        gasLimit,
+        chainId,
+        ...fees,
+      };
+      const raw = await signer.signTransaction(signable);
+      const resp = await rpc.broadcastTransaction(raw);
+      entry.hash = resp.hash;
+      entry.nonce = nonce;
+      entry.status = 'sent';
+      entry.zapTo = zapTx.to;
+      entry.zapValue = BigInt(zapTx.value).toString();
+    } catch (err) {
+      entry.status = 'failed';
+      entry.error = rpcMessage(err);
+    }
+    return entry;
+  };
+
+  const results = await mapWithConcurrency(plan.buys, sendConcurrency, buyOne);
 
   for (const r of results) {
     if (r.status !== 'sent') continue;
