@@ -106,20 +106,10 @@ async function prepareV2(input, deps = {}) {
     readTokenBalance: readTokenBalanceFn = (t, o) => erc20mod.readTokenBalance(t, o),
     getSymbol: getSymbolFn = (t) => erc20mod.getSymbol(t),
   } = deps;
-  const {
-    params,
-    launchConfigId,
-    pairToken = ZeroAddress,
-    wallets = [],
-    devBuyEth = 0,
-    bundleFunding = 'pair',
-  } = input;
+  const { params, launchConfigId, pairToken = ZeroAddress, wallets = [], devBuyEth = 0 } = input;
 
   if (!params || !params.name || !params.symbol) throw new Error('name and symbol are required');
   if (!params.logo) throw new Error('logo is required');
-  if (bundleFunding !== 'pair' && bundleFunding !== 'ethZap') {
-    throw new Error(`unknown bundleFunding "${bundleFunding}" — expected 'pair' or 'ethZap'`);
-  }
 
   const dev = devWalletFor(ks, deps.variant || DEFAULT_VARIANT);
   const warnings = [];
@@ -128,14 +118,6 @@ async function prepareV2(input, deps = {}) {
   // from a native launch is gated on it; when it is false the code path is the
   // one that has always run, byte for byte.
   const nonNative = pair !== ZeroAddress;
-
-  // ETH-zap bundle funding. A NON-native pair whose bundle wallets hold only ETH:
-  // each buy routes ETH → pair → curve.buy through pons's swap-zap, fetched per
-  // wallet AT FIRE TIME (the route calls the token's curve, which does not exist
-  // until the launch confirms). It is meaningless for a native pair — the wallets
-  // already hold ETH — so the flag is IGNORED there rather than rejected, exactly
-  // as the spec requires: a native launch is byte-for-byte unchanged.
-  const ethZap = nonNative && bundleFunding === 'ethZap';
 
   // Resolve every referenced wallet through the CALLER's keystore before any
   // chain work, so a foreign wallet id fails as "no wallet" rather than being
@@ -224,18 +206,9 @@ async function prepareV2(input, deps = {}) {
   // token's own units otherwise (a 6-decimal USDG dev buy of "5" is 5_000_000,
   // not 5e18). Parsing at the wrong scale would over- or under-buy by orders of
   // magnitude, so the decimals come from the factory's own economics.
-  //
-  // IN ETH-ZAP MODE THE ATOMIC DEV BUY IS ZERO. launchAndBuy takes the pair
-  // token, which a zap-funded dev does not hold — so the launch is a plain
-  // launchToken (no forwarder, no quoteIn), and a requested dev buy becomes a
-  // post-launch zap buyer instead (sized further down). Forcing devBuy to 0n here
-  // makes every "dev buy" branch below take its no-dev-buy path automatically:
-  // exemption limit 32 not 31, launch value = fee only, no dev approve.
-  const devBuy = ethZap
-    ? 0n
-    : nonNative
-      ? parseUnits(String(devBuyEth || 0), pairDecimals)
-      : parseEther(String(devBuyEth || 0));
+  const devBuy = nonNative
+    ? parseUnits(String(devBuyEth || 0), pairDecimals)
+    : parseEther(String(devBuyEth || 0));
 
   // ── who is exempt from the opening tax ────────────────────────────────────
   // The dev and the creator fee recipient are exempted by the factory itself.
@@ -421,181 +394,6 @@ async function prepareV2(input, deps = {}) {
       toSignable(launchTx, { nonce: launchNonce, gasLimit: launchGas, fees, chainId })
     ),
   };
-
-  // ── ETH-zap buys: sized here, NOT signed here ─────────────────────────────
-  // This is the whole difference the mode makes, and it returns early so the
-  // pre-signed native and pair paths below are reached ONLY when ethZap is false
-  // — they are byte-for-byte what they always were.
-  //
-  // A zap buy cannot be pre-signed: the transaction that spends the ETH is the
-  // pons swap-zap route, which bakes in the wallet as recipient and calls the
-  // token's curve, and that route can only be fetched once the curve exists —
-  // after the launch confirms. So prepareV2 sizes each wallet's ETH spend and
-  // stops; fireV2 fetches the quote per wallet and signs it at fire time.
-  if (ethZap) {
-    const zapBuyGas = BigInt(config.zapBuyGasLimit);
-    const zapBuyCost = gasCost(fees, zapBuyGas);
-    const buffer = parseEther(String(config.gasBufferEth));
-    const slippageBps = Number(input.slippageBps ?? config.zapSlippageBps);
-
-    const buys = [];
-
-    // A requested dev buy is NOT atomic in zap mode — it becomes another
-    // post-launch zap buyer. The factory exempts the dev wallet itself, so its
-    // taker=dev zap is untaxed without being declared in the exemption list. It
-    // is sized from the dev's native balance AFTER the launch's own fee + gas.
-    const devZapWei = parseEther(String(devBuyEth || 0));
-    if (devZapWei > 0n) {
-      const devNeededForZap =
-        launchFee + gasCost(fees, launchGas) + devZapWei + zapBuyCost + buffer;
-      if (devBalance >= devNeededForZap) {
-        buys.push({
-          walletId: dev.id,
-          address: dev.address,
-          amountEth: formatEther(devZapWei),
-          amountIn: devZapWei.toString(),
-          exempt: true,
-          zap: true,
-          isDev: true,
-        });
-      } else {
-        warnings.push(
-          `dev wallet ${dev.address}: ${formatEther(devBalance)} ETH does not cover the launch plus a ` +
-            `${formatEther(devZapWei)} ETH post-launch dev zap (needs ${formatEther(devNeededForZap)} ETH) — dev zap skipped`
-        );
-      }
-    }
-
-    for (const w of wallets) {
-      const wallet = known.get(w.walletId);
-      const balance = await prov.getBalance(wallet.address);
-
-      let amountIn;
-      if (w.mode === 'all') {
-        // Whole balance minus this buy's own gas and the buffer — the zap sends
-        // ETH as value AND pays gas from the same balance, so both come out here.
-        amountIn = spendableFromBalance(balance, zapBuyCost, zapBuyGas, buffer);
-        if (amountIn === 0n) {
-          warnings.push(
-            `${wallet.address}: balance ${formatEther(balance)} ETH does not cover the zap gas + buffer — skipped`
-          );
-          continue;
-        }
-      } else {
-        amountIn = parseEther(String(w.amountEth || 0));
-        if (amountIn <= 0n) {
-          warnings.push(`${wallet.address}: buy amount is zero — skipped`);
-          continue;
-        }
-        // The requested buy plus this zap's own gas + buffer must fit the
-        // balance. A zap buy reserves the heavy 900k-gas settle, so a fixed
-        // amount sized before ETH-zap was chosen (against a plain buy's lighter
-        // gas) can be a touch too large. Rather than drop the wallet from the
-        // bundle, TRIM the buy to the most it can afford — the same clamp `all`
-        // mode uses above — and only skip when nothing at all is affordable.
-        const affordable = spendableFromBalance(balance, zapBuyCost, zapBuyGas, buffer);
-        if (affordable === 0n) {
-          warnings.push(
-            `${wallet.address}: balance ${formatEther(balance)} ETH does not cover the zap gas + buffer — skipped`
-          );
-          continue;
-        }
-        if (amountIn > affordable) {
-          warnings.push(
-            `${wallet.address}: buy trimmed ${formatEther(amountIn)} → ${formatEther(affordable)} ETH ` +
-              `to cover the zap gas + buffer`
-          );
-          amountIn = affordable;
-        }
-      }
-
-      buys.push({
-        walletId: wallet.id,
-        address: wallet.address,
-        amountEth: formatEther(amountIn),
-        amountIn: amountIn.toString(),
-        exempt: true,
-        zap: true,
-      });
-    }
-
-    // The honest health warnings the pre-signed path also raises.
-    const funded = new Set(buys.filter((b) => !b.isDev).map((b) => b.address));
-    const declaredButSkipped = exemptions.filter((a) => !funded.has(a));
-    if (declaredButSkipped.length) {
-      warnings.push(
-        `${declaredButSkipped.length} wallet(s) are declared snipe-tax exempt but have no buy — harmless, but they will not be in the bundle`
-      );
-    }
-
-    // The one thing the operator MUST understand about this mode, stated plainly:
-    // zap buys are NOT atomic with the launch. They go out after the launch
-    // confirms — a block or more later — so the "nothing gets in front of the
-    // bundle" guarantee of the same-block pre-signed path does NOT hold. The
-    // exemption still protects the PRICE (the bundle buys untaxed; a non-exempt
-    // sniper in the gap pays the decaying opening tax), but it cannot stop a
-    // sniper from buying ahead in that window.
-    warnings.push(
-      'ETH-zap mode: bundle buys are fetched and sent AFTER the launch confirms, not atomically inside ' +
-        'it. The wallets buy untaxed (exemption preserved), but they are not guaranteed to be first — a ' +
-        'non-exempt buyer in the gap between launch and buys pays the opening snipe tax, not you.'
-    );
-
-    const totalWei = buys.reduce((s, b) => s + BigInt(b.amountIn), 0n);
-
-    return {
-      variant: deps.variant || DEFAULT_VARIANT,
-      protocol: 'v2',
-      mode: 'ethZap',
-      bundleFunding: 'ethZap',
-      token,
-      curve,
-      predictedBy: 'salt',
-      launchConfigId: Number(launchConfigId),
-      pairToken: pair,
-      pairSymbol,
-      pairDecimals,
-      launchFeeEth: formatEther(launchFee),
-      params: fullParams,
-      salt: fullParams.salt,
-      dryRun: config.dryRun,
-      canLaunch: gate.canLaunch,
-      launchEnabled: gate.enabled,
-      pairApproved: gate.approved,
-      supply: launchConfig.supply,
-      graduationThreshold:
-        pairEconomics ? pairEconomics.graduationThreshold.toString() : launchConfig.graduationThreshold,
-      curveFeeBps: launchConfig.curveFeeBps,
-      creatorTaxBps: fullParams.creatorTaxBps,
-      buybackEnabled: fullParams.buybackEnabled,
-      snipeTax: {
-        startBps: cfgs.snipeTaxStartBps,
-        seconds: cfgs.snipeTaxSeconds,
-        exemptions,
-        max: exemptionLimit,
-      },
-      launch: signedLaunch,
-      buys,
-      // The buys are denominated in ETH — that is what the wallets spend. What
-      // reaches the curve is in the pair token and is only known at fire time
-      // from the zap rate, so the precise supply share is NOT precomputed. Left
-      // null deliberately (a partial share object would be a lie, and the console
-      // reads share.bundle.bps when share is present).
-      share: null,
-      slippageBps,
-      // ETH the bundle spends in total (not what lands in the curve).
-      totalBuyEth: formatEther(totalWei),
-      dryRun: config.dryRun,
-      fees: Object.fromEntries(
-        Object.entries(fees).map(([k, v]) => [k, typeof v === 'bigint' ? v.toString() : v])
-      ),
-      // The zap buy's gas limit, baked so fireV2 signs each buy against the same
-      // figure the sizing above reserved native ETH for.
-      zapBuyGas: zapBuyGas.toString(),
-      chainId: chainId.toString(),
-      warnings,
-    };
-  }
 
   // ── the buys ──────────────────────────────────────────────────────────────
   // Signed here, against the predicted curve. Nothing is left to do at fire

@@ -102,31 +102,16 @@ router.get('/eth-price', async (req, res) => {
 // size a "reserve gas for N sells" fund without knowing the gas limits (those
 // live here). Fees carry the same +25% headroom a launch uses, so the reserve
 // errs high rather than leaving a wallet unable to sell.
-//
-// zapBuyGasEth is the cost of an ETH-zap buy specifically: a zap is a multi-hop
-// settle (ETH → pair → curve.buy in one call) the backend reserves
-// config.zapBuyGasLimit (900k) for — far more than a plain curve.buy — and the
-// preflight in prepareV2's ethZap branch skips a wallet unless it holds
-// buy + this gas + gasBufferEth. So the console must size a zap-funded bundle
-// against THIS figure plus gasBufferEth, not buyGasEth, or every distributed
-// buy is sized too large and the backend skips it for lack of gas. Both are
-// returned so a native / pre-signed launch keeps sizing against buyGasEth
-// unchanged while a zap launch uses the zap pair.
 router.get('/gas', async (req, res, next) => {
   try {
     const fees = await getFees(25);
     const perGas = fees.maxFeePerGas ?? fees.gasPrice ?? 0n;
     const buyGasWei = BigInt(config.buyGasLimit) * perGas;
     const sellGasWei = (APPROVE_GAS + SELL_GAS) * perGas;
-    const zapBuyGasWei = BigInt(config.zapBuyGasLimit) * perGas;
     res.json({
       maxFeePerGasWei: perGas.toString(),
       buyGasEth: formatEther(buyGasWei),
       sellGasEth: formatEther(sellGasWei),
-      // The zap buy's gas cost and the fixed buffer prepareV2 adds on top of it,
-      // together the exact `zapBuyCost + buffer` the ethZap preflight requires.
-      zapBuyGasEth: formatEther(zapBuyGasWei),
-      gasBufferEth: String(config.gasBufferEth),
     });
   } catch (err) {
     next(err);
