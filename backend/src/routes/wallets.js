@@ -23,7 +23,8 @@ const { requireApiKey, requireAuthConfigured } = require('../middleware/auth');
 const { findSellable, withDeadline } = require('../evm/v2/holdings');
 const { prepareSell } = require('../bundle/prepareSell');
 const { fireSell } = require('../bundle/fireSell');
-const { jsonSafe } = require('./launch');
+const { distributePair } = require('../bundle/distributePair');
+const { jsonSafe, withLaunchLock } = require('./launch');
 const relayFunding = require('../relay/funding');
 const timedRelayFunding = require('../relay/timedFunding');
 const { storeFor } = require('../v4/store');
@@ -309,6 +310,49 @@ router.post('/v2/relay/fund', requireApiKey, async (req, res, next) => {
     next(err);
   }
 });
+
+// POST /api/v2/bundle/distribute-pair — spread the pair token (SPCX) from the
+// dev wallet (or a named source) to the bundle wallets, so each can pre-sign an
+// untaxed pair-token buy that fires in the launch's first block. dryRun:true
+// validates and prices without moving anything.
+// Shares the launch lock: distribute-pair spends the dev wallet, the same wallet
+// a launch signs from. Holding the one lock makes distribution and launching
+// mutually exclusive per account, so neither reads the other's pending nonce.
+router.post('/v2/bundle/distribute-pair', requireApiKey, withLaunchLock(async (req, res, next) => {
+  try {
+    const ks = keystoreFor(req.user.id);
+    const { variant = DEFAULT_VARIANT, sourceWalletId, pairToken, transfers, dryRun = false } = req.body || {};
+    const out = await distributePair(
+      { variant, sourceWalletId, pairToken, transfers, dryRun },
+      { keystore: ks }
+    );
+    if (!out.dryRun) {
+      activityFor(req.user.id).record(
+        'fund',
+        `[${variant}] distributed ${out.pairSymbol}: ${out.confirmed}/${out.count} wallet(s)` +
+          (out.failed ? `, ${out.failed} failed` : ''),
+        {
+          variant,
+          pairToken: out.pairToken,
+          pairSymbol: out.pairSymbol,
+          source: out.source,
+          totalAmount: out.totalAmount,
+          transfers: out.transfers.map((t) => ({
+            walletId: t.walletId,
+            address: t.address,
+            amount: t.amount,
+            hash: t.hash,
+            status: t.status,
+            error: t.error,
+          })),
+        }
+      );
+    }
+    res.json(out);
+  } catch (err) {
+    next(err);
+  }
+}));
 
 // GET /api/v2/relay/status?requestId=0x... — Relay intent status.
 router.get('/v2/relay/status', requireApiKey, async (req, res, next) => {

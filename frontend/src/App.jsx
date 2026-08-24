@@ -669,6 +669,15 @@ export default function App() {
             // Sized in the launch form (step 5) but read here: an ETH-zap launch
             // reserves the 900k zap gas per buy, so the auto-fill must too.
             zapMode={Boolean(sizing?.zapMode)}
+            // Also from the launch form: the quote asset and funding mode drive
+            // the pre-launch "Distribute <pair>" step. Default nativePair to true
+            // so that step stays hidden until the form has reported its shape.
+            pairToken={sizing?.pairToken}
+            pairSymbol={sizing?.pairSymbol}
+            nativePair={sizing?.nativePair ?? true}
+            bundleFunding={sizing?.bundleFunding}
+            explorer={health?.explorer || ''}
+            live={live}
           />
           <FundPanel
             variant={tab}

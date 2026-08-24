@@ -146,8 +146,18 @@ export default function LaunchForm({
       // each buy's gas reserve against the 900k zap cost when it is, so it has
       // to know here — see WalletsPanel / bundleReserve.js.
       zapMode,
+      // The quote asset and funding mode this launch will use, handed up so the
+      // wallet table can offer the pre-launch "Distribute <pair>" step (step 3).
+      // That step is only enabled for a NON-native pair funded in 'pair' mode;
+      // a native pair (and every v1 launch) reports nativePair:true, so it stays
+      // hidden there.
+      pairToken: bodyPairToken(pair.address),
+      pairSymbol: pair.symbol,
+      pairDecimals: pair.decimals,
+      nativePair,
+      bundleFunding: funding,
     });
-  }, [protocol, lc, isV2, f.creatorTaxBps, f.devBuyEth, zapMode]);
+  }, [protocol, lc, isV2, f.creatorTaxBps, f.devBuyEth, zapMode, pair.address, pair.symbol, nativePair, funding]);
 
   /**
    * The three facts this step cannot be armed without, pushed up to App.
@@ -404,23 +414,27 @@ export default function LaunchForm({
           <label>
             Bundle funding
             <select value={bundleFunding} onChange={(e) => setBundleFunding(e.target.value)}>
-              <option value="pair">Bundles hold the pair asset (pre-signed)</option>
-              <option value="ethZap">Bundles hold ETH (auto-zap via Pons)</option>
+              <option value="pair">Bundles hold the pair asset (pre-signed) — recommended</option>
+              <option value="ethZap">Bundles hold ETH (auto-zap via Pons) — not recommended</option>
             </select>
             <span className="hint">
               {zapMode ? (
                 <>
+                  <b className="forever">Not recommended</b> — it fires{' '}
+                  <b>after the launch confirms</b>, so it misses the first-block snipe window. Use{' '}
+                  <b>Distribute {pair.symbol}</b> in step 3 with pair funding instead.{' '}
                   <b>ETH-zap:</b> fund every bundle wallet with <b>ETH only</b> — no {pair.symbol}{' '}
                   needed. Each buy routes ETH&nbsp;→&nbsp;{pair.symbol}&nbsp;→&nbsp;curve in one
-                  transaction, fetched just-in-time <b>after the launch confirms</b>. The snipe-tax
+                  transaction, fetched just-in-time after the launch confirms. The snipe-tax
                   exemption still applies, so the bundle buys untaxed — but because the buys are not
                   atomic with the launch, they are not guaranteed to be first.
                 </>
               ) : (
                 <>
-                  <b>Pre-signed:</b> every bundle wallet must already hold {pair.symbol}; buys are
-                  signed up front and fire the instant the launch lands. Switch to ETH-zap to fund
-                  the wallets with ETH instead.
+                  <b>Pre-signed (recommended):</b> every bundle wallet must already hold {pair.symbol};
+                  buys are signed up front and fire the instant the launch lands. Use{' '}
+                  <b>Distribute {pair.symbol}</b> in step 3 to spread {pair.symbol} across the bundle
+                  before launching.
                 </>
               )}
             </span>
