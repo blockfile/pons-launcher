@@ -22,6 +22,7 @@ const { provider, warmPool } = require('../evm/provider');
 const { rpcMessage } = require('../evm/errors');
 const v2factory = require('../evm/v2/factory');
 const { waitForReceipt } = require('../evm/receipt');
+const zeroexSwap = require('../evm/v2/zeroexSwap');
 
 // A last, HARD-CAPPED re-check that the launch still simulates, run at fire time
 // to catch chain state that drifted between preflight and now. It is one
@@ -108,6 +109,15 @@ async function fireV2(plan, deps = {}) {
         ...(b.approve ? { approve: { hash: null, status: 'simulated' } } : {}),
       })),
     };
+  }
+
+  // ETH-zap is a wholly separate live flow: the buys are NOT pre-signed (they
+  // cannot be — the zap route calls a curve that does not exist until the launch
+  // lands), so the "everything is signed" checks below do not apply. Branch here,
+  // after the dry-run short-circuit, so the pre-signed native and pair paths that
+  // follow are byte-for-byte unchanged.
+  if (plan.bundleFunding === 'ethZap') {
+    return fireZap(plan, deps);
   }
 
   if (!plan.launch?.raw) throw new Error('plan has no signed launch');
@@ -310,4 +320,223 @@ async function fireV2(plan, deps = {}) {
   };
 }
 
-module.exports = { fireV2, recheckLaunch, RECHECK_MS };
+/**
+ * The ETH-zap fire path.
+ *
+ *   warm → re-check the plain launch → broadcast the launch → WAIT for it to
+ *   confirm → fetch one zap quote per wallet (taker = that wallet) concurrently →
+ *   sign each at fire time → broadcast → collect receipts.
+ *
+ * TWO things make this fundamentally different from the pre-signed path above,
+ * and both are inherent to the zap, not choices:
+ *
+ *   1. The buys wait for the launch. A pre-signed buy is broadcast the instant
+ *      the launch is (the curve address is already known); a zap buy cannot be,
+ *      because the swap route calls the token's curve and that curve does not
+ *      exist until the launch is mined. So there IS a gap here — the bundle is no
+ *      longer guaranteed first. The snipe-tax exemption still makes the bundle's
+ *      buys untaxed; a non-exempt buyer in the gap pays the decaying opening tax.
+ *   2. The buys are signed here. prepareV2 signed nothing for them, so this needs
+ *      the keystore. Each wallet's nonce is read AFTER the launch is mined, so the
+ *      dev buyer's post-launch nonce is already its launch nonce + 1 with no
+ *      special handling.
+ *
+ * A wallet whose quote fails is skipped with the reason recorded — never an abort
+ * of the whole bundle.
+ *
+ * @param {object} plan from prepareV2() in ethZap mode
+ * @param {object} [deps] injectable for tests: { provider, keystore, getZapBuyTx,
+ *   waitForReceipt, parseLaunch, warmPool, explainRevert, skipRecheck, recheckMs }
+ */
+async function fireZap(plan, deps = {}) {
+  const rpc = deps.provider || provider;
+  const ks = deps.keystore;
+  const getZap = deps.getZapBuyTx || zeroexSwap.getZapBuyTx;
+  const awaitReceipt = deps.waitForReceipt || waitForReceipt;
+  const parseLaunch = deps.parseLaunch || v2factory.parseLaunch;
+  const warm = deps.warmPool || warmPool;
+
+  if (!ks || typeof ks.signer !== 'function') {
+    throw new Error('ETH-zap fire needs a keystore to sign each buy at fire time');
+  }
+  if (!plan.launch?.raw) throw new Error('plan has no signed launch');
+
+  await warm();
+
+  // The launch is a plain launchToken (no dev buy, no allowance to wait on), so
+  // the bounded pre-launch re-check runs exactly as on the native path.
+  if (!deps.skipRecheck) {
+    let tx = null;
+    try {
+      const p = Transaction.from(plan.launch.raw);
+      tx = { to: p.to, data: p.data, value: p.value, from: p.from };
+    } catch (_err) {
+      // Unparseable raw — skip the re-check; prepareV2 already estimated this.
+    }
+    if (tx) {
+      const rc = await recheckLaunch(rpc, tx, deps.explainRevert || v2factory.explainRevert, {
+        timeoutMs: deps.recheckMs ?? RECHECK_MS,
+      });
+      if (!rc.ok) {
+        throw new Error(
+          `the launch reverts as of now, so nothing was broadcast: ${rc.reason}. ` +
+            'State changed since preflight — re-run preflight before launching.'
+        );
+      }
+    }
+  }
+
+  const t0 = Date.now();
+  const launchResp = await rpc.broadcastTransaction(plan.launch.raw);
+  const sentMs = Date.now() - t0;
+
+  // The buys CANNOT go out yet: the zap route calls the token's curve, which does
+  // not exist until the launch is mined. Wait for the receipt before quoting.
+  const launchReceipt = await awaitReceipt(rpc, launchResp.hash);
+  const launch = {
+    hash: launchResp.hash,
+    status: !launchReceipt ? 'pending' : launchReceipt.status === 1 ? 'confirmed' : 'reverted',
+    blockNumber: launchReceipt?.blockNumber ?? null,
+  };
+
+  const skipAll = (reason) =>
+    plan.buys.map((b) => ({
+      walletId: b.walletId,
+      address: b.address,
+      amountEth: b.amountEth,
+      exempt: b.exempt,
+      ...(b.isDev ? { isDev: true } : {}),
+      status: 'skipped',
+      reason,
+    }));
+
+  // No curve, no buys — and nothing was sent, so nothing can strand.
+  if (!launchReceipt || launchReceipt.status !== 1) {
+    return {
+      protocol: 'v2',
+      mode: 'ethZap',
+      token: plan.token,
+      curve: plan.curve,
+      launch,
+      buys: skipAll(`launch ${launch.status} — no zap buys attempted (the curve was never created)`),
+      confirmed: 0,
+      skipped: plan.buys.length,
+      sentMs,
+      burstMs: Date.now() - t0,
+    };
+  }
+
+  // The launch event is the authority on where the token is. If it disagrees with
+  // the plan, buying would buy the WRONG token — abort the buys and say so.
+  let mismatch = null;
+  const actual = parseLaunch(launchReceipt);
+  if (actual) {
+    launch.token = actual.token;
+    launch.curve = actual.curve;
+    if (actual.curve.toLowerCase() !== String(plan.curve).toLowerCase()) {
+      mismatch = `launch created curve ${actual.curve}, but the plan predicted ${plan.curve} — refusing to zap-buy the wrong token`;
+    }
+  }
+  if (mismatch) {
+    return {
+      protocol: 'v2',
+      mode: 'ethZap',
+      token: (actual && actual.token) || plan.token,
+      curve: plan.curve,
+      launch,
+      buys: skipAll('curve mismatch — see `mismatch`'),
+      confirmed: 0,
+      skipped: plan.buys.length,
+      sentMs,
+      burstMs: Date.now() - t0,
+      mismatch,
+    };
+  }
+
+  const buyToken = (actual && actual.token) || plan.token;
+  const slippageBps = Number(plan.slippageBps ?? config.zapSlippageBps);
+  const gasLimit = BigInt(plan.zapBuyGas || config.zapBuyGasLimit);
+  const chainId = BigInt(plan.chainId || config.chainId);
+  // The fees prepareV2 baked (strings), carried with the plan's +25% headroom.
+  const fees = plan.fees || {};
+
+  // One quote per wallet, taker = that wallet, all concurrent to shrink the gap
+  // between the launch landing and the buys firing. A failed quote skips ONLY its
+  // own wallet.
+  const quotes = await Promise.all(
+    plan.buys.map(async (b) => {
+      try {
+        const zapTx = await getZap({ buyToken, sellAmountWei: b.amountIn, taker: b.address, slippageBps });
+        return { b, zapTx };
+      } catch (err) {
+        return { b, error: err.message };
+      }
+    })
+  );
+
+  const results = await Promise.all(
+    quotes.map(async ({ b, zapTx, error }) => {
+      const entry = {
+        walletId: b.walletId,
+        address: b.address,
+        amountEth: b.amountEth,
+        exempt: b.exempt,
+        ...(b.isDev ? { isDev: true } : {}),
+      };
+      if (error || !zapTx) {
+        entry.status = 'skipped';
+        entry.reason = `zap quote failed: ${error || 'no route'}`;
+        return entry;
+      }
+      try {
+        const signer = ks.signer(b.walletId, rpc);
+        // Read AFTER the launch is mined, so the dev buyer's nonce is already its
+        // launch nonce + 1 — no special-casing.
+        const nonce = await rpc.getTransactionCount(b.address, 'pending');
+        const signable = {
+          to: zapTx.to,
+          data: zapTx.data,
+          value: BigInt(zapTx.value),
+          nonce,
+          gasLimit,
+          chainId,
+          ...fees,
+        };
+        const raw = await signer.signTransaction(signable);
+        const resp = await rpc.broadcastTransaction(raw);
+        entry.hash = resp.hash;
+        entry.nonce = nonce;
+        entry.status = 'sent';
+        entry.zapTo = zapTx.to;
+        entry.zapValue = BigInt(zapTx.value).toString();
+      } catch (err) {
+        entry.status = 'failed';
+        entry.error = rpcMessage(err);
+      }
+      return entry;
+    })
+  );
+
+  for (const r of results) {
+    if (r.status !== 'sent') continue;
+    const receipt = await awaitReceipt(rpc, r.hash);
+    r.status = !receipt ? 'pending' : receipt.status === 1 ? 'confirmed' : 'reverted';
+    r.blockNumber = receipt?.blockNumber ?? null;
+  }
+  const burstMs = Date.now() - t0;
+
+  return {
+    protocol: 'v2',
+    mode: 'ethZap',
+    token: buyToken,
+    curve: plan.curve,
+    launch,
+    buys: results,
+    confirmed: results.filter((r) => r.status === 'confirmed').length,
+    skipped: results.filter((r) => r.status === 'skipped').length,
+    sentMs,
+    burstMs,
+  };
+}
+
+module.exports = { fireV2, fireZap, recheckLaunch, RECHECK_MS };

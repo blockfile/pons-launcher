@@ -73,6 +73,13 @@ export default function LaunchForm({
   // The v2 quote asset. Native ETH (the zero-address sentinel) by default, which
   // is byte-for-byte the backend's own default — a native launch is unchanged.
   const [pairToken, setPairToken] = useState(NATIVE_PAIR);
+  // How the bundle wallets are funded for a NON-native pair:
+  //   'pair'   — they hold the pair token, and every buy is pre-signed (today's
+  //              behaviour, and the backend default).
+  //   'ethZap' — they hold only ETH, and each buy routes ETH → pair → curve.buy
+  //              through pons's swap-zap, fetched just-in-time after the launch
+  //              confirms. Meaningless for a native pair, where it is ignored.
+  const [bundleFunding, setBundleFunding] = useState('pair');
   const [dexId, setDexId] = useState(0);
   const [busy, setBusy] = useState('');
   const [uploading, setUploading] = useState(false);
@@ -98,6 +105,12 @@ export default function LaunchForm({
   const pairTokens = pairOptions(v2);
   const pair = selectedPair(v2, pairToken);
   const nativePair = isNativePair(pair.address);
+  // The funding mode that actually applies: a native pair always funds in ETH the
+  // old way, so it collapses to 'pair' (which the backend ignores for native)
+  // regardless of what the toggle last held. ethZap only ever means anything for a
+  // non-native pair.
+  const funding = nativePair ? 'pair' : bundleFunding;
+  const zapMode = isV2 && !nativePair && funding === 'ethZap';
 
   // v2's factory is a different contract with its own configs and its own
   // gating, so they are read separately and only when the operator asks for it.
@@ -114,6 +127,7 @@ export default function LaunchForm({
   useEffect(() => {
     setLaunchConfigId(0);
     setPairToken(NATIVE_PAIR);
+    setBundleFunding('pair');
   }, [protocol]);
 
   // The amounts are typed two panels up, but what they BUY is decided here: the
@@ -197,6 +211,10 @@ export default function LaunchForm({
         // sentinel, which is the backend's own default, so ETH is unchanged; a
         // chosen RWA sends its own address for the factory to price against.
         pairToken: bodyPairToken(pair.address),
+        // How the bundle wallets are funded. 'pair' is the backend default (and
+        // the only meaningful value for a native pair); 'ethZap' tells the backend
+        // to size buys in ETH and zap them in just-in-time after launch.
+        bundleFunding: funding,
         devBuyEth: f.devBuyEth || 0,
         wallets: bundle,
       };
@@ -259,7 +277,12 @@ export default function LaunchForm({
   // flat 32 let a 32-wallet bundle with a dev buy pass here and revert
   // ExemptionListTooLong on-chain — the failure that stranded a bundle's ETH.
   const hasDevBuy = Number(f.devBuyEth || 0) > 0;
-  const exemptionLimit = hasDevBuy
+  // Only a dev buy that goes through the FORWARDER (launchAndBuy) costs an
+  // exemption slot. In ETH-zap mode the launch is a plain launchToken and the dev
+  // buy becomes a post-launch zap buyer, so the forwarder is never used and the
+  // full 32-slot cap applies even with a dev buy.
+  const forwarderDevBuy = hasDevBuy && !zapMode;
+  const exemptionLimit = forwarderDevBuy
     ? active?.maxExemptionsWithDevBuy ?? MAX_EXEMPTIONS - 1
     : active?.maxExemptions ?? MAX_EXEMPTIONS;
   const overExempt = isV2 && buying > exemptionLimit;
@@ -373,6 +396,32 @@ export default function LaunchForm({
             </span>
           </label>
         )}
+        {isV2 && !nativePair && (
+          <label>
+            Bundle funding
+            <select value={bundleFunding} onChange={(e) => setBundleFunding(e.target.value)}>
+              <option value="pair">Bundles hold the pair asset (pre-signed)</option>
+              <option value="ethZap">Bundles hold ETH (auto-zap via Pons)</option>
+            </select>
+            <span className="hint">
+              {zapMode ? (
+                <>
+                  <b>ETH-zap:</b> fund every bundle wallet with <b>ETH only</b> — no {pair.symbol}{' '}
+                  needed. Each buy routes ETH&nbsp;→&nbsp;{pair.symbol}&nbsp;→&nbsp;curve in one
+                  transaction, fetched just-in-time <b>after the launch confirms</b>. The snipe-tax
+                  exemption still applies, so the bundle buys untaxed — but because the buys are not
+                  atomic with the launch, they are not guaranteed to be first.
+                </>
+              ) : (
+                <>
+                  <b>Pre-signed:</b> every bundle wallet must already hold {pair.symbol}; buys are
+                  signed up front and fire the instant the launch lands. Switch to ETH-zap to fund
+                  the wallets with ETH instead.
+                </>
+              )}
+            </span>
+          </label>
+        )}
         {isV2 ? (
           <label>
             Creator tax (bps)
@@ -456,7 +505,7 @@ export default function LaunchForm({
             </li>
             <li>
               {buying} of your wallets declared exempt (max {exemptionLimit}
-              {hasDevBuy ? ', one lower because of the dev buy' : ''})
+              {forwarderDevBuy ? ', one lower because of the dev buy' : ''})
               {overExempt
                 ? ` — too many by ${buying - exemptionLimit}, the launch would revert (ExemptionListTooLong)`
                 : ' — they buy at the untaxed price'}
@@ -466,6 +515,14 @@ export default function LaunchForm({
               <li>
                 priced in <b>native ETH</b> — the dev buy and every bundle buy are spent in ETH, as
                 today
+              </li>
+            ) : zapMode ? (
+              <li>
+                priced in <b>{pair.symbol}</b>, but bundles fund in <b>ETH</b> — each buy auto-zaps
+                ETH&nbsp;→&nbsp;{pair.symbol}&nbsp;→&nbsp;curve via Pons, fetched{' '}
+                <b>just-in-time after launch</b>. Wallets need only ETH (buy amounts are in ETH). The
+                dev buy, if any, is <b>not atomic</b> here — it fires as another post-launch zap, so
+                nothing is guaranteed ahead of the bundle, though the exemption still keeps it untaxed
               </li>
             ) : (
               <li>

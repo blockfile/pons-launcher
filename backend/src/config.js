@@ -186,6 +186,26 @@ const config = {
   // A V4 seed wallet is claimable by V1/V3 once it has been funded and has aged
   // at least this many hours — the "done seasoning" gate. 24h by default.
   seasonedMinHours: num(process.env.SEASONED_MIN_HOURS, 24),
+
+  // ── pons "ETH-zap" bundle buys ────────────────────────────────────────────
+  // Pons's own swap-zap endpoint. For a curve priced in a NON-ETH pair token,
+  // a bundle wallet holding only ETH can still buy in one transaction: the zap
+  // routes ETH → pair → curve.buy, with the taker (the wallet itself) as the
+  // recipient, so the snipe-tax exemption still applies. No auth. The route
+  // bakes recipient=taker and carries a ~6-minute deadline and calls curve.buy,
+  // so a quote can only be fetched AFTER the launch confirms — see
+  // evm/v2/zeroexSwap.js and the ethZap branch of bundle/fireV2.js.
+  zapUrl: process.env.PONS_ZAP_URL || 'https://www.ponsfamily.com/api/zeroex-swap',
+  // Slippage tolerance for a zap buy, in basis points. 1% by default: these fire
+  // just behind a launch into a curve whose opening price the config fixes, so
+  // the ETH→pair leg is the only place slippage really bites.
+  zapSlippageBps: num(process.env.PONS_ZAP_SLIPPAGE_BPS, 100),
+  // Gas limit for a zap buy. Higher than a plain curve.buy (buyGasLimit) because
+  // the zap is a multi-hop settle: ETH → pair → curve.buy in one call. Unused gas
+  // is refunded, so this is deliberately generous — the only cost of over-reserving
+  // is that a wallet buying its "entire balance" holds a little more ETH back for
+  // gas. Raise it if a live zap ever runs out of gas.
+  zapBuyGasLimit: num(process.env.PONS_ZAP_BUY_GAS_LIMIT, 900000),
 };
 
 /**
