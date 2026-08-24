@@ -92,6 +92,13 @@ const FACTORY_V2_ABI = [
 
   'function getLaunchedToken(address token) view returns (tuple(address token, address curve, address deployer, address creatorFeeRecipient, address pairToken, uint256 graduationThreshold, uint24 poolFee, int24 tickSpacing, uint16 creatorTaxBps, bool buybackEnabled, uint8 phase, uint256 sweptQuote, uint256 sweptTokens, uint256 sweptAt, bool exists))',
 
+  // Re-point a launch's creator-fee recipient. Callable ONLY by the token's
+  // CURRENT creatorFeeRecipient (the factory reverts NotCreatorFeeRecipient
+  // otherwise), and it takes effect immediately. This is the second half of
+  // enabling holder-fee sharing: point the recipient at a per-token distributor
+  // deployed by the holder-fee factory. See evm/v2/holderFees.js.
+  'function transferCreatorFeeRecipient(address token, address newRecipient)',
+
   'event TokenLaunched(address indexed token, address indexed curve, address indexed deployer, address pairToken, uint256 launchConfigId, uint256 graduationThreshold)',
 
   // The ONLY authoritative way to enumerate approved pair tokens — there is no
@@ -146,6 +153,29 @@ const CURVE_V2_ABI = [
   'function currentSnipeTaxBps(address recipient) view returns (uint256)',
   'function snipeTaxStartBps() view returns (uint256)',
   'function snipeTaxSeconds() view returns (uint256)',
+];
+
+// The HOLDER-FEE DISTRIBUTOR FACTORY (0x70e95CC5…), verified on Robinhood Chain.
+//
+// createFor(token) deploys a per-token distributor that splits the creator fee
+// across the token's holders, and returns its address. It is PERMISSIONLESS —
+// anyone may create the distributor for any pons launch — but the address is a
+// plain CREATE and so is NOT predictable: read it back from the DistributorCreated
+// event, or from distributorOf() once created. distributorOf() returns the zero
+// address until the distributor exists, then the distributor forever.
+//
+// The two custom errors are transcribed so a revert is named rather than shown as
+// a bare selector, exactly like V2_ERROR_ABI does for the launch path:
+//   · DistributorAlreadyExists(address existing) — createFor called twice; the
+//     revert data carries the address that already exists, which the caller
+//     decodes and reuses (the operation is idempotent).
+//   · UnknownLaunch(address) — the token is not a pons launch this factory knows.
+const HOLDER_FEE_FACTORY_ABI = [
+  'function createFor(address token) returns (address distributor)',
+  'function distributorOf(address token) view returns (address)',
+  'event DistributorCreated(address indexed token, address distributor)',
+  'error DistributorAlreadyExists(address existing)',
+  'error UnknownLaunch(address token)',
 ];
 
 // The factory refuses a list longer than this (MAX_SNIPE_TAX_EXEMPTIONS).
@@ -243,6 +273,7 @@ module.exports = {
   MEME_HOOK_V2_ABI,
   CURVE_V2_ABI,
   V2_ERROR_ABI,
+  HOLDER_FEE_FACTORY_ABI,
   MAX_SNIPE_TAX_EXEMPTIONS,
   MAX_EXEMPTIONS_VIA_FORWARDER,
 };

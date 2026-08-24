@@ -44,6 +44,15 @@ const config = {
   v2FactoryAddress:
     lowerOrNull(process.env.PONS_V2_FACTORY) || '0x7ed598bcef8bd9edd8c97a195c6d13f40801ec7e',
 
+  // The pons v2 holder-fee distributor FACTORY. Permissionless: createFor(token)
+  // deploys a per-token distributor, and pointing the token's creatorFeeRecipient
+  // at it (via the core factory's transferCreatorFeeRecipient) routes the
+  // creator's cut of every trade to the token's holders instead of one wallet.
+  // A non-secret on-chain constant, verified on Robinhood Chain; overridable only
+  // so a redeployment does not need a code change. See evm/v2/holderFees.js.
+  holderFeeFactory:
+    lowerOrNull(process.env.HOLDER_FEE_FACTORY) || '0x70e95cc5f03db2906081e7a8d16e4c4209291507',
+
   // Optional Disperse contract (contracts/Disperse.sol). When set, funding
   // five or more wallets goes out as ONE transaction instead of N concurrent
   // broadcasts — the pattern that tripped the provider's rate limiter and

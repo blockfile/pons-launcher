@@ -19,6 +19,7 @@ import DispersersPanel from './components/DispersersPanel.jsx';
 import LaunchForm from './components/LaunchForm.jsx';
 import ResultPanel from './components/ResultPanel.jsx';
 import SellPanel from './components/SellPanel.jsx';
+import HolderFeesPanel from './components/HolderFeesPanel.jsx';
 import HistoryPanel from './components/HistoryPanel.jsx';
 import ActivityPanel from './components/ActivityPanel.jsx';
 import BundlerV2Panel from './components/BundlerV2Panel.jsx';
@@ -726,6 +727,19 @@ export default function App() {
             report={report}
             onState={setSellable}
           />
+
+          {/* Post-launch, v2 only: route a launched token's creator fee to its
+              holders. Its own panel rather than a numbered step — it is an
+              optional management action, not part of the launch sequence, and it
+              touches the real pons v2 holder-fee factory. */}
+          {tab === 'v2' && (
+            <HolderFeesPanel
+              explorer={health?.explorer || ''}
+              credential={credential}
+              live={live}
+              wallets={wallets}
+            />
+          )}
 
           </div>
           </>

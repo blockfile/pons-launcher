@@ -19,6 +19,11 @@ const distributorRoutes = require('./src/routes/distributor');
 // whole strategy. See src/v3/roles.js for why it does not share variants.js.
 const v3Routes = require('./src/routes/v3');
 const v4Routes = require('./src/routes/v4');
+// Holder-fee sharing: re-point a launched v2 token's creator fee at a per-token
+// distributor so it pays the holders. Its own router, sharing only the factory
+// and the keystore — see src/routes/holderFees.js. Unrelated to distributorRoutes
+// above, which is the launcher's own bundle distributor.
+const holderFeeRoutes = require('./src/routes/holderFees');
 const v4Runner = require('./src/v4/runner');
 const { rpcMessage } = require('./src/evm/errors');
 
@@ -65,6 +70,7 @@ app.use('/api', launchRoutes);
 app.use('/api', distributorRoutes);
 app.use('/api', v3Routes);
 app.use('/api', v4Routes);
+app.use('/api', holderFeeRoutes);
 
 app.use((req, res) => {
   if (req.path.startsWith('/api/')) return res.status(404).json({ error: 'not found' });
