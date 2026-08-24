@@ -6,6 +6,7 @@ import LogoField from './LogoField.jsx';
 import Modal, { Fact } from './Modal.jsx';
 import { pct } from './Share.jsx';
 import { rolesFor } from '../variant.js';
+import { NATIVE_PAIR, isNativePair, pairOptions, selectedPair, bodyPairToken } from '../pairAssets.js';
 
 // The chain makes a block every ~100ms, but the restriction window is counted
 // in the EVM's own block number, which advances roughly every 16 seconds. So
@@ -63,6 +64,9 @@ export default function LaunchForm({
   const [protocol, setProtocol] = useState('v1');
   const [v2, setV2] = useState(null);
   const [launchConfigId, setLaunchConfigId] = useState(0);
+  // The v2 quote asset. Native ETH (the zero-address sentinel) by default, which
+  // is byte-for-byte the backend's own default — a native launch is unchanged.
+  const [pairToken, setPairToken] = useState(NATIVE_PAIR);
   const [dexId, setDexId] = useState(0);
   const [busy, setBusy] = useState('');
   const [uploading, setUploading] = useState(false);
@@ -80,6 +84,15 @@ export default function LaunchForm({
   const active = isV2 ? v2 : configs;
   const lc = active?.launchConfigs.find((c) => c.id === Number(launchConfigId));
 
+  // The approved quote assets, native ETH first. Falls back to native-only when
+  // the v2 config never loaded or its pair list failed to resolve, so the picker
+  // always has something valid and the form never crashes. The selection is
+  // resolved against this same list, so a token un-approved between reads falls
+  // back to native rather than pointing at nothing.
+  const pairTokens = pairOptions(v2);
+  const pair = selectedPair(v2, pairToken);
+  const nativePair = isNativePair(pair.address);
+
   // v2's factory is a different contract with its own configs and its own
   // gating, so they are read separately and only when the operator asks for it.
   useEffect(() => {
@@ -90,8 +103,12 @@ export default function LaunchForm({
   }, [isV2, v2]);
 
   // Config ids are per-factory; carrying v1's selection into v2 would silently
-  // pick a different set of terms.
-  useEffect(() => setLaunchConfigId(0), [protocol]);
+  // pick a different set of terms. The quote asset resets the same way, so
+  // toggling v2→v1→v2 always returns to native rather than a stale RWA pick.
+  useEffect(() => {
+    setLaunchConfigId(0);
+    setPairToken(NATIVE_PAIR);
+  }, [protocol]);
 
   // The amounts are typed two panels up, but what they BUY is decided here: the
   // protocol, the config's supply and curve, the dev buy that goes first and the
@@ -170,6 +187,10 @@ export default function LaunchForm({
           buybackEnabled: Boolean(f.buybackEnabled),
         },
         launchConfigId: Number(launchConfigId),
+        // The quote asset the curve is priced in. Native → the zero-address
+        // sentinel, which is the backend's own default, so ETH is unchanged; a
+        // chosen RWA sends its own address for the factory to price against.
+        pairToken: bodyPairToken(pair.address),
         devBuyEth: f.devBuyEth || 0,
         wallets: bundle,
       };
@@ -327,6 +348,25 @@ export default function LaunchForm({
             ))}
           </select>
         </label>
+        {isV2 && (
+          <label>
+            Paired asset
+            <select value={pair.address} onChange={(e) => setPairToken(e.target.value)}>
+              {pairTokens.map((t) => (
+                <option key={t.address} value={t.address}>
+                  {t.symbol}
+                  {isNativePair(t.address)
+                    ? ' (native)'
+                    : ` — ${t.address.slice(0, 6)}…${t.address.slice(-4)}`}
+                </option>
+              ))}
+            </select>
+            <span className="hint">
+              What the curve is priced in. <b>ETH (native)</b> keeps today's behaviour; any other
+              asset means the dev buy and every bundle buy are spent in that token.
+            </span>
+          </label>
+        )}
         {isV2 ? (
           <label>
             Creator tax (bps)
@@ -346,7 +386,9 @@ export default function LaunchForm({
                 text input rather than a button. */}
             <span className="hint">
               <b className="forever">Immutable once launched</b> — your cut of every trade, fixed by
-              this launch and never editable again. Max {v2?.maxCreatorTaxBps ?? 1000} bps.
+              this launch and never editable again. Max {v2?.maxCreatorTaxBps ?? 1000} bps. A
+              non-zero tax is what generates fees at all — the pool of value the operator can later
+              choose to share back with holders.
             </span>
           </label>
         ) : (
@@ -414,10 +456,19 @@ export default function LaunchForm({
                 : ' — they buy at the untaxed price'}
             </li>
             <li>no wallet or per-buy cap: v2 has no restriction window</li>
-            <li>
-              priced in <b>native ETH</b> — the factory has approved no other quote asset, so there
-              is nothing to choose
-            </li>
+            {nativePair ? (
+              <li>
+                priced in <b>native ETH</b> — the dev buy and every bundle buy are spent in ETH, as
+                today
+              </li>
+            ) : (
+              <li>
+                priced in <b>{pair.symbol}</b> — the dev buy and every bundle buy are denominated and{' '}
+                <b>spent in {pair.symbol}</b>, not ETH, so each buying wallet needs a {pair.symbol}{' '}
+                balance (ETH only covers gas). Amounts use {pair.symbol}'s{' '}
+                {pair.decimals ?? '?'} decimals
+              </li>
+            )}
           </ul>
         </div>
       )}
