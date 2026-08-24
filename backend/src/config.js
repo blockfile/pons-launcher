@@ -232,6 +232,33 @@ const config = {
   // that pair" and is lost, as a live launch showed. 45s covers the observed
   // indexing lag with margin; the zap route's own ~6-min deadline is the ceiling.
   zapRouteTimeoutMs: num(process.env.PONS_ZAP_ROUTE_TIMEOUT_MS, 45000),
+
+  // The deployed EthToSpcxSwap router (contracts/EthToSpcxSwap.sol) — the address
+  // printed by `node scripts/deploy-contract.js EthToSpcxSwap --broadcast`. Lets
+  // each bundle wallet swap its OWN ETH→SPCX in preflight, so the dev wallet never
+  // transfers SPCX to the bundle (no on-chain dev→buyers link). Empty until
+  // deployed; the swap-to-pair route refuses with a clear message when unset.
+  ethToSpcxSwap: lowerOrNull(process.env.ETH_TO_SPCX_SWAP_ADDRESS),
+  // The SPCX token the router swaps to — hardcoded in the contract, mirrored here
+  // so the route can reject a launch paired against anything else (the router only
+  // ever outputs this token).
+  spcxToken: (process.env.SPCX_TOKEN || '0x4a0E65A3EcceC6dBe60AE065F2e7bb85Fae35eEa').toLowerCase(),
+  // Gas limit for one ETH→SPCX swap through the router (wrap-free native settle +
+  // one V4 hop). Generous; unused gas is refunded.
+  pairSwapGasLimit: num(process.env.PAIR_SWAP_GAS_LIMIT, 500000),
+  // Slippage floor for the auto-swap, in bps. The pool is thin and pons-managed,
+  // so this protects each wallet's ETH→SPCX leg; a swap that would fill worse than
+  // this reverts (ETH kept, only gas lost) rather than dumping into a bad price.
+  // NB this is RELATIVE to the simulated quote — it guards against the price
+  // MOVING between simulate and mine, not against a bad STANDING price; that is
+  // what pairSwapMinSpcxPerEth below is for.
+  pairSwapSlippageBps: num(process.env.PAIR_SWAP_SLIPPAGE_BPS, 300),
+  // Optional absolute floor on the auto-swap rate, in whole SPCX per 1 ETH. 0
+  // disables it (the default) — the dry-run preview shows the expected SPCX per
+  // wallet, which is the primary guard against a thin/mispriced pool. Set it (env
+  // PAIR_SWAP_MIN_SPCX_PER_ETH) to hard-refuse any wallet the pool would fill
+  // below that rate, rather than dumping ETH for dust.
+  pairSwapMinSpcxPerEth: num(process.env.PAIR_SWAP_MIN_SPCX_PER_ETH, 0),
 };
 
 /**

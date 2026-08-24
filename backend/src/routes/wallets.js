@@ -24,6 +24,7 @@ const { findSellable, withDeadline } = require('../evm/v2/holdings');
 const { prepareSell } = require('../bundle/prepareSell');
 const { fireSell } = require('../bundle/fireSell');
 const { distributePair } = require('../bundle/distributePair');
+const { swapBundleToPair } = require('../bundle/swapToPair');
 const { jsonSafe, withLaunchLock } = require('./launch');
 const relayFunding = require('../relay/funding');
 const timedRelayFunding = require('../relay/timedFunding');
@@ -344,6 +345,49 @@ router.post('/v2/bundle/distribute-pair', requireApiKey, withLaunchLock(async (r
             hash: t.hash,
             status: t.status,
             error: t.error,
+          })),
+        }
+      );
+    }
+    res.json(out);
+  } catch (err) {
+    next(err);
+  }
+}));
+
+// POST /api/v2/bundle/swap-to-pair — each bundle wallet swaps its OWN ETH → SPCX
+// through the deployed EthToSpcxSwap router, so the dev wallet never transfers
+// SPCX to the bundle (no on-chain dev→buyers link). Each swap is simulated first
+// and skipped if the pool is empty. Shares the launch lock: it spends the bundle
+// wallets whose nonces a launch also pre-signs from.
+router.post('/v2/bundle/swap-to-pair', requireApiKey, withLaunchLock(async (req, res, next) => {
+  try {
+    const ks = keystoreFor(req.user.id);
+    const { variant = DEFAULT_VARIANT, walletIds, pairToken, slippageBps, dryRun = false } = req.body || {};
+    const out = await swapBundleToPair(
+      { variant, walletIds, pairToken, slippageBps, dryRun },
+      { keystore: ks }
+    );
+    if (!out.dryRun) {
+      activityFor(req.user.id).record(
+        'fund',
+        `[${variant}] swapped ETH→${out.pairSymbol}: ${out.confirmed}/${out.count} wallet(s)` +
+          (out.skipped ? `, ${out.skipped} skipped` : '') +
+          (out.failed ? `, ${out.failed} failed` : ''),
+        {
+          variant,
+          pairToken: out.pairToken,
+          pairSymbol: out.pairSymbol,
+          router: out.router,
+          swaps: out.swaps.map((s) => ({
+            walletId: s.walletId,
+            address: s.address,
+            swapEth: s.swapEth,
+            received: s.received,
+            hash: s.hash,
+            status: s.status,
+            reason: s.reason,
+            error: s.error,
           })),
         }
       );

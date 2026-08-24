@@ -97,6 +97,13 @@ export default function WalletsPanel({
   const [pairPreview, setPairPreview] = useState(null);
   const [pairConfirm, setPairConfirm] = useState(false);
   const [pairResults, setPairResults] = useState(null);
+  // The PREFERRED pair-token path: each bundle wallet swaps its OWN ETH → SPCX,
+  // so the dev wallet never sends SPCX to the bundle and no dev→buyers link is
+  // written on chain. Same dry-run → confirm → results shape as the distribute
+  // flow above — see previewSwap/runSwap and canDistributePair.
+  const [swapPreview, setSwapPreview] = useState(null);
+  const [swapConfirm, setSwapConfirm] = useState(false);
+  const [swapResults, setSwapResults] = useState(null);
 
   useEffect(() => {
     let alive = true;
@@ -294,6 +301,17 @@ export default function WalletsPanel({
     .filter((t) => Number(t.amount) > 0);
   const pairTotal = pairTransfers.reduce((s, t) => s + Number(t.amount), 0);
 
+  // The swap path reads NO table amounts — each wallet swaps its whole spendable
+  // ETH, sized server-side — so these only shape the preview dialog. A dry run
+  // that comes back all-skipped means the pool is empty right now, and the
+  // confirm is withheld rather than offered against a dead pool.
+  const swapPlanned = (swapPreview?.swaps || []).filter((s) => s.status === 'planned');
+  const swapSkipped = (swapPreview?.swaps || []).filter((s) => s.status === 'skipped');
+  const swapAllSkipped = Boolean(swapPreview) && swapPlanned.length === 0;
+  const swapExpectedTotal = swapPlanned
+    .reduce((s, x) => s + Number(x.expected || 0), 0)
+    .toFixed(6);
+
   // Step one of the spend: a dry run that sends nothing and returns the plan, or
   // throws a readable 4xx/5xx when the dev wallet is short of SPCX or ETH. On an
   // error the confirm is never offered — the message goes to the readout (api()
@@ -335,6 +353,58 @@ export default function WalletsPanel({
         dryRun: false,
       });
       setPairResults(out);
+      report(out);
+      setTimeout(reload, 3000);
+    } catch (err) {
+      report(`ERROR: ${err.message}`);
+    } finally {
+      setBusy('');
+    }
+  }
+
+  // The pre-launch pair-token SWAP — the PREFERRED alternative to distribute.
+  //
+  // Each bundle wallet swaps its own spendable ETH → SPCX through the deployed
+  // router, so the dev wallet never touches the bundle and there is no on-chain
+  // dev→buyers link. No per-wallet amount is read: the swap sizes by each
+  // wallet's ETH balance, less the gas it must keep back for the launch. walletIds
+  // is omitted, so the backend swaps every bundle wallet of this variant.
+  //
+  // The pool is often empty, so every wallet is SIMULATED first. A dry run that
+  // comes back all "skipped" means no liquidity right now — the confirm dialog
+  // withholds its confirm rather than sending into a dead pool.
+  async function previewSwap() {
+    setBusy('swap-preview');
+    setSwapResults(null);
+    try {
+      const out = await api('/v2/bundle/swap-to-pair', 'POST', {
+        variant,
+        pairToken,
+        dryRun: true,
+      });
+      setSwapPreview(out);
+      setSwapConfirm(true);
+    } catch (err) {
+      setSwapPreview(null);
+      setSwapConfirm(false);
+      report(`ERROR: ${err.message}`);
+    } finally {
+      setBusy('');
+    }
+  }
+
+  // Step two: the real run, on confirm. Each wallet's ETH balance falls as its
+  // swap lands, so re-read after a beat the way the distribute run does.
+  async function runSwap() {
+    setSwapConfirm(false);
+    setBusy('swap-run');
+    try {
+      const out = await api('/v2/bundle/swap-to-pair', 'POST', {
+        variant,
+        pairToken,
+        dryRun: false,
+      });
+      setSwapResults(out);
       report(out);
       setTimeout(reload, 3000);
     } catch (err) {
@@ -656,13 +726,99 @@ export default function WalletsPanel({
         </div>
       )}
 
-      {/* The pre-launch SPCX distribution. Shown only for a non-native pair funded
-          in 'pair' mode — for a native pair (and every v1 launch) nativePair is
-          true and this whole block is off. It is a PREFLIGHT step, done before
-          the launch: swap ETH→SPCX into the dev wallet, distribute, then launch. */}
+      {/* The pre-launch SPCX supply for the bundle. Shown only for a non-native
+          pair funded in 'pair' mode — for a native pair (and every v1 launch)
+          nativePair is true and this whole block is off. Two ways to get the
+          bundle wallets their SPCX, both PREFLIGHT (done before launching):
+
+            1. Swap (RECOMMENDED) — each wallet swaps its own ETH → SPCX, so the
+               dev wallet never touches the bundle and nothing on chain links the
+               creator to the buyers. Preferred whenever the pool has liquidity.
+            2. Distribute (ALTERNATIVE) — the dev wallet sends SPCX to each; simpler,
+               but it writes a dev→buyers link on chain. Use it if the pool is empty. */}
       {bundle.length > 0 && canDistributePair && (
+        <>
+        <div className="distribute">
+          <b className="distribute-title">Swap wallets to {sym}</b>
+          <span className="hint" style={{ flexBasis: '100%' }}>
+            <b>Recommended</b> — each wallet swaps its own ETH → {sym}, so the dev wallet never
+            touches the bundle (no on-chain dev→buyers link). Fund the bundle wallets with ETH
+            first; each swaps its own ETH→{sym} here, then buys with its <b>whole {sym} balance</b>{' '}
+            at launch — so set those rows to <b>“all − gas”</b> below. Only works while the {sym}{' '}
+            pool has liquidity — if it’s empty, wallets are skipped; try again during a window.
+          </span>
+          <Busy
+            className="btn-primary"
+            busy={busy === 'swap-preview' || busy === 'swap-run'}
+            onClick={previewSwap}
+          >
+            Swap {bundle.length} wallet{bundle.length === 1 ? '' : 's'} to {sym}
+          </Busy>
+          <span className="hint">
+            each swaps its whole spendable ETH → {sym} — previewed first, nothing is sent until you
+            confirm; empty-pool wallets are skipped and keep their ETH
+          </span>
+
+          {swapResults && (
+            <div className="table-scroll" style={{ flexBasis: '100%', marginTop: 4 }}>
+              <table className="wallet-list">
+                <thead>
+                  <tr>
+                    <th>Bundle wallet</th>
+                    <th>{swapResults.pairSymbol || sym} received</th>
+                    <th>Status</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {(swapResults.swaps || []).map((s, i) => (
+                    <tr key={`${s.walletId ?? s.address}-${i}`}>
+                      <td className="addr">
+                        <Address value={s.address} />
+                      </td>
+                      <td className="bal">
+                        {s.status === 'confirmed' ? Number(s.received || 0).toFixed(6) : '—'}
+                      </td>
+                      <td>
+                        <span
+                          className={`fund-state ${s.status === 'confirmed' ? 'is-in' : 'is-part'}`}
+                        >
+                          {s.status || '—'}
+                        </span>
+                        {s.reason && <div className="hint">{s.reason}</div>}
+                        {s.error && <div className="hint">{s.error}</div>}
+                        {s.hash &&
+                          (explorer ? (
+                            <div className="hint">
+                              <a href={`${explorer}/tx/${s.hash}`} target="_blank" rel="noreferrer">
+                                {s.hash.slice(0, 18)}…
+                              </a>
+                            </div>
+                          ) : (
+                            <div className="hint">{s.hash.slice(0, 18)}…</div>
+                          ))}
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+              <p className="hint">
+                {swapResults.confirmed ?? 0} confirmed
+                {swapResults.skipped ? ` · ${swapResults.skipped} skipped` : ''}
+                {swapResults.failed ? ` · ${swapResults.failed} failed` : ''}. Skipped wallets kept
+                their ETH — the pool was empty; try again during a window. Fund gas next, then launch
+                in pair mode with these wallets on “all”.
+              </p>
+            </div>
+          )}
+        </div>
+
         <div className="distribute">
           <b className="distribute-title">Distribute {sym}</b>
+          <span className="hint" style={{ flexBasis: '100%' }}>
+            <b>Alternative</b> — the dev wallet sends {sym} to each bundle wallet; simpler, but it
+            links the dev wallet to every buyer on chain. Prefer the swap above unless the {sym}{' '}
+            pool is empty.
+          </span>
           <span className="hint" style={{ flexBasis: '100%' }}>
             Preflight, done <b>BEFORE launching</b>: swap ETH→{sym} into the dev wallet first, then
             distribute, then launch in pair mode. Uses each wallet's <b>Buy</b> amount from the table
@@ -730,6 +886,7 @@ export default function WalletsPanel({
             </div>
           )}
         </div>
+        </>
       )}
 
       {/* The confirm for the SPCX distribution. danger (vermilion) only when the
@@ -781,6 +938,91 @@ export default function WalletsPanel({
                     <Address value={t.address} />
                   </td>
                   <td className="bal">{Number(t.amount || 0).toFixed(6)}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      </Modal>
+
+      {/* The confirm for the SPCX swap. Same rule as the distribute dialog:
+          danger (vermilion) only on a live run, which spends the bundle wallets'
+          OWN ETH; a dry run broadcasts nothing. When every wallet came back
+          skipped the pool is empty, so the confirm is disabled and the dialog
+          says why rather than offering a run that would send nothing. */}
+      <Modal
+        open={swapConfirm}
+        danger={live}
+        title={
+          live
+            ? `Swap wallets to ${swapPreview?.pairSymbol || sym} — spends real ETH`
+            : `Swap wallets to ${swapPreview?.pairSymbol || sym} (dry run)`
+        }
+        confirmLabel={
+          live ? `Swap to ${swapPreview?.pairSymbol || sym}` : 'Swap (dry run)'
+        }
+        confirmDisabled={swapAllSkipped}
+        onConfirm={runSwap}
+        onCancel={() => setSwapConfirm(false)}
+      >
+        {swapAllSkipped ? (
+          <div className="notice danger">
+            <h3>Every wallet was skipped</h3>
+            <ul>
+              <li>
+                The {swapPreview?.pairSymbol || sym} pool has no liquidity right now, so nothing can
+                be swapped and no ETH will move. Wait for a window and preview again — or use{' '}
+                <b>Distribute {sym}</b> instead.
+              </li>
+            </ul>
+          </div>
+        ) : (
+          <>
+            {!live && <p>Nothing will be broadcast.</p>}
+            <p className="hint">
+              Each bundle wallet swaps its OWN ETH → {swapPreview?.pairSymbol || sym}, so the dev
+              wallet never touches the bundle and nothing links it to the buyers. A wallet with no
+              route/liquidity is skipped and keeps its ETH.
+            </p>
+          </>
+        )}
+        <div className="modal-facts">
+          <Fact label="Router" mono>
+            {swapPreview?.router || '—'}
+          </Fact>
+          <Fact label="Wallets swapping">
+            {swapPlanned.length} of {swapPreview?.count ?? swapPreview?.swaps?.length ?? 0}
+            {swapSkipped.length ? ` · ${swapSkipped.length} skipped` : ''}
+          </Fact>
+          <Fact label={`Total ${swapPreview?.pairSymbol || sym} expected`}>
+            {swapExpectedTotal}
+          </Fact>
+        </div>
+        <div className="table-scroll">
+          <table className="wallet-list">
+            <thead>
+              <tr>
+                <th>Bundle wallet</th>
+                <th>ETH → swap</th>
+                <th>{swapPreview?.pairSymbol || sym} expected</th>
+              </tr>
+            </thead>
+            <tbody>
+              {(swapPreview?.swaps || []).map((s, i) => (
+                <tr key={`${s.walletId ?? s.address}-${i}`}>
+                  <td className="addr">
+                    <Address value={s.address} />
+                  </td>
+                  <td className="bal">
+                    {s.status === 'skipped' ? '—' : Number(s.swapEth || 0).toFixed(6)}
+                  </td>
+                  <td className="bal">
+                    {s.status === 'skipped' ? (
+                      <span className="hint">skipped — {s.reason}</span>
+                    ) : (
+                      Number(s.expected || 0).toFixed(6)
+                    )}
+                  </td>
                 </tr>
               ))}
             </tbody>
