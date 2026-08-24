@@ -61,7 +61,13 @@ export default function LaunchForm({
 }) {
   const roles = rolesFor(variant);
   const [f, setF] = useState(BLANK);
-  const [protocol, setProtocol] = useState('v1');
+  // Pons v1 is dead: the factory owner set launchEnabled=false on both v1
+  // factories (2026-08-12) and never re-enabled it, and the launcher whitelist
+  // is provably empty — nothing can launch on pons v1. So the selector below
+  // hides it and the form defaults to v2 (where SPCX/RWA pairing and holder-fee
+  // sharing live). Flip SHOW_PONS_V1 back to true if pons ever reopens v1.
+  const SHOW_PONS_V1 = false;
+  const [protocol, setProtocol] = useState(SHOW_PONS_V1 ? 'v1' : 'v2');
   const [v2, setV2] = useState(null);
   const [launchConfigId, setLaunchConfigId] = useState(0);
   // The v2 quote asset. Native ETH (the zero-address sentinel) by default, which
@@ -264,7 +270,7 @@ export default function LaunchForm({
   return (
     <Step {...step}>
       <div className="protocol">
-        {['v1', 'v2'].map((p) => (
+        {(SHOW_PONS_V1 ? ['v1', 'v2'] : ['v2']).map((p) => (
           <button
             key={p}
             type="button"
