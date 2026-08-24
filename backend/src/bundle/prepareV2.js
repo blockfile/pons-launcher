@@ -487,12 +487,25 @@ async function prepareV2(input, deps = {}) {
           warnings.push(`${wallet.address}: buy amount is zero — skipped`);
           continue;
         }
-        if (balance < amountIn + zapBuyCost + buffer) {
+        // The requested buy plus this zap's own gas + buffer must fit the
+        // balance. A zap buy reserves the heavy 900k-gas settle, so a fixed
+        // amount sized before ETH-zap was chosen (against a plain buy's lighter
+        // gas) can be a touch too large. Rather than drop the wallet from the
+        // bundle, TRIM the buy to the most it can afford — the same clamp `all`
+        // mode uses above — and only skip when nothing at all is affordable.
+        const affordable = spendableFromBalance(balance, zapBuyCost, zapBuyGas, buffer);
+        if (affordable === 0n) {
           warnings.push(
-            `${wallet.address}: has ${formatEther(balance)} ETH, needs ${formatEther(amountIn + zapBuyCost + buffer)} ` +
-              `(zap ${formatEther(amountIn)} + gas + buffer) — skipped`
+            `${wallet.address}: balance ${formatEther(balance)} ETH does not cover the zap gas + buffer — skipped`
           );
           continue;
+        }
+        if (amountIn > affordable) {
+          warnings.push(
+            `${wallet.address}: buy trimmed ${formatEther(amountIn)} → ${formatEther(affordable)} ETH ` +
+              `to cover the zap gas + buffer`
+          );
+          amountIn = affordable;
         }
       }
 
