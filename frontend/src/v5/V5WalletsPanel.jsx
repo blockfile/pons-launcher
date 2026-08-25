@@ -48,6 +48,34 @@ export default function V5WalletsPanel({ step, dev, bundle, lastLaunch, live, ex
   // whether deleting it is a tidy-up or a mistake.
   const [deleting, setDeleting] = useState(null);
 
+  // IMPORT — existing wallets by private key, into either v5 role. The role
+  // selector is here (not split into a launcher-only and a bundle-only
+  // control) because one textarea covers both: importing a launcher key is
+  // just as much "get a wallet into v5" as generating bundle wallets is.
+  // Keys never linger in state past a submit — see importKeysNow below.
+  const [importRole, setImportRole] = useState(ROLES.bundle);
+  const [importKeys, setImportKeys] = useState('');
+  const [importLabel, setImportLabel] = useState('');
+
+  // CLAIM SEASONED — aged, pre-funded wallets handed off from the V4 tab's
+  // pool. `seasoned.count` is read-only background state, same shape as the
+  // v3/v4 consoles' own poll of the same endpoint: quiet on failure, because
+  // an unreachable or disabled V4 should just show 0 here, not an error in a
+  // panel that has nothing to do with it.
+  const [seasoned, setSeasoned] = useState({ count: 0 });
+  const [seasonedCount, setSeasonedCount] = useState(10);
+
+  useEffect(() => {
+    let alive = true;
+    const load = () => api('/v4/seasoned').then((s) => alive && setSeasoned(s)).catch(() => {});
+    load();
+    const t = setInterval(load, 60_000);
+    return () => {
+      alive = false;
+      clearInterval(t);
+    };
+  }, []);
+
   // GET /v5/launcher/status — read-only, the launcher's ETH/USDG (and, if a
   // token address is known, that token) plus whether it has a stuck tx.
   // `lastLaunch` is optional: this panel is drawn before a launch has ever
@@ -70,6 +98,63 @@ export default function V5WalletsPanel({ step, dev, bundle, lastLaunch, live, ex
     try {
       report(await fn());
       await reload();
+    } catch (err) {
+      report(`ERROR: ${err.message}`);
+    } finally {
+      setBusy('');
+    }
+  }
+
+  /**
+   * Import existing wallets by private key into a v5 role. The backend does
+   * the whitespace/comma/newline splitting (routes/v5.js), so the raw
+   * textarea text is sent as-is rather than pre-split here.
+   *
+   * The textarea is cleared ONLY on success — a rejected import (a bad key,
+   * or a second v5dev landing on the keystore's singleton guard) leaves the
+   * field alone so the operator can fix it without re-pasting everything.
+   * Either way the keys never get echoed anywhere else: nothing here logs
+   * them, stores them past this state, or reflects them back into the UI.
+   */
+  async function importKeysNow() {
+    if (!importKeys.trim()) return;
+    setBusy('import');
+    try {
+      const made = await api('/v5/wallets/import', 'POST', {
+        privateKeys: importKeys,
+        role: importRole,
+        label: importLabel.trim() || undefined,
+      });
+      report(`imported ${plural(made.length, 'wallet')} into ${importRole === ROLES.dev ? 'the launcher' : 'the bundle'}`);
+      setImportKeys('');
+      setImportLabel('');
+      await reload();
+    } catch (err) {
+      report(`ERROR: ${err.message}`);
+    } finally {
+      setBusy('');
+    }
+  }
+
+  /** Pull N aged, pre-funded wallets out of the V4 seasoning pool into the v5 bundle role. */
+  async function claimSeasoned() {
+    setBusy('claim-seasoned');
+    try {
+      const n = Math.max(1, Math.round(Number(seasonedCount) || 0));
+      const out = await api('/v5/wallets/claim-seasoned', 'POST', { count: n });
+      report(
+        out.available === 0
+          ? 'claimed 0 — none available, season some in the V4 tab first'
+          : out.shortfall > 0
+            ? `claimed ${plural(out.claimed.length, 'wallet')} — only ${out.available} seasoned wallet(s) were available`
+            : `claimed ${plural(out.claimed.length, 'seasoned wallet')}`
+      );
+      await reload();
+      try {
+        setSeasoned(await api('/v4/seasoned'));
+      } catch {
+        // Background read — see the mount-time poll above.
+      }
     } catch (err) {
       report(`ERROR: ${err.message}`);
     } finally {
@@ -411,9 +496,15 @@ export default function V5WalletsPanel({ step, dev, bundle, lastLaunch, live, ex
         </>
       )}
 
-      {/* The bundle — plural, generated in a batch. */}
+      {/* The bundle — plural, generated in a batch. THREE WAYS IN, grouped
+          under one "Add wallets" idea because they are all just different
+          sources for the same table below: fresh (Generate), keys the
+          operator already holds (Import — either role), or aged/pre-funded
+          ones handed off from V4's seasoning pool (Seasoned). */}
       <h3 style={{ margin: '4px 0 8px' }}>Bundle wallets</h3>
+
       <div className="row">
+        <span className="ctl-label">Generate</span>
         <input
           type="number"
           min="1"
@@ -448,6 +539,72 @@ export default function V5WalletsPanel({ step, dev, bundle, lastLaunch, live, ex
       <p className="hint" style={{ margin: '0 0 12px' }}>
         {MAX_GENERATE} at a time is the ceiling. Unlike v1/v2 there is no 31-wallet cap — letscash has
         no exemption list, so the only cost of more wallets is a longer fan-out. Run it again for more.
+      </p>
+
+      {/* IMPORT — wallets the operator already holds the key for. Fresh
+          wallets are a fingerprint (they all share a birth timestamp); keys
+          brought in from elsewhere do not. Role selector covers both v5
+          roles from one control, since a launcher key is imported exactly
+          the same way as a bundle key. */}
+      <div className="row">
+        <span className="ctl-label">Import</span>
+        <select value={importRole} onChange={(e) => setImportRole(e.target.value)} style={{ width: 140 }}>
+          <option value={ROLES.bundle}>Bundle wallet</option>
+          <option value={ROLES.dev}>Launcher</option>
+        </select>
+        <input
+          value={importLabel}
+          onChange={(e) => setImportLabel(e.target.value)}
+          placeholder="label (optional)"
+          style={{ width: 160 }}
+        />
+        <Busy busy={busy === 'import'} disabled={!importKeys.trim()} onClick={importKeysNow}>
+          Import
+        </Busy>
+      </div>
+      <div className="row" style={{ alignItems: 'flex-start' }}>
+        <span className="ctl-label" />
+        <textarea
+          rows={3}
+          value={importKeys}
+          onChange={(e) => setImportKeys(e.target.value)}
+          placeholder="0x… one per line, or comma-separated"
+          style={{ flex: 1 }}
+        />
+      </div>
+      <p className="hint" style={{ margin: '0 0 12px' }}>
+        Each key is encrypted straight into the keystore and never logged or shown again — the field
+        clears itself once the import succeeds. Launcher (v5dev) is a singleton: importing a second
+        fails loudly, the same way generating one does once a launcher already exists.
+      </p>
+
+      {/* SEASONED — aged, pre-funded wallets from the V4 tab's pool, pulled
+          into the bundle role most-aged first. The point of seasoning: these
+          look organic on-chain where a batch of fresh wallets does not. */}
+      <div className="row">
+        <span className="ctl-label">Seasoned</span>
+        <input
+          type="number"
+          min="1"
+          max={seasoned.count || 1}
+          value={seasonedCount}
+          onChange={(e) => setSeasonedCount(e.target.value)}
+          title="how many seasoned wallets to claim"
+          style={{ width: 70 }}
+        />
+        <Busy
+          busy={busy === 'claim-seasoned'}
+          disabled={!seasoned.count}
+          title={seasoned.count ? '' : 'no seasoned wallets ready yet'}
+          onClick={claimSeasoned}
+        >
+          Claim seasoned
+        </Busy>
+        <span className="hint">{seasoned.count} seasoned ready</span>
+      </div>
+      <p className="hint" style={{ margin: '0 0 12px' }}>
+        Aged, pre-funded wallets seasoned in the V4 tab — they read as organic rather than as a batch
+        generated together. If none are ready, season some there first.
       </p>
 
       {bundle.length === 0 ? (
