@@ -47,6 +47,7 @@ const router = express.Router();
 // guards rather than sharing v1/v2's, per the tab-isolation rule.
 const launching = new Set();
 const pendingLaunches = new Map(); // userId -> { hash, nonce, walletId, address, symbol, token, poolId, at }
+const resolving = new Set(); // userIds mid-reconcile, so two /resolve calls can't double-record
 
 function withLaunchLock(handler) {
   return async (req, res, next) => {
@@ -254,29 +255,46 @@ router.post('/v5/launch', requireApiKey, withLaunchLock(async (req, res, next) =
 }));
 
 // POST /api/v5/launch/resolve — reconcile a launch that was broadcast but whose
-// receipt never arrived (the /v5/launch response carried status 'pending'). It
-// re-fetches the receipt NOW: on a definitive outcome it records the honest result
-// and CLEARS the in-flight guard so launching can resume; while the tx is still
-// unmined it keeps the guard (a fresh launch would double-spend). This is also the
-// recovery path after a process restart drops the in-memory guard — an operator
-// who knows a launch was in flight can pass its { hash } explicitly.
+// receipt never arrived (the /v5/launch response carried status 'pending', OR its
+// broadcast response was lost). It re-fetches the receipt NOW: on a DEFINITIVE
+// outcome (confirmed / reverted / dropped) it records the honest result and CLEARS
+// the in-flight guard so launching can resume; while the tx is still in the mempool
+// it keeps the guard (a fresh launch would double-spend). A 'dropped' outcome — the
+// tx is gone from the mempool and never mined, so its nonce is free — is what saves
+// an evicted launch from parking the wallet forever. This is also the recovery path
+// after a process restart drops the in-memory guard: an operator who knows a launch
+// was in flight can pass its { hash, address, nonce } explicitly.
 router.post('/v5/launch/resolve', requireApiKey, async (req, res, next) => {
+  const id = req.user.id;
+  // Serialise reconciles per account, so two concurrent /resolve calls cannot both
+  // read the same marker and double-record before either clears it.
+  if (resolving.has(id)) {
+    return res.status(409).json({ error: 'a v5 launch reconcile is already in progress for this account' });
+  }
+  resolving.add(id);
   try {
-    const id = req.user.id;
     const parked = pendingLaunches.get(id);
     const hash = parked?.hash || req.body?.hash;
     if (!hash) {
       return res.json({ pending: null, message: 'no v5 launch is awaiting reconciliation' });
     }
-    const seed = parked || { hash, token: req.body?.token || null, poolId: req.body?.poolId || null };
+    // For an operator-supplied hash (post-restart recovery), address+nonce let
+    // reconcile detect a dropped tx; without them it can still confirm/revert.
+    const seed = parked || {
+      hash,
+      token: req.body?.token || null,
+      poolId: req.body?.poolId || null,
+      address: req.body?.address || null,
+      nonce: req.body?.nonce != null ? Number(req.body.nonce) : null,
+    };
     const result = await reconcileLaunch(seed, {});
 
     if (result.launch.status === 'pending') {
-      // Still not mined — keep the guard; do not record (nothing definitive yet).
+      // Still in the mempool — keep the guard; do not record (nothing definitive).
       return res.json({ resolved: false, ...jsonSafe(result) });
     }
 
-    // Definitive (confirmed or reverted): record the honest outcome and release.
+    // Definitive (confirmed / reverted / dropped): record the honest outcome and release.
     activityFor(id).record(
       'v5',
       `[v5] launch ${hash} reconciled: ${parked?.symbol ? parked.symbol + ' ' : ''}${result.launch.status}`,
@@ -290,6 +308,8 @@ router.post('/v5/launch/resolve', requireApiKey, async (req, res, next) => {
     res.json({ resolved: true, ...jsonSafe(result) });
   } catch (err) {
     next(err);
+  } finally {
+    resolving.delete(id);
   }
 });
 

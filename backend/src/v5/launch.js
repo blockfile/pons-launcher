@@ -485,7 +485,35 @@ async function fireLaunch(plan, deps = {}) {
     }
   }
 
-  const resp = await rpc.broadcastTransaction(plan.launch.raw);
+  // The broadcast hash is DETERMINISTIC from the signed bytes — compute it before
+  // sending, so that even if broadcastTransaction throws with no response we still
+  // know which tx may now be live.
+  let signedHash = null;
+  try {
+    signedHash = Transaction.from(plan.launch.raw).hash;
+  } catch (_err) {
+    // Unparseable raw is caught by the no-raw guard above; leave null.
+  }
+
+  let resp;
+  try {
+    resp = await rpc.broadcastTransaction(plan.launch.raw);
+  } catch (err) {
+    // CRITICAL: broadcastTransaction can throw AFTER the node accepted the tx — a
+    // timed-out / lost eth_sendRawTransaction response on a busy RPC. We cannot
+    // know the tx did NOT land, so we must NOT let this throw past the caller's
+    // in-flight park: a fresh launch would then sign at the next nonce and, if the
+    // first did land, spend a second fee + first buy. Return a PENDING outcome
+    // carrying the deterministic hash so the route parks the wallet exactly as a
+    // receipt timeout does — resolvable via /v5/launch/resolve.
+    return resultFromReceipt(null, plan, signedHash, {
+      parseReceipt,
+      pendingReason:
+        `the broadcast response was lost (${explain(err)}) — the launch MAY be live in the mempool. ` +
+        'Check the hash on the explorer and resolve it before retrying, so the same launch is not sent twice.',
+    });
+  }
+
   const receipt = await awaitReceipt(rpc, resp.hash);
   return resultFromReceipt(receipt, plan, resp.hash, { parseReceipt });
 }
@@ -501,7 +529,7 @@ async function fireLaunch(plan, deps = {}) {
  *        the non-confirmed branches and the mismatch cross-check.
  * @param {string} hash           the broadcast tx hash.
  */
-function resultFromReceipt(receipt, planLike, hash, { parseReceipt }) {
+function resultFromReceipt(receipt, planLike, hash, { parseReceipt, pendingReason } = {}) {
   const planToken = planLike?.token ?? null;
   const planPoolId = planLike?.poolId ?? null;
   const status = !receipt ? 'pending' : receipt.status === 1 ? 'confirmed' : 'reverted';
@@ -529,8 +557,9 @@ function resultFromReceipt(receipt, planLike, hash, { parseReceipt }) {
           }
         : {
             pending:
+              pendingReason ||
               'the launch receipt did not appear before the timeout — check the hash on the explorer ' +
-              'before retrying, so the same launch is not sent twice.',
+                'before retrying, so the same launch is not sent twice.',
           }),
     };
   }
@@ -604,8 +633,35 @@ async function reconcileLaunch(pending, deps = {}) {
   const f = deps.factory || factoryModule;
   const parseReceipt = deps.parseLaunchReceipt || f.parseLaunchReceipt;
   if (!pending || !pending.hash) throw new Error('reconcileLaunch: a launch hash is required');
+
   const receipt = await rpc.getTransactionReceipt(pending.hash);
-  return resultFromReceipt(receipt, pending, pending.hash, { parseReceipt });
+  if (receipt) return resultFromReceipt(receipt, pending, pending.hash, { parseReceipt });
+
+  // No receipt yet — but is the tx still IN the mempool, or was it dropped
+  // (underpriced / evicted / replaced)? A dropped tx never mines and never
+  // reverts, so a naive "still pending" answer would park the wallet forever. The
+  // pending nonce tells us: if the account's next nonce is at or below the one
+  // this launch was signed at, the tx occupies NO slot — it is gone, and that
+  // nonce is free, so a fresh launch is safe. Report 'dropped' so the guard clears.
+  if (pending.address != null && pending.nonce != null && typeof rpc.getTransactionCount === 'function') {
+    const nextNonce = BigInt(await rpc.getTransactionCount(getAddress(pending.address), 'pending'));
+    if (nextNonce <= BigInt(pending.nonce)) {
+      return {
+        protocol: 'v5',
+        token: pending.token ?? null,
+        poolId: pending.poolId ?? null,
+        hook: null,
+        firstBuyOut: null,
+        launch: { hash: pending.hash, status: 'dropped', blockNumber: null },
+        dropped:
+          `the launch transaction is no longer in the mempool and never mined — it was dropped ` +
+          `(underpriced or evicted). Nonce ${pending.nonce} is free again, so it is safe to launch anew.`,
+      };
+    }
+  }
+
+  // Genuinely still in flight — keep the guard.
+  return resultFromReceipt(null, pending, pending.hash, { parseReceipt });
 }
 
 module.exports = {

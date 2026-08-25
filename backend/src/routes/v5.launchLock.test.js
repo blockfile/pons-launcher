@@ -125,6 +125,16 @@ test('a REVERTED launch persists null token/poolId — never a phantom pool', ()
   assert.equal(detail.status, 'reverted');
 });
 
+test('a DROPPED launch persists null token/poolId (its nonce was freed, nothing landed)', () => {
+  const detail = launchActivityDetail(
+    { token: '0xPREDICTED', poolId: '0xPREDICTED_POOL', hook: null, launch: { status: 'dropped', hash: '0xH', blockNumber: null } },
+    plan
+  );
+  assert.equal(detail.token, null);
+  assert.equal(detail.poolId, null);
+  assert.equal(detail.status, 'dropped');
+});
+
 test('a PENDING launch persists null token/poolId (it may never mine)', () => {
   const detail = launchActivityDetail(
     { token: '0xPREDICTED', poolId: '0xPREDICTED_POOL', hook: null, launch: { status: 'pending', hash: '0xH', blockNumber: null } },

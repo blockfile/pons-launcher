@@ -558,6 +558,55 @@ test('reconcileLaunch requires a hash', async () => {
   await assert.rejects(() => reconcileLaunch({}, { provider: fakeProvider() }), /hash is required/);
 });
 
+// ── a LOST broadcast response must still park (not throw past the guard) ────────
+test('a broadcast that throws AFTER the tx may have landed returns pending, not a throw', async () => {
+  const raw = await signedLaunchRaw();
+  const realHash = Transaction.from(raw).hash;
+  const provider = fakeProvider({
+    broadcastTransaction: async () => {
+      // The node accepted the tx, but the HTTP response was lost — a real class of
+      // busy-RPC failure. We must NOT let this throw past the caller's park.
+      throw new Error('timeout waiting for eth_sendRawTransaction response');
+    },
+  });
+  const res = await fireLaunch(planFor(raw), {
+    provider,
+    factory: fakeFactory(),
+    dryRun: false,
+    warmPool: async () => {},
+    waitForReceipt: (rpc, hash) => rpc.getTransactionReceipt(hash),
+  });
+  assert.equal(res.launch.status, 'pending', 'a lost broadcast response is treated as in-flight, so the wallet parks');
+  assert.equal(res.launch.hash, realHash, 'the deterministic signed-tx hash is carried, so /resolve can find it');
+  assert.match(res.pending, /broadcast response was lost/);
+});
+
+// ── a DROPPED (evicted) tx must be recoverable, not park forever ───────────────
+test('reconcileLaunch reports dropped when the tx left the mempool without mining (nonce freed)', async () => {
+  const provider = fakeProvider({
+    getTransactionReceipt: async () => null, // never mined
+    getTransactionCount: async () => 5, // next nonce == the launch nonce ⇒ tx is gone
+  });
+  const res = await reconcileLaunch(
+    { hash: '0xH', address: DEV, nonce: 5, token: TOKEN },
+    { provider, factory: fakeFactory() }
+  );
+  assert.equal(res.launch.status, 'dropped');
+  assert.match(res.dropped, /dropped/);
+});
+
+test('reconcileLaunch stays pending while the tx is still in the mempool (nonce still occupied)', async () => {
+  const provider = fakeProvider({
+    getTransactionReceipt: async () => null,
+    getTransactionCount: async () => 6, // next nonce is past the launch nonce ⇒ tx still pending at 5
+  });
+  const res = await reconcileLaunch(
+    { hash: '0xH', address: DEV, nonce: 5, token: TOKEN },
+    { provider, factory: fakeFactory() }
+  );
+  assert.equal(res.launch.status, 'pending', 'the tx still occupies its nonce, so it is genuinely in flight');
+});
+
 // ── resultFromReceipt honesty (the shape the route persists) ───────────────────
 test('a confirmed-but-unparsed receipt is flagged hookResolved:false, not a silent null hook', () => {
   const res = resultFromReceipt(
