@@ -14,7 +14,7 @@
  */
 
 const express = require('express');
-const { formatEther } = require('ethers');
+const { formatEther, getAddress } = require('ethers');
 const config = require('../config');
 const { keystoreFor } = require('../wallets/keystore');
 const { activityFor } = require('../store/activity');
@@ -273,6 +273,46 @@ function launchedTokenQuote(userId, token) {
   return q === usdg ? 'usdg' : 'eth';
 }
 
+function sameAddress(a, b) {
+  try {
+    return getAddress(String(a)) === getAddress(String(b));
+  } catch {
+    return false;
+  }
+}
+function normQuote(q) {
+  const s = String(q || '').toLowerCase();
+  return s === 'usdg' || s === String(config.letscash.usdg).toLowerCase() ? 'usdg' : 'eth';
+}
+
+// Resolve the {hook, quote} a sell must target, with the RECEIPT record as the
+// authority. For a token this account launched, the persisted receipt hook + quote
+// WIN — a client-supplied hook/quote is accepted only if it MATCHES (it can never
+// override the decoy-pool guard's authoritative pool). For an unlisted token
+// (allowUnlistedToken), there is nothing to pin against, so the operator must
+// supply the exact identity — and a hook without a quote is refused, because
+// assuming ETH could route a USDG token's exit into a seeded (ETH,token) decoy.
+function resolveSellPool(userId, body = {}) {
+  const recordedHook = launchedTokenHook(userId, body.token);
+  const recordedQuote = launchedTokenQuote(userId, body.token); // 'usdg' | 'eth' | null
+  if (recordedHook) {
+    if (body.hook && !sameAddress(body.hook, recordedHook)) {
+      throw new Error(
+        "the supplied hook does not match this token's launch record — refusing (the receipt hook is " +
+          'authoritative for the decoy-pool guard)'
+      );
+    }
+    if (body.quote && normQuote(body.quote) !== (recordedQuote || 'eth')) {
+      throw new Error("the supplied quote does not match this token's launch record");
+    }
+    return { hook: recordedHook, quote: recordedQuote || 'eth' };
+  }
+  if (body.hook && !body.quote) {
+    throw new Error('for an unlisted token, pass an explicit quote ("eth" or "usdg") alongside the hook');
+  }
+  return { hook: body.hook, quote: body.quote || 'eth' };
+}
+
 // GET /api/v5/config — the letscash contract map + chain, for the console.
 router.get('/v5/config', requireApiKey, (req, res) => {
   res.json({
@@ -370,15 +410,17 @@ router.get('/v5/launch/quote-allowance', requireApiKey, async (req, res, next) =
 // a first buy (a one-time setup, separate from the launch so the allowance exists
 // on-chain before preflight simulates). Broadcasts one approval from the launcher.
 // { amount } bounds it (whole USDG units); omit for MAX.
-router.post('/v5/launch/approve', requireApiKey, async (req, res, next) => {
+router.post('/v5/launch/approve', requireApiKey, withLauncherLock(async (req, res, next) => {
   try {
-    // Don't stack an approval onto a launcher that is mid-launch or parked — it
-    // would sign behind the in-flight tx. (approveQuoteForLaunch also refuses on
-    // an on-chain in-flight nonce; this is the cheaper, clearer first line.)
-    if (launching.has(req.user.id) || pendingLaunches.has(req.user.id)) {
+    // The approve signs the singleton v5dev wallet, so it must be mutually excluded
+    // from every other v5dev spender. withLauncherLock holds launcherBusy (which the
+    // launch + bundle locks honour); this also refuses while a launch/bundle handler
+    // is mid-flight or a launch is parked, closing the TOCTOU where two preparers
+    // read the same settled nonce.
+    if (launching.has(req.user.id) || bundling.has(req.user.id) || pendingLaunches.has(req.user.id)) {
       return res
         .status(409)
-        .json({ error: 'a v5 launch is in progress or unresolved on the launcher — settle it before approving' });
+        .json({ error: 'a v5 launch or bundle is in progress or unresolved on the launcher — settle it before approving' });
     }
     const out = await approveQuoteForLaunch(req.body || {}, { keystore: keystoreFor(req.user.id) });
     activityFor(req.user.id).record('v5', `[v5] approved factory to pull ${out.amount} USDG (${out.status})`, {
@@ -393,7 +435,7 @@ router.post('/v5/launch/approve', requireApiKey, async (req, res, next) => {
   } catch (err) {
     next(err);
   }
-});
+}));
 
 // POST /api/v5/launch — prepare, then fire. This is a MONEY PATH: it signs and
 // broadcasts the real launch and SPENDS the first buy, so it demands an explicit
@@ -570,12 +612,9 @@ router.post('/v5/bundle', requireApiKey, withBundleLock(async (req, res, next) =
 router.post('/v5/sell/preflight', requireApiKey, async (req, res, next) => {
   try {
     assertOwnLaunchedToken(req.user.id, req.body?.token, req.body?.allowUnlistedToken);
-    // Pin the launch's recorded hook (or an explicit override) so the sell targets
-    // the exact pool, never a probed/decoy one. prepareSell refuses without it.
-    const hook = req.body?.hook || launchedTokenHook(req.user.id, req.body?.token);
-    // Derive the quote from the launch record too, so a USDG-launched token sells
-    // into its (USDG,token) pool without the console having to know its quote.
-    const quote = req.body?.quote || launchedTokenQuote(req.user.id, req.body?.token) || 'eth';
+    // The launch's recorded receipt hook + quote are authoritative (decoy-pool
+    // guard); a client hook/quote is honoured only if it matches. See resolveSellPool.
+    const { hook, quote } = resolveSellPool(req.user.id, req.body || {});
     const plan = await prepareSell({ ...(req.body || {}), hook, quote }, { keystore: keystoreFor(req.user.id) });
     res.json(publicSellPlan(plan));
   } catch (err) {
@@ -592,8 +631,7 @@ router.post('/v5/sell', requireApiKey, withSellLock(async (req, res, next) => {
       throw new Error('refusing to sell without { confirm: true } — this exits every holding wallet, irreversibly');
     }
     assertOwnLaunchedToken(req.user.id, req.body?.token, req.body?.allowUnlistedToken);
-    const hook = req.body?.hook || launchedTokenHook(req.user.id, req.body?.token);
-    const quote = req.body?.quote || launchedTokenQuote(req.user.id, req.body?.token) || 'eth';
+    const { hook, quote } = resolveSellPool(req.user.id, req.body || {});
     const ks = keystoreFor(req.user.id);
     const plan = await prepareSell({ ...(req.body || {}), hook, quote }, { keystore: ks });
     const result = await fireSell(plan, {});
@@ -728,3 +766,4 @@ module.exports.selling = selling;
 module.exports.publicSellPlan = publicSellPlan;
 module.exports.launchedTokenHook = launchedTokenHook;
 module.exports.launchedTokenQuote = launchedTokenQuote;
+module.exports.resolveSellPool = resolveSellPool;

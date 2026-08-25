@@ -688,16 +688,34 @@ test('reconcileLaunch reports dropped when the tx left the mempool without minin
   assert.match(res.dropped, /dropped/);
 });
 
-test('reconcileLaunch stays pending while the tx is still in the mempool (nonce still occupied)', async () => {
+test('reconcileLaunch stays pending only when latest <= nonce < pending (genuinely in flight)', async () => {
   const provider = fakeProvider({
     getTransactionReceipt: async () => null,
-    getTransactionCount: async () => 6, // next nonce is past the launch nonce ⇒ tx still pending at 5
+    // latest 5 (nonce 5 NOT yet mined), pending 6 (the tx occupies slot 5) ⇒ in flight.
+    getTransactionCount: async (_addr, tag) => (tag === 'pending' ? 6 : 5),
   });
   const res = await reconcileLaunch(
     { hash: '0xH', address: DEV, nonce: 5, token: TOKEN },
     { provider, factory: fakeFactory() }
   );
   assert.equal(res.launch.status, 'pending', 'the tx still occupies its nonce, so it is genuinely in flight');
+});
+
+test('reconcileLaunch reports dropped when a REPLACEMENT (cancel) mined the nonce — un-bricks the launcher', async () => {
+  // The bug this guards: after /v5/launcher/cancel replaces the launch at nonce 5,
+  // that nonce is CONFIRMED by the cancel (latest 6) but the launch's own hash has
+  // no receipt. Reading only 'pending' (6) would say "still pending" forever and
+  // brick the launcher. Reading latest (6 > 5) correctly says dropped.
+  const provider = fakeProvider({
+    getTransactionReceipt: async () => null, // the launch's own hash never mined
+    getTransactionCount: async () => 6, // latest AND pending both 6 (cancel confirmed at 5)
+  });
+  const res = await reconcileLaunch(
+    { hash: '0xH', address: DEV, nonce: 5, token: TOKEN },
+    { provider, factory: fakeFactory() }
+  );
+  assert.equal(res.launch.status, 'dropped', 'a nonce mined by a replacement means the launch is gone');
+  assert.match(res.dropped, /replaced|dropped/);
 });
 
 // ── resultFromReceipt honesty (the shape the route persists) ───────────────────

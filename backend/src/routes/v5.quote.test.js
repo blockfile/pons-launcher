@@ -10,7 +10,7 @@ const assert = require('node:assert');
 const fs = require('fs');
 
 const v5 = require('./v5');
-const { launchedTokenQuote, launchedTokenHook, assertOwnLaunchedToken } = v5;
+const { launchedTokenQuote, launchedTokenHook, assertOwnLaunchedToken, resolveSellPool } = v5;
 const { activityFor } = require('../store/activity');
 const config = require('../config');
 
@@ -46,6 +46,32 @@ test('launchedTokenQuote maps a native (0x0) launch record to "eth"', () => {
 
 test('launchedTokenQuote returns null for a token this account never launched', () => {
   assert.equal(launchedTokenQuote(USER, '0x00000000000000000000000000000000000000ff'), null);
+});
+
+test('resolveSellPool uses the RECORD hook+quote and rejects a mismatching client hook', () => {
+  // Listed token: the receipt hook/quote win.
+  const r = resolveSellPool(USER, { token: TOKEN });
+  assert.equal(r.hook.toLowerCase(), HOOK.toLowerCase());
+  assert.equal(r.quote, 'usdg');
+  // A matching client hook is fine.
+  assert.doesNotThrow(() => resolveSellPool(USER, { token: TOKEN, hook: HOOK }));
+  // A DIFFERENT client hook is refused — it cannot override the authoritative pool.
+  assert.throws(
+    () => resolveSellPool(USER, { token: TOKEN, hook: '0x1111111111111111111111111111111111111111' }),
+    /does not match this token's launch record/
+  );
+});
+
+test('resolveSellPool requires an explicit quote for an unlisted token given a hook', () => {
+  const unlisted = '0x00000000000000000000000000000000000000ff';
+  assert.throws(
+    () => resolveSellPool(USER, { token: unlisted, hook: HOOK }),
+    /pass an explicit quote/
+  );
+  // With both, it passes them through.
+  const r = resolveSellPool(USER, { token: unlisted, hook: HOOK, quote: 'usdg' });
+  assert.equal(r.quote, 'usdg');
+  assert.equal(r.hook, HOOK);
 });
 
 test('assertOwnLaunchedToken ACCEPTS a token this account actually launched', () => {

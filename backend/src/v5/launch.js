@@ -733,15 +733,26 @@ async function reconcileLaunch(pending, deps = {}) {
   const receipt = await rpc.getTransactionReceipt(pending.hash);
   if (receipt) return resultFromReceipt(receipt, pending, pending.hash, { parseReceipt });
 
-  // No receipt yet — but is the tx still IN the mempool, or was it dropped
-  // (underpriced / evicted / replaced)? A dropped tx never mines and never
-  // reverts, so a naive "still pending" answer would park the wallet forever. The
-  // pending nonce tells us: if the account's next nonce is at or below the one
-  // this launch was signed at, the tx occupies NO slot — it is gone, and that
-  // nonce is free, so a fresh launch is safe. Report 'dropped' so the guard clears.
+  // No receipt yet under THIS tx's hash — but is it still in the mempool, or is it
+  // gone (evicted, or REPLACED by a /v5/launcher/cancel at the same nonce)? We
+  // must read BOTH nonces, not just pending:
+  //   • pending <= nonce  → this nonce holds nothing pending → the tx is gone.
+  //   • latest  >  nonce  → a DIFFERENT tx already CONFIRMED at/after this nonce
+  //     (a cancel/replacement mined it) → this tx can never mine → gone.
+  // Reading only pending misses the replaced-and-mined case: after a cancel
+  // confirms, pending advances to nonce+1, so `pending <= nonce` is false and the
+  // launch would be reported 'pending' FOREVER — bricking the launcher, since the
+  // documented cancel→resolve recovery ends exactly here. Report 'dropped' in both
+  // cases so the guard clears. Only `latest <= nonce < pending` is genuinely still
+  // in flight.
   if (pending.address != null && pending.nonce != null && typeof rpc.getTransactionCount === 'function') {
-    const nextNonce = BigInt(await rpc.getTransactionCount(getAddress(pending.address), 'pending'));
-    if (nextNonce <= BigInt(pending.nonce)) {
+    const addr = getAddress(pending.address);
+    const [pendingN, latestN] = await Promise.all([
+      rpc.getTransactionCount(addr, 'pending'),
+      rpc.getTransactionCount(addr, 'latest'),
+    ]);
+    const n = BigInt(pending.nonce);
+    if (BigInt(latestN) > n || BigInt(pendingN) <= n) {
       return {
         protocol: 'v5',
         token: pending.token ?? null,
@@ -750,8 +761,8 @@ async function reconcileLaunch(pending, deps = {}) {
         firstBuyOut: null,
         launch: { hash: pending.hash, status: 'dropped', blockNumber: null },
         dropped:
-          `the launch transaction is no longer in the mempool and never mined — it was dropped ` +
-          `(underpriced or evicted). Nonce ${pending.nonce} is free again, so it is safe to launch anew.`,
+          `the launch transaction is gone — it never mined and was dropped, evicted, or replaced ` +
+          `(e.g. by a launcher cancel). Nonce ${pending.nonce} is free again, so it is safe to launch anew.`,
       };
     }
   }
