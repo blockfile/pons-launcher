@@ -230,6 +230,25 @@ test('retries pool resolution when the pool is still propagating right after lau
   assert.ok(plan.walletCount >= 1, 'the bundle prepares once the pool is readable');
 });
 
+test('uses a receipt-provided poolKey directly — no resolve, no probe, and the quote uses its tickSpacing', async () => {
+  let resolveCalls = 0;
+  let quoteTickSpacing = null;
+  const POOLKEY = { currency0: '0x0000000000000000000000000000000000000000', currency1: TOKEN, fee: 0, tickSpacing: 60, hooks: HOOK };
+  const { deps: d } = deps({
+    swap: {
+      resolvePoolKey: async () => { resolveCalls += 1; throw new Error('resolvePoolKey must not run when a receipt pool is given'); },
+      quoteBuy: async ({ amountInWei, poolKey }) => {
+        quoteTickSpacing = poolKey?.tickSpacing;
+        return { expectedOut: BigInt(amountInWei) * 1000n, minOut: BigInt(amountInWei) * 990n };
+      },
+    },
+  });
+  const plan = await prepareBundleBuys({ token: TOKEN, hook: HOOK, poolKey: POOLKEY, poolId: PID, buys: BUYS }, d);
+  assert.equal(resolveCalls, 0, 'the receipt pool is used directly, not re-resolved/probed');
+  assert.equal(Number(quoteTickSpacing), 60, 'the quote targets the pool at the receipt tickSpacing, not the hardcoded default');
+  assert.ok(plan.walletCount >= 1);
+});
+
 // ── fireBundleBuys ────────────────────────────────────────────────────────────
 function buyPlan(buys) {
   return { protocol: 'v5', kind: 'bundle-buy', token: TOKEN, symbol: 'CAT', buys };

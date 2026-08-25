@@ -133,12 +133,31 @@ async function launchThenBundle(input = {}, deps = {}) {
     }
 
     // Sign the buys against the REAL launched pool (token + receipt hook), then fire.
+    // Hand the buy path the AUTHORITATIVE pool from the launch receipt's Initialize
+    // event (exact poolId + full key with the config's real fee/tickSpacing), so it
+    // targets the pool this launch actually created instead of re-deriving it from
+    // hardcoded values (wrong for a non-default tickSpacing) or probing a pool the
+    // RPC hasn't caught up on. Falls back to on-chain resolution if, exceptionally,
+    // the receipt carried no Initialize event.
+    const pool = launchResult.pool;
     const buyPlan = await prepareBuysFn(
       {
         token: launchResult.token,
         hook: launchResult.hook,
         quote: 'eth',
         buys,
+        ...(pool && pool.poolId
+          ? {
+              poolId: pool.poolId,
+              poolKey: {
+                currency0: pool.currency0,
+                currency1: pool.currency1,
+                fee: pool.fee,
+                tickSpacing: pool.tickSpacing,
+                hooks: pool.hooks,
+              },
+            }
+          : {}),
         ...(slippageBps != null ? { slippageBps } : {}),
         ...(buyGas != null ? { buyGas } : {}),
       },

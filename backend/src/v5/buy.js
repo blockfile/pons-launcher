@@ -106,24 +106,43 @@ async function prepareBundleBuys(input, deps = {}) {
   const wallets = roles.bundle(ks);
   if (!wallets.length) throw new Error('no v5bundle wallets to buy from — generate or fund some first');
 
-  // Resolve + verify the pinned pool. The pool exists on-chain the instant the
-  // launch tx mines, but the bundle buys fire immediately after that (the combined
-  // Launch + bundle), and a load-balanced RPC can serve a node a block or two
-  // behind, so the FIRST read can miss a pool that is genuinely there. Retry a few
-  // times with a short delay before giving up — that is the difference between "the
-  // pool is still propagating" and "there is genuinely no pool". Tunable/injectable
-  // so a plain manual buy (pool long settled) and the offline tests don't wait.
-  const sleep = deps.sleep || ((ms) => (ms > 0 ? new Promise((r) => setTimeout(r, ms)) : Promise.resolve()));
-  const poolTries = input.poolWaitTries != null ? Number(input.poolWaitTries) : 5;
-  const poolDelayMs = input.poolWaitMs != null ? Number(input.poolWaitMs) : 2000;
+  // Resolve the pool. Prefer the AUTHORITATIVE pool the caller hands in (the
+  // combined Launch + bundle passes the launch receipt's Initialize event: exact
+  // poolId + full key with the config's REAL fee/tickSpacing). Using it directly
+  // avoids two failure modes that wrongly skipped a fresh launch's bundle: (1)
+  // re-deriving the poolId from a hardcoded fee/tickSpacing, which is wrong for any
+  // config whose tickSpacing isn't the default → "no pool"; and (2) the StateView
+  // liquidity/price probe missing a just-seeded pool a load-balanced RPC hasn't
+  // caught up on. The receipt already PROVES the pool exists, so no probe is needed.
   let resolved;
-  for (let attempt = 0; ; attempt += 1) {
-    try {
-      resolved = await swapClient.resolvePoolKey({ token: tokenAddr, quote, hook: hookAddr }, { provider: prov });
-      break;
-    } catch (err) {
-      if (attempt >= poolTries) throw err;
-      await sleep(poolDelayMs);
+  if (input.poolKey && input.poolId) {
+    const pk = input.poolKey;
+    resolved = {
+      poolKey: {
+        currency0: getAddress(pk.currency0),
+        currency1: getAddress(pk.currency1),
+        fee: Number(pk.fee),
+        tickSpacing: Number(pk.tickSpacing),
+        hooks: getAddress(pk.hooks),
+      },
+      poolId: input.poolId,
+      hook: getAddress(pk.hooks),
+    };
+  } else {
+    // No receipt pool (a plain manual buy). Resolve against the chain, and retry a
+    // few times for the "still propagating right after a launch" case. Tunable/
+    // injectable so a settled-pool buy and the offline tests don't wait.
+    const sleep = deps.sleep || ((ms) => (ms > 0 ? new Promise((r) => setTimeout(r, ms)) : Promise.resolve()));
+    const poolTries = input.poolWaitTries != null ? Number(input.poolWaitTries) : 5;
+    const poolDelayMs = input.poolWaitMs != null ? Number(input.poolWaitMs) : 2000;
+    for (let attempt = 0; ; attempt += 1) {
+      try {
+        resolved = await swapClient.resolvePoolKey({ token: tokenAddr, quote, hook: hookAddr }, { provider: prov });
+        break;
+      } catch (err) {
+        if (attempt >= poolTries) throw err;
+        await sleep(poolDelayMs);
+      }
     }
   }
   const [decimals, symbol] = await Promise.all([decimalsOf(tokenAddr), symbolOf(tokenAddr)]);
@@ -192,7 +211,7 @@ async function prepareBundleBuys(input, deps = {}) {
     let minOut;
     try {
       const qres = await swapClient.quoteBuy(
-        { token: tokenAddr, quote, amountInWei: amountWei, slippageBps, hook: hookAddr },
+        { token: tokenAddr, quote, amountInWei: amountWei, slippageBps, hook: hookAddr, poolKey: resolved.poolKey },
         { provider: prov }
       );
       expectedOut = qres.expectedOut;

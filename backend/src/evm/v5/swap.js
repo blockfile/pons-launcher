@@ -380,13 +380,21 @@ async function quoteExactInSingle({ poolKey, zeroForOne, amountIn }, deps) {
  * Quote a BUY (quote → token). amountInWei is the quote spent (ETH wei, or USDG
  * base units). slippageBps sizes the returned floor; 0 = no floor.
  */
-async function quoteBuy({ token, quote, amountInWei, slippageBps = 0, hook } = {}, deps) {
-  const { poolKey, quoteIsCurrency0 } = poolKeyFor({ token, quote, hook }, deps);
+async function quoteBuy({ token, quote, amountInWei, slippageBps = 0, hook, poolKey } = {}, deps) {
+  const d = resolveDeps(deps);
+  // Prefer a pre-resolved poolKey (e.g. the launch receipt's Initialize event,
+  // which carries the config's ACTUAL fee/tickSpacing) over re-deriving from a
+  // hardcoded fee/tickSpacing — a config whose tickSpacing isn't the default would
+  // otherwise hash to the wrong pool and quote against nothing.
+  let key = poolKey;
+  let quoteIsCurrency0;
+  if (key) {
+    quoteIsCurrency0 = norm(key.currency0) === quoteAddress(quote, d);
+  } else {
+    ({ poolKey: key, quoteIsCurrency0 } = poolKeyFor({ token, quote, hook }, deps));
+  }
   // BUY spends the quote; zeroForOne is true iff the quote is currency0.
-  const expectedOut = await quoteExactInSingle(
-    { poolKey, zeroForOne: quoteIsCurrency0, amountIn: BigInt(amountInWei) },
-    deps
-  );
+  const expectedOut = await quoteExactInSingle({ poolKey: key, zeroForOne: quoteIsCurrency0, amountIn: BigInt(amountInWei) }, deps);
   return { expectedOut, minOut: applySlippage(expectedOut, slippageBps) };
 }
 
