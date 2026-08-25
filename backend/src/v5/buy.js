@@ -73,6 +73,17 @@ async function prepareBundleBuys(input, deps = {}) {
   if (!token || !isAddress(String(token))) throw new Error('token must be the launched ERC-20 address');
   const tokenAddr = getAddress(token);
 
+  // The buy gas cap is a fixed 500k, but a caller can raise it — the one lever if
+  // 500k ever proved too low for a pool (which would otherwise re-OOG on every
+  // retry). Bounded, and never below the safe floor. Mirrors the sell's sellGas.
+  const buyGasLimit = (() => {
+    if (input.buyGas == null) return BUY_GAS;
+    const g = BigInt(input.buyGas);
+    if (g < BUY_GAS) return BUY_GAS;
+    if (g > 3_000_000n) throw new Error('buyGas override is capped at 3,000,000');
+    return g;
+  })();
+
   // ETH-only for now — a USDG-quoted buy pulls USDG via Permit2 (like the sell's
   // input side) and needs the two approvals; that is a later pass.
   const q = String(quote).toLowerCase();
@@ -112,7 +123,7 @@ async function prepareBundleBuys(input, deps = {}) {
 
   const fees = deps.fees || (await getFeesFn(FEE_BUMP_PCT));
   const chainId = BigInt(deps.chainId ?? config.chainId);
-  const gasReserve = gasCost(fees, BUY_GAS);
+  const gasReserve = gasCost(fees, buyGasLimit);
   const nowSec = deps.nowMs != null ? Math.floor(deps.nowMs / 1000) : Math.floor(Date.now() / 1000);
   const deadline = deps.deadline ?? nowSec + DEADLINE_SECONDS;
 
@@ -173,7 +184,7 @@ async function prepareBundleBuys(input, deps = {}) {
     );
     const signer = ks.signer(wallet.id, prov);
     const raw = await signer.signTransaction(
-      toSignable({ to: tx.to, data: tx.data, value: tx.value }, { nonce: pendingNonce, gasLimit: BUY_GAS, fees, chainId })
+      toSignable({ to: tx.to, data: tx.data, value: tx.value }, { nonce: pendingNonce, gasLimit: buyGasLimit, fees, chainId })
     );
 
     out.push({
@@ -214,7 +225,7 @@ async function prepareBundleBuys(input, deps = {}) {
     buys: out,
     skipped,
     fees: stringifyFees(fees),
-    buyGas: BUY_GAS.toString(),
+    buyGas: buyGasLimit.toString(),
     chainId: chainId.toString(),
     dryRun,
     warnings,

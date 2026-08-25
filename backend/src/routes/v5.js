@@ -451,7 +451,7 @@ router.post('/v5/wallets/import', requireApiKey, (req, res, next) => {
 router.post('/v5/wallets/claim-seasoned', requireApiKey, (req, res, next) => {
   try {
     const id = req.user.id;
-    if (launching.has(id) || bundling.has(id) || selling.has(id) || launcherBusy.has(id) || pendingLaunches.has(id)) {
+    if (launching.has(id) || bundling.has(id) || selling.has(id) || buying.has(id) || launcherBusy.has(id) || pendingLaunches.has(id)) {
       throw new Error('a v5 launch/bundle/sell/launcher action is in progress or unresolved — settle it before claiming wallets');
     }
     const ks = keystoreFor(id);

@@ -151,6 +151,23 @@ test('refuses a buys entry naming a wallet not in the bundle, or twice', async (
   );
 });
 
+test('the buy signs the default 500k gas, and a bounded buyGas override raises it / clamps / caps', async () => {
+  const { deps: d, ks } = deps();
+  await prepareBundleBuys({ token: TOKEN, hook: HOOK, buys: BUYS }, d);
+  assert.ok(ks.signables.every((s) => s.gasLimit === 500_000n), 'default buy gas is 500k');
+
+  const { deps: d2, ks: ks2 } = deps();
+  await prepareBundleBuys({ token: TOKEN, hook: HOOK, buys: BUYS, buyGas: 1_200_000 }, d2);
+  assert.ok(ks2.signables.every((s) => s.gasLimit === 1_200_000n), 'a valid override reaches the signed buys');
+
+  const { deps: d3, ks: ks3 } = deps();
+  await prepareBundleBuys({ token: TOKEN, hook: HOOK, buys: BUYS, buyGas: 100_000 }, d3); // below floor
+  assert.ok(ks3.signables.every((s) => s.gasLimit === 500_000n), 'never below the safe floor');
+
+  const { deps: d4 } = deps();
+  await assert.rejects(() => prepareBundleBuys({ token: TOKEN, hook: HOOK, buys: BUYS, buyGas: 5_000_000 }, d4), /capped at 3,000,000/);
+});
+
 test('prepareBundleBuys broadcasts nothing', async () => {
   const { deps: d, provider } = deps();
   await prepareBundleBuys({ token: TOKEN, hook: HOOK, buys: BUYS }, d);
