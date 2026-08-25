@@ -228,7 +228,9 @@ function assertOwnLaunchedToken(userId, token, allowUnlisted) {
   const launched = new Set(
     activityFor(userId)
       .list({ kind: 'v5', limit: 500 })
-      .map((e) => e.detail && e.detail.token)
+      // activity.record spreads the detail at the TOP LEVEL of the entry (not under
+      // e.detail), so the launched token is e.token, not e.detail.token.
+      .map((e) => e.token)
       .filter(Boolean)
       .map((t) => String(t).toLowerCase())
   );
@@ -248,10 +250,27 @@ function launchedTokenHook(userId, token) {
   const want = String(token || '').toLowerCase();
   const entry = activityFor(userId)
     .list({ kind: 'v5', limit: 500 })
-    .find(
-      (e) => e.detail && e.detail.token && String(e.detail.token).toLowerCase() === want && e.detail.hook
-    );
-  return entry ? entry.detail.hook : null;
+    // detail is spread at the top level of the entry (see activity.record), so the
+    // fields are e.token / e.hook, not e.detail.*.
+    .find((e) => e.token && String(e.token).toLowerCase() === want && e.hook);
+  return entry ? entry.hook : null;
+}
+
+// The token's QUOTE asset, from the same launch record. A USDG-quoted token trades
+// in a (USDG, token) pool, so the sell must resolve against USDG — but the sell
+// input defaults to ETH, and the console never sends a quote, so without this a
+// USDG token would resolve a non-existent ETH pool and be unsellable. Returns
+// 'usdg' | 'eth' | null (no record). The launch persisted detail.quote as the
+// quote ADDRESS (0x0 for ETH, the USDG address for USDG).
+function launchedTokenQuote(userId, token) {
+  const want = String(token || '').toLowerCase();
+  const usdg = String(config.letscash.usdg).toLowerCase();
+  const entry = activityFor(userId)
+    .list({ kind: 'v5', limit: 500 })
+    .find((e) => e.token && String(e.token).toLowerCase() === want && e.quote);
+  if (!entry) return null;
+  const q = String(entry.quote).toLowerCase();
+  return q === usdg ? 'usdg' : 'eth';
 }
 
 // GET /api/v5/config — the letscash contract map + chain, for the console.
@@ -554,7 +573,10 @@ router.post('/v5/sell/preflight', requireApiKey, async (req, res, next) => {
     // Pin the launch's recorded hook (or an explicit override) so the sell targets
     // the exact pool, never a probed/decoy one. prepareSell refuses without it.
     const hook = req.body?.hook || launchedTokenHook(req.user.id, req.body?.token);
-    const plan = await prepareSell({ ...(req.body || {}), hook }, { keystore: keystoreFor(req.user.id) });
+    // Derive the quote from the launch record too, so a USDG-launched token sells
+    // into its (USDG,token) pool without the console having to know its quote.
+    const quote = req.body?.quote || launchedTokenQuote(req.user.id, req.body?.token) || 'eth';
+    const plan = await prepareSell({ ...(req.body || {}), hook, quote }, { keystore: keystoreFor(req.user.id) });
     res.json(publicSellPlan(plan));
   } catch (err) {
     next(err);
@@ -571,8 +593,9 @@ router.post('/v5/sell', requireApiKey, withSellLock(async (req, res, next) => {
     }
     assertOwnLaunchedToken(req.user.id, req.body?.token, req.body?.allowUnlistedToken);
     const hook = req.body?.hook || launchedTokenHook(req.user.id, req.body?.token);
+    const quote = req.body?.quote || launchedTokenQuote(req.user.id, req.body?.token) || 'eth';
     const ks = keystoreFor(req.user.id);
-    const plan = await prepareSell({ ...(req.body || {}), hook }, { keystore: ks });
+    const plan = await prepareSell({ ...(req.body || {}), hook, quote }, { keystore: ks });
     const result = await fireSell(plan, {});
 
     activityFor(req.user.id).record(
@@ -703,3 +726,5 @@ module.exports.assertOwnLaunchedToken = assertOwnLaunchedToken;
 module.exports.withSellLock = withSellLock;
 module.exports.selling = selling;
 module.exports.publicSellPlan = publicSellPlan;
+module.exports.launchedTokenHook = launchedTokenHook;
+module.exports.launchedTokenQuote = launchedTokenQuote;
