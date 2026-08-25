@@ -1,13 +1,14 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { api } from '../api.js';
 import Sequence from '../components/Sequence.jsx';
-import Step from '../components/Step.jsx';
 import ResultPanel from '../components/ResultPanel.jsx';
 import { plural } from './roles.js';
 import V5WalletsPanel from './V5WalletsPanel.jsx';
 import V5FundPanel from './V5FundPanel.jsx';
 import V5LaunchPanel from './V5LaunchPanel.jsx';
 import V5BundlePanel from './V5BundlePanel.jsx';
+import V5SellPanel from './V5SellPanel.jsx';
+import V5SweepPanel from './V5SweepPanel.jsx';
 
 /**
  * The v5 tab, whole — the letscash.fun (CashCat) bundler.
@@ -16,26 +17,8 @@ import V5BundlePanel from './V5BundlePanel.jsx';
  * App renders one or the other; this component holds v5's launcher and bundle
  * wallets, and nothing it does can change what another tab is drawing.
  *
- * Wallets, Fund, Launch and Bundle work. Sell and Sweep are drawn as the steps
- * they will be so the flow reads end-to-end, but each is still a stub until its
- * own fund-safety review lands.
+ * All six steps work: Wallets, Fund, Launch, Bundle, Sell and Sweep.
  */
-
-/**
- * A later step, drawn but not yet built. Titled and threaded onto the spine so
- * the sequence reads whole, with one line saying it is not here yet.
- */
-function Stub({ step, children }) {
-  return (
-    <Step {...step}>
-      <p className="lede">{children}</p>
-      <div className="notice">
-        <h3>Coming soon</h3>
-        <p>This step is scaffolding — the controls arrive in a later phase.</p>
-      </div>
-    </Step>
-  );
-}
 
 export default function V5Console({ health, credential, report, output, reportedAt }) {
   const [dev, setDev] = useState(null);
@@ -112,10 +95,10 @@ export default function V5Console({ health, credential, report, output, reported
    * Same rules the v1/v2/v3/v4 sequences use: exactly one step is `now` — the
    * first that is not done and whose predecessor is — and `later` is a statement
    * about order, never a permission — see Step.jsx: every control below stays
-   * live regardless of which step is marked current. Sell and Sweep are still
-   * stubs and never done; Bundle has no session-held "last result" the way
-   * Launch keeps `lastLaunch`, so it too never claims `done` here — the marker
-   * rests on whichever of Wallets, Fund or Launch is the first not yet true.
+   * live regardless of which step is marked current. Bundle, Sell and Sweep
+   * have no session-held "last result" the way Launch keeps `lastLaunch`, so
+   * none of them claims `done` here — the marker rests on whichever of
+   * Wallets, Fund or Launch is the first not yet true.
    */
   const steps = useMemo(() => {
     const plan = [
@@ -250,12 +233,28 @@ export default function V5Console({ health, credential, report, output, reported
         reload={loadWallets}
         report={report}
       />
-      <Stub step={step('sell')}>
-        The bundle unwinds its position back to ETH.
-      </Stub>
-      <Stub step={{ ...step('sweep'), last: true }}>
-        Whatever is left is collected to a single wallet.
-      </Stub>
+
+      <V5SellPanel
+        step={step('sell')}
+        dev={dev}
+        bundle={bundle}
+        lastLaunch={lastLaunch}
+        live={live}
+        explorer={explorer}
+        reload={loadWallets}
+        report={report}
+      />
+
+      <V5SweepPanel
+        step={{ ...step('sweep'), last: true }}
+        dev={dev}
+        bundle={bundle}
+        lastLaunch={lastLaunch}
+        live={live}
+        explorer={explorer}
+        reload={loadWallets}
+        report={report}
+      />
     </div>
   );
 }
