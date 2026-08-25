@@ -34,10 +34,17 @@ const v5roles = require('./roles');
 const BUY_GAS = 500_000n;
 const DEADLINE_SECONDS = 3600;
 const FEE_BUMP_PCT = 25;
-// Default slippage floor on a buy — a buy MUST carry a positive floor (buildBuyTx
-// refuses minOut 0). 1% by default; the tax is already in the quote, so this is
-// only headroom for movement between preflight and broadcast.
-const DEFAULT_SLIPPAGE_BPS = 100;
+// Default slippage floor on a bundle buy — a buy MUST carry a positive floor
+// (buildBuyTx refuses minOut 0). This is NOT just preflight→broadcast drift: the
+// bundle wallets all buy the SAME pool in the same/adjacent blocks, so each buy is
+// quoted at the pre-bundle price but executes after the ones ahead of it have
+// already pushed the price up — the ones that land later get fewer tokens than
+// their quote and, with a tight floor, REVERT (1 buys, the rest revert). The
+// floor therefore has to absorb the bundle's OWN cumulative price impact, which is
+// self-inflicted and expected. 30% by default so a normal bundle into a fresh pool
+// goes through; raise it (or use the untaxed fan-out) for a very thin pool, lower
+// it for a single buy. The operator can always override via slippageBps.
+const DEFAULT_SLIPPAGE_BPS = 3000;
 
 function toSignable({ to, data, value = 0n }, { nonce, gasLimit, fees, chainId }) {
   return { to, data, value: BigInt(value), nonce, gasLimit, chainId, ...fees };

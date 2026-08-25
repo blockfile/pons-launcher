@@ -5,7 +5,6 @@ import { Busy } from '../components/Section.jsx';
 import Modal, { Fact } from '../components/Modal.jsx';
 import Address from '../components/Address.jsx';
 import { eth, plural } from './roles.js';
-import V5BuyPanel from './V5BuyPanel.jsx';
 
 // The 409 backend/src/routes/v5.js's withBundleLock (and prepareBundle's own
 // settled-balance gate) raise when the launcher's on-chain state is not settled
@@ -33,17 +32,12 @@ function fmt(v, dp = 4) {
 }
 
 /**
- * Bundle tools — an UNNUMBERED utility, below the numbered flow.
- *
- * The primary bundle now rides with the launch: step 3 (V5LaunchPanel) is the
- * combined "Launch + bundle" that fires every wallet's buy the instant the
- * launch confirms, uniform with the pons v1 Launcher tab. This panel is what is
- * left over for the cases that combined step does not cover:
- *   • the untaxed fan-out — distribute the launcher's first-buy supply by
- *     transfer() instead of (or on top of) per-wallet buys;
- *   • extra/manual per-wallet buys, to top up after the combined run;
- *   • recovery — fire the bundle by hand when a combined launch confirmed but
- *     skipped its buys (a USDG launch, an unreadable hook: `bundleSkipped`).
+ * Bundle tools — an UNNUMBERED utility, below the numbered flow. The UNTAXED
+ * FAN-OUT, and nothing else: the per-wallet buys ride with the launch (step 4's
+ * combined "Launch + bundle"), so there is no separate/manual buy here — that
+ * would just duplicate it. This panel is the tax-free distribution the combined
+ * step does NOT do, and the recovery path when a launch confirmed but its buys
+ * were skipped (a USDG launch, an unreadable hook: `bundleSkipped`).
  *
  * THE EDGE: letscash taxes SWAPS (pool interactions) through its hook, but a
  * plain wallet→wallet ERC-20 transfer() never touches the pool, so it is
@@ -67,16 +61,8 @@ function fmt(v, dp = 4) {
  * NOT SETTLED. Unlike the launch step's `parked` state, there is no resolve
  * action here — the guard clears itself the moment the in-flight tx confirms.
  * So this is shown as a plain "wait and try again" notice, not a button.
- *
- * METHOD TOGGLE. `panelMode` picks between the two mechanics — 'fanout' (the
- * untaxed transfer(), DEFAULT here because the combined step 3 already handles
- * the per-wallet buys, so this utility leads with the distribution step 3 does
- * NOT do) and 'buy' (V5BuyPanel — manual per-wallet buys, for topping up or for
- * recovering a skipped bundle). Both live inside this one shell; the toggle is
- * drawn once, at the top, and only ever changes which body renders under it.
  */
 export default function V5BundlePanel({ step, dev, bundle, lastLaunch, live, explorer, reload, report }) {
-  const [panelMode, setPanelMode] = useState('fanout'); // 'fanout' (untaxed transfer, default) | 'buy' (V1-style per-wallet)
   const [tokenOverride, setTokenOverride] = useState('');
   const [allowUnlisted, setAllowUnlisted] = useState(false);
   const [mode, setMode] = useState('equal');
@@ -188,50 +174,14 @@ export default function V5BundlePanel({ step, dev, bundle, lastLaunch, live, exp
 
   return (
     <Step {...step}>
-      {panelMode === 'buy' ? (
-        <p className="lede">
-          Each bundle wallet buys the token from the pool with its own ETH — the pons v1 mechanic, on
-          letscash. These buys pay the pool's tax — the launch config's base tier (1/3/5/10%), flat in
-          practice with no decaying anti-snipe premium to wait out; the Buy panel below shows the live
-          rate.
-          <b> ETH-only</b> for now: a USDG-quoted launch can't buy through this path yet. Nothing
-          broadcasts until Buy is armed and confirmed.
-        </p>
-      ) : (
-        <p className="lede">
-          letscash taxes swaps through its hook, but a plain wallet→wallet transfer never touches the
-          pool — so fanning the launcher's first-buy position out to the bundle wallets here is
-          <b> untaxed</b>. Nothing broadcasts until Bundle is armed and confirmed.
-        </p>
-      )}
+      <p className="lede">
+        letscash taxes swaps through its hook, but a plain wallet→wallet transfer never touches the
+        pool — so fanning the launcher's first-buy position out to the bundle wallets here is
+        <b> untaxed, with zero slippage</b>. The launcher makes one big first buy in the launch, and
+        the tokens are split out to the bundle wallets by transfer() — no per-wallet buys, nothing to
+        revert. Nothing broadcasts until Bundle is armed and confirmed.
+      </p>
 
-      <div className="grid" style={{ marginBottom: 8 }}>
-        <label>
-          Method
-          <select value={panelMode} onChange={(e) => setPanelMode(e.target.value)}>
-            <option value="fanout">Untaxed fan-out</option>
-            <option value="buy">Each wallet buys (extra/manual)</option>
-          </select>
-          <span className="hint">
-            {panelMode === 'buy'
-              ? "each bundle wallet buys from the pool with its own ETH — pays the pool's tax (the Buy panel below shows the live rate)"
-              : "the launcher's first-buy supply moves by transfer() — untaxed, and independent of the tax's decay"}
-          </span>
-        </label>
-      </div>
-
-      {panelMode === 'buy' && (
-        <V5BuyPanel
-          bundle={bundle}
-          lastLaunch={lastLaunch}
-          live={live}
-          explorer={explorer}
-          reload={reload}
-          report={report}
-        />
-      )}
-
-      {panelMode === 'fanout' && (
       <>
       {noWallets && (
         <div className="notice warn">
@@ -528,7 +478,6 @@ export default function V5BundlePanel({ step, dev, bundle, lastLaunch, live, exp
         </div>
       </Modal>
       </>
-      )}
     </Step>
   );
 }

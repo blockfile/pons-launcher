@@ -286,7 +286,7 @@ export default function V5Console({ health, credential, report, output, reported
           id: 'v5-bundle-tools',
           n: null,
           label: 'Utility',
-          title: 'Bundle tools — fan-out & extra buys',
+          title: 'Bundle tools — untaxed fan-out',
           state: 'later',
           chip: null,
         }}

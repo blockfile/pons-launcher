@@ -544,11 +544,16 @@ export default function V5LaunchPanel({ step, dev, bundle = [], launchConfigs, l
                 type="number"
                 step="1"
                 min="0"
-                placeholder="100"
+                placeholder="3000"
                 value={slippageBps}
                 onChange={(e) => setSlippageBps(e.target.value)}
               />
-              <span className="hint">empty = 1% default — the tax is already in the quote; this is only headroom</span>
+              <span className="hint">
+                empty = 30% default. The wallets all buy the same pool at once, so each pushes the price
+                up for the next — the floor has to absorb the bundle's own impact or the later buys
+                revert. Raise it for a thin pool; lower it for a single buy. (Or use the untaxed fan-out
+                below — no slippage at all.)
+              </span>
             </label>
           </div>
 
