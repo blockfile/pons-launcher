@@ -7,6 +7,7 @@ import { plural } from './roles.js';
 import V5WalletsPanel from './V5WalletsPanel.jsx';
 import V5FundPanel from './V5FundPanel.jsx';
 import V5LaunchPanel from './V5LaunchPanel.jsx';
+import V5BundlePanel from './V5BundlePanel.jsx';
 
 /**
  * The v5 tab, whole — the letscash.fun (CashCat) bundler.
@@ -15,7 +16,7 @@ import V5LaunchPanel from './V5LaunchPanel.jsx';
  * App renders one or the other; this component holds v5's launcher and bundle
  * wallets, and nothing it does can change what another tab is drawing.
  *
- * Wallets, Fund and Launch work. Bundle, Sell and Sweep are drawn as the steps
+ * Wallets, Fund, Launch and Bundle work. Sell and Sweep are drawn as the steps
  * they will be so the flow reads end-to-end, but each is still a stub until its
  * own fund-safety review lands.
  */
@@ -111,9 +112,10 @@ export default function V5Console({ health, credential, report, output, reported
    * Same rules the v1/v2/v3/v4 sequences use: exactly one step is `now` — the
    * first that is not done and whose predecessor is — and `later` is a statement
    * about order, never a permission — see Step.jsx: every control below stays
-   * live regardless of which step is marked current. Bundle, Sell and Sweep are
-   * still stubs and never done, so the marker rests on whichever of Wallets,
-   * Fund or Launch is the first not yet true.
+   * live regardless of which step is marked current. Sell and Sweep are still
+   * stubs and never done; Bundle has no session-held "last result" the way
+   * Launch keeps `lastLaunch`, so it too never claims `done` here — the marker
+   * rests on whichever of Wallets, Fund or Launch is the first not yet true.
    */
   const steps = useMemo(() => {
     const plan = [
@@ -238,10 +240,16 @@ export default function V5Console({ health, credential, report, output, reported
         onLaunched={setLastLaunch}
       />
 
-      <Stub step={step('bundle')}>
-        The first-buy supply is fanned out to the bundle wallets — token transfers are untaxed on
-        letscash.
-      </Stub>
+      <V5BundlePanel
+        step={step('bundle')}
+        dev={dev}
+        bundle={bundle}
+        lastLaunch={lastLaunch}
+        live={live}
+        explorer={explorer}
+        reload={loadWallets}
+        report={report}
+      />
       <Stub step={step('sell')}>
         The bundle unwinds its position back to ETH.
       </Stub>
