@@ -218,6 +218,16 @@ test('no v5dev launcher wallet is a clear, early error', async () => {
   );
 });
 
+test('prepareLaunch refuses to sign while the launcher has a tx in flight (restart-proof guard)', async () => {
+  // pending nonce ahead of latest ⇒ a prior launch is unconfirmed in the mempool.
+  // Signing now would place a SECOND launch at the next nonce — the double-spend
+  // the in-memory park guards against, here caught on-chain so a restart can't
+  // reopen it.
+  const { deps, ks } = prepDeps({}, { getTransactionCount: async (_addr, tag) => (tag === 'pending' ? 8 : 7) });
+  await assert.rejects(() => prepareLaunch(baseInput, deps), /still in flight/);
+  assert.equal(ks.signCalls.length, 0, 'nothing is signed against an unsettled launcher');
+});
+
 test('a config quoted in something other than ETH refuses a non-zero first buy', async () => {
   const { deps } = prepDeps({
     getConfigs: async () => ({

@@ -345,8 +345,30 @@ async function prepareLaunch(input, deps = {}) {
     );
   }
 
+  // ── the SETTLED-nonce gate (the restart-proof half of the double-launch guard) ─
+  // The route's in-memory pendingLaunches marker parks a launch whose receipt
+  // never arrived, but that marker dies on a process restart — leaving a window
+  // where a launch broadcast before the restart is still in the mempool at nonce
+  // N, yet a fresh launch would read 'pending' as N+1 and sign a SECOND launch
+  // against the same wallet (two fees + two first-buys). The chain is the durable
+  // source of truth: if the launcher's next-pending nonce is ahead of its
+  // confirmed (latest) nonce, it has an unconfirmed tx in flight, and we refuse to
+  // sign another launch until it settles. This needs no persistence and survives a
+  // restart — the same guard prepareBundle uses on the shared wallet.
+  const [pendingNonce, latestNonce] = await Promise.all([
+    prov.getTransactionCount(dev.address, 'pending'),
+    prov.getTransactionCount(dev.address, 'latest'),
+  ]);
+  if (pendingNonce > latestNonce) {
+    throw new Error(
+      `the launcher has ${pendingNonce - latestNonce} transaction(s) still in flight — wait for the ` +
+        'previous launch to confirm (or reconcile it via /v5/launch/resolve) before launching again, ' +
+        'so a second launch cannot spend a second fee + first buy at the next nonce'
+    );
+  }
+
   // ── SIGN, at the launcher's pending nonce. Broadcast NOTHING. ──────────────
-  const nonce = await prov.getTransactionCount(dev.address, 'pending');
+  const nonce = pendingNonce;
   const signer = ks.signer(dev.id, prov);
   const raw = await signer.signTransaction(toSignable(txFields, { nonce, gasLimit, fees, chainId }));
 

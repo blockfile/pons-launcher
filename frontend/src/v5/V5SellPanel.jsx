@@ -55,6 +55,7 @@ function fmt(v, dp = 4) {
 export default function V5SellPanel({ step, dev, bundle, lastLaunch, live, explorer, reload, report }) {
   const [tokenOverride, setTokenOverride] = useState('');
   const [allowUnlisted, setAllowUnlisted] = useState(false);
+  const [hookOverride, setHookOverride] = useState('');
   const [slippageBps, setSlippageBps] = useState('');
   const [busy, setBusy] = useState('');
   const [plan, setPlan] = useState(null); // the last preflight's response
@@ -97,7 +98,13 @@ export default function V5SellPanel({ step, dev, bundle, lastLaunch, live, explo
     const b = { token };
     const bps = Number(slippageBps);
     if (slippageBps.trim() && bps > 0) b.slippageBps = bps;
-    if (differsFromLaunch && allowUnlisted) b.allowUnlistedToken = true;
+    if (differsFromLaunch && allowUnlisted) {
+      b.allowUnlistedToken = true;
+      // An unlisted token has no recorded launch hook for the server to pin, so
+      // the exact pool hook must be supplied here — the server refuses the sell
+      // without it (a probed hook could be a seeded decoy pool at minOut 0).
+      if (hookOverride.trim()) b.hook = hookOverride.trim();
+    }
     return b;
   }
 
@@ -143,7 +150,10 @@ export default function V5SellPanel({ step, dev, bundle, lastLaunch, live, explo
     }
   }
 
-  const tokenReady = Boolean(token) && (!differsFromLaunch || allowUnlisted);
+  // For an unlisted token the operator must also supply the pool hook — the exit
+  // refuses without it, so keep the buttons disabled until it is given.
+  const tokenReady =
+    Boolean(token) && (!differsFromLaunch || (allowUnlisted && Boolean(hookOverride.trim())));
   const ready = tokenReady && !noWallets;
   const blocked = live && !armed;
 
@@ -206,6 +216,22 @@ export default function V5SellPanel({ step, dev, bundle, lastLaunch, live, explo
           <input type="checkbox" checked={allowUnlisted} onChange={(e) => setAllowUnlisted(e.target.checked)} />
           I'm sure this is my token — sell it even though it wasn't launched here
         </label>
+      )}
+      {differsFromLaunch && allowUnlisted && (
+        <div className="grid" style={{ marginTop: 8 }}>
+          <label className="wide">
+            Pool hook (required for an unlisted token)
+            <input
+              value={hookOverride}
+              onChange={(e) => setHookOverride(e.target.value)}
+              placeholder="0x… — the pool hook from this token's launch receipt"
+            />
+            <span className="hint">
+              An unlisted token has no recorded launch here, so the exact pool hook must be given — the
+              exit refuses without it, because a probed hook could hit a decoy pool and drain at no floor.
+            </span>
+          </label>
+        </div>
       )}
       {!token && (
         <div className="notice warn">
