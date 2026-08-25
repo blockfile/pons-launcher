@@ -256,8 +256,14 @@ function explainRevert(err) {
         return `${parsed.name}${args}`;
       }
     } catch (_err) {
-      // Not one of the factory errors; fall through to the plain message.
+      // Not one of the factory (or built-in Error/Panic) errors — fall through,
+      // but keep the raw selector: an error this factory ABI does not know almost
+      // always comes from a sub-contract the launch calls (the CashCat hook, the
+      // V4 PoolManager during the atomic first buy, Permit2). Surfacing its 4-byte
+      // selector is what makes an otherwise-blank "unknown custom error"
+      // identifiable — look the selector up (e.g. openchain.xyz/signatures).
     }
+    return `unknown custom error ${data.slice(0, 10)} (from a sub-contract — likely the hook or the V4 pool, not the factory)`;
   }
   return rpcMessage(err);
 }
