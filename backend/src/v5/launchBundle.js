@@ -74,9 +74,15 @@ async function launchThenBundle(input = {}, deps = {}) {
   // warning meant for the bundle. `confirm` is the route's gate, not a launch field.
   const { buys: rawBuys, slippageBps, buyGas, confirm, ...launchInput } = input || {};
 
-  // Drop zero / blank buys up front — an all-zero bundle is just a launch.
+  // Drop zero / blank buys up front — an all-zero bundle is just a launch. An
+  // 'all − gas' entry carries NO amountEth (its size is resolved from the live
+  // balance in prepareBundleBuys), so it must be kept, not read as zero — else
+  // every all-gas wallet is silently dropped and never buys.
   const buys = (Array.isArray(rawBuys) ? rawBuys : []).filter(
-    (b) => b && Number(String(b.amountEth ?? b.amount ?? '0').trim() || '0') > 0
+    (b) =>
+      b &&
+      (String(b.mode || '').toLowerCase() === 'all' ||
+        Number(String(b.amountEth ?? b.amount ?? '0').trim() || '0') > 0)
   );
 
   // ── 1. LAUNCH ──────────────────────────────────────────────────────────────

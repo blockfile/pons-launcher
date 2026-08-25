@@ -115,6 +115,36 @@ test('a wallet short of ETH for the buy + gas is skipped, not signed', async () 
   assert.equal(ks.signCalls.length, 1);
 });
 
+test("mode 'all' buys the whole balance minus the gas reserve", async () => {
+  const { deps: d, ks } = deps();
+  const plan = await prepareBundleBuys({ token: TOKEN, hook: HOOK, buys: [{ walletId: 'b1', mode: 'all' }] }, d);
+  assert.equal(plan.walletCount, 1);
+  const s1 = ks.signables.find((s) => s.id === 'b1');
+  const gasReserve = 500_000n * 1_000_000_000n; // buyGas × maxFeePerGas from the fakes
+  assert.equal(s1.value, 10n ** 18n - gasReserve, "an 'all' buy spends balance − gas reserve");
+});
+
+test("mode 'all' skips a wallet too poor to cover its own gas", async () => {
+  const { deps: d } = deps({ provider: { getBalance: async () => 1n } }); // 1 wei — under the reserve
+  await assert.rejects(
+    () => prepareBundleBuys({ token: TOKEN, hook: HOOK, buys: [{ walletId: 'b1', mode: 'all' }] }, d),
+    /no wallet could be prepared/
+  );
+});
+
+test("mode 'all' skips a wallet whose tiny residual quotes to zero output — never signs a floorless buy", async () => {
+  const gasReserve = 500_000n * 1_000_000_000n; // buyGas × maxFeePerGas from the fakes
+  const { deps: d, ks } = deps({
+    provider: { getBalance: async () => gasReserve + 100n }, // 100 wei left to buy after gas
+    swap: { quoteBuy: async () => ({ expectedOut: 0n, minOut: 0n }) }, // dust buys nothing
+  });
+  await assert.rejects(
+    () => prepareBundleBuys({ token: TOKEN, hook: HOOK, buys: [{ walletId: 'b1', mode: 'all' }] }, d),
+    /no wallet could be prepared/
+  );
+  assert.equal(ks.signCalls.length, 0, 'a zero-output buy is never signed');
+});
+
 test('skips a wallet with an unconfirmed tx in flight', async () => {
   const { deps: d } = deps({
     provider: {

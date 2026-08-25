@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react';
-import { api, notify } from '../api.js';
+import { api } from '../api.js';
 import Step from '../components/Step.jsx';
 import { Busy } from '../components/Section.jsx';
 import LogoField from '../components/LogoField.jsx';
@@ -71,7 +71,7 @@ function fmt(v, dp = 4) {
  * /v5/launch/resolve re-checks it. Tracked here as `parked`, with its own
  * Resolve button.
  */
-export default function V5LaunchPanel({ step, dev, bundle = [], launchConfigs, live, explorer, reload, report, onLaunched }) {
+export default function V5LaunchPanel({ step, dev, bundle = [], launchConfigs, live, explorer, reload, report, onLaunched, rows = {} }) {
   const [f, setF] = useState(BLANK);
   const [busy, setBusy] = useState('');
   const [uploading, setUploading] = useState(false);
@@ -83,16 +83,14 @@ export default function V5LaunchPanel({ step, dev, bundle = [], launchConfigs, l
   const [quoteInfo, setQuoteInfo] = useState(null);
   const [quoteInfoBusy, setQuoteInfoBusy] = useState(false);
 
-  // The bundle half: a per-wallet ETH buy table, plus a "distribute a total"
-  // auto-fill — the same controls the old standalone buy panel carried, folded
-  // in here so the launch and its bundle are armed and fired together.
-  const [amounts, setAmounts] = useState({}); // walletId -> typed ETH string
-  const [totalBuy, setTotalBuy] = useState('');
+  // The bundle's per-wallet buys are set in the step-1 wallets table (the shared
+  // `rows`), the same way the v1 Launcher tab sizes buys in its wallets table and
+  // fires them from the launch step. This panel READS them and fires them with the
+  // launch; the slippage floor is the one bundle knob that belongs with the firing.
   const [slippageBps, setSlippageBps] = useState('');
 
   const set = (k) => (e) => setF((prev) => ({ ...prev, [k]: e.target.value }));
   const setLogo = (logo) => setF((prev) => ({ ...prev, logo }));
-  const setAmount = (walletId, value) => setAmounts((prev) => ({ ...prev, [walletId]: value }));
 
   const enabledConfigs = (launchConfigs?.configs || []).filter((c) => c.enabled);
   const cfg = enabledConfigs.find((c) => c.configId === Number(f.configId)) || null;
@@ -162,9 +160,16 @@ export default function V5LaunchPanel({ step, dev, bundle = [], launchConfigs, l
 
   const usdgQuoted = Boolean(cfg) && !cfg.quoteIsNative;
 
+  // The bundle buys, read from the shared step-1 `rows`: an "all − gas" wallet
+  // sends { walletId, mode:'all' } (its amount is resolved from the live balance
+  // server-side), a fixed wallet sends { walletId, amountEth } when positive.
   const namedBuys = bundle
-    .map((w) => ({ walletId: w.walletId, amountEth: amounts[w.walletId] }))
-    .filter((b) => Number(b.amountEth) > 0);
+    .map((w) => {
+      const r = rows[w.walletId] || {};
+      if (r.mode === 'all') return { walletId: w.walletId, mode: 'all' };
+      return Number(r.buy) > 0 ? { walletId: w.walletId, amountEth: String(r.buy) } : null;
+    })
+    .filter(Boolean);
 
   function body() {
     const out = {
@@ -198,29 +203,6 @@ export default function V5LaunchPanel({ step, dev, bundle = [], launchConfigs, l
     const bps = Number(slippageBps);
     if (slippageBps.trim() && bps > 0) out.slippageBps = bps;
     return out;
-  }
-
-  // Split a typed total across the bundle wallets into a jittered spread — the
-  // v1 model. Moves NO ETH; only fills the buy inputs the operator would type.
-  function distribute() {
-    const total = Number(totalBuy);
-    if (!(total > 0)) return notify('Enter a total buy amount first.', 'error');
-    if (!bundle.length) return notify('No bundle wallets to distribute across.', 'error');
-
-    const weights = bundle.map(() => 1 + (Math.random() - 0.5) * 0.6); // ±30% jitter
-    const wsum = weights.reduce((a, b) => a + b, 0);
-    const vals = bundle.map((_, i) => Math.round((weights[i] / wsum) * total * 1e6) / 1e6);
-    const drift = Math.round((total - vals.reduce((a, b) => a + b, 0)) * 1e6) / 1e6;
-    vals[vals.length - 1] = Math.round((vals[vals.length - 1] + drift) * 1e6) / 1e6;
-
-    setAmounts((prev) => {
-      const next = { ...prev };
-      bundle.forEach((w, i) => {
-        next[w.walletId] = String(vals[i]);
-      });
-      return next;
-    });
-    notify(`Filled ${bundle.length} wallets for ${total} ETH. No ETH moved — edit, then Preflight.`, 'ok');
   }
 
   async function preflight() {
@@ -312,11 +294,17 @@ export default function V5LaunchPanel({ step, dev, bundle = [], launchConfigs, l
   // them (ETH-only), so it is a plain launch even with the buy table filled —
   // the button label and confirm dialog follow this, not the raw row count.
   const bundleWillFire = !usdgQuoted && namedBuys.length > 0;
+  // Split the bundle into its fixed-ETH total and how many are on "all − gas"
+  // (whose amount is only known from the live balance server-side), for the
+  // summary line under the bundle table.
+  const fixedTotal = namedBuys.reduce((s, b) => s + Number(b.amountEth || 0), 0);
+  const allCount = namedBuys.filter((b) => b.mode === 'all').length;
 
   const p = plan?.plan;
   const pendingCfg = pendingBody ? enabledConfigs.find((c) => c.configId === pendingBody.configId) : null;
   const pendingQuoteSymbol = pendingCfg?.quoteSymbol || 'ETH';
   const pendingBuyTotal = (pendingBody?.buys || []).reduce((s, b) => s + Number(b.amountEth || 0), 0);
+  const pendingAllCount = (pendingBody?.buys || []).filter((b) => b.mode === 'all').length;
 
   // The combined fire result's bundle half, for the readout below.
   const bundleRes = result?.bundle || null;
@@ -485,7 +473,7 @@ export default function V5LaunchPanel({ step, dev, bundle = [], launchConfigs, l
 
       {/* The bundle half — a per-wallet ETH buy table, fired the instant the
           launch confirms. Optional: leave every row blank to launch only. */}
-      <h3 style={{ margin: '18px 0 8px' }}>The bundle — each wallet's buy</h3>
+      <h3 style={{ margin: '18px 0 8px' }}>The bundle</h3>
       {bundle.length === 0 ? (
         <div className="notice warn">
           <h3>No bundle wallets yet</h3>
@@ -494,41 +482,60 @@ export default function V5LaunchPanel({ step, dev, bundle = [], launchConfigs, l
       ) : (
         <>
           <p className="hint" style={{ margin: '0 0 8px' }}>
-            Each bundle wallet buys the token with its own ETH right after launch, paying the pool's flat
-            base tax ({cfg?.taxLabel || 'the config tier'}). Fund these wallets in step 2 first; a wallet
-            short of ETH is skipped, not failed.
+            The per-wallet buys are set in <b>step 1's wallets table</b> (the Buy column — use Auto-fill
+            there to size them). Each funded bundle wallet buys the token with its own ETH right after
+            launch, paying the pool's flat base tax ({cfg?.taxLabel || 'the config tier'}); a wallet short
+            of ETH is skipped, not failed.
           </p>
           {usdgQuoted && namedBuys.length > 0 && (
             <div className="notice warn">
               <h3>This launch is USDG-quoted — the bundle buys can't ride along</h3>
               <p>
                 Per-wallet buys are ETH-only for now, so with a USDG config the launch fires on its own
-                and the buys are skipped (you'll see that in the result). Buy them afterward from the
-                Bundle tools below (untaxed fan-out), or pick an ETH-quoted config.
+                and the buys are skipped. Buy them afterward from the Bundle tools below (untaxed
+                fan-out), or pick an ETH-quoted config.
               </p>
             </div>
           )}
 
-          <div className="distribute">
-            <b className="distribute-title">Auto-fill buys</b>
-            <label style={{ display: 'flex', flexDirection: 'row', alignItems: 'center', gap: 6 }}>
-              Total buy
-              <input
-                type="number"
-                min="0"
-                step="0.01"
-                placeholder="0.5"
-                value={totalBuy}
-                onChange={(e) => setTotalBuy(e.target.value)}
-                style={{ width: 90 }}
-              />
-              ETH
-            </label>
-            <Busy className="ghost" disabled={!(Number(totalBuy) > 0)} onClick={distribute}>
-              Distribute across {bundle.length} wallet{bundle.length === 1 ? '' : 's'}
-            </Busy>
-            <span className="hint">random split · sum exact · fields stay editable · moves no ETH</span>
-          </div>
+          {namedBuys.length === 0 ? (
+            <div className="notice">
+              <h3>No buys set — this will launch only</h3>
+              <p>
+                Set a Buy amount for one or more wallets in step 1 (or use Auto-fill there) to bundle-buy
+                with the launch. Without any, this fires the launch and its dev first buy alone.
+              </p>
+            </div>
+          ) : (
+            <div className="table-scroll" style={{ maxHeight: 360, overflowY: 'auto' }}>
+              <table className="wallet-list">
+                <thead>
+                  <tr>
+                    <th>Address</th>
+                    <th className="num">Balance (ETH)</th>
+                    <th className="num">Buy</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {bundle.map((w) => {
+                    const r = rows[w.walletId] || {};
+                    const label = r.mode === 'all' ? 'all − gas' : Number(r.buy) > 0 ? `${Number(r.buy)} ETH` : '—';
+                    return (
+                      <tr key={w.walletId}>
+                        <td className="addr">
+                          <Address value={w.address} plain href={explorerFor(w.address)} />
+                        </td>
+                        <td className="num">
+                          {w.balanceEth == null ? <span className="hint">unreadable</span> : eth(w.balanceEth)}
+                        </td>
+                        <td className="num">{label}</td>
+                      </tr>
+                    );
+                  })}
+                </tbody>
+              </table>
+            </div>
+          )}
 
           <div className="grid" style={{ marginTop: 8 }}>
             <label>
@@ -545,44 +552,11 @@ export default function V5LaunchPanel({ step, dev, bundle = [], launchConfigs, l
             </label>
           </div>
 
-          <div className="table-scroll" style={{ maxHeight: 460, overflowY: 'auto', marginTop: 8 }}>
-            <table className="wallet-list">
-              <thead>
-                <tr>
-                  <th>Address</th>
-                  <th className="num">Balance (ETH)</th>
-                  <th className="num">Buy (ETH)</th>
-                </tr>
-              </thead>
-              <tbody>
-                {bundle.map((w) => (
-                  <tr key={w.walletId}>
-                    <td className="addr">
-                      <Address value={w.address} plain href={explorerFor(w.address)} />
-                    </td>
-                    <td className="num">
-                      {w.balanceEth == null ? <span className="hint">unreadable</span> : eth(w.balanceEth)}
-                    </td>
-                    <td className="num">
-                      <input
-                        type="number"
-                        step="any"
-                        min="0"
-                        placeholder="0"
-                        value={amounts[w.walletId] ?? ''}
-                        onChange={(e) => setAmount(w.walletId, e.target.value)}
-                        style={{ width: 120 }}
-                      />
-                    </td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          </div>
-          {namedBuys.length > 0 && (
+          {bundleWillFire && (
             <p className="hint" style={{ marginTop: 6 }}>
-              {plural(namedBuys.length, 'wallet')} set to buy ·{' '}
-              {namedBuys.reduce((s, b) => s + Number(b.amountEth || 0), 0).toFixed(6)} ETH total
+              {plural(namedBuys.length, 'wallet')} set to buy
+              {fixedTotal > 0 ? ` · ${fixedTotal.toFixed(6)} ETH fixed` : ''}
+              {allCount > 0 ? ` · ${allCount} on all − gas` : ''}
             </p>
           )}
         </>
@@ -797,7 +771,9 @@ export default function V5LaunchPanel({ step, dev, bundle = [], launchConfigs, l
           </Fact>
           <Fact label="Bundle">
             {pendingBody?.buys?.length
-              ? `${plural(pendingBody.buys.length, 'wallet')} · ${pendingBuyTotal.toFixed(6)} ETH`
+              ? `${plural(pendingBody.buys.length, 'wallet')}` +
+                (pendingBuyTotal > 0 ? ` · ${pendingBuyTotal.toFixed(6)} ETH fixed` : '') +
+                (pendingAllCount > 0 ? ` · ${pendingAllCount} on all − gas` : '')
               : 'none — launch only'}
           </Fact>
         </div>

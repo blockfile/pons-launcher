@@ -662,8 +662,13 @@ router.post('/v5/launch-bundle/preflight', requireApiKey, async (req, res, next)
   try {
     const { buys, slippageBps, buyGas, confirm, ...launchInput } = req.body || {};
     const plan = await prepareLaunch(launchInput, { keystore: keystoreFor(req.user.id) });
+    // Count 'all − gas' wallets too — they carry no amountEth, so an amount>0
+    // filter would undercount an all-gas bundle to zero (mirrors launchThenBundle).
     const intended = (Array.isArray(buys) ? buys : []).filter(
-      (b) => b && Number(String(b.amountEth ?? b.amount ?? '0').trim() || '0') > 0
+      (b) =>
+        b &&
+        (String(b.mode || '').toLowerCase() === 'all' ||
+          Number(String(b.amountEth ?? b.amount ?? '0').trim() || '0') > 0)
     );
     res.json({
       plan: publicPlan(plan),

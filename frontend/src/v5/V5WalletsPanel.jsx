@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react';
-import { api } from '../api.js';
+import { api, notify } from '../api.js';
 import Step from '../components/Step.jsx';
 import { Busy } from '../components/Section.jsx';
 import Modal, { Fact } from '../components/Modal.jsx';
@@ -35,9 +35,19 @@ import { MAX_GENERATE, ROLES, eth, plural } from './roles.js';
  * the end of the console: this step is where wallets get set up, not where the
  * launcher's leftover ETH/USDG/token gets moved back out.
  */
-export default function V5WalletsPanel({ step, dev, bundle, explorer, reload, report }) {
+// How many sells each wallet keeps gas for when the auto-fill sizes its fund —
+// deliberately generous, since a wallet stranded holding a token it can't sell is
+// worse than a slightly larger fund. Mirrors the v1 wallets table's own reserve.
+const SELL_RESERVE = 3;
+
+export default function V5WalletsPanel({ step, dev, bundle, explorer, reload, report, rows = {}, setRow = () => {} }) {
   const [busy, setBusy] = useState('');
   const [count, setCount] = useState(10);
+  // "Distribute a total across the bundle" — the amount typed above the table,
+  // and the live gas cost of a buy/sell so the auto-filled fund reserve is real.
+  // Same shape the v1 wallets table (components/WalletsPanel.jsx) uses.
+  const [totalBuy, setTotalBuy] = useState('');
+  const [gas, setGas] = useState(null); // { buyGasEth, sellGasEth }
   // The wallet a delete is being asked about, or null. The whole record rather
   // than an id so the dialog can state its balance — the fact that decides
   // whether deleting it is a tidy-up or a mistake.
@@ -72,6 +82,18 @@ export default function V5WalletsPanel({ step, dev, bundle, explorer, reload, re
     };
   }, []);
 
+  // The current cost of a buy and a sell, used only to size the auto-fill's fund
+  // reserve. Read-only background fetch, quiet on failure like the seasoned poll.
+  useEffect(() => {
+    let alive = true;
+    api('/gas')
+      .then((g) => alive && setGas(g))
+      .catch(() => {});
+    return () => {
+      alive = false;
+    };
+  }, []);
+
   async function act(what, fn) {
     setBusy(what);
     try {
@@ -82,6 +104,49 @@ export default function V5WalletsPanel({ step, dev, bundle, explorer, reload, re
     } finally {
       setBusy('');
     }
+  }
+
+  /**
+   * Split a typed total across the bundle wallets into a jittered spread and fill
+   * each row's Buy AND Fund — the v1 wallets table's "distribute" (see
+   * components/WalletsPanel.jsx), on letscash. Moves NO ETH: it only writes the
+   * table fields the operator was about to type. Fund = the buy plus a gas reserve
+   * (its own buy, plus a few sells) so a funded wallet can both buy and exit. Both
+   * fields stay editable.
+   */
+  async function distribute() {
+    const total = Number(totalBuy);
+    if (!(total > 0)) return notify('Enter a total buy amount first.', 'error');
+    if (!bundle.length) return notify('Generate bundle wallets before distributing.', 'error');
+
+    let g = gas;
+    if (!g) {
+      try {
+        g = await api('/gas');
+        setGas(g);
+      } catch {
+        g = { buyGasEth: '0', sellGasEth: '0' };
+      }
+    }
+    const reserve = Number(g.buyGasEth || 0) + SELL_RESERVE * Number(g.sellGasEth || 0);
+
+    // ±30% jitter around equal, normalised to the exact total; the rounding drift
+    // is pushed onto the last wallet so the sum is exactly what was typed.
+    const weights = bundle.map(() => 1 + (Math.random() - 0.5) * 0.6);
+    const wsum = weights.reduce((a, b) => a + b, 0);
+    const amounts = bundle.map((_, i) => Math.round((weights[i] / wsum) * total * 1e6) / 1e6);
+    const drift = Math.round((total - amounts.reduce((a, b) => a + b, 0)) * 1e6) / 1e6;
+    amounts[amounts.length - 1] = Math.round((amounts[amounts.length - 1] + drift) * 1e6) / 1e6;
+
+    bundle.forEach((w, i) => {
+      const buy = amounts[i];
+      setRow(w.walletId, { mode: 'fixed', buy: String(buy), fund: (buy + reserve).toFixed(6) });
+    });
+    report(
+      `distributed ${total} ETH across ${bundle.length} wallets — each funded for its buy plus gas for ` +
+        `${SELL_RESERVE} sells. Nothing was sent; set the first buy and launch in step 3.`
+    );
+    notify(`Filled ${bundle.length} wallets for ${total} ETH. No ETH moved — edit, then Fund in step 2.`, 'ok');
   }
 
   /**
@@ -167,14 +232,50 @@ export default function V5WalletsPanel({ step, dev, bundle, explorer, reload, re
   // soon as v5 has a wallet in it.
   const allWallets = [dev, ...bundle].filter(Boolean);
 
+  // The run at a glance, for the summary tiles. `fundedBundle` counts wallets that
+  // actually hold ETH (so "generated" and "funded" don't read as the same thing);
+  // `totalBuyEth` sums the fixed buy amounts typed in the table (an "all − gas"
+  // wallet has no fixed figure, so it is not counted here).
+  const fundedBundle = bundle.filter((w) => Number(w.balanceEth) > 0).length;
+  const totalBuyEth = bundle.reduce(
+    (s, w) => s + (rows[w.walletId]?.mode === 'all' ? 0 : Number(rows[w.walletId]?.buy) || 0),
+    0
+  );
+
   const explorerFor = (address) => (explorer ? `${explorer}/address/${address}` : '');
 
   return (
     <Step {...step}>
       <p className="lede">
         The launcher signs the letscash launch and takes the guaranteed first buy; the bundle wallets
-        are where that first-buy supply is fanned out. Set both up here — nothing is funded yet.
+        buy behind it. This table is where the whole run is sized — what each wallet is funded with in
+        step 2 and what it buys in step 3 — the same shape as the Launcher tab. Nothing is funded yet.
       </p>
+
+      {/* The run at a glance, across the top of the step — the counts and figures
+          the bundle is judged by, lifted out of the table below. Read-only: every
+          value here is already set in the table or read from chain. */}
+      <div className="stats">
+        <div className="stat">
+          <span>Bundle wallets</span>
+          <b>{bundle.length}</b>
+          <span className="stat-of">no exemption cap on letscash</span>
+        </div>
+        <div className="stat">
+          <span>Funded</span>
+          <b>
+            {fundedBundle} <span className="stat-of">of {bundle.length}</span>
+          </b>
+        </div>
+        <div className="stat">
+          <span>Bundle buy</span>
+          <b>{totalBuyEth > 0 ? `${totalBuyEth.toFixed(4)} ETH` : '—'}</b>
+        </div>
+        <div className={`stat ${dev && Number(dev.balanceEth) > 0 ? 'ok' : ''}`}>
+          <span>Launcher</span>
+          <b>{dev ? `${eth(dev.balanceEth)} ETH` : '—'}</b>
+        </div>
+      </div>
 
       {/* The launcher — a singleton, so this is a create-once row that becomes a
           delete once one exists. */}
@@ -362,27 +463,61 @@ export default function V5WalletsPanel({ step, dev, bundle, explorer, reload, re
         generated together. If none are ready, season some there first.
       </p>
 
+      {/* AUTO-FILL — type one total and spread it across the bundle as a jittered
+          split, filling each wallet's Buy and its Fund (buy + gas). Moves no ETH;
+          the same control the v1 wallets table carries. */}
+      {bundle.length > 0 && (
+        <div className="distribute">
+          <b className="distribute-title">Auto-fill buys</b>
+          <label style={{ display: 'flex', flexDirection: 'row', alignItems: 'center', gap: 6 }}>
+            Total buy
+            <input
+              type="number"
+              min="0"
+              step="0.01"
+              placeholder="0.5"
+              value={totalBuy}
+              onChange={(e) => setTotalBuy(e.target.value)}
+              style={{ width: 90 }}
+            />
+            ETH
+          </label>
+          <Busy className="ghost" disabled={!(Number(totalBuy) > 0)} onClick={distribute}>
+            Distribute across {bundle.length} wallet{bundle.length === 1 ? '' : 's'}
+          </Busy>
+          <span className="hint">
+            random split · each funded for its buy + gas for {SELL_RESERVE} sells · fields stay editable ·
+            moves no ETH
+          </span>
+        </div>
+      )}
+
       {bundle.length === 0 ? (
         <div className="notice">
           <h3>No bundle wallets yet</h3>
           <p>
-            These are where the launcher's first-buy supply is distributed. Generate however many the
-            strategy wants — nothing is funded until a later step.
+            These are the wallets that buy behind the launcher's first buy. Generate however many the
+            strategy wants, then set each one's Fund and Buy below — nothing moves until a later step.
           </p>
         </div>
       ) : (
         <div className="table-scroll" style={{ maxHeight: 460, overflowY: 'auto' }}>
-          <table>
+          <table className="wallet-list">
             <thead>
               <tr>
                 <th className="num">No.</th>
                 <th>Address</th>
                 <th className="num">Balance</th>
+                <th className="num">Fund (ETH)</th>
+                <th>Buy mode</th>
+                <th className="num">Buy (ETH)</th>
                 <th />
               </tr>
             </thead>
             <tbody>
-              {bundle.map((w, i) => (
+              {bundle.map((w, i) => {
+                const row = rows[w.walletId] || {};
+                return (
                 <tr key={w.walletId}>
                   <td className="num hint">{i + 1}</td>
                   <td>
@@ -390,6 +525,39 @@ export default function V5WalletsPanel({ step, dev, bundle, explorer, reload, re
                   </td>
                   <td className="num">
                     {w.balanceEth == null ? <span className="hint">unreadable</span> : eth(w.balanceEth)}
+                  </td>
+                  {/* Fund is what step 2 sends this wallet from the launcher; Buy
+                      is what it spends buying in step 3. Both are owned by the
+                      console's shared `rows`, so the Fund and Launch steps read
+                      exactly what is typed here. */}
+                  <td className="num">
+                    <input
+                      type="number"
+                      step="0.0001"
+                      placeholder="0.0"
+                      value={row.fund ?? ''}
+                      onChange={(e) => setRow(w.walletId, { fund: e.target.value })}
+                      style={{ width: 100 }}
+                    />
+                  </td>
+                  <td>
+                    <select value={row.mode ?? 'fixed'} onChange={(e) => setRow(w.walletId, { mode: e.target.value })}>
+                      <option value="fixed">fixed</option>
+                      <option value="all">all − gas</option>
+                    </select>
+                  </td>
+                  <td className="num">
+                    <input
+                      type="number"
+                      step="0.0001"
+                      placeholder="0.0"
+                      // "all − gas" is resolved server-side from the live balance,
+                      // so a typed amount here would be meaningless.
+                      disabled={row.mode === 'all'}
+                      value={row.mode === 'all' ? '' : row.buy ?? ''}
+                      onChange={(e) => setRow(w.walletId, { buy: e.target.value })}
+                      style={{ width: 100 }}
+                    />
                   </td>
                   <td className="num">
                     <IconButton
@@ -400,7 +568,8 @@ export default function V5WalletsPanel({ step, dev, bundle, explorer, reload, re
                     />
                   </td>
                 </tr>
-              ))}
+                );
+              })}
             </tbody>
           </table>
         </div>

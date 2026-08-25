@@ -138,6 +138,17 @@ test('all-zero buys are treated as no bundle', async () => {
   assert.equal(calls.prepareBuys.length, 0);
 });
 
+test("an 'all − gas' buy (no amountEth) survives the filter and reaches the bundle", async () => {
+  const { d, calls } = deps();
+  // The bug the review caught: an 'all' entry has no amountEth, so an amount>0
+  // filter would silently drop it and the wallet would never buy.
+  const out = await launchThenBundle({ ...BASE, buys: [{ walletId: 'b1', mode: 'all' }] }, d);
+  assert.equal(calls.prepareBuys.length, 1, 'the all-gas bundle still fires');
+  assert.equal(calls.prepareBuys[0].buys.length, 1);
+  assert.equal(calls.prepareBuys[0].buys[0].mode, 'all');
+  assert.ok(out.bundle, 'the bundle result comes back');
+});
+
 test('confirmed launch but UNREADABLE hook → keeps the launch, skips the bundle with a reason', async () => {
   const { d, calls } = deps({ launchResult: launchResult({ hook: null, hookResolved: false }) });
   const out = await launchThenBundle(BASE, d);

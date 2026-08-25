@@ -37,17 +37,19 @@ import { eth, plural } from './roles.js';
  * explicitly here. (variants.js also fails loud on an unknown variant rather than
  * falling back to v1, for the same reason.)
  */
-export default function V5FundPanel({ step, dev, bundle, explorer, reload, report }) {
-  const [amounts, setAmounts] = useState({});
+export default function V5FundPanel({ step, dev, bundle, explorer, reload, report, rows = {}, setRow = () => {} }) {
   const [busy, setBusy] = useState('');
 
   const explorerFor = (address) => (explorer ? `${explorer}/address/${address}` : '');
-  const setAmount = (walletId, value) => setAmounts((prev) => ({ ...prev, [walletId]: value }));
+  // The per-wallet fund amount is the SHARED `rows.fund` the step-1 wallets table
+  // writes (its auto-fill fills it), so what was sized there is what this step
+  // sends — the v1 Launcher tab's split between the sizing table and the Fund step.
+  const setFund = (walletId, value) => setRow(walletId, { fund: value });
 
   // Exactly the shape components/FundPanel.jsx builds for pons' own /fund call
   // — walletId + amountEth pairs, blank/zero rows skipped.
   const targets = bundle
-    .map((w) => ({ walletId: w.walletId, amountEth: amounts[w.walletId] }))
+    .map((w) => ({ walletId: w.walletId, amountEth: rows[w.walletId]?.fund }))
     .filter((t) => Number(t.amountEth) > 0);
   const total = targets.reduce((s, t) => s + Number(t.amountEth), 0);
 
@@ -56,7 +58,10 @@ export default function V5FundPanel({ step, dev, bundle, explorer, reload, repor
     try {
       const out = await api('/fund', 'POST', { targets, variant: 'v5' });
       report(out);
-      setAmounts({});
+      // Clear the fund column for the wallets just funded — their buy amount is a
+      // separate field and stays. The balance column re-reads below to show the
+      // result.
+      targets.forEach((t) => setRow(t.walletId, { fund: '' }));
       // Give the transfers a moment to land before re-reading balances — same
       // pause pons' own FundPanel gives itself.
       setTimeout(reload, 3000);
@@ -70,9 +75,10 @@ export default function V5FundPanel({ step, dev, bundle, explorer, reload, repor
   return (
     <Step {...step}>
       <p className="lede">
-        The launcher pays the launch fee and the atomic first buy; the bundle wallets are where the
-        first-buy supply gets fanned out later, so they need enough ETH of their own for that step's
-        gas. Fund the launcher from outside first, then send it out to the bundle wallets below.
+        The launcher pays the launch fee and the atomic first buy; the bundle wallets each buy behind
+        it, so they need enough ETH for their own buy plus gas. Fund the launcher from outside first,
+        then send it out to the bundle wallets below. The per-wallet amounts here are the <b>Fund</b>{' '}
+        column from step 1 — <b>Auto-fill</b> there sizes them; edit any row before sending.
       </p>
 
       <h3 style={{ margin: '0 0 8px' }}>Launcher wallet</h3>
@@ -141,8 +147,8 @@ export default function V5FundPanel({ step, dev, bundle, explorer, reload, repor
                       type="number"
                       step="0.0001"
                       placeholder="0.0"
-                      value={amounts[w.walletId] ?? ''}
-                      onChange={(e) => setAmount(w.walletId, e.target.value)}
+                      value={rows[w.walletId]?.fund ?? ''}
+                      onChange={(e) => setFund(w.walletId, e.target.value)}
                       style={{ width: 100 }}
                     />
                   </td>

@@ -115,9 +115,17 @@ async function prepareBundleBuys(input, deps = {}) {
     if (!wallet) throw new Error(`buys names "${b.walletId ?? b.address}", not one of this tab's bundle wallets`);
     if (seen.has(wallet.id)) throw new Error(`buys names wallet ${wallet.id} more than once`);
     seen.add(wallet.id);
-    const amountWei = parseEther(String(b.amountEth ?? b.amount ?? '0').trim() || '0');
-    if (amountWei < 0n) throw new Error(`a negative buy for ${wallet.address} makes no sense`);
-    if (amountWei > 0n) requested.push({ wallet, amountWei });
+    // 'all' spends the wallet's whole balance minus a gas reserve — its amount is
+    // resolved from the LIVE balance in the loop below, not from the request (the
+    // "all − gas" mode the v1 wallets table offers). 'fixed' (the default) takes
+    // the typed ETH amount as now.
+    if (String(b.mode || '').toLowerCase() === 'all') {
+      requested.push({ wallet, mode: 'all' });
+    } else {
+      const amountWei = parseEther(String(b.amountEth ?? b.amount ?? '0').trim() || '0');
+      if (amountWei < 0n) throw new Error(`a negative buy for ${wallet.address} makes no sense`);
+      if (amountWei > 0n) requested.push({ wallet, mode: 'fixed', amountWei });
+    }
   }
   if (!requested.length) throw new Error('no wallet has a positive buy amount — set at least one');
 
@@ -130,13 +138,29 @@ async function prepareBundleBuys(input, deps = {}) {
   const out = [];
   const skipped = [];
   const warnings = [];
-  for (const { wallet, amountWei } of requested) {
+  for (const req of requested) {
+    const wallet = req.wallet;
     const balance = await prov.getBalance(wallet.address);
-    if (balance < amountWei + gasReserve) {
-      const why = `holds ${formatEther(balance)} ETH but the buy + gas needs ${formatEther(amountWei + gasReserve)} — fund it first`;
-      skipped.push({ walletId: wallet.id, address: wallet.address, reason: why });
-      warnings.push(`${wallet.address}: ${why}`);
-      continue;
+    // Resolve 'all − gas' from the live balance; a 'fixed' buy uses its typed
+    // amount and must leave the gas reserve behind. Either way `amountWei` is
+    // what the quote and the signed value are built from below.
+    let amountWei;
+    if (req.mode === 'all') {
+      amountWei = balance - gasReserve;
+      if (amountWei <= 0n) {
+        const why = `holds ${formatEther(balance)} ETH — too little to buy anything after the ${formatEther(gasReserve)} gas reserve`;
+        skipped.push({ walletId: wallet.id, address: wallet.address, reason: why });
+        warnings.push(`${wallet.address}: ${why}`);
+        continue;
+      }
+    } else {
+      amountWei = req.amountWei;
+      if (balance < amountWei + gasReserve) {
+        const why = `holds ${formatEther(balance)} ETH but the buy + gas needs ${formatEther(amountWei + gasReserve)} — fund it first`;
+        skipped.push({ walletId: wallet.id, address: wallet.address, reason: why });
+        warnings.push(`${wallet.address}: ${why}`);
+        continue;
+      }
     }
 
     // Quote the buy — this is where the CURRENT anti-snipe tax shows up: a buy made

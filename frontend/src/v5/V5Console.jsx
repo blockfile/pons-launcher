@@ -28,6 +28,14 @@ export default function V5Console({ health, credential, report, output, reported
   const [dev, setDev] = useState(null);
   const [bundle, setBundle] = useState([]);
   const [config, setConfig] = useState(null);
+  // The per-wallet fund/buy sizing, owned here so the Wallets table (which writes
+  // it), the Fund step, and the Launch + bundle step all read the SAME values —
+  // the shape the v1 Launcher tab keeps in App.jsx. Keyed by walletId:
+  // { [walletId]: { fund, mode, buy } }.
+  const [rows, setRows] = useState({});
+  const setRow = useCallback((id, patch) => {
+    setRows((prev) => ({ ...prev, [id]: { ...prev[id], ...patch } }));
+  }, []);
   // The live launch menu (GET /v5/launch/configs) — the picker's source, plus
   // launchEnabled/launchFeeWei. Heavier than /v5/config (it walks the on-chain
   // config range), so it is its own load rather than folded into loadConfig.
@@ -190,6 +198,8 @@ export default function V5Console({ health, credential, report, output, reported
         explorer={explorer}
         reload={loadWallets}
         report={report}
+        rows={rows}
+        setRow={setRow}
       />
 
       {/* The console's answer, between the wallets and the later steps because
@@ -213,6 +223,8 @@ export default function V5Console({ health, credential, report, output, reported
         explorer={explorer}
         reload={loadWallets}
         report={report}
+        rows={rows}
+        setRow={setRow}
       />
 
       <V5LaunchPanel
@@ -225,6 +237,7 @@ export default function V5Console({ health, credential, report, output, reported
         reload={loadWallets}
         report={report}
         onLaunched={setLastLaunch}
+        rows={rows}
       />
 
       <V5SellPanel
