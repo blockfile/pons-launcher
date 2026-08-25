@@ -131,6 +131,46 @@ test('cancel replaces the stuck tx at its own nonce with a bumped fee', async ()
   assert.equal(signed.value, 0n);
 });
 
+// ── gas override + cancel bump + erc-20 over-send (test-integrity gaps) ────────
+test('withdraw signs the default 21000 gas, and honours a bounded gas override', async () => {
+  const { deps: d, ks } = baseDeps();
+  await withdrawFromLauncher({ to: EXT, asset: 'eth', amount: '0.1' }, d);
+  assert.equal(ks.signables[0].gasLimit, 21_000n, 'default ETH send gas');
+
+  const { deps: d2, ks: ks2 } = baseDeps();
+  await withdrawFromLauncher({ to: EXT, asset: 'eth', amount: '0.1', gas: 120_000 }, d2);
+  assert.equal(ks2.signables[0].gasLimit, 120_000n, 'override reaches the signed gasLimit (contract recipient)');
+});
+
+test('withdraw rejects a gas override below 21000 or above 500000', async () => {
+  const { deps: d } = baseDeps();
+  await assert.rejects(() => withdrawFromLauncher({ to: EXT, asset: 'eth', amount: '0.1', gas: 1000 }, d), /at least 21000/);
+  await assert.rejects(() => withdrawFromLauncher({ to: EXT, asset: 'eth', amount: '0.1', gas: 9_000_000 }, d), /capped at 500,000/);
+});
+
+test('withdraw ERC-20 refuses an amount over the token balance', async () => {
+  const { deps: d } = baseDeps({ readTokenBalance: async () => 5_000_000n }); // 5 USDG
+  await assert.rejects(() => withdrawFromLauncher({ to: EXT, asset: 'usdg', amount: '10' }, d), /withdrawal is/);
+});
+
+test('cancel actually applies the fee bump to the replacement tx', async () => {
+  // A getFees that ECHOES its bump arg into maxFeePerGas, so we can prove the bump
+  // reaches the signed replacement (the whole point of cancel — out-bid the stuck tx).
+  const ks = fakeKs();
+  const provider = fakeProvider({ getTransactionCount: async (_a, tag) => (tag === 'pending' ? 6 : 5) });
+  await cancelStuckLauncherTx(
+    { feeBumpPct: 200 },
+    {
+      keystore: ks,
+      provider,
+      dryRun: false,
+      getFees: async (bump = 0) => ({ type: 2, maxFeePerGas: BigInt(bump), maxPriorityFeePerGas: 1n }),
+      waitForReceipt: (rpc, h) => rpc.getTransactionReceipt(h),
+    }
+  );
+  assert.equal(ks.signables[0].maxFeePerGas, 200n, 'the feeBumpPct is threaded into the replacement fee');
+});
+
 // ── status ─────────────────────────────────────────────────────────────────────
 test('launcherStatus reports balances and flags a stuck nonce', async () => {
   const { deps: d } = baseDeps({

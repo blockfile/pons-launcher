@@ -14,7 +14,7 @@ const test = require('node:test');
 const assert = require('node:assert');
 
 const v5 = require('./v5');
-const { withLaunchLock, pendingLaunches, launchActivityDetail } = v5;
+const { withLaunchLock, pendingLaunches, launchActivityDetail, publicPlan } = v5;
 
 function res() {
   return {
@@ -30,6 +30,22 @@ function res() {
     },
   };
 }
+
+test('publicPlan strips the SIGNED launch raw — the most irreversible leak in the tab', () => {
+  const plan = {
+    protocol: 'v5',
+    token: '0xToKeN',
+    launch: { walletId: 'dev', address: '0xDEV', raw: '0xSIGNED_LAUNCH_SECRET', nonce: 7, valueEth: '0.1' },
+    fees: { maxFeePerGas: 1n },
+  };
+  const pub = publicPlan(plan);
+  const serialized = JSON.stringify(pub);
+  assert.equal(serialized.includes('SIGNED_LAUNCH_SECRET'), false, 'a signed launch (= a spendable fee+first-buy) must never leave the server');
+  assert.equal(pub.launch.raw, undefined);
+  // safe fields survive
+  assert.equal(pub.launch.nonce, 7);
+  assert.equal(pub.token, '0xToKeN');
+});
 
 test('the concurrent-handler guard refuses an overlapping launch (same account)', async () => {
   pendingLaunches.clear();

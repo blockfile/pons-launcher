@@ -757,6 +757,7 @@ module.exports = router;
 module.exports.withLaunchLock = withLaunchLock;
 module.exports.pendingLaunches = pendingLaunches;
 module.exports.launchActivityDetail = launchActivityDetail;
+module.exports.publicPlan = publicPlan;
 module.exports.withBundleLock = withBundleLock;
 module.exports.bundling = bundling;
 module.exports.publicBundlePlan = publicBundlePlan;

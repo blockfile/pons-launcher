@@ -282,9 +282,14 @@ test('fireSell counts a reverted sell as failed and keeps going', async () => {
   assert.equal(res.failed, 1);
 });
 
-test('fireSell records a send-failed wallet without throwing the run', async () => {
+test('fireSell send-fail STOPS the wallet chain — no tx laid on the unused nonce', async () => {
+  // b1's first approval throws; its approval@n+1 and sell@n+2 must NOT be broadcast
+  // (laying them on the failed nonce would strand the sell). b2 is a fresh wallet,
+  // so it proceeds normally.
+  const attempted = [];
   const provider = fakeProvider({
     broadcastTransaction: async (raw) => {
+      attempted.push(raw);
       if (raw === '0xa1:b1') throw new Error('nonce too low');
       return { hash: `hash:${raw}` };
     },
@@ -296,8 +301,32 @@ test('fireSell records a send-failed wallet without throwing the run', async () 
     waitForReceipt: (rpc, h) => rpc.getTransactionReceipt(h),
   });
   assert.equal(res.wallets.find((w) => w.walletId === 'b1').status, 'send-failed');
-  assert.equal(res.sold, 1);
+  assert.equal(attempted.includes('0xa2:b1'), false, "b1's 2nd approval must not be broadcast after the 1st failed");
+  assert.equal(attempted.includes('0xsell:b1'), false, "b1's sell must not be laid on the failed nonce");
+  assert.equal(res.sold, 1, 'b2 still exits');
   assert.equal(res.failed, 1);
+});
+
+test('the sell signs the default 700k gas, and a bounded sellGas override raises it', async () => {
+  const { deps: d, ks } = deps();
+  await prepareSell({ token: TOKEN, hook: HOOK }, d);
+  assert.ok(
+    ks.signables.some((s) => s.gasLimit === 700_000n),
+    'the sell tx carries the default 700k gas cap'
+  );
+
+  const { deps: d2, ks: ks2 } = deps();
+  await prepareSell({ token: TOKEN, hook: HOOK, sellGas: 1_500_000 }, d2);
+  assert.ok(ks2.signables.some((s) => s.gasLimit === 1_500_000n), 'a valid sellGas override reaches the sell tx');
+});
+
+test('sellGas below the 700k floor clamps up; above 3M throws', async () => {
+  const { deps: d, ks } = deps();
+  await prepareSell({ token: TOKEN, hook: HOOK, sellGas: 100_000 }, d); // below floor
+  assert.ok(ks.signables.some((s) => s.gasLimit === 700_000n), 'never below the safe floor');
+
+  const { deps: d2 } = deps();
+  await assert.rejects(() => prepareSell({ token: TOKEN, hook: HOOK, sellGas: 5_000_000 }, d2), /capped at 3,000,000/);
 });
 
 test('a dry run broadcasts nothing', async () => {
