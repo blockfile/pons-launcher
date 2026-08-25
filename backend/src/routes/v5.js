@@ -22,6 +22,11 @@ const { requireApiKey } = require('../middleware/auth');
 const { provider } = require('../evm/provider');
 const v5roles = require('../v5/roles');
 const factoryModule = require('../evm/v5/factory');
+// The seasoned-wallet pool is the SHARED v4 seasoning store (aged, pre-funded
+// wallets). v5 claims from it into its own v5bundle role, exactly as v3 does — see
+// the claim route below. v5 owns its routes; the pool + keystore are shared spine.
+const seasoned = require('../v4/seasoned');
+const { storeFor } = require('../v4/store');
 const { prepareLaunch, fireLaunch, reconcileLaunch, approveQuoteForLaunch, quoteAllowanceStatus } = require('../v5/launch');
 const { prepareBundle, fireBundle } = require('../v5/bundle');
 const { prepareSell, fireSell } = require('../v5/sell');
@@ -375,6 +380,63 @@ router.post('/v5/wallets/generate', requireApiKey, (req, res, next) => {
       addresses: made.map((w) => w.address),
     });
     res.json(made);
+  } catch (err) {
+    next(err);
+  }
+});
+
+// POST /api/v5/wallets/import — import existing wallets by private key into a v5
+// role. A bundler wants aged/existing wallets, not only fresh ones (fresh wallets
+// are a fingerprint). NOT capped at 31 — that limit is the pons factory's
+// exemption list, which letscash does not have. Keys are never logged (only the
+// derived addresses), mirroring the shared import.
+router.post('/v5/wallets/import', requireApiKey, (req, res, next) => {
+  try {
+    const { privateKeys, label, role = v5roles.ROLES.bundle } = req.body || {};
+    if (!v5roles.isV5Role(role)) throw new Error(`role must be ${v5roles.ROLES.dev} or ${v5roles.ROLES.bundle}`);
+    const keys = (Array.isArray(privateKeys) ? privateKeys : String(privateKeys || '').split(/[\s,]+/)).filter(Boolean);
+    if (!keys.length) throw new Error('privateKeys is required');
+    // v5dev is a singleton — the keystore refuses a second, so importing >1 into it
+    // (or a second when one exists) fails loudly there.
+    const added = keystoreFor(req.user.id).importKeys(keys, { label, role });
+    activityFor(req.user.id).record('v5', `[v5] imported ${added.length} ${role} wallet(s)`, {
+      role,
+      addresses: added.map((w) => w.address),
+    });
+    res.json(added);
+  } catch (err) {
+    next(err);
+  }
+});
+
+// POST /api/v5/wallets/claim-seasoned — pull N finished-seasoning wallets from the
+// shared v4 pool into v5's bundle role, most-aged first. They arrive pre-aged and
+// pre-funded — organic-looking bundle wallets, the whole point of seasoning.
+// Mirrors /v3/wallets/claim-seasoned; refused while a v5 money path is active or a
+// launch is parked, since claiming re-roles wallets a prepare step may resolve.
+router.post('/v5/wallets/claim-seasoned', requireApiKey, (req, res, next) => {
+  try {
+    const id = req.user.id;
+    if (launching.has(id) || bundling.has(id) || selling.has(id) || launcherBusy.has(id) || pendingLaunches.has(id)) {
+      throw new Error('a v5 launch/bundle/sell/launcher action is in progress or unresolved — settle it before claiming wallets');
+    }
+    const ks = keystoreFor(id);
+    const store = storeFor(id);
+    const want = Math.max(1, Math.round(Number((req.body || {}).count) || 0));
+    const pool = seasoned.available(ks, store, Date.now());
+    const take = pool.slice(0, want);
+    if (take.length === 0) {
+      return res.json(jsonSafe({ claimed: [], available: pool.length, shortfall: want }));
+    }
+    const out = seasoned.claim(ks, store, take.map((w) => w.id), {
+      toRole: v5roles.ROLES.bundle,
+      toTab: 'v5',
+      now: Date.now(),
+    });
+    activityFor(id).record('v5', `[v5] claimed ${out.claimed.length} seasoned wallet(s) into the bundle`, {
+      count: out.claimed.length,
+    });
+    res.json(jsonSafe({ claimed: out.claimed, available: pool.length, shortfall: Math.max(0, want - take.length) }));
   } catch (err) {
     next(err);
   }
