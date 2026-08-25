@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import { LazyMotion, MotionConfig, domMax } from 'framer-motion';
-import { LuRocket, LuArrowRightLeft, LuLink, LuClock } from 'react-icons/lu';
+import { LuRocket, LuArrowRightLeft, LuLink, LuClock, LuBanknote } from 'react-icons/lu';
 import ThemeToggle from './ThemeToggle.jsx';
 import { api, getApiKey, setApiKey } from './api.js';
 import { shortAddress } from './format.js';
@@ -30,6 +30,7 @@ import Toaster from './components/Toaster.jsx';
 // nothing else: every prop, effect and step of the v1/v2 flow is untouched.
 import V3Console from './v3/V3Console.jsx';
 import V4Console from './v4/V4Console.jsx';
+import V5Console from './v5/V5Console.jsx';
 
 const { bundleShare } = bundleShareModule;
 
@@ -51,6 +52,7 @@ const TAB_TITLE = {
   v2: 'V2 · external funding',
   v3: 'V3 · relay chain',
   v4: 'V4 · seasoning',
+  v5: 'V5 · letscash',
 };
 
 // What a launch cannot be armed without, in the order step 5 asks for it, and
@@ -453,6 +455,14 @@ export default function App() {
                 <LuClock size={16} aria-hidden="true" />
                 V4 · seasoning
               </button>
+              <button
+                type="button"
+                className={tab === 'v5' ? 'side-item is-on' : 'side-item'}
+                onClick={() => setTab('v5')}
+              >
+                <LuBanknote size={16} aria-hidden="true" />
+                V5 · letscash
+              </button>
             </nav>
             <div className="side-foot">
               <ThemeToggle />
@@ -472,7 +482,9 @@ export default function App() {
                     ? `${steps.length} steps, no disperser — funded from outside this console`
                     : tab === 'v3'
                       ? 'not a launcher — distributes a live token, one wallet at a time'
-                      : 'not a launcher — drips ETH into fresh wallets over weeks'}
+                      : tab === 'v4'
+                        ? 'not a launcher — drips ETH into fresh wallets over weeks'
+                        : 'the letscash.fun bundler — launcher first buy, fanned out to a bundle'}
               </span>
             </div>
 
@@ -554,6 +566,14 @@ export default function App() {
             />
           ) : tab === 'v4' ? (
             <V4Console
+              health={health}
+              credential={credential}
+              report={report}
+              output={output}
+              reportedAt={reportedAt}
+            />
+          ) : tab === 'v5' ? (
+            <V5Console
               health={health}
               credential={credential}
               report={report}
