@@ -64,6 +64,11 @@ export default function Step({
   // state everywhere except the readout, which is threaded onto the launch's
   // spine without ever claiming to have succeeded itself.
   railDone,
+  // The eyebrow shown beside an unnumbered (n == null) panel's title, in place
+  // of "Step N". Defaults to "Readout" — ResultPanel's own word for itself —
+  // so every existing unnumbered panel is unaffected; a panel that is not a
+  // readout (a utility section, say) passes its own word instead.
+  label,
   className = '',
   children,
 }) {
@@ -93,7 +98,7 @@ export default function Step({
           the gutter tightens. Set dimmer than the title so the two do not
           compete for the same glance. */}
       <h2>
-        <span className="stage-n">{n == null ? 'Readout' : `Step ${n}`}</span>
+        <span className="stage-n">{n == null ? (label ?? 'Readout') : `Step ${n}`}</span>
         <span className="stage-t">{title}</span>
         {chip && (
           <span className={`chip is-${state}`}>

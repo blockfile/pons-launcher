@@ -98,11 +98,12 @@ export default function V5SweepPanel({ step, dev, bundle, lastLaunch, live, expl
 
       {/* Said plainly, because a sweep that "worked" leaves the operator with
           a wallet they think is empty and money they think is loose — it is
-          neither. Everything landed HERE, and step 1's Launcher subsection is
-          the only console path that moves it on from here. */}
+          neither. Everything landed HERE, and the Launcher tools section at
+          the end of the console is the only console path that moves it on
+          from here. */}
       <p className="hint" style={{ margin: '0 0 8px' }}>
         Swept ETH, USDG and token land in the launcher and stay there — nothing here sends them
-        further. Withdraw them from the <b>Launcher</b> section in step 1, or export the key.
+        further. Withdraw them from <b>Launcher tools</b>, below, or export the key.
       </p>
       <p className="hint" style={{ margin: '0 0 12px' }}>
         The token sweep moves <b>one token per run</b>. A bundle wallet holding both the launched

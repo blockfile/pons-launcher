@@ -9,6 +9,7 @@ import V5LaunchPanel from './V5LaunchPanel.jsx';
 import V5BundlePanel from './V5BundlePanel.jsx';
 import V5SellPanel from './V5SellPanel.jsx';
 import V5SweepPanel from './V5SweepPanel.jsx';
+import V5LauncherPanel from './V5LauncherPanel.jsx';
 
 /**
  * The v5 tab, whole — the letscash.fun (CashCat) bundler.
@@ -184,8 +185,6 @@ export default function V5Console({ health, credential, report, output, reported
         step={step('wallets')}
         dev={dev}
         bundle={bundle}
-        lastLaunch={lastLaunch}
-        live={live}
         explorer={explorer}
         reload={loadWallets}
         report={report}
@@ -251,6 +250,19 @@ export default function V5Console({ health, credential, report, output, reported
         step={{ ...step('sweep'), last: true }}
         dev={dev}
         bundle={bundle}
+        lastLaunch={lastLaunch}
+        live={live}
+        explorer={explorer}
+        reload={loadWallets}
+        report={report}
+      />
+
+      {/* Not one of the six — a folded-away utility for the launcher's own
+          value-OUT path (withdraw, and clearing a stuck tx). Last on the
+          page, deliberately outside the numbered flow: see its own header
+          comment for why it forces itself open when the launcher is stuck. */}
+      <V5LauncherPanel
+        dev={dev}
         lastLaunch={lastLaunch}
         live={live}
         explorer={explorer}
