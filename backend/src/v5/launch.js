@@ -73,6 +73,18 @@ const DEFAULT_SALT_ROUNDS = 5000;
 const DEFAULT_SALT_ATTEMPTS = 3;
 const DEFAULT_SALT_TIMEOUT_MS = 15000;
 
+// The token is a clone of CONSTANT init code, so its address depends only on
+// (launcher, salt) — name/symbol do NOT move it. Starting the vanity search from a
+// fixed 0 made a given launcher re-mine the SAME first "cc" salt (hence the same
+// address) on every launch; the second launch's CREATE2 then hit already-deployed
+// code and reverted FailedDeployment. So the search starts from a RANDOM offset
+// (a different address each run), and the loop additionally skips any mined
+// address that already has code. Randomness only picks WHERE to search; it never
+// weakens the "cc"/undeployed requirements the launch itself enforces.
+function randomSaltStart() {
+  return BigInt(Math.floor(Math.random() * Number.MAX_SAFE_INTEGER));
+}
+
 // The fire-time revert re-check is HARD-CAPPED: one eth_call, and if the node
 // does not answer in time we PROCEED (preflight already validated this exact tx).
 // It aborts ONLY on a definitive revert. Mirrors bundle/fireV2's RECHECK_MS.
@@ -317,23 +329,45 @@ async function prepareLaunch(input, deps = {}) {
     const rounds = Number(input.saltRounds || DEFAULT_SALT_ROUNDS);
     const attempts = Number(input.saltAttempts || DEFAULT_SALT_ATTEMPTS);
     const timeoutMs = Number(input.saltTimeoutMs || DEFAULT_SALT_TIMEOUT_MS);
-    let start = BigInt(input.saltStart || 0);
-    for (let i = 0; i < attempts && salt == null; i++) {
+    // Random start (see randomSaltStart) so a repeat launch by the same launcher
+    // does not re-mine the same already-deployed "cc" address.
+    let start = input.saltStart != null ? BigInt(input.saltStart) : randomSaltStart();
+    // Read code at a candidate address to skip one that is already deployed. Falls
+    // back to "undeployed" when no getCode is available (offline tests inject a
+    // provider without it), which cannot mask a real collision on-chain.
+    const codeOf = deps.getCode || (typeof prov.getCode === 'function' ? (a) => prov.getCode(a) : async () => '0x');
+    let scans = 0;
+    const maxScans = attempts + 6; // headroom so already-deployed skips don't eat the miss budget
+    while (salt == null && scans < maxScans) {
+      scans += 1;
       const hit = await f.mineSalt(
         { params: fullParams, configId, sender: dev.address, start, rounds, timeoutMs },
         { runner }
       );
-      if (hit) {
-        salt = hit.salt;
-        minedToken = getAddress(hit.token);
-      } else {
-        start += BigInt(rounds); // widen the window past the tries already burned
+      if (!hit) {
+        start += BigInt(rounds); // a miss — widen past the window already tried
+        continue;
       }
+      // Skip an already-deployed vanity address: CREATE2 to code that already
+      // exists reverts FailedDeployment (0xb06ebf3d). Advance past this salt and
+      // keep mining for a fresh one.
+      let existing = '0x';
+      try {
+        existing = await codeOf(getAddress(hit.token));
+      } catch (_err) {
+        // A getCode blip is not a reason to reject a valid mint — treat as unused.
+      }
+      if (existing && existing !== '0x') {
+        start = BigInt(hit.salt) + 1n;
+        continue;
+      }
+      salt = hit.salt;
+      minedToken = getAddress(hit.token);
     }
     if (salt == null) {
       throw new Error(
-        `could not mine a vanity "cc" salt in ${attempts} × ${rounds} rounds — the search is ` +
-          'probabilistic (~1/1024 per try), so simply retry, or widen saltRounds / saltAttempts'
+        `could not mine an UNUSED vanity "cc" salt in ${maxScans} × ${rounds} rounds — the search is ` +
+          'probabilistic (~1/1024 per try) and skips already-deployed addresses. Simply retry, or widen saltRounds.'
       );
     }
   }

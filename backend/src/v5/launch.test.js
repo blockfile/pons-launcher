@@ -168,6 +168,25 @@ test('params.creator is FORCED to the launcher, ignoring whatever the caller sen
   assert.equal(getAddress(seen.simFrom), DEV);
 });
 
+test('skips an already-deployed vanity address and mines a fresh one (no FailedDeployment)', async () => {
+  const DEPLOYED = getAddress('0x' + 'cc'.repeat(20));
+  let calls = 0;
+  const { deps } = prepDeps({
+    // First mined "cc" address already has code (a repeat launch collision); the
+    // second is fresh. Advancing past salt 0x01 lands on 0x02.
+    mineSalt: async () => {
+      calls += 1;
+      return calls === 1 ? { salt: '0x01', token: DEPLOYED } : { salt: '0x02', token: TOKEN };
+    },
+    simulateLaunch: async () => ({ ok: true, token: TOKEN, poolId: POOLID }),
+  });
+  deps.getCode = async (addr) => (getAddress(addr) === DEPLOYED ? '0x60006000' : '0x');
+
+  const plan = await prepareLaunch(baseInput, deps);
+  assert.equal(getAddress(plan.token), getAddress(TOKEN), 'the deployed address is skipped for a fresh one');
+  assert.equal(calls, 2, 'mineSalt was re-run past the already-deployed address');
+});
+
 test('value = launchFee + firstBuyIn for a native (ETH) launch', async () => {
   const { deps, ks } = prepDeps();
   const plan = await prepareLaunch(baseInput, deps);
