@@ -21,6 +21,7 @@ const { activityFor } = require('../store/activity');
 const { requireApiKey } = require('../middleware/auth');
 const { provider } = require('../evm/provider');
 const v5roles = require('../v5/roles');
+const factoryModule = require('../evm/v5/factory');
 const { prepareLaunch, fireLaunch, reconcileLaunch } = require('../v5/launch');
 
 const router = express.Router();
@@ -127,6 +128,18 @@ router.get('/v5/config', requireApiKey, (req, res) => {
     letscash: config.letscash,
     roles: v5roles.ROLES,
   });
+});
+
+// GET /api/v5/launch/configs — the LIVE launch menu read off the factory: the
+// enabled flag + fee, and every config (id, tax tier, quote asset, supply, mode)
+// the form's picker offers. Read-only; a heavier call than /v5/config (it walks
+// the on-chain config range), so the console fetches it when the Launch step opens.
+router.get('/v5/launch/configs', requireApiKey, async (req, res, next) => {
+  try {
+    res.json(jsonSafe(await factoryModule.getConfigs({ runner: provider })));
+  } catch (err) {
+    next(err);
+  }
 });
 
 // GET /api/v5/wallets — the v5dev launcher + v5bundle wallets, with balances.
