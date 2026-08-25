@@ -80,6 +80,25 @@ test('v2 never resolves a v1 wallet, and v1 never resolves a v2 wallet', () => {
   assert.equal(v1.some((a) => v2.includes(a)), false, 'the two sets must not overlap');
 });
 
+test('v5 (letscash) resolves its OWN wallets through the shared funder, never v1/v2s', () => {
+  const ks = fakeKeystore([
+    ...POPULATED,
+    { id: 'f', role: 'v5dev', address: '0xV5DEV' },
+    { id: 'g', role: 'v5bundle', address: '0xV5B1' },
+    { id: 'h', role: 'v5bundle', address: '0xV5B2' },
+  ]);
+  assert.equal(devWalletFor(ks, 'v5').address, '0xV5DEV', 'v5 funds FROM the v5dev wallet');
+  assert.deepEqual(
+    bundleWalletsFor(ks, 'v5').map((w) => w.address),
+    ['0xV5B1', '0xV5B2'],
+    'v5 funds v5bundle wallets, not v1/v2 bundle wallets'
+  );
+  // Disjoint from both other launchers, and no dispersers (individual transfers).
+  const r = roles('v5');
+  assert.equal(usesDispersers('v5'), false);
+  assert.equal([r.dev, r.bundle].some((role) => ['dev', 'bundle', 'v2dev', 'v2bundle'].includes(role)), false);
+});
+
 test('an unknown variant throws rather than falling back to v1', () => {
   const ks = fakeKeystore(POPULATED);
   // Falling back would point a mistyped v2 request at v1's funded wallets,

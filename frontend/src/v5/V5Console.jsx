@@ -5,6 +5,8 @@ import Step from '../components/Step.jsx';
 import ResultPanel from '../components/ResultPanel.jsx';
 import { plural } from './roles.js';
 import V5WalletsPanel from './V5WalletsPanel.jsx';
+import V5FundPanel from './V5FundPanel.jsx';
+import V5LaunchPanel from './V5LaunchPanel.jsx';
 
 /**
  * The v5 tab, whole — the letscash.fun (CashCat) bundler.
@@ -13,9 +15,9 @@ import V5WalletsPanel from './V5WalletsPanel.jsx';
  * App renders one or the other; this component holds v5's launcher and bundle
  * wallets, and nothing it does can change what another tab is drawing.
  *
- * SCAFFOLDING PHASE. Only the wallets step works. Fund, Launch, Bundle, Sell and
- * Sweep are drawn as the steps they will be so the flow reads end-to-end, but
- * each is a stub until its own fund-safety review lands.
+ * Wallets, Fund and Launch work. Bundle, Sell and Sweep are drawn as the steps
+ * they will be so the flow reads end-to-end, but each is still a stub until its
+ * own fund-safety review lands.
  */
 
 /**
@@ -38,10 +40,25 @@ export default function V5Console({ health, credential, report, output, reported
   const [dev, setDev] = useState(null);
   const [bundle, setBundle] = useState([]);
   const [config, setConfig] = useState(null);
+  // The live launch menu (GET /v5/launch/configs) — the picker's source, plus
+  // launchEnabled/launchFeeWei. Heavier than /v5/config (it walks the on-chain
+  // config range), so it is its own load rather than folded into loadConfig.
+  const [launchConfigs, setLaunchConfigs] = useState(null);
+  // The last launch response this session has seen, confirmed or not — enough
+  // to give the Launch step a real `done` state and a one-line detail, the same
+  // way App.jsx's own step 5 reads `history.length > 0` rather than tracking
+  // nothing at all. Not persisted: a reload of the page forgets it, same as
+  // every other piece of state here.
+  const [lastLaunch, setLastLaunch] = useState(null);
 
   // The explorer base comes with the v5 config; fall back to the health readout,
   // which carries the same value, so a slow config fetch does not blank the links.
   const explorer = config?.explorerUrl || health?.explorer || '';
+  // Same computation App.jsx makes for the pons consoles: dry-run unless the
+  // server says otherwise. v5's own money paths (fund, launch) read this to
+  // decide whether an Arm switch and a vermilion confirmation stand between a
+  // click and a real spend.
+  const live = Boolean(health && !health.dryRun);
 
   /**
    * `report`, held still — App rebuilds its `report` closure every render, so a
@@ -72,20 +89,31 @@ export default function V5Console({ health, credential, report, output, reported
     }
   }, []);
 
+  const loadLaunchConfigs = useCallback(async () => {
+    try {
+      setLaunchConfigs(await api('/v5/launch/configs'));
+    } catch (err) {
+      say.current(`ERROR: ${err.message}`);
+    }
+  }, []);
+
   useEffect(() => {
     if (!credential) return undefined;
     loadConfig();
     loadWallets();
+    loadLaunchConfigs();
     return undefined;
-  }, [credential, loadConfig, loadWallets]);
+  }, [credential, loadConfig, loadWallets, loadLaunchConfigs]);
 
   /**
    * The order of work, and where in it the operator is standing.
    *
    * Same rules the v1/v2/v3/v4 sequences use: exactly one step is `now` — the
    * first that is not done and whose predecessor is — and `later` is a statement
-   * about order, never a permission. The five stub steps are never done, so once
-   * the wallets exist the marker rests on Fund and the rest read as later.
+   * about order, never a permission — see Step.jsx: every control below stays
+   * live regardless of which step is marked current. Bundle, Sell and Sweep are
+   * still stubs and never done, so the marker rests on whichever of Wallets,
+   * Fund or Launch is the first not yet true.
    */
   const steps = useMemo(() => {
     const plan = [
@@ -100,8 +128,26 @@ export default function V5Console({ health, credential, report, output, reported
             ? `launcher · ${plural(bundle.length, 'bundle wallet')}`
             : 'launcher ready — generate the bundle wallets it feeds',
       },
-      { key: 'fund', n: 2, title: 'Fund', done: false, detail: 'ETH into the launcher and bundle wallets' },
-      { key: 'launch', n: 3, title: 'Launch', done: false, detail: 'the letscash launch and its atomic first buy' },
+      {
+        key: 'fund',
+        n: 2,
+        title: 'Fund',
+        // Mirrors App.jsx's own `funded > 0` for pons' step 4: at least one
+        // bundle wallet holding ETH is what "started funding" means here too.
+        done: bundle.some((w) => Number(w.balanceEth) > 0),
+        detail: 'ETH into the launcher and bundle wallets',
+      },
+      {
+        key: 'launch',
+        n: 3,
+        title: 'Launch',
+        done: Boolean(lastLaunch),
+        detail: lastLaunch
+          ? `${lastLaunch.plan?.params?.symbol || lastLaunch.token || '—'} · ${
+              lastLaunch.launch?.status || (lastLaunch.pending ? 'pending' : '—')
+            }`
+          : 'the letscash launch and its atomic first buy',
+      },
       { key: 'bundle', n: 4, title: 'Bundle', done: false, detail: 'fan the first-buy supply out to the bundle' },
       { key: 'sell', n: 5, title: 'Sell', done: false, detail: 'unwind the bundle back to ETH' },
       { key: 'sweep', n: 6, title: 'Sweep', done: false, detail: 'collect what is left to one wallet' },
@@ -132,7 +178,7 @@ export default function V5Console({ health, credential, report, output, reported
             : null,
       };
     });
-  }, [dev, bundle]);
+  }, [dev, bundle, lastLaunch]);
 
   const step = (key) => steps.find((s) => s.key === key) || null;
 
@@ -172,12 +218,26 @@ export default function V5Console({ health, credential, report, output, reported
         output={output}
       />
 
-      <Stub step={step('fund')}>
-        ETH goes into the launcher and the bundle wallets before anything launches.
-      </Stub>
-      <Stub step={step('launch')}>
-        The letscash launch fires with its atomic, unfront-runnable first buy into the launcher.
-      </Stub>
+      <V5FundPanel
+        step={step('fund')}
+        dev={dev}
+        bundle={bundle}
+        explorer={explorer}
+        reload={loadWallets}
+        report={report}
+      />
+
+      <V5LaunchPanel
+        step={step('launch')}
+        dev={dev}
+        launchConfigs={launchConfigs}
+        live={live}
+        explorer={explorer}
+        reload={loadWallets}
+        report={report}
+        onLaunched={setLastLaunch}
+      />
+
       <Stub step={step('bundle')}>
         The first-buy supply is fanned out to the bundle wallets — token transfers are untaxed on
         letscash.

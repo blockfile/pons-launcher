@@ -34,6 +34,14 @@ const VARIANTS = {
   // took them, so nothing else can reach them — see the note above ROLES in
   // keystore.js.
   v2: { dev: 'v2dev', bundle: 'v2bundle', dispersers: false },
+  // v5 is the letscash (CashCat) bundler. It funds through this SHARED spine (its
+  // routes/v5.js header says so) but owns its OWN role strings — 'v5dev' /
+  // 'v5bundle', already in keystore.js's ROLES — so a v5 fund resolves v5's dev as
+  // the source and v5's bundle as the targets, and can never reach v1/v2's wallets.
+  // No dispersers: like v2 it funds with individual transfers (letscash's bundle
+  // primitive is an untaxed TOKEN fan-out, not a big ETH fan-out that needs
+  // batching through a Disperse contract).
+  v5: { dev: 'v5dev', bundle: 'v5bundle', dispersers: false },
 };
 
 const DEFAULT_VARIANT = 'v1';
