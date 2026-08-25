@@ -23,6 +23,7 @@ const { provider } = require('../evm/provider');
 const v5roles = require('../v5/roles');
 const factoryModule = require('../evm/v5/factory');
 const { prepareLaunch, fireLaunch, reconcileLaunch } = require('../v5/launch');
+const { prepareBundle, fireBundle } = require('../v5/bundle');
 
 const router = express.Router();
 
@@ -56,6 +57,13 @@ function withLaunchLock(handler) {
       return res
         .status(409)
         .json({ error: 'a v5 launch is already in progress for this account — wait for it to finish' });
+    }
+    // A bundle fan-out spends the SAME v5dev wallet at sequential nonces, so a
+    // launch must not start while one is mid-flight (their nonces would collide).
+    if (bundling.has(id)) {
+      return res
+        .status(409)
+        .json({ error: 'a v5 bundle fan-out is in progress on this launcher — wait for it before launching' });
     }
     const pending = pendingLaunches.get(id);
     if (pending) {
@@ -119,6 +127,65 @@ function jsonSafe(value) {
 // exactly as routes/launch.js's publicPlan does for the pons paths.
 function publicPlan(plan) {
   return jsonSafe({ ...plan, launch: { ...plan.launch, raw: undefined } });
+}
+
+// The bundle plan's secret is every transfer's SIGNED raw — strip them all, the
+// same way publicPlan strips the launch's. The rest (who gets how much) is safe.
+function publicBundlePlan(plan) {
+  return jsonSafe({ ...plan, transfers: (plan.transfers || []).map((t) => ({ ...t, raw: undefined })) });
+}
+
+// One bundle fan-out at a time per account: the transfers are signed at the
+// launcher's sequential nonces, so two overlapping runs would sign against the
+// same nonces and collide (or, if the first has landed, re-split a smaller
+// balance). Refused, not raced — the same discipline as the launch lock.
+const bundling = new Set();
+function withBundleLock(handler) {
+  return async (req, res, next) => {
+    const id = req.user.id;
+    if (bundling.has(id)) {
+      return res.status(409).json({ error: 'a v5 bundle fan-out is already in progress for this account' });
+    }
+    // The launcher wallet is shared with the launch path. Don't fan out while a
+    // launch is running or parked-unconfirmed on it — the on-chain settled-nonce
+    // gate in prepareBundle is the real guard, but refusing here is cheaper and
+    // gives a clearer message.
+    if (launching.has(id) || pendingLaunches.has(id)) {
+      return res
+        .status(409)
+        .json({ error: 'a v5 launch is in progress or unresolved on this launcher — settle it before bundling' });
+    }
+    bundling.add(id);
+    try {
+      await handler(req, res, next);
+    } finally {
+      bundling.delete(id);
+    }
+  };
+}
+
+// F3 — PIN the bundle's token to one this account actually launched. `token` is
+// caller-supplied; without this an arbitrary (or fat-fingered) address could be
+// fanned out. The launched tokens are the confirmed-launch rows in this user's own
+// v5 activity. A token that is not among them is refused unless the caller sets
+// `allowUnlistedToken: true` (the escape hatch for a token launched before the
+// activity log existed / was trimmed — used knowingly, never by default).
+function assertOwnLaunchedToken(userId, token, allowUnlisted) {
+  if (allowUnlisted === true) return;
+  const want = String(token || '').toLowerCase();
+  const launched = new Set(
+    activityFor(userId)
+      .list({ kind: 'v5', limit: 500 })
+      .map((e) => e.detail && e.detail.token)
+      .filter(Boolean)
+      .map((t) => String(t).toLowerCase())
+  );
+  if (!launched.has(want)) {
+    throw new Error(
+      `token ${token} is not among this account's launched letscash tokens — bundle a token you launched ` +
+        'here, or pass { allowUnlistedToken: true } if you are certain this is yours'
+    );
+  }
 }
 
 // GET /api/v5/config — the letscash contract map + chain, for the console.
@@ -313,9 +380,63 @@ router.post('/v5/launch/resolve', requireApiKey, async (req, res, next) => {
   }
 });
 
+// POST /api/v5/bundle/preflight — build and SIGN the untaxed token fan-out from
+// the launcher to the bundle wallets, broadcast nothing. Returns the public plan
+// (each transfer's signed raw stripped) so the operator can read who gets how much
+// before anything moves.
+router.post('/v5/bundle/preflight', requireApiKey, async (req, res, next) => {
+  try {
+    assertOwnLaunchedToken(req.user.id, req.body?.token, req.body?.allowUnlistedToken);
+    const plan = await prepareBundle(req.body || {}, { keystore: keystoreFor(req.user.id) });
+    res.json({ plan: publicBundlePlan(plan) });
+  } catch (err) {
+    next(err);
+  }
+});
+
+// POST /api/v5/bundle — prepare, then fire the fan-out. A MONEY PATH (it moves the
+// launched supply), so it demands { confirm: true }. DRY_RUN returns a simulated
+// result without broadcasting. One fan-out at a time per account.
+router.post('/v5/bundle', requireApiKey, withBundleLock(async (req, res, next) => {
+  try {
+    if (req.body?.confirm !== true) {
+      throw new Error('refusing to fan out without { confirm: true } — this moves the launched supply');
+    }
+    assertOwnLaunchedToken(req.user.id, req.body?.token, req.body?.allowUnlistedToken);
+    const ks = keystoreFor(req.user.id);
+    const plan = await prepareBundle(req.body || {}, { keystore: ks });
+    const result = await fireBundle(plan, {});
+
+    activityFor(req.user.id).record(
+      'v5',
+      `[v5] bundled ${plan.symbol}: ${result.sent}/${plan.count} transfer(s) confirmed` +
+        (result.failed ? `, ${result.failed} failed` : '') +
+        (result.pending ? `, ${result.pending} pending` : ''),
+      {
+        kind: 'bundle',
+        token: plan.token,
+        symbol: plan.symbol,
+        count: plan.count,
+        totalOut: plan.totalOut,
+        sent: result.sent,
+        failed: result.failed,
+        pending: result.pending,
+      }
+    );
+
+    res.json({ ...jsonSafe(result), plan: publicBundlePlan(plan) });
+  } catch (err) {
+    next(err);
+  }
+}));
+
 module.exports = router;
 // Exposed for the fund-safety tests (the double-launch guard + the honest
 // persistence detail), mirroring routes/launch.js.
 module.exports.withLaunchLock = withLaunchLock;
 module.exports.pendingLaunches = pendingLaunches;
 module.exports.launchActivityDetail = launchActivityDetail;
+module.exports.withBundleLock = withBundleLock;
+module.exports.bundling = bundling;
+module.exports.publicBundlePlan = publicBundlePlan;
+module.exports.assertOwnLaunchedToken = assertOwnLaunchedToken;
