@@ -194,6 +194,30 @@ const config = {
   // A V4 seed wallet is claimable by V1/V3 once it has been funded and has aged
   // at least this many hours — the "done seasoning" gate. 24h by default.
   seasonedMinHours: num(process.env.SEASONED_MIN_HOURS, 24),
+
+  // ── v5: letscash.fun (CashCat) launchpad, on this same chain (4663) ─────────
+  // A Uniswap-V4 launchpad: a launch mints a fixed-supply token and seeds one
+  // locked V4 pool with the whole supply; trades are V4 swaps priced in ETH or
+  // USDG, and the CashCatHookV2 skims the tax off the quote side. All addresses
+  // verified on-chain (see the letscash-contract-map notes); overridable by env
+  // so a redeployment needs no code change. NO snipe-tax exemption exists — the
+  // launch's atomic firstBuyIn is the only guaranteed-first entry.
+  letscash: {
+    factory: (process.env.LETSCASH_FACTORY || '0x5bd1Fbe78a78fe8236fa00CF48fbEBA74ae34661').toLowerCase(),
+    hook: (process.env.LETSCASH_HOOK || '0x75A54357D9C78a2Db19004a5FDc76c50F9242AEC').toLowerCase(),
+    poolManager: (process.env.LETSCASH_POOL_MANAGER || '0x8366a39CC670B4001A1121B8F6A443A643e40951').toLowerCase(),
+    universalRouter: (process.env.LETSCASH_UNIVERSAL_ROUTER || '0x8876789976deCBFcbbBe364623c63652DB8c0904').toLowerCase(),
+    quoter: (process.env.LETSCASH_QUOTER || '0x8Dc178eFB8111BB0973Dd9d722ebeFF267c98F94').toLowerCase(),
+    stateView: (process.env.LETSCASH_STATE_VIEW || '0xF3334192D15450CdD385c8B70e03f9A6bD9E673b').toLowerCase(),
+    permit2: (process.env.LETSCASH_PERMIT2 || '0x000000000022D473030F116dDEE9F6B43aC78BA3').toLowerCase(),
+    usdg: (process.env.LETSCASH_USDG || '0x5fc5360D0400a0Fd4f2af552ADD042D716F1d168').toLowerCase(),
+    // The V4 pool shape every letscash launch uses (verified: fee 0, tickSpacing
+    // 200; currency0 = the quote, ETH sentinel 0x0 or USDG; currency1 = token).
+    poolFee: num(process.env.LETSCASH_POOL_FEE, 0),
+    tickSpacing: num(process.env.LETSCASH_TICK_SPACING, 200),
+    // The factory's flat launch fee, on top of firstBuyIn (0.0005 ETH observed).
+    launchFeeEth: process.env.LETSCASH_LAUNCH_FEE_ETH || '0.0005',
+  },
 };
 
 /**

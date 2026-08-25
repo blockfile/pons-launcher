@@ -144,6 +144,12 @@ const ROLES = new Set([
   'v3bundle',
   'v4master',
   'v4seed',
+  // v5dev / v5bundle are the sixth owner — the letscash.fun (CashCat) bundler.
+  // Their names live in v5/roles.js, v5's own table (shares nothing with the
+  // others). v5dev is a singleton (one launcher, one position) and joins
+  // SINGLETON_ROLES below; v5bundle is plural.
+  'v5dev',
+  'v5bundle',
 ]);
 // v3main joins the singletons: the chain sells from one position, and a second
 // main wallet would mean half the supply sitting somewhere the engine never
@@ -156,6 +162,9 @@ const SINGLETON_ROLES = new Set([
   'v2funding',
   'v3dev',
   'v3main',
+  // The letscash launcher: one launch, one position, one payer — a second v5dev
+  // would mean half the first-buy supply sitting where the tab never looks.
+  'v5dev',
 ]);
 const instances = new Map();
 // Same alphabet as users.slug() (backend/src/users/users.js). Duplicated
