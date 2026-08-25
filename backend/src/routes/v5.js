@@ -30,6 +30,7 @@ const { storeFor } = require('../v4/store');
 const { prepareLaunch, fireLaunch, reconcileLaunch, approveQuoteForLaunch, quoteAllowanceStatus } = require('../v5/launch');
 const { prepareBundle, fireBundle } = require('../v5/bundle');
 const { prepareSell, fireSell } = require('../v5/sell');
+const { prepareBundleBuys, fireBundleBuys } = require('../v5/buy');
 const { launcherStatus, withdrawFromLauncher, cancelStuckLauncherTx } = require('../v5/launcher');
 
 const router = express.Router();
@@ -152,6 +153,11 @@ function publicBundlePlan(plan) {
   return jsonSafe({ ...plan, transfers: (plan.transfers || []).map((t) => ({ ...t, raw: undefined })) });
 }
 
+// The buy plan's secret is every wallet's signed buy — strip them.
+function publicBuyPlan(plan) {
+  return jsonSafe({ ...plan, buys: (plan.buys || []).map((b) => ({ ...b, raw: undefined })) });
+}
+
 // The sell plan's secrets are every wallet's signed approvals + sell. Strip them.
 function publicSellPlan(plan) {
   return jsonSafe({
@@ -201,11 +207,17 @@ function withBundleLock(handler) {
 // is still landing tokens INTO those wallets, or it would exit a half-settled
 // balance. Refuse a concurrent sell, and a sell while a bundle is mid-flight.
 const selling = new Set();
+// Per-wallet BUYS (the v1-style bundle) spend the SAME bundle wallets as the sell,
+// so buy and sell are mutually exclusive per account.
+const buying = new Set();
 function withSellLock(handler) {
   return async (req, res, next) => {
     const id = req.user.id;
     if (selling.has(id)) {
       return res.status(409).json({ error: 'a v5 sell is already in progress for this account' });
+    }
+    if (buying.has(id)) {
+      return res.status(409).json({ error: 'a v5 bundle buy is in progress on these wallets — let it finish before selling' });
     }
     if (bundling.has(id)) {
       return res
@@ -217,6 +229,28 @@ function withSellLock(handler) {
       await handler(req, res, next);
     } finally {
       selling.delete(id);
+    }
+  };
+}
+function withBuyLock(handler) {
+  return async (req, res, next) => {
+    const id = req.user.id;
+    if (buying.has(id)) {
+      return res.status(409).json({ error: 'a v5 bundle buy is already in progress for this account' });
+    }
+    if (selling.has(id)) {
+      return res.status(409).json({ error: 'a v5 sell is in progress on these wallets — let it finish before buying' });
+    }
+    if (bundling.has(id)) {
+      return res
+        .status(409)
+        .json({ error: 'a v5 bundle is still landing into the bundle wallets — let it settle before buying' });
+    }
+    buying.add(id);
+    try {
+      await handler(req, res, next);
+    } finally {
+      buying.delete(id);
     }
   };
 }
@@ -721,6 +755,58 @@ router.post('/v5/sell', requireApiKey, withSellLock(async (req, res, next) => {
   }
 }));
 
+// POST /api/v5/bundle-buy/preflight — the V1-style bundle: build and SIGN a buy for
+// every bundle wallet that has a buy amount (each buys the token from the pool with
+// its own ETH), broadcast nothing. Returns the plan raw-stripped, with the per-wallet
+// expected tokens the CURRENT tax gives — run it after the anti-snipe tax has decayed.
+router.post('/v5/bundle-buy/preflight', requireApiKey, async (req, res, next) => {
+  try {
+    assertOwnLaunchedToken(req.user.id, req.body?.token, req.body?.allowUnlistedToken);
+    const { hook, quote } = resolveSellPool(req.user.id, req.body || {});
+    const plan = await prepareBundleBuys({ ...(req.body || {}), hook, quote }, { keystore: keystoreFor(req.user.id) });
+    res.json(publicBuyPlan(plan));
+  } catch (err) {
+    next(err);
+  }
+});
+
+// POST /api/v5/bundle-buy — prepare, then fire the per-wallet buys. A MONEY PATH →
+// { confirm:true }. Broadcasts each wallet's buy. One buy run at a time, and never
+// alongside a sell (both spend the same bundle wallets).
+router.post('/v5/bundle-buy', requireApiKey, withBuyLock(async (req, res, next) => {
+  try {
+    if (req.body?.confirm !== true) {
+      throw new Error('refusing to buy without { confirm: true } — this spends each bundle wallet\'s ETH');
+    }
+    assertOwnLaunchedToken(req.user.id, req.body?.token, req.body?.allowUnlistedToken);
+    const { hook, quote } = resolveSellPool(req.user.id, req.body || {});
+    const ks = keystoreFor(req.user.id);
+    const plan = await prepareBundleBuys({ ...(req.body || {}), hook, quote }, { keystore: ks });
+    const result = await fireBundleBuys(plan, {});
+
+    activityFor(req.user.id).record(
+      'v5',
+      `[v5] bundle buy ${plan.symbol}: ${result.bought}/${plan.walletCount} wallet(s) bought` +
+        (result.failed ? `, ${result.failed} failed` : '') +
+        (result.pending ? `, ${result.pending} pending` : ''),
+      {
+        kind: 'bundle-buy',
+        token: plan.token,
+        symbol: plan.symbol,
+        walletCount: plan.walletCount,
+        totalEth: plan.totalEth,
+        bought: result.bought,
+        failed: result.failed,
+        pending: result.pending,
+      }
+    );
+
+    res.json({ ...jsonSafe(result), plan: publicBuyPlan(plan) });
+  } catch (err) {
+    next(err);
+  }
+}));
+
 // ── launcher rescue: get value OUT of v5dev, and un-stick it ───────────────────
 // The launcher is a one-way value sink (fund/bundle spend into the bundle wallets,
 // sweep pulls into it) and a stuck launcher tx bricks new launches. These are the
@@ -827,6 +913,9 @@ module.exports.assertOwnLaunchedToken = assertOwnLaunchedToken;
 module.exports.withSellLock = withSellLock;
 module.exports.selling = selling;
 module.exports.publicSellPlan = publicSellPlan;
+module.exports.withBuyLock = withBuyLock;
+module.exports.buying = buying;
+module.exports.publicBuyPlan = publicBuyPlan;
 module.exports.launchedTokenHook = launchedTokenHook;
 module.exports.launchedTokenQuote = launchedTokenQuote;
 module.exports.resolveSellPool = resolveSellPool;

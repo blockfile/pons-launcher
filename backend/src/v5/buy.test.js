@@ -1,0 +1,223 @@
+'use strict';
+
+// Unit tests for the v5 per-wallet BUY money path (the V1-style bundle). Fully
+// offline: the swap client, keystore signer, and provider are injected.
+
+const test = require('node:test');
+const assert = require('node:assert');
+const { getAddress, parseEther } = require('ethers');
+
+const { prepareBundleBuys, fireBundleBuys } = require('./buy');
+
+const TOKEN = getAddress('0x4F0d7ea112547Af5dAD59959d98B6A8ee3355Bcc');
+const HOOK = getAddress('0xEfe669814e5Eec33406Bd50ffa8331618D076aEc');
+const ROUTER = getAddress('0x8876789976decbfcbbbe364623c63652db8c0904');
+const PID = '0x' + 'ab'.repeat(32);
+const B = (n) => getAddress('0x' + String(n).repeat(40).slice(0, 40));
+const WALLETS = [
+  { id: 'b1', address: B(2), role: 'v5bundle' },
+  { id: 'b2', address: B(3), role: 'v5bundle' },
+  { id: 'b3', address: B(4), role: 'v5bundle' },
+];
+
+function fakeKs(bundle = WALLETS) {
+  const ks = { signables: [], signCalls: [] };
+  ks.walletsWithRole = (r) => (r === 'v5bundle' ? bundle : []);
+  ks.walletWithRole = () => null;
+  ks.signer = (id) => {
+    ks.signCalls.push(id);
+    return {
+      signTransaction: async (tx) => {
+        ks.signables.push({ id, ...tx });
+        return `0xSIGNED:${id}:${tx.nonce}`;
+      },
+    };
+  };
+  return ks;
+}
+
+function fakeSwap(over = {}) {
+  return {
+    resolvePoolKey:
+      over.resolvePoolKey ||
+      (async () => ({ poolKey: { currency0: '0x00', currency1: TOKEN, fee: 0, tickSpacing: 200, hooks: HOOK }, hook: HOOK, poolId: PID, liquidity: 10n ** 20n })),
+    quoteBuy: over.quoteBuy || (async ({ amountInWei }) => ({ expectedOut: BigInt(amountInWei) * 1000n, minOut: BigInt(amountInWei) * 990n })),
+    buildBuyTx: over.buildBuyTx || (({ amountInWei }) => ({ to: ROUTER, data: '0xbuy', value: BigInt(amountInWei) })),
+  };
+}
+
+function fakeProvider(over = {}) {
+  const p = { broadcasts: [] };
+  p.getBalance = over.getBalance || (async () => 10n ** 18n); // 1 ETH
+  p.getTransactionCount = over.getTransactionCount || (async (_a, _t) => 4);
+  p.broadcastTransaction =
+    over.broadcastTransaction ||
+    (async (raw) => {
+      p.broadcasts.push(raw);
+      return { hash: `hash:${raw}` };
+    });
+  p.getTransactionReceipt = over.getTransactionReceipt || (async () => ({ status: 1, blockNumber: 9 }));
+  return p;
+}
+
+function deps(over = {}, ks = fakeKs(over.bundle)) {
+  const provider = fakeProvider(over.provider);
+  return {
+    ks,
+    provider,
+    deps: {
+      keystore: ks,
+      provider,
+      swap: fakeSwap(over.swap),
+      getFees: async () => ({ type: 2, maxFeePerGas: 1_000_000_000n, maxPriorityFeePerGas: 1_000_000n }),
+      getDecimals: async () => 18,
+      getSymbol: async () => 'CAT',
+      deadline: 1_800_000_000,
+    },
+  };
+}
+
+const BUYS = [
+  { walletId: 'b1', amountEth: '0.01' },
+  { walletId: 'b2', amountEth: '0.02' },
+];
+
+// ── prepareBundleBuys ─────────────────────────────────────────────────────────
+test('signs one buy per named wallet, value = the ETH in, against the pinned pool', async () => {
+  const { deps: d, ks } = deps();
+  const plan = await prepareBundleBuys({ token: TOKEN, hook: HOOK, buys: BUYS }, d);
+  assert.equal(plan.walletCount, 2);
+  assert.equal(plan.hook, HOOK);
+  assert.equal(ks.signables.length, 2, 'one signed buy per wallet');
+  const b1 = plan.buys.find((b) => b.walletId === 'b1');
+  assert.equal(b1.ethIn, '0.01');
+  const s1 = ks.signables.find((s) => s.id === 'b1');
+  assert.equal(getAddress(s1.to), ROUTER, 'the buy targets the router');
+  assert.equal(s1.value, parseEther('0.01'), 'a native buy rides the ETH as msg.value');
+  assert.ok(b1.expectedTokens && b1.minOut, 'a quote + floor are attached');
+});
+
+test('a buy carries a positive floor and reports expected tokens (the tax shows in the quote)', async () => {
+  const { deps: d } = deps();
+  const plan = await prepareBundleBuys({ token: TOKEN, hook: HOOK, buys: BUYS, slippageBps: 200 }, d);
+  const b = plan.buys[0];
+  assert.ok(BigInt(b.minOut) > 0n, 'buildBuyTx would refuse a zero floor — the plan always has one');
+  assert.equal(plan.totalEth, '0.03');
+});
+
+test('a wallet short of ETH for the buy + gas is skipped, not signed', async () => {
+  const { deps: d, ks } = deps({
+    provider: { getBalance: async (addr) => (getAddress(addr) === WALLETS[0].address ? 1n : 10n ** 18n) },
+  });
+  const plan = await prepareBundleBuys({ token: TOKEN, hook: HOOK, buys: BUYS }, d);
+  assert.equal(plan.walletCount, 1);
+  assert.ok(plan.skipped.some((s) => s.walletId === 'b1' && /needs/.test(s.reason)));
+  assert.equal(ks.signCalls.length, 1);
+});
+
+test('skips a wallet with an unconfirmed tx in flight', async () => {
+  const { deps: d } = deps({
+    provider: {
+      getTransactionCount: async (addr, tag) =>
+        getAddress(addr) === WALLETS[1].address ? (tag === 'pending' ? 6 : 5) : 4,
+    },
+  });
+  const plan = await prepareBundleBuys({ token: TOKEN, hook: HOOK, buys: BUYS }, d);
+  assert.equal(plan.walletCount, 1);
+  assert.ok(plan.skipped.some((s) => s.walletId === 'b2' && /in flight/.test(s.reason)));
+});
+
+test('requires a verified hook, refuses a non-ETH quote, and rejects a bad token', async () => {
+  const { deps: d } = deps();
+  await assert.rejects(() => prepareBundleBuys({ token: TOKEN, buys: BUYS }, d), /verified pool hook is required/);
+  await assert.rejects(() => prepareBundleBuys({ token: TOKEN, hook: HOOK, quote: 'usdg', buys: BUYS }, d), /ETH-only/);
+  await assert.rejects(() => prepareBundleBuys({ token: 'nope', hook: HOOK, buys: BUYS }, d), /launched ERC-20/);
+});
+
+test('refuses when no wallet has a positive buy amount', async () => {
+  const { deps: d } = deps();
+  await assert.rejects(
+    () => prepareBundleBuys({ token: TOKEN, hook: HOOK, buys: [{ walletId: 'b1', amountEth: '0' }] }, d),
+    /no wallet has a positive buy/
+  );
+});
+
+test('refuses a buys entry naming a wallet not in the bundle, or twice', async () => {
+  const { deps: d } = deps();
+  await assert.rejects(() => prepareBundleBuys({ token: TOKEN, hook: HOOK, buys: [{ walletId: 'nope', amountEth: '1' }] }, d), /not one of this tab's bundle/);
+  await assert.rejects(
+    () => prepareBundleBuys({ token: TOKEN, hook: HOOK, buys: [{ walletId: 'b1', amountEth: '1' }, { walletId: 'b1', amountEth: '1' }] }, d),
+    /more than once/
+  );
+});
+
+test('prepareBundleBuys broadcasts nothing', async () => {
+  const { deps: d, provider } = deps();
+  await prepareBundleBuys({ token: TOKEN, hook: HOOK, buys: BUYS }, d);
+  assert.equal(provider.broadcasts.length, 0);
+});
+
+test('refuses when there is no live pool (buying before launch)', async () => {
+  const { deps: d } = deps({
+    swap: { resolvePoolKey: async () => { throw new Error('No initialised letscash pool'); } },
+  });
+  await assert.rejects(() => prepareBundleBuys({ token: TOKEN, hook: HOOK, buys: BUYS }, d), /No initialised letscash pool/);
+});
+
+// ── fireBundleBuys ────────────────────────────────────────────────────────────
+function buyPlan(buys) {
+  return { protocol: 'v5', kind: 'bundle-buy', token: TOKEN, symbol: 'CAT', buys };
+}
+
+test('fireBundleBuys broadcasts every buy and tallies confirmed', async () => {
+  const provider = fakeProvider();
+  const res = await fireBundleBuys(
+    buyPlan([
+      { walletId: 'b1', address: B(2), ethIn: '0.01', raw: '0xr1' },
+      { walletId: 'b2', address: B(3), ethIn: '0.02', raw: '0xr2' },
+    ]),
+    { provider, dryRun: false, warmPool: async () => {}, waitForReceipt: (rpc, h) => rpc.getTransactionReceipt(h) }
+  );
+  assert.equal(provider.broadcasts.length, 2);
+  assert.equal(res.bought, 2);
+  assert.equal(res.failed, 0);
+});
+
+test('fireBundleBuys counts a reverted buy as failed and a send-failed as failed', async () => {
+  const provider = fakeProvider({
+    broadcastTransaction: async (raw) => {
+      if (raw === '0xr1') throw new Error('nonce too low');
+      return { hash: `hash:${raw}` };
+    },
+    getTransactionReceipt: async (h) => ({ status: h === 'hash:0xr2' ? 0 : 1, blockNumber: 9 }),
+  });
+  const res = await fireBundleBuys(
+    buyPlan([
+      { walletId: 'b1', address: B(2), ethIn: '0.01', raw: '0xr1' },
+      { walletId: 'b2', address: B(3), ethIn: '0.02', raw: '0xr2' },
+    ]),
+    { provider, dryRun: false, warmPool: async () => {}, waitForReceipt: (rpc, h) => rpc.getTransactionReceipt(h) }
+  );
+  assert.equal(res.bought, 0);
+  assert.equal(res.failed, 2, 'one send-failed + one reverted');
+  assert.equal(res.buys.find((b) => b.walletId === 'b1').status, 'send-failed');
+});
+
+test('a dry run broadcasts nothing', async () => {
+  const provider = fakeProvider();
+  const res = await fireBundleBuys(buyPlan([{ walletId: 'b1', address: B(2), ethIn: '0.01', raw: '0xr1' }]), {
+    provider,
+    dryRun: true,
+    warmPool: async () => {},
+  });
+  assert.equal(provider.broadcasts.length, 0);
+  assert.equal(res.simulated, true);
+});
+
+test('fireBundleBuys refuses an unsigned or non-buy plan', async () => {
+  await assert.rejects(
+    () => fireBundleBuys(buyPlan([{ walletId: 'b1', address: B(2), ethIn: '0.01' }]), { provider: fakeProvider(), dryRun: false, warmPool: async () => {} }),
+    /unsigned buys/
+  );
+  await assert.rejects(() => fireBundleBuys({ kind: 'sell' }, { provider: fakeProvider(), dryRun: false }), /not a v5 bundle-buy plan/);
+});
