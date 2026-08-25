@@ -4,17 +4,17 @@ import assert from 'node:assert/strict';
 import { pacedDelayMs, runPacedFunding } from './pacedFunding.js';
 
 // ── pacedDelayMs ─────────────────────────────────────────────────────────────
-test('pacedDelayMs stays inside [4000, 7000] and is an integer', () => {
+test('pacedDelayMs stays inside [8000, 9000] and is an integer', () => {
   for (let i = 0; i < 2000; i++) {
     const ms = pacedDelayMs();
     assert.ok(Number.isInteger(ms), `${ms} is not an integer`);
-    assert.ok(ms >= 4000 && ms <= 7000, `${ms} out of range`);
+    assert.ok(ms >= 8000 && ms <= 9000, `${ms} out of range`);
   }
 });
 
 test('pacedDelayMs covers both ends of the range', () => {
-  assert.equal(pacedDelayMs(4000, 7000, () => 0), 4000);
-  assert.equal(pacedDelayMs(4000, 7000, () => 0.999999), 7000);
+  assert.equal(pacedDelayMs(8000, 9000, () => 0), 8000);
+  assert.equal(pacedDelayMs(8000, 9000, () => 0.999999), 9000);
   assert.equal(pacedDelayMs(10, 20, () => 0.5), 15);
 });
 
@@ -75,7 +75,7 @@ test('waits between wallets but not after the last one', async () => {
   const h = harness();
   await runPacedFunding({ targets: THREE, dispersers: [D1], ...h });
   assert.equal(h.waits.length, 2, 'two gaps for three wallets');
-  for (const ms of h.waits) assert.ok(ms >= 4000 && ms <= 7000, `${ms} out of range`);
+  for (const ms of h.waits) assert.ok(ms >= 8000 && ms <= 9000, `${ms} out of range`);
 });
 
 test('rotates across several dispersers', async () => {

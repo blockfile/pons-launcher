@@ -1,8 +1,8 @@
 // The V1 paced funding loop — one disperser transaction per bundle wallet,
-// 4–7 seconds apart, driven from the browser.
+// 8–9 seconds apart, driven from the browser.
 //
 // Why the browser and not the server: each POST /fund is short, so nothing
-// hits nginx's 180 s proxy_read_timeout (30 wallets × 7 s would); progress
+// hits nginx's 180 s proxy_read_timeout (30 wallets × 9 s would); progress
 // shows per wallet as it happens; and stopping is just not sending the next
 // one. Nothing here can double-send: a wallet is posted exactly once or not
 // at all.
@@ -10,8 +10,8 @@
 // Pure: every side effect (the request, the wait, the report box, the Stop
 // flag) is injected, so the loop is unit-tested without React or a network.
 
-export const PACE_MIN_MS = 4000;
-export const PACE_MAX_MS = 7000;
+export const PACE_MIN_MS = 8000;
+export const PACE_MAX_MS = 9000;
 
 /** A uniform random integer in [min, max] milliseconds. */
 export function pacedDelayMs(min = PACE_MIN_MS, max = PACE_MAX_MS, random = Math.random) {

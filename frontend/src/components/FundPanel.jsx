@@ -73,7 +73,7 @@ export default function FundPanel({ step, wallets, rows, dispersers, reload, rep
 
   // V1 paced run. The Stop flag is a ref, not state: the loop reads it between
   // wallets and a re-render is not needed for it to take effect. `wake` lets
-  // Stop cut the current 4–7 s gap short instead of waiting it out.
+  // Stop cut the current 8–9 s gap short instead of waiting it out.
   const [pacing, setPacing] = useState(false);
   const stopRef = useRef(false);
   const wakeRef = useRef(null);
@@ -222,7 +222,7 @@ export default function FundPanel({ step, wallets, rows, dispersers, reload, rep
           </Busy>
         ) : (
           <>
-            {/* V1 funds 1 by 1 through the disperser contract, 4–7 s apart, so
+            {/* V1 funds 1 by 1 through the disperser contract, 8–9 s apart, so
                 every bundle wallet is funded by the contract rather than in one
                 burst from the dev wallet. The burst/batched send is gone from
                 this tab on purpose. */}
