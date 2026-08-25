@@ -251,21 +251,33 @@ router.post('/wallets/backup', requireApiKey, requireAuthConfigured, (req, res, 
 router.post('/fund', requireApiKey, async (req, res, next) => {
   try {
     const ks = keystoreFor(req.user.id);
-    const { targets, variant = DEFAULT_VARIANT } = req.body || {};
+    // viaDisperser: the paced v1 path — one disperser transaction for the
+    // targets in THIS request (the panel posts one wallet at a time). The
+    // disperser address is validated inside disperse() against the user's own
+    // list; a foreign address is refused before anything is signed.
+    const { targets, variant = DEFAULT_VARIANT, viaDisperser = false, disperser } = req.body || {};
     if (!Array.isArray(targets) || !targets.length) throw new Error('targets[] is required');
     // Bound the work before it starts: disperse does an O(n) keystore lookup per
     // target, so an unbounded list is O(n²) CPU on the request path. A real
     // bundle is tens of wallets; 500 is far above that and far below abusive.
     if (targets.length > 500) throw new Error(`targets[] is capped at 500 (got ${targets.length})`);
-    const out = await funding.disperse(targets, { keystore: ks, userId: req.user.id, variant });
+    const out = await funding.disperse(targets, {
+      keystore: ks,
+      userId: req.user.id,
+      variant,
+      viaDisperser: viaDisperser === true,
+      disperser,
+    });
     const s = summariseTransfers(out);
     // The variant is on the log line, not only in the payload: an operator
     // reading the activity log after a bad run needs to know WHICH launcher
     // spent, and "funded 27 wallets" reads identically for both.
     activityFor(req.user.id).record(
       'fund',
-      `[${variant}] funded ${s.sent}/${s.wallets} wallet(s)` + (s.failed ? `, ${s.failed} failed` : ''),
-      { ...s, variant }
+      `[${variant}] funded ${s.sent}/${s.wallets} wallet(s)` +
+        (viaDisperser === true ? ' via disperser' : '') +
+        (s.failed ? `, ${s.failed} failed` : ''),
+      { ...s, variant, viaDisperser: viaDisperser === true }
     );
     res.json(out);
   } catch (err) {
