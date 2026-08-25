@@ -128,6 +128,19 @@ async function withdrawFromLauncher(input = {}, deps = {}) {
   const { native, address } = resolveAsset(input.asset);
   const all = isAll(input.amount);
 
+  // Optional gas override — the default 21000 (ETH) / 100000 (ERC-20) covers an
+  // EOA recipient and a standard token, but a contract recipient (Safe/AA) or a
+  // hooked token needs more; without a lever such a withdrawal would just revert.
+  const gasOverride = (() => {
+    if (input.gas == null) return null;
+    const g = BigInt(input.gas);
+    if (g < 21_000n) throw new Error('gas override must be at least 21000');
+    if (g > 500_000n) throw new Error('gas override is capped at 500,000');
+    return g;
+  })();
+  const ethGas = gasOverride ?? ETH_SEND_GAS;
+  const ercGas = gasOverride ?? ERC20_SEND_GAS;
+
   const fees = await getFeesFn(FEE_BUMP_PCT);
   const chainId = BigInt(config.chainId);
 
@@ -147,7 +160,7 @@ async function withdrawFromLauncher(input = {}, deps = {}) {
 
   if (native) {
     const balance = await prov.getBalance(dev.address);
-    const gasReserve = gasCost(fees, ETH_SEND_GAS);
+    const gasReserve = gasCost(fees, ethGas);
     let value;
     if (all) {
       value = balance - gasReserve;
@@ -160,7 +173,7 @@ async function withdrawFromLauncher(input = {}, deps = {}) {
       }
     }
     if (dryRun) return { simulated: true, asset: 'ETH', to, amount: formatEther(value), status: 'simulated', hash: null };
-    const raw = await ks.signer(dev.id, prov).signTransaction(toSignable({ to, value }, { nonce: pendingNonce, gasLimit: ETH_SEND_GAS, fees, chainId }));
+    const raw = await ks.signer(dev.id, prov).signTransaction(toSignable({ to, value }, { nonce: pendingNonce, gasLimit: ethGas, fees, chainId }));
     const resp = await prov.broadcastTransaction(raw);
     const receipt = await awaitReceipt(prov, resp.hash);
     return { asset: 'ETH', to, amount: formatEther(value), hash: resp.hash, status: !receipt ? 'pending' : receipt.status === 1 ? 'confirmed' : 'reverted' };
@@ -179,13 +192,13 @@ async function withdrawFromLauncher(input = {}, deps = {}) {
     throw new Error(`the launcher holds ${formatUnits(balance, dec)} ${symbol} but the withdrawal is ${formatUnits(amountWei, dec)}`);
   }
   const ethBalance = await prov.getBalance(dev.address);
-  const gasNeeded = gasCost(fees, ERC20_SEND_GAS);
+  const gasNeeded = gasCost(fees, ercGas);
   if (ethBalance < gasNeeded) {
     throw new Error(`the launcher needs ~${formatEther(gasNeeded)} ETH to pay the ${symbol} transfer gas — fund it with a little ETH first`);
   }
   if (dryRun) return { simulated: true, asset: symbol, token: address, to, amount: formatUnits(amountWei, dec), status: 'simulated', hash: null };
   const data = erc20Iface.encodeFunctionData('transfer', [to, amountWei]);
-  const raw = await ks.signer(dev.id, prov).signTransaction(toSignable({ to: address, data }, { nonce: pendingNonce, gasLimit: ERC20_SEND_GAS, fees, chainId }));
+  const raw = await ks.signer(dev.id, prov).signTransaction(toSignable({ to: address, data }, { nonce: pendingNonce, gasLimit: ercGas, fees, chainId }));
   const resp = await prov.broadcastTransaction(raw);
   const receipt = await awaitReceipt(prov, resp.hash);
   return { asset: symbol, token: address, to, amount: formatUnits(amountWei, dec), hash: resp.hash, status: !receipt ? 'pending' : receipt.status === 1 ? 'confirmed' : 'reverted' };

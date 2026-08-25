@@ -264,7 +264,9 @@ async function prepareSell(input, deps = {}) {
 
   if (!out.length) {
     throw new Error(
-      `every wallet holding ${symbol} is too short of ETH to pay for the exit — fund them with gas first`
+      `no bundle wallet could be prepared for the exit — every holder was skipped (too short of ETH for the ` +
+        `two approvals + sell, or a tx in flight). Fund the short wallets with gas and/or wait for in-flight ` +
+        `txs to settle, then re-run. Reasons: ${skipped.map((s) => `${s.address} (${s.reason})`).join('; ')}`
     );
   }
 

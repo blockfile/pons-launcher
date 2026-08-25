@@ -184,6 +184,8 @@ export default function V5Console({ health, credential, report, output, reported
         step={step('wallets')}
         dev={dev}
         bundle={bundle}
+        lastLaunch={lastLaunch}
+        live={live}
         explorer={explorer}
         reload={loadWallets}
         report={report}

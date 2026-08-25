@@ -77,6 +77,12 @@ function withLaunchLock(handler) {
         resolve: 'POST /api/v5/launch/resolve to re-check it against the chain and clear it',
       });
     }
+    // A launcher withdraw/cancel signs the same v5dev wallet; don't let a launch
+    // start mid-withdraw and collide on its nonce (symmetric with the launcher
+    // routes' own launching/bundling/selling checks).
+    if (launcherBusy.has(id)) {
+      return res.status(409).json({ error: 'a v5 launcher action (withdraw/cancel) is in progress — wait for it to finish' });
+    }
     launching.add(id);
     try {
       await handler(req, res, next);
@@ -172,6 +178,9 @@ function withBundleLock(handler) {
       return res
         .status(409)
         .json({ error: 'a v5 launch is in progress or unresolved on this launcher — settle it before bundling' });
+    }
+    if (launcherBusy.has(id)) {
+      return res.status(409).json({ error: 'a v5 launcher action (withdraw/cancel) is in progress — wait for it to finish' });
     }
     bundling.add(id);
     try {
