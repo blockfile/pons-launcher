@@ -289,7 +289,7 @@ export default function V5BuyPanel({ bundle, lastLaunch, live, explorer, reload,
       {noWallets && (
         <div className="notice warn">
           <h3>No bundle wallets yet</h3>
-          <p>Generate them in step 1 — there is nothing to buy with until a wallet holds ETH.</p>
+          <p>Generate them in step 2 — there is nothing to buy with until a wallet holds ETH.</p>
         </div>
       )}
 
@@ -363,7 +363,7 @@ export default function V5BuyPanel({ bundle, lastLaunch, live, explorer, reload,
       {!token && (
         <div className="notice warn">
           <h3>No token to buy</h3>
-          <p>Launch a token in step 3 first, or type its address above.</p>
+          <p>Launch a token in step 4 first, or type its address above.</p>
         </div>
       )}
 
@@ -439,7 +439,7 @@ export default function V5BuyPanel({ bundle, lastLaunch, live, explorer, reload,
       )}
 
       {bundle.length === 0 ? (
-        <p className="hint">No bundle wallets to buy with — generate some in step 1.</p>
+        <p className="hint">No bundle wallets to buy with — generate some in step 2.</p>
       ) : (
         <div className="table-scroll" style={{ maxHeight: 460, overflowY: 'auto' }}>
           <table className="wallet-list">
@@ -543,7 +543,7 @@ export default function V5BuyPanel({ bundle, lastLaunch, live, explorer, reload,
                 : namedBuys.length === 0
                   ? "enter at least one wallet's buy amount above"
                   : noWallets
-                    ? 'generate bundle wallets in step 1 first'
+                    ? 'generate bundle wallets in step 2 first'
                     : 'signs everything, broadcasts nothing'
           }
           onClick={preflight}

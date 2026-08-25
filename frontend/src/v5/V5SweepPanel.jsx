@@ -113,7 +113,7 @@ export default function V5SweepPanel({ step, dev, bundle, lastLaunch, live, expl
       {noWallets && (
         <div className="notice warn">
           <h3>{!dev ? 'No launcher wallet yet' : 'No bundle wallets yet'}</h3>
-          <p>Generate {!dev ? 'a launcher wallet' : 'bundle wallets'} in step 1 before sweeping anything.</p>
+          <p>Generate {!dev ? 'a launcher wallet in step 1' : 'bundle wallets in step 2'} before sweeping anything.</p>
         </div>
       )}
 
@@ -129,7 +129,7 @@ export default function V5SweepPanel({ step, dev, bundle, lastLaunch, live, expl
 
       <h3 style={{ margin: '16px 0 8px' }}>Sources — bundle wallets</h3>
       {bundle.length === 0 ? (
-        <p className="hint">No bundle wallets yet — generate them in step 1.</p>
+        <p className="hint">No bundle wallets yet — generate them in step 2.</p>
       ) : (
         <div className="table-scroll" style={{ maxHeight: 460, overflowY: 'auto' }}>
           <table className="wallet-list">
@@ -184,7 +184,7 @@ export default function V5SweepPanel({ step, dev, bundle, lastLaunch, live, expl
           disabled={noWallets || blocked}
           title={
             noWallets
-              ? 'generate the launcher and bundle wallets in step 1 first'
+              ? 'generate the launcher and bundle wallets in steps 1–2 first'
               : blocked
                 ? 'flip Arm first — this moves ETH out of every bundle wallet'
                 : ''

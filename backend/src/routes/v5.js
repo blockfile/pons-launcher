@@ -33,6 +33,15 @@ const { prepareSell, fireSell } = require('../v5/sell');
 const { prepareBundleBuys, fireBundleBuys } = require('../v5/buy');
 const { launchThenBundle } = require('../v5/launchBundle');
 const relayFundJob = require('../v5/relayFundJob');
+
+// The timed Relay funding job spends the launcher while it is `running` AND while a
+// tick's deposit is still in flight (a stop/complete flips status before the last
+// fundOne resolves). The launcher-signing locks must refuse across BOTH so nothing
+// else signs v5dev at a nonce the job's deposit still holds.
+const relayFundingActive = (id) => {
+  const s = relayFundJob.status(id);
+  return Boolean(s.running || s.inFlight);
+};
 const { poolFeeStatus } = require('../evm/v5/swap');
 const { launcherStatus, withdrawFromLauncher, cancelStuckLauncherTx } = require('../v5/launcher');
 
@@ -95,7 +104,7 @@ function withLaunchLock(handler) {
     // The timed Relay funding job spends the launcher (deposits) at sequential
     // nonces over minutes; a launch signing against the same wallet mid-run would
     // collide on its nonce. Refuse until the funding job is stopped or done.
-    if (relayFundJob.status(id).running) {
+    if (relayFundingActive(id)) {
       return res.status(409).json({
         error: 'v5 timed Relay funding is running on the launcher — stop it or let it finish before launching',
       });
@@ -204,7 +213,7 @@ function withBundleLock(handler) {
     if (launcherBusy.has(id)) {
       return res.status(409).json({ error: 'a v5 launcher action (withdraw/cancel) is in progress — wait for it to finish' });
     }
-    if (relayFundJob.status(id).running) {
+    if (relayFundingActive(id)) {
       return res.status(409).json({ error: 'v5 timed Relay funding is running on the launcher — stop it or let it finish before fanning out' });
     }
     bundling.add(id);
@@ -1030,7 +1039,7 @@ function withLauncherLock(handler) {
     }
     // A launcher withdraw/cancel signs the launcher too — don't let it race the
     // timed Relay funding job's in-flight deposits on the launcher's nonce.
-    if (relayFundJob.status(id).running) {
+    if (relayFundingActive(id)) {
       return res.status(409).json({ error: 'v5 timed Relay funding is running on the launcher — stop it or let it finish first' });
     }
     launcherBusy.add(id);

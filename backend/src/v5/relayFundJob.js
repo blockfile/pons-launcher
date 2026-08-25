@@ -180,7 +180,12 @@ function createV5RelayFundManager({
 
   function start(userId, targets, { minGapMs: reqMin, maxGapMs: reqMax } = {}) {
     const existing = jobs.get(userId);
-    if (existing?.status === 'running') throw new Error('a v5 timed Relay funding job is already running for this account');
+    // Refuse while a job is running OR still draining an in-flight deposit (a stop/
+    // complete flips status before the last fundOne resolves) — starting a new job
+    // then could sign the launcher at a nonce the in-flight deposit still holds.
+    if (existing?.status === 'running' || existing?.inFlight) {
+      throw new Error('a v5 timed Relay funding job is already running for this account');
+    }
 
     const ks = keystoreForFn(userId);
     const planned = planTargets(targets, ks); // validates every target up front

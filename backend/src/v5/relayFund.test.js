@@ -113,6 +113,19 @@ test('refuses a wallet that is not one of this tab’s bundle wallets, and a non
   await assert.rejects(() => fundOneViaRelay({ walletId: 'b1', amountEth: '0' }, d), /positive fund amount/);
 });
 
+test('refuses a Relay quote whose deposit is far larger than the requested amount (drain guard)', async () => {
+  const { d } = deps({
+    relayQuote: async (input) => {
+      const q = fakeQuote(input);
+      // A wrong/hostile quote: ask for 3× the delivered amount (a drain would ask
+      // for the whole balance — the same guard catches it).
+      q.steps[0].items[0].data.value = (BigInt(input.amountWei) * 3n).toString();
+      return q;
+    },
+  });
+  await assert.rejects(() => fundOneViaRelay({ walletId: 'b1', amountEth: '0.02' }, d), /more than 2/);
+});
+
 test('refuses when the launcher cannot cover the deposit + gas', async () => {
   const { d } = deps({ provider: { getBalance: async () => 1n } });
   await assert.rejects(() => fundOneViaRelay({ walletId: 'b1', amountEth: '0.02' }, d), /needs up to/);

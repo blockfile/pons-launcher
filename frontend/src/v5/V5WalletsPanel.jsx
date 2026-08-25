@@ -139,7 +139,7 @@ export default function V5WalletsPanel({ step, dev, bundle, explorer, reload, re
     });
     report(
       `distributed ${total} ETH across ${bundle.length} wallets — each funded for its buy plus gas for ` +
-        `${SELL_RESERVE} sells. Nothing was sent; set the first buy and launch in step 3.`
+        `${SELL_RESERVE} sells. Nothing was sent; set the first buy and launch in step 4.`
     );
     notify(`Filled ${bundle.length} wallets for ${total} ETH. No ETH moved — edit, then Fund in step 2.`, 'ok');
   }
@@ -424,9 +424,9 @@ export default function V5WalletsPanel({ step, dev, bundle, explorer, reload, re
                   <td className="num">
                     {w.balanceEth == null ? <span className="hint">unreadable</span> : eth(w.balanceEth)}
                   </td>
-                  {/* Fund is what step 2 sends this wallet from the launcher; Buy
-                      is what it spends buying in step 3. Both are owned by the
-                      console's shared `rows`, so the Fund and Launch steps read
+                  {/* Fund is what step 3 Relay-sends this wallet; Buy is what it
+                      spends buying in step 4 (Launch + bundle). Both are owned by
+                      the console's shared `rows`, so the Fund and Launch steps read
                       exactly what is typed here. */}
                   <td className="num">
                     <input

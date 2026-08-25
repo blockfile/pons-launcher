@@ -69,7 +69,9 @@ export default function V5FundPanel({ step, dev, bundle, live, explorer, reload,
         const j = await api('/v5/fund/relay/status');
         if (!alive) return;
         setJob(j);
-        if (!j.running) reload();
+        // Re-read balances every tick so a wallet's Balance column updates as its
+        // solver fill lands, not only when the whole run ends.
+        reload();
       } catch {
         // transient — keep the last status
       }

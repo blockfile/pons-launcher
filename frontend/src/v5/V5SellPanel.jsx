@@ -180,7 +180,7 @@ export default function V5SellPanel({ step, dev, bundle, lastLaunch, live, explo
       {noWallets && (
         <div className="notice warn">
           <h3>No bundle wallets yet</h3>
-          <p>Generate them in step 1 — there is nothing to exit until a wallet holds a position.</p>
+          <p>Generate them in step 2 — there is nothing to exit until a wallet holds a position.</p>
         </div>
       )}
 
@@ -243,7 +243,7 @@ export default function V5SellPanel({ step, dev, bundle, lastLaunch, live, explo
       {!token && (
         <div className="notice warn">
           <h3>No token to sell</h3>
-          <p>Launch a token in step 3 first, or type its address above.</p>
+          <p>Launch a token in step 4 first, or type its address above.</p>
         </div>
       )}
 
@@ -333,7 +333,7 @@ export default function V5SellPanel({ step, dev, bundle, lastLaunch, live, explo
               : differsFromLaunch && !allowUnlisted
                 ? 'check "I\'m sure this is my token" to sell a token launched elsewhere'
                 : noWallets
-                  ? 'generate bundle wallets in step 1 first'
+                  ? 'generate bundle wallets in step 2 first'
                   : 'signs everything, broadcasts nothing'
           }
           onClick={preflight}

@@ -36,6 +36,15 @@ const { quoteDeposit, depositStep, _private: relayPrivate } = require('../relay/
 // refreshed at send time.
 const RELAY_FEE_BUMP_PCT = 50;
 
+// The signed deposit value comes entirely from Relay's quote (depositStep only
+// checks it is FROM the launcher, on this chain, to a non-empty address, > 0). A
+// same-chain EXACT_OUTPUT deposit is the delivered amount + a MARGINAL solver fee,
+// so a quote asking for far more than the requested amount is wrong or hostile —
+// and, unbounded, could sign the launcher's whole balance to a quote-controlled
+// address. Cap the deposit at this multiple of the requested amount; a legit fee
+// is nowhere near it, and this bounds the worst case to ~this×amount per wallet.
+const MAX_DEPOSIT_MULTIPLE = 2n;
+
 // A transient Relay refusal (a 429 "try again later", a gateway blip) is retried
 // with a long backoff so the rate-limit window can refill; a specific error (bad
 // address, unsupported route) is surfaced on the first try. The 8-9s job pacing
@@ -132,6 +141,16 @@ async function fundOneViaRelay(target, deps = {}) {
   const fees = await getFeesFn(RELAY_FEE_BUMP_PCT);
   const depositValue = BigInt(deposit.tx.value);
   const gas = gasCost(fees, relayPrivate.gasLimitOf(deposit.tx));
+
+  // Sanity-bound the quote before signing: refuse a deposit far larger than the
+  // amount it is supposed to deliver, so a wrong/compromised quote cannot drain
+  // the launcher to a value it chose.
+  if (depositValue > amountWei * MAX_DEPOSIT_MULTIPLE) {
+    throw new Error(
+      `Relay quoted a ${formatEther(depositValue)} ETH deposit to deliver only ${formatEther(amountWei)} ETH — ` +
+        `refusing (more than ${MAX_DEPOSIT_MULTIPLE}× the amount; the quote looks wrong)`
+    );
+  }
 
   const base = {
     walletId: wallet.id,

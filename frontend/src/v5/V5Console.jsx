@@ -214,20 +214,6 @@ export default function V5Console({ health, credential, report, output, reported
         setRow={setRow}
       />
 
-      {/* The console's answer, between the wallets and the later steps because
-          that is where it falls — the last thing a button here returned.
-          Unnumbered: a readout, not a step. */}
-      <ResultPanel
-        step={{
-          id: 'v5-readout',
-          title: 'Result',
-          state: 'readout',
-          chip: reportedAt ? `updated ${reportedAt}` : null,
-          railDone: step('wallets')?.state === 'done',
-        }}
-        output={output}
-      />
-
       <V5FundPanel
         step={step('fund')}
         dev={dev}
@@ -251,6 +237,20 @@ export default function V5Console({ health, credential, report, output, reported
         report={report}
         onLaunched={setLastLaunch}
         rows={rows}
+      />
+
+      {/* The console's answer, between Launch and Sell — the same place the v1
+          Launcher tab puts it (App.jsx). You launch, read this, then decide to
+          sell. Unnumbered: a readout, not a step. */}
+      <ResultPanel
+        step={{
+          id: 'v5-readout',
+          title: 'Result',
+          state: 'readout',
+          chip: reportedAt ? `updated ${reportedAt}` : null,
+          railDone: step('launch')?.state === 'done',
+        }}
+        output={output}
       />
 
       <V5SellPanel

@@ -430,7 +430,7 @@ export default function V5LaunchPanel({ step, dev, bundle = [], launchConfigs, l
           <h3>The launcher cannot cover this</h3>
           <p>
             It holds {eth(dev.balanceEth)} ETH but this launch needs ≈{needed.toFixed(4)} ETH before
-            gas — fund it in step 2 first.
+            gas — fund it in step 3 first.
           </p>
         </div>
       )}
@@ -477,12 +477,12 @@ export default function V5LaunchPanel({ step, dev, bundle = [], launchConfigs, l
       {bundle.length === 0 ? (
         <div className="notice warn">
           <h3>No bundle wallets yet</h3>
-          <p>Generate them in step 1. You can still launch on its own — the bundle just needs wallets to buy with.</p>
+          <p>Generate them in step 2. You can still launch on its own — the bundle just needs wallets to buy with.</p>
         </div>
       ) : (
         <>
           <p className="hint" style={{ margin: '0 0 8px' }}>
-            The per-wallet buys are set in <b>step 1's wallets table</b> (the Buy column — use Auto-fill
+            The per-wallet buys are set in <b>step 2's wallets table</b> (the Buy column — use Auto-fill
             there to size them). Each funded bundle wallet buys the token with its own ETH right after
             launch, paying the pool's flat base tax ({cfg?.taxLabel || 'the config tier'}); a wallet short
             of ETH is skipped, not failed.
@@ -502,7 +502,7 @@ export default function V5LaunchPanel({ step, dev, bundle = [], launchConfigs, l
             <div className="notice">
               <h3>No buys set — this will launch only</h3>
               <p>
-                Set a Buy amount for one or more wallets in step 1 (or use Auto-fill there) to bundle-buy
+                Set a Buy amount for one or more wallets in step 2 (or use Auto-fill there) to bundle-buy
                 with the launch. Without any, this fires the launch and its dev first buy alone.
               </p>
             </div>
