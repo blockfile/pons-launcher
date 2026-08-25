@@ -183,9 +183,9 @@ export default function V5BundlePanel({ step, dev, bundle, lastLaunch, live, exp
       {panelMode === 'buy' ? (
         <p className="lede">
           Each bundle wallet buys the token from the pool with its own ETH — the pons v1 mechanic, on
-          letscash. These buys pay the hook's anti-snipe tax, which decays from the launch premium to
-          its base rate over the config's window — wait for it to stabilise before firing, or read the
-          preflight's expected-tokens figures below to judge the current rate.
+          letscash. These buys pay the pool's tax — the launch config's base tier (1/3/5/10%), flat in
+          practice with no decaying anti-snipe premium to wait out; the Buy panel below shows the live
+          rate.
           <b> ETH-only</b> for now: a USDG-quoted launch can't buy through this path yet. Nothing
           broadcasts until Buy is armed and confirmed.
         </p>
@@ -206,7 +206,7 @@ export default function V5BundlePanel({ step, dev, bundle, lastLaunch, live, exp
           </select>
           <span className="hint">
             {panelMode === 'buy'
-              ? 'each bundle wallet buys from the pool with its own ETH — pays the anti-snipe tax as it stands now'
+              ? "each bundle wallet buys from the pool with its own ETH — pays the pool's tax (the Buy panel below shows the live rate)"
               : "the launcher's first-buy supply moves by transfer() — untaxed, and independent of the tax's decay"}
           </span>
         </label>

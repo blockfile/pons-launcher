@@ -33,6 +33,25 @@ function fmt(v, dp = 4) {
   return n.toLocaleString(undefined, { maximumFractionDigits: dp });
 }
 
+// /v5/pool-fee's currentPct/basePct/launchPct already arrive in percent (5 ==
+// 5%) — this only trims the trailing zeroes a plain toFixed leaves behind, so
+// the common flat tiers (1/3/5/10) read as whole numbers instead of "5.00".
+function pct(v, dp = 2) {
+  const n = Number(v);
+  if (!Number.isFinite(n)) return '—';
+  return n.toFixed(dp).replace(/\.?0+$/, '');
+}
+
+// premiumGoneAt is unix seconds; this is only ever read while hasDecay is
+// true, i.e. the rare per-config case — see the readout below.
+function countdown(seconds) {
+  const s = Math.max(0, Math.floor(seconds));
+  const h = Math.floor(s / 3600);
+  const m = Math.floor((s % 3600) / 60);
+  const r = s % 60;
+  return [h, m, r].map((n) => String(n).padStart(2, '0')).join(':');
+}
+
 /**
  * The V1-style half of step 4 — every bundle wallet BUYS the token from the
  * pool with its own ETH, instead of the launcher's fan-out transfer(). This
@@ -48,12 +67,17 @@ function fmt(v, dp = 4) {
  * console is live.
  *
  * NO LAUNCH-BLOCK RACE. Unlike pons v1 — where the bundle buys ride the same
- * block as the launch to front-run public buyers — letscash taxes every swap
- * through its hook with an anti-snipe premium that decays to a base rate over
- * the launch config's window. So this buy is meant to run AFTER that decay,
- * whenever the operator chooses; firing early just pays a higher tax for
- * fewer tokens. The preflight quote reflects the tax as it stands right now,
- * which is the whole reason to preflight before buying rather than just firing.
+ * block as the launch to front-run public buyers — there is no window to beat
+ * here. Reverse-engineering the live CashCat hook showed every real letscash
+ * launch is FLAT: the tax sits at the config's base tier (1/3/5/10%) from the
+ * moment it launches, with no decaying anti-snipe premium to wait out. So this
+ * buy just pays the pool's current tax and can run whenever the operator
+ * chooses — the live readout below (GET /v5/pool-fee) shows that rate. The
+ * rare pool that DOES set a decay window still surfaces there too, as a
+ * countdown to when its premium reaches base; that is the exception, not the
+ * rule. The preflight quote reflects whatever the tax happens to be at the
+ * moment it runs, which is the whole reason to preflight before buying rather
+ * than just firing.
  *
  * TOKEN PIN: same pattern as V5BundlePanel/V5SellPanel — the backend refuses
  * to buy a token this account did not launch here unless
@@ -82,6 +106,8 @@ export default function V5BuyPanel({ bundle, lastLaunch, live, explorer, reload,
   const [pendingBody, setPendingBody] = useState(null);
   const [blocked, setBlocked] = useState(false); // WALLETS_BUSY
   const [ethOnly, setEthOnly] = useState(false); // ETH_ONLY
+  const [poolFee, setPoolFee] = useState(null); // last GET /v5/pool-fee reading, or null (no reading yet)
+  const [now, setNow] = useState(() => Date.now()); // ticks the decay countdown below; see V4CampaignsPanel's own `now`
 
   const explorerFor = (address) => (explorer ? `${explorer}/address/${address}` : '');
   const setAmount = (walletId, value) => setAmounts((prev) => ({ ...prev, [walletId]: value }));
@@ -108,6 +134,40 @@ export default function V5BuyPanel({ bundle, lastLaunch, live, explorer, reload,
     setArmed(false);
     setPendingBody(null);
   }, [token, slippageBps]);
+
+  // Live "pool tax" readout — GET /v5/pool-fee needs a launched pool (it pins
+  // the hook from the launch record), so it throws before launch. That is a
+  // "no reading yet" state, not an error, so this stays quiet the same way
+  // every other background poll in this console does (see api.js's own
+  // comment on why only non-GET failures toast). Polled every 15s while a
+  // token is known, cleared the moment it changes.
+  useEffect(() => {
+    setPoolFee(null);
+    if (!token) return undefined;
+    let alive = true;
+    async function load() {
+      try {
+        const out = await api(`/v5/pool-fee?token=${encodeURIComponent(token)}`);
+        if (alive) setPoolFee(out);
+      } catch {
+        if (alive) setPoolFee(null);
+      }
+    }
+    load();
+    const t = setInterval(load, 15_000);
+    return () => {
+      alive = false;
+      clearInterval(t);
+    };
+  }, [token]);
+
+  // Ticks the decay countdown down to the second. Only the rare hasDecay pool
+  // needs this — the flat, normal case has nothing to count down.
+  useEffect(() => {
+    if (!poolFee?.hasDecay) return undefined;
+    const t = setInterval(() => setNow(Date.now()), 1000);
+    return () => clearInterval(t);
+  }, [poolFee?.hasDecay]);
 
   // Buys spend the bundle wallets directly — the launcher signs nothing here,
   // unlike the fan-out, so there is no `dev` gate to check.
@@ -302,6 +362,35 @@ export default function V5BuyPanel({ bundle, lastLaunch, live, explorer, reload,
         <div className="notice warn">
           <h3>No token to buy</h3>
           <p>Launch a token in step 3 first, or type its address above.</p>
+        </div>
+      )}
+
+      {token && !poolFee?.hasDecay && (
+        <p className="hint">
+          {poolFee
+            ? `Pool tax: ${pct(poolFee.currentPct)}% (flat — no anti-snipe premium; buy any time)`
+            : 'Pool tax shows here once the token is launched.'}
+        </p>
+      )}
+      {token && poolFee?.hasDecay && (
+        <div className="notice">
+          <h3>Anti-snipe premium still decaying</h3>
+          <p>
+            {poolFee.premiumGoneAt - Math.floor(now / 1000) > 0 ? (
+              <>
+                Pool tax: {pct(poolFee.currentPct)}% now → {pct(poolFee.basePct)}% base · premium gone in{' '}
+                {countdown(poolFee.premiumGoneAt - Math.floor(now / 1000))} (at{' '}
+                {new Date(poolFee.premiumGoneAt * 1000).toLocaleTimeString(undefined, {
+                  hour: '2-digit',
+                  minute: '2-digit',
+                  second: '2-digit',
+                })}
+                )
+              </>
+            ) : (
+              <>premium settled — now at base {pct(poolFee.basePct)}%</>
+            )}
+          </p>
         </div>
       )}
 
