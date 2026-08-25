@@ -340,10 +340,14 @@ test('fireBundle counts a reverted transfer as failed without dropping the rest'
   assert.equal(res.failed, 1);
 });
 
-test('fireBundle records a send-failed transfer without throwing the whole run', async () => {
+test('fireBundle STOPS at the first send failure — no transfer is laid on the unused nonce', async () => {
+  // Fail the MIDDLE transfer: b1 sends, b2 send-fails, b3 must NOT be broadcast
+  // (broadcasting it at a higher nonce would strand it behind b2's unused nonce).
+  const attempted = [];
   const provider = fakeProvider({
     broadcastTransaction: async (raw) => {
-      if (raw === '0xr1') throw new Error('nonce too low');
+      attempted.push(raw);
+      if (raw === '0xr2') throw new Error('connection reset');
       return { hash: `hash:${raw}` };
     },
   });
@@ -351,12 +355,16 @@ test('fireBundle records a send-failed transfer without throwing the whole run',
     bundlePlan([
       { walletId: 'b1', to: B(2), amount: '250', raw: '0xr1' },
       { walletId: 'b2', to: B(3), amount: '250', raw: '0xr2' },
+      { walletId: 'b3', to: B(4), amount: '250', raw: '0xr3' },
     ]),
     { provider, dryRun: false, warmPool: async () => {}, waitForReceipt: (rpc, h) => rpc.getTransactionReceipt(h) }
   );
-  assert.equal(res.failed, 1);
+  assert.deepEqual(attempted, ['0xr1', '0xr2'], 'b3 is never even attempted — the loop stops at the failure');
+  assert.equal(res.transfers.find((t) => t.walletId === 'b2').status, 'send-failed');
+  assert.equal(res.transfers.find((t) => t.walletId === 'b3').status, 'not-sent', 'the tail is not laid on the gap');
   assert.equal(res.sent, 1);
-  assert.equal(res.transfers.find((t) => t.walletId === 'b1').status, 'send-failed');
+  assert.equal(res.notSent, 1);
+  assert.match(res.incomplete, /re-run the bundle/);
 });
 
 test('a dry run broadcasts nothing and marks every transfer simulated', async () => {

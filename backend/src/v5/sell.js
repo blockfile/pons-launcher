@@ -97,6 +97,17 @@ async function prepareSell(input, deps = {}) {
   if (!token || !isAddress(String(token))) throw new Error('token must be the launched ERC-20 address');
   const tokenAddr = getAddress(token);
 
+  // The sell gas cap is a fixed 700k (it can't be estimated pre-approval), but a
+  // caller can raise it — the one lever if 700k ever proved too low for a pool
+  // (which would otherwise re-OOG on every retry). Bounded to a sane ceiling.
+  const sellGasLimit = (() => {
+    if (input.sellGas == null) return SELL_GAS;
+    const g = BigInt(input.sellGas);
+    if (g < SELL_GAS) return SELL_GAS; // never below the safe floor
+    if (g > 3_000_000n) throw new Error('sellGas override is capped at 3,000,000');
+    return g;
+  })();
+
   // The exit quote — ETH or USDG (the two letscash quotes). A USDG-quoted token
   // sells token → USDG; proceeds are then denominated in USDG units, not ETH.
   const q = String(quote).toLowerCase();
@@ -149,7 +160,7 @@ async function prepareSell(input, deps = {}) {
 
   const fees = deps.fees || (await getFeesFn(FEE_BUMP_PCT));
   const chainId = BigInt(deps.chainId ?? config.chainId);
-  const reserve = gasCost(fees, ERC20_APPROVE_GAS + PERMIT2_APPROVE_GAS + SELL_GAS);
+  const reserve = gasCost(fees, ERC20_APPROVE_GAS + PERMIT2_APPROVE_GAS + sellGasLimit);
   const nowSec = deps.nowMs != null ? Math.floor(deps.nowMs / 1000) : Math.floor(Date.now() / 1000);
   const deadline = deps.deadline ?? nowSec + DEADLINE_SECONDS;
 
@@ -197,7 +208,21 @@ async function prepareSell(input, deps = {}) {
     );
     const approvals = built.approvals || [];
 
-    const startNonce = await prov.getTransactionCount(wallet.address, 'pending');
+    const [startNonce, latestNonce] = await Promise.all([
+      prov.getTransactionCount(wallet.address, 'pending'),
+      prov.getTransactionCount(wallet.address, 'latest'),
+    ]);
+    // SETTLED-nonce guard (mirrors prepareBundle/prepareLaunch). If the wallet
+    // already has an unconfirmed tx — e.g. a prior sell whose receipt never
+    // arrived — signing this 3-tx exit at the next nonce would sit it BEHIND that
+    // tx; and if that tx were later evicted, this whole chain strands behind the
+    // freed nonce. Skip the wallet until it settles rather than sign past it.
+    if (startNonce > latestNonce) {
+      const why = 'has an unconfirmed tx in flight — its exit is skipped until it settles (re-run then)';
+      skipped.push({ walletId: wallet.id, address: wallet.address, reason: why });
+      warnings.push(`${wallet.address}: ${why}`);
+      continue;
+    }
     const signer = ks.signer(wallet.id, prov);
 
     // Sign the approvals then the sell, at consecutive nonces.
@@ -219,7 +244,7 @@ async function prepareSell(input, deps = {}) {
       nonce: sellNonce,
       minOut: minOut.toString(),
       raw: await signer.signTransaction(
-        toSignable({ to: built.to, data: built.data, value: built.value || 0n }, { nonce: sellNonce, gasLimit: SELL_GAS, fees, chainId })
+        toSignable({ to: built.to, data: built.data, value: built.value || 0n }, { nonce: sellNonce, gasLimit: sellGasLimit, fees, chainId })
       ),
     };
 
@@ -273,7 +298,7 @@ async function prepareSell(input, deps = {}) {
     fees: stringifyFees(fees),
     erc20ApproveGas: ERC20_APPROVE_GAS.toString(),
     permit2ApproveGas: PERMIT2_APPROVE_GAS.toString(),
-    sellGas: SELL_GAS.toString(),
+    sellGas: sellGasLimit.toString(),
     chainId: chainId.toString(),
     warnings,
   };

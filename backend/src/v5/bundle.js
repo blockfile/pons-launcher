@@ -329,16 +329,29 @@ async function fireBundle(plan, deps = {}) {
   // path of the first broadcast.
   await warm(Math.min(plan.transfers.length, 4), rpc);
 
-  // Broadcast IN NONCE ORDER. Sequential await keeps the order the node expects;
-  // the transfers are cheap and the chain is fast, so this is not a latency
-  // concern the way a launch's single tx is.
+  // Broadcast IN NONCE ORDER, and STOP at the first send failure. The transfers
+  // are signed at consecutive nonces, so a send that throws leaves that nonce
+  // UNUSED — and broadcasting the higher-nonce transfers anyway would queue them
+  // behind that hole where they can NEVER mine until it is filled (a stranded,
+  // stuck-pending fan-out). Stopping instead leaves a clean prefix: nonces up to
+  // the failure are used, everything after is simply un-sent, so the pending nonce
+  // sits exactly at the gap and a later re-run (once the sent ones settle) fills
+  // from there with no collision. The remainder is reported 'not-sent' so the
+  // operator knows to re-run for them.
   const results = [];
+  let stopped = false;
   for (const t of plan.transfers) {
+    if (stopped) {
+      results.push({ walletId: t.walletId, to: t.to, amount: t.amount, hash: null, status: 'not-sent' });
+      continue;
+    }
     try {
       const resp = await rpc.broadcastTransaction(t.raw);
       results.push({ walletId: t.walletId, to: t.to, amount: t.amount, hash: resp.hash, status: 'broadcast' });
     } catch (err) {
       results.push({ walletId: t.walletId, to: t.to, amount: t.amount, hash: null, status: 'send-failed', error: err.message });
+      // Do not lay later transfers on top of the now-unused nonce.
+      stopped = true;
     }
   }
 
@@ -362,7 +375,8 @@ async function fireBundle(plan, deps = {}) {
 
   const sent = results.filter((r) => r.status === 'confirmed').length;
   const failed = results.filter((r) => r.status === 'reverted' || r.status === 'send-failed').length;
-  return {
+  const notSent = results.filter((r) => r.status === 'not-sent').length;
+  const out = {
     protocol: 'v5',
     kind: 'bundle',
     token: plan.token,
@@ -370,8 +384,19 @@ async function fireBundle(plan, deps = {}) {
     sent,
     failed,
     pending: results.filter((r) => r.status === 'pending').length,
+    notSent,
     transfers: results,
   };
+  if (notSent) {
+    // A send failure stopped the run partway. Tell the operator the safe recovery:
+    // the fan-out did NOT strand anything (no nonce gap was created), but the
+    // remaining wallets were not funded — re-run once the sent transfers confirm.
+    out.incomplete =
+      `${notSent} transfer(s) were not sent after a broadcast failure. Nothing is stranded — the ` +
+      'unfunded wallets simply were not sent to. Wait for the sent transfers to confirm, then re-run ' +
+      'the bundle to fan out to the rest.';
+  }
+  return out;
 }
 
 module.exports = {

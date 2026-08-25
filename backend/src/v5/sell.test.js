@@ -208,6 +208,23 @@ test('prepareSell refuses a bad token and an empty bundle and a no-holders case'
   await assert.rejects(() => prepareSell({ token: TOKEN, hook: HOOK },none), /nothing to sell/);
 });
 
+test('prepareSell skips a wallet with an unconfirmed tx in flight (would strand behind it)', async () => {
+  // Wallet b2 has a pending tx (pending 11 > latest 10); it must be skipped, not
+  // signed past. b1 and b3 (pending==latest) proceed.
+  const { deps: d, ks } = deps({
+    provider: {
+      getTransactionCount: async (addr, tag) => {
+        if (getAddress(addr) === WALLETS[1].address) return tag === 'pending' ? 11 : 10;
+        return 10;
+      },
+    },
+  });
+  const plan = await prepareSell({ token: TOKEN, hook: HOOK }, d);
+  assert.equal(plan.walletCount, 2, 'only the two settled wallets are in the plan');
+  assert.ok(plan.skipped.some((s) => s.walletId === 'b2' && /in flight/.test(s.reason)));
+  assert.equal(ks.signCalls.length, 2, 'the in-flight wallet is never signed');
+});
+
 test('prepareSell broadcasts nothing', async () => {
   const { deps: d, provider } = deps();
   await prepareSell({ token: TOKEN, hook: HOOK },d);

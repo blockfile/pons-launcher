@@ -428,8 +428,9 @@ async function prepareLaunch(input, deps = {}) {
   if (pendingNonce > latestNonce) {
     throw new Error(
       `the launcher has ${pendingNonce - latestNonce} transaction(s) still in flight — wait for the ` +
-        'previous launch to confirm (or reconcile it via /v5/launch/resolve) before launching again, ' +
-        'so a second launch cannot spend a second fee + first buy at the next nonce'
+        'previous launch to confirm, reconcile it via /v5/launch/resolve, or — if it is genuinely stuck ' +
+        '(neither mining nor dropping) — replace it via /v5/launcher/cancel, before launching again, so a ' +
+        'second launch cannot spend a second fee + first buy at the next nonce'
     );
   }
 
@@ -848,7 +849,20 @@ async function approveQuoteForLaunch(input = {}, deps = {}) {
     return { simulated: true, spender: factoryAddr, quote: quoteAddr, amount: amountLabel, status: 'simulated', hash: null };
   }
 
-  const nonce = await prov.getTransactionCount(dev.address, 'pending');
+  // Settled-nonce guard, like prepareLaunch: don't stack this approval behind a
+  // launch/approve still in flight, where it could be stranded if that tx is
+  // evicted. Cancel or settle the in-flight tx first.
+  const [pendingNonce, latestNonce] = await Promise.all([
+    prov.getTransactionCount(dev.address, 'pending'),
+    prov.getTransactionCount(dev.address, 'latest'),
+  ]);
+  if (pendingNonce > latestNonce) {
+    throw new Error(
+      'the launcher has an unconfirmed tx in flight — wait for it to settle, or cancel it ' +
+        '(POST /v5/launcher/cancel), before approving'
+    );
+  }
+  const nonce = pendingNonce;
   const signer = ks.signer(dev.id, prov);
   const raw = await signer.signTransaction(
     toSignable({ to: quoteAddr, data, value: 0n }, { nonce, gasLimit: APPROVE_GAS, fees, chainId })

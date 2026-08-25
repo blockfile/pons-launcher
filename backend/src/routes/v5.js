@@ -25,6 +25,7 @@ const factoryModule = require('../evm/v5/factory');
 const { prepareLaunch, fireLaunch, reconcileLaunch, approveQuoteForLaunch, quoteAllowanceStatus } = require('../v5/launch');
 const { prepareBundle, fireBundle } = require('../v5/bundle');
 const { prepareSell, fireSell } = require('../v5/sell');
+const { launcherStatus, withdrawFromLauncher, cancelStuckLauncherTx } = require('../v5/launcher');
 
 const router = express.Router();
 
@@ -343,6 +344,14 @@ router.get('/v5/launch/quote-allowance', requireApiKey, async (req, res, next) =
 // { amount } bounds it (whole USDG units); omit for MAX.
 router.post('/v5/launch/approve', requireApiKey, async (req, res, next) => {
   try {
+    // Don't stack an approval onto a launcher that is mid-launch or parked — it
+    // would sign behind the in-flight tx. (approveQuoteForLaunch also refuses on
+    // an on-chain in-flight nonce; this is the cheaper, clearer first line.)
+    if (launching.has(req.user.id) || pendingLaunches.has(req.user.id)) {
+      return res
+        .status(409)
+        .json({ error: 'a v5 launch is in progress or unresolved on the launcher — settle it before approving' });
+    }
     const out = await approveQuoteForLaunch(req.body || {}, { keystore: keystoreFor(req.user.id) });
     activityFor(req.user.id).record('v5', `[v5] approved factory to pull ${out.amount} USDG (${out.status})`, {
       kind: 'approve-quote',
@@ -447,7 +456,13 @@ router.post('/v5/launch/resolve', requireApiKey, async (req, res, next) => {
 
     if (result.launch.status === 'pending') {
       // Still in the mempool — keep the guard; do not record (nothing definitive).
-      return res.json({ resolved: false, ...jsonSafe(result) });
+      return res.json({
+        resolved: false,
+        ...jsonSafe(result),
+        hint:
+          'still unconfirmed. If it is genuinely stuck (neither mining nor dropping), replace it via ' +
+          'POST /v5/launcher/cancel to un-brick the launcher, then resolve again.',
+      });
     }
 
     // Definitive (confirmed / reverted / dropped): record the honest outcome and release.
@@ -569,6 +584,98 @@ router.post('/v5/sell', requireApiKey, withSellLock(async (req, res, next) => {
     );
 
     res.json({ ...jsonSafe(result), plan: publicSellPlan(plan) });
+  } catch (err) {
+    next(err);
+  }
+}));
+
+// ── launcher rescue: get value OUT of v5dev, and un-stick it ───────────────────
+// The launcher is a one-way value sink (fund/bundle spend into the bundle wallets,
+// sweep pulls into it) and a stuck launcher tx bricks new launches. These are the
+// console paths to withdraw surplus and to replace a stuck nonce.
+
+// serialise launcher withdraw/cancel per account (both sign from the singleton v5dev).
+const launcherBusy = new Set();
+function withLauncherLock(handler) {
+  return async (req, res, next) => {
+    const id = req.user.id;
+    if (launcherBusy.has(id)) {
+      return res.status(409).json({ error: 'a v5 launcher action is already in progress for this account' });
+    }
+    launcherBusy.add(id);
+    try {
+      await handler(req, res, next);
+    } finally {
+      launcherBusy.delete(id);
+    }
+  };
+}
+
+// GET /api/v5/launcher/status — the launcher's ETH + USDG (and, with ?token=, a
+// token) balances, and whether it has a stuck/unconfirmed tx. Read-only.
+router.get('/v5/launcher/status', requireApiKey, async (req, res, next) => {
+  try {
+    res.json(jsonSafe(await launcherStatus({ token: req.query?.token }, { keystore: keystoreFor(req.user.id) })));
+  } catch (err) {
+    next(err);
+  }
+});
+
+// POST /api/v5/launcher/withdraw — send ETH or an ERC-20 (asset: 'eth'|'usdg'|
+// <address>) from the launcher to an external address. A MONEY PATH → { confirm:true }.
+// Refused while a launch/bundle/sell is active or a launch is parked (all spend the
+// same wallet), and while the launcher has an unconfirmed tx (cancel that first).
+router.post('/v5/launcher/withdraw', requireApiKey, withLauncherLock(async (req, res, next) => {
+  try {
+    if (req.body?.confirm !== true) {
+      throw new Error('refusing to withdraw without { confirm: true } — this moves funds out of the launcher');
+    }
+    const id = req.user.id;
+    if (launching.has(id) || bundling.has(id) || selling.has(id) || pendingLaunches.has(id)) {
+      return res
+        .status(409)
+        .json({ error: 'a v5 launch/bundle/sell is active or unresolved — settle it before withdrawing from the launcher' });
+    }
+    const out = await withdrawFromLauncher(req.body || {}, { keystore: keystoreFor(id) });
+    activityFor(id).record('v5', `[v5] withdrew ${out.amount} ${out.asset} from launcher → ${out.to} (${out.status})`, {
+      kind: 'launcher-withdraw',
+      asset: out.asset,
+      token: out.token || null,
+      to: out.to,
+      amount: out.amount,
+      hash: out.hash,
+      status: out.status,
+    });
+    res.json(jsonSafe(out));
+  } catch (err) {
+    next(err);
+  }
+}));
+
+// POST /api/v5/launcher/cancel — replace a stuck launcher tx (0-value self-transfer
+// at the stuck nonce with a bumped fee). { confirm:true }. Intentionally NOT blocked
+// by pendingLaunches — un-sticking a parked/stuck launch is its whole purpose. After
+// it lands, run /v5/launch/resolve so the parked marker clears (the old tx drops).
+router.post('/v5/launcher/cancel', requireApiKey, withLauncherLock(async (req, res, next) => {
+  try {
+    if (req.body?.confirm !== true) {
+      throw new Error('refusing to cancel without { confirm: true } — this replaces the launcher\'s stuck transaction');
+    }
+    const id = req.user.id;
+    if (launching.has(id) || bundling.has(id) || selling.has(id)) {
+      return res
+        .status(409)
+        .json({ error: 'a v5 launch/bundle/sell handler is running — let it finish before cancelling' });
+    }
+    const out = await cancelStuckLauncherTx(req.body || {}, { keystore: keystoreFor(id) });
+    activityFor(id).record(
+      'v5',
+      out.nothingStuck
+        ? '[v5] launcher cancel: nothing to cancel'
+        : `[v5] cancelled launcher tx at nonce ${out.nonce} (${out.status})`,
+      { kind: 'launcher-cancel', nonce: out.nonce ?? null, hash: out.hash || null, status: out.status || 'none' }
+    );
+    res.json(jsonSafe(out));
   } catch (err) {
     next(err);
   }
