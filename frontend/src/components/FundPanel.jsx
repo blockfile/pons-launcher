@@ -1,9 +1,10 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { api } from '../api.js';
 import Step from './Step.jsx';
 import { Busy } from './Section.jsx';
 import { rolesFor } from '../variant.js';
 import Address from './Address.jsx';
+import { runPacedFunding, PACE_MIN_MS, PACE_MAX_MS } from './pacedFunding.js';
 
 /**
  * Step 4 — moving ETH from the dev wallet out to the bundle wallets.
@@ -69,6 +70,51 @@ export default function FundPanel({ step, wallets, rows, dispersers, reload, rep
   const [relayRuns, setRelayRuns] = useState([]);
   const [timedInterval, setTimedInterval] = useState(30);
   const [timedStatus, setTimedStatus] = useState(null);
+
+  // V1 paced run. The Stop flag is a ref, not state: the loop reads it between
+  // wallets and a re-render is not needed for it to take effect. `wake` lets
+  // Stop cut the current 4–7 s gap short instead of waiting it out.
+  const [pacing, setPacing] = useState(false);
+  const stopRef = useRef(false);
+  const wakeRef = useRef(null);
+
+  function pacedWait(ms) {
+    return new Promise((resolve) => {
+      const t = setTimeout(() => {
+        wakeRef.current = null;
+        resolve();
+      }, ms);
+      wakeRef.current = () => {
+        clearTimeout(t);
+        wakeRef.current = null;
+        resolve();
+      };
+    });
+  }
+
+  function stopPaced() {
+    stopRef.current = true;
+    if (wakeRef.current) wakeRef.current();
+  }
+
+  async function sendPaced() {
+    stopRef.current = false;
+    setPacing(true);
+    try {
+      await runPacedFunding({
+        targets,
+        dispersers: dispersers?.addresses || [],
+        post: (body) => api('/fund', 'POST', body),
+        wait: pacedWait,
+        report,
+        stopped: () => stopRef.current,
+      });
+    } finally {
+      setPacing(false);
+      // Give the last transfer a moment to land before re-reading balances.
+      setTimeout(reload, 3000);
+    }
+  }
 
   async function act(name, fn) {
     setBusy(name);
@@ -138,8 +184,6 @@ export default function FundPanel({ step, wallets, rows, dispersers, reload, rep
   // Read, never decided here: the backend picks the path per run from the same
   // two numbers. This only names the choice it is going to make.
   const active = dispersers?.addresses?.length ?? 0;
-  const threshold = Number(dispersers?.batchThreshold ?? 0);
-  const batches = Boolean(threshold) && targets.length >= threshold;
   const fundEndpoint = isV2 ? '/v2/relay/fund' : '/fund';
   const fundBody = isV2 ? { targets } : { targets, variant };
   const canResumeTimed = timedStatus?.status === 'stopped' && Number(timedStatus.remaining) > 0;
@@ -156,26 +200,59 @@ export default function FundPanel({ step, wallets, rows, dispersers, reload, rep
           </>
         ) : (
           <>
-            Sends ETH from the dev wallet to each bundle wallet, using the <b>Fund</b> column in the
-            table above. Blank rows are skipped. Fund a little above what each wallet will buy — it
-            pays its own gas.
+            Sends ETH from the dev wallet to each bundle wallet through the disperser contract, one
+            wallet at a time and {PACE_MIN_MS / 1000}–{PACE_MAX_MS / 1000} seconds apart, using the{' '}
+            <b>Fund</b> column in the table above. Blank rows are skipped. Fund a little above what
+            each wallet will buy — it pays its own gas. Stop halts before the next wallet.
           </>
         )}
       </p>
 
       <div className="row">
-        <Busy
-          busy={busy === 'fund'}
-          disabled={!targets.length}
-          title={targets.length ? '' : 'enter a fund amount in the table above'}
-          onClick={() => act('fund', () => api(fundEndpoint, 'POST', fundBody))}
-        >
-          {targets.length
-            ? isV2
+        {isV2 ? (
+          <Busy
+            busy={busy === 'fund'}
+            disabled={!targets.length}
+            title={targets.length ? '' : 'enter a fund amount in the table above'}
+            onClick={() => act('fund', () => api(fundEndpoint, 'POST', fundBody))}
+          >
+            {targets.length
               ? `Relay ${total.toFixed(4)} ETH to ${targets.length} wallet${targets.length === 1 ? '' : 's'}`
-              : `Send ${total.toFixed(4)} ETH to ${targets.length} wallet${targets.length === 1 ? '' : 's'}`
-            : 'Nothing to send'}
-        </Busy>
+              : 'Nothing to send'}
+          </Busy>
+        ) : (
+          <>
+            {/* V1 funds 1 by 1 through the disperser contract, 4–7 s apart, so
+                every bundle wallet is funded by the contract rather than in one
+                burst from the dev wallet. The burst/batched send is gone from
+                this tab on purpose. */}
+            <Busy
+              busy={pacing}
+              disabled={!targets.length || !dispersers?.addresses?.length}
+              title={
+                !targets.length
+                  ? 'enter a fund amount in the table above'
+                  : !dispersers?.addresses?.length
+                    ? 'no disperser deployed — deploy one in step 2 first'
+                    : ''
+              }
+              onClick={sendPaced}
+            >
+              {targets.length
+                ? `Send ${total.toFixed(4)} ETH to ${targets.length} wallet${targets.length === 1 ? '' : 's'} — 1 by 1 via disperser, ${PACE_MIN_MS / 1000}–${PACE_MAX_MS / 1000} s apart`
+                : 'Nothing to send'}
+            </Busy>
+            {pacing && (
+              <button
+                className="spend"
+                title="stop before the next wallet; a transfer already sent cannot be cancelled"
+                onClick={stopPaced}
+              >
+                Stop
+              </button>
+            )}
+          </>
+        )}
 
         {isV2 && targets.length > 0 && (
           <span className="hint">
@@ -183,13 +260,11 @@ export default function FundPanel({ step, wallets, rows, dispersers, reload, rep
           </span>
         )}
 
-        {!isV2 && targets.length > 0 && Boolean(threshold) && (
+        {!isV2 && targets.length > 0 && (
           <span className="hint">
-            {batches && active > 0
-              ? `batched through ${active} disperser contract${active === 1 ? '' : 's'} — one transaction`
-              : batches
-                ? `${targets.length} recipients and no disperser deployed — one transfer per wallet, which is what rate limiting hits first. Deploy one in step 2.`
-                : `${targets.length} recipient${targets.length === 1 ? '' : 's'}, below the ${threshold} batching threshold — individual transfers are cheaper here`}
+            {active > 0
+              ? `one disperser transaction per wallet, ${PACE_MIN_MS / 1000}–${PACE_MAX_MS / 1000} s apart${active > 1 ? `, rotating across ${active} contracts` : ''}`
+              : 'no disperser deployed — deploy one in step 2 first'}
           </span>
         )}
 
@@ -216,6 +291,7 @@ export default function FundPanel({ step, wallets, rows, dispersers, reload, rep
             step 4's own action and has to stay the loudest thing in the row. */}
         <Busy
           busy={busy === 'sweep'}
+          disabled={pacing}
           className="spend"
           title="return everything to the dev wallet"
           onClick={() =>
