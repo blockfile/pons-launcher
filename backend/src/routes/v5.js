@@ -24,6 +24,7 @@ const v5roles = require('../v5/roles');
 const factoryModule = require('../evm/v5/factory');
 const { prepareLaunch, fireLaunch, reconcileLaunch } = require('../v5/launch');
 const { prepareBundle, fireBundle } = require('../v5/bundle');
+const { prepareSell, fireSell } = require('../v5/sell');
 
 const router = express.Router();
 
@@ -135,6 +136,18 @@ function publicBundlePlan(plan) {
   return jsonSafe({ ...plan, transfers: (plan.transfers || []).map((t) => ({ ...t, raw: undefined })) });
 }
 
+// The sell plan's secrets are every wallet's signed approvals + sell. Strip them.
+function publicSellPlan(plan) {
+  return jsonSafe({
+    ...plan,
+    wallets: (plan.wallets || []).map((w) => ({
+      ...w,
+      approvals: (w.approvals || []).map((a) => ({ ...a, raw: undefined })),
+      sell: { ...w.sell, raw: undefined },
+    })),
+  });
+}
+
 // One bundle fan-out at a time per account: the transfers are signed at the
 // launcher's sequential nonces, so two overlapping runs would sign against the
 // same nonces and collide (or, if the first has landed, re-split a smaller
@@ -164,6 +177,31 @@ function withBundleLock(handler) {
   };
 }
 
+// One exit at a time per account. A sell spends the BUNDLE wallets (not v5dev), so
+// it does not collide with a launch's nonces — but it must not run while a bundle
+// is still landing tokens INTO those wallets, or it would exit a half-settled
+// balance. Refuse a concurrent sell, and a sell while a bundle is mid-flight.
+const selling = new Set();
+function withSellLock(handler) {
+  return async (req, res, next) => {
+    const id = req.user.id;
+    if (selling.has(id)) {
+      return res.status(409).json({ error: 'a v5 sell is already in progress for this account' });
+    }
+    if (bundling.has(id)) {
+      return res
+        .status(409)
+        .json({ error: 'a v5 bundle is still landing into the bundle wallets — let it settle before selling' });
+    }
+    selling.add(id);
+    try {
+      await handler(req, res, next);
+    } finally {
+      selling.delete(id);
+    }
+  };
+}
+
 // F3 — PIN the bundle's token to one this account actually launched. `token` is
 // caller-supplied; without this an arbitrary (or fat-fingered) address could be
 // fanned out. The launched tokens are the confirmed-launch rows in this user's own
@@ -186,6 +224,20 @@ function assertOwnLaunchedToken(userId, token, allowUnlisted) {
         'here, or pass { allowUnlistedToken: true } if you are certain this is yours'
     );
   }
+}
+
+// The AUTHORITATIVE per-pool hook for a launched token, from this user's own v5
+// activity (the launch persisted the receipt hook). The sell path pins this so it
+// targets the exact launched pool instead of probing candidate hooks — see the
+// decoy-pool guard in v5/sell.js. Newest matching record wins; null if none.
+function launchedTokenHook(userId, token) {
+  const want = String(token || '').toLowerCase();
+  const entry = activityFor(userId)
+    .list({ kind: 'v5', limit: 500 })
+    .find(
+      (e) => e.detail && e.detail.token && String(e.detail.token).toLowerCase() === want && e.detail.hook
+    );
+  return entry ? entry.detail.hook : null;
 }
 
 // GET /api/v5/config — the letscash contract map + chain, for the console.
@@ -430,6 +482,61 @@ router.post('/v5/bundle', requireApiKey, withBundleLock(async (req, res, next) =
   }
 }));
 
+// POST /api/v5/sell/preflight — build and SIGN the whole exit (per wallet: two
+// Permit2 approvals + the V4 sell), broadcast nothing. Returns the public plan
+// (every signed raw stripped) plus the per-wallet token counts and best-effort ETH
+// estimates. Worth running: it is where the estimate comes from, and it verifies
+// the pool exists before any approval is signed.
+router.post('/v5/sell/preflight', requireApiKey, async (req, res, next) => {
+  try {
+    assertOwnLaunchedToken(req.user.id, req.body?.token, req.body?.allowUnlistedToken);
+    // Pin the launch's recorded hook (or an explicit override) so the sell targets
+    // the exact pool, never a probed/decoy one. prepareSell refuses without it.
+    const hook = req.body?.hook || launchedTokenHook(req.user.id, req.body?.token);
+    const plan = await prepareSell({ ...(req.body || {}), hook }, { keystore: keystoreFor(req.user.id) });
+    res.json(publicSellPlan(plan));
+  } catch (err) {
+    next(err);
+  }
+});
+
+// POST /api/v5/sell — prepare, then fire the exit. Irreversible and touches every
+// holding wallet, so it demands { confirm: true }. DRY_RUN returns a simulated
+// result without broadcasting. One exit at a time per account.
+router.post('/v5/sell', requireApiKey, withSellLock(async (req, res, next) => {
+  try {
+    if (req.body?.confirm !== true) {
+      throw new Error('refusing to sell without { confirm: true } — this exits every holding wallet, irreversibly');
+    }
+    assertOwnLaunchedToken(req.user.id, req.body?.token, req.body?.allowUnlistedToken);
+    const hook = req.body?.hook || launchedTokenHook(req.user.id, req.body?.token);
+    const ks = keystoreFor(req.user.id);
+    const plan = await prepareSell({ ...(req.body || {}), hook }, { keystore: ks });
+    const result = await fireSell(plan, {});
+
+    activityFor(req.user.id).record(
+      'v5',
+      `[v5] sold ${plan.symbol}: ${result.sold}/${plan.walletCount} wallet(s) exited` +
+        (result.failed ? `, ${result.failed} failed` : '') +
+        (result.pending ? `, ${result.pending} pending` : ''),
+      {
+        kind: 'sell',
+        token: plan.token,
+        symbol: plan.symbol,
+        walletCount: plan.walletCount,
+        totalTokens: plan.totalTokens,
+        sold: result.sold,
+        failed: result.failed,
+        pending: result.pending,
+      }
+    );
+
+    res.json({ ...jsonSafe(result), plan: publicSellPlan(plan) });
+  } catch (err) {
+    next(err);
+  }
+}));
+
 module.exports = router;
 // Exposed for the fund-safety tests (the double-launch guard + the honest
 // persistence detail), mirroring routes/launch.js.
@@ -440,3 +547,6 @@ module.exports.withBundleLock = withBundleLock;
 module.exports.bundling = bundling;
 module.exports.publicBundlePlan = publicBundlePlan;
 module.exports.assertOwnLaunchedToken = assertOwnLaunchedToken;
+module.exports.withSellLock = withSellLock;
+module.exports.selling = selling;
+module.exports.publicSellPlan = publicSellPlan;
