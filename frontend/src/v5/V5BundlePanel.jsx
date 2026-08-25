@@ -5,6 +5,7 @@ import { Busy } from '../components/Section.jsx';
 import Modal, { Fact } from '../components/Modal.jsx';
 import Address from '../components/Address.jsx';
 import { eth, plural } from './roles.js';
+import V5BuyPanel from './V5BuyPanel.jsx';
 
 // The 409 backend/src/routes/v5.js's withBundleLock (and prepareBundle's own
 // settled-balance gate) raise when the launcher's on-chain state is not settled
@@ -56,8 +57,18 @@ function fmt(v, dp = 4) {
  * NOT SETTLED. Unlike the launch step's `parked` state, there is no resolve
  * action here — the guard clears itself the moment the in-flight tx confirms.
  * So this is shown as a plain "wait and try again" notice, not a button.
+ *
+ * METHOD TOGGLE. The user asked for step 4 to work like pons v1: every bundle
+ * wallet BUYS the token from the pool with its own ETH, rather than only
+ * receiving a transfer of the launcher's first-buy supply. `panelMode` picks
+ * between the two — 'buy' (V1BuyPanel, DEFAULT, since that is the mechanic
+ * asked for) and 'fanout' (everything below this comment, unchanged). Both
+ * live inside this one Step so the numbered sequence still shows a single
+ * step 4; the toggle is drawn once, at the top, and only ever changes which
+ * body renders under it.
  */
 export default function V5BundlePanel({ step, dev, bundle, lastLaunch, live, explorer, reload, report }) {
+  const [panelMode, setPanelMode] = useState('buy'); // 'buy' (V1-style, default) | 'fanout' (untaxed transfer)
   const [tokenOverride, setTokenOverride] = useState('');
   const [allowUnlisted, setAllowUnlisted] = useState(false);
   const [mode, setMode] = useState('equal');
@@ -169,12 +180,51 @@ export default function V5BundlePanel({ step, dev, bundle, lastLaunch, live, exp
 
   return (
     <Step {...step}>
-      <p className="lede">
-        letscash taxes swaps through its hook, but a plain wallet→wallet transfer never touches the
-        pool — so fanning the launcher's first-buy position out to the bundle wallets here is
-        <b> untaxed</b>. Nothing broadcasts until Bundle is armed and confirmed.
-      </p>
+      {panelMode === 'buy' ? (
+        <p className="lede">
+          Each bundle wallet buys the token from the pool with its own ETH — the pons v1 mechanic, on
+          letscash. These buys pay the hook's anti-snipe tax, which decays from the launch premium to
+          its base rate over the config's window — wait for it to stabilise before firing, or read the
+          preflight's expected-tokens figures below to judge the current rate.
+          <b> ETH-only</b> for now: a USDG-quoted launch can't buy through this path yet. Nothing
+          broadcasts until Buy is armed and confirmed.
+        </p>
+      ) : (
+        <p className="lede">
+          letscash taxes swaps through its hook, but a plain wallet→wallet transfer never touches the
+          pool — so fanning the launcher's first-buy position out to the bundle wallets here is
+          <b> untaxed</b>. Nothing broadcasts until Bundle is armed and confirmed.
+        </p>
+      )}
 
+      <div className="grid" style={{ marginBottom: 8 }}>
+        <label>
+          Method
+          <select value={panelMode} onChange={(e) => setPanelMode(e.target.value)}>
+            <option value="buy">Each wallet buys (V1-style)</option>
+            <option value="fanout">Untaxed fan-out</option>
+          </select>
+          <span className="hint">
+            {panelMode === 'buy'
+              ? 'each bundle wallet buys from the pool with its own ETH — pays the anti-snipe tax as it stands now'
+              : "the launcher's first-buy supply moves by transfer() — untaxed, and independent of the tax's decay"}
+          </span>
+        </label>
+      </div>
+
+      {panelMode === 'buy' && (
+        <V5BuyPanel
+          bundle={bundle}
+          lastLaunch={lastLaunch}
+          live={live}
+          explorer={explorer}
+          reload={reload}
+          report={report}
+        />
+      )}
+
+      {panelMode === 'fanout' && (
+      <>
       {noWallets && (
         <div className="notice warn">
           <h3>{!dev ? 'No launcher wallet yet' : 'No bundle wallets yet'}</h3>
@@ -469,6 +519,8 @@ export default function V5BundlePanel({ step, dev, bundle, lastLaunch, live, exp
           )}
         </div>
       </Modal>
+      </>
+      )}
     </Step>
   );
 }
