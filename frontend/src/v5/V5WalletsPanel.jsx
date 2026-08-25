@@ -43,12 +43,13 @@ export default function V5WalletsPanel({ step, dev, bundle, explorer, reload, re
   // whether deleting it is a tidy-up or a mistake.
   const [deleting, setDeleting] = useState(null);
 
-  // IMPORT — existing wallets by private key, into either v5 role. The role
-  // selector is here (not split into a launcher-only and a bundle-only
-  // control) because one textarea covers both: importing a launcher key is
-  // just as much "get a wallet into v5" as generating bundle wallets is.
-  // Keys never linger in state past a submit — see importKeysNow below.
-  const [importRole, setImportRole] = useState(ROLES.bundle);
+  // IMPORT — existing wallets by private key. Two independent fields, one per
+  // role, so each import lives where that wallet is set up: the launcher key
+  // in the Launcher section, bundle keys in the Bundle section (an operator
+  // looking to import a dev wallet should not have to hunt for it under
+  // "Bundle wallets"). Keys never linger in state past a submit — each field
+  // clears only on success, see runImport below.
+  const [devKey, setDevKey] = useState('');
   const [importKeys, setImportKeys] = useState('');
   const [importLabel, setImportLabel] = useState('');
 
@@ -85,27 +86,30 @@ export default function V5WalletsPanel({ step, dev, bundle, explorer, reload, re
 
   /**
    * Import existing wallets by private key into a v5 role. The backend does
-   * the whitespace/comma/newline splitting (routes/v5.js), so the raw
-   * textarea text is sent as-is rather than pre-split here.
+   * the whitespace/comma/newline splitting (routes/v5.js), so the raw text is
+   * sent as-is rather than pre-split here.
    *
-   * The textarea is cleared ONLY on success — a rejected import (a bad key,
-   * or a second v5dev landing on the keystore's singleton guard) leaves the
-   * field alone so the operator can fix it without re-pasting everything.
-   * Either way the keys never get echoed anywhere else: nothing here logs
-   * them, stores them past this state, or reflects them back into the UI.
+   * The source field is cleared ONLY on success — a rejected import (a bad
+   * key, or a second v5dev landing on the keystore's singleton guard) leaves
+   * it alone so the operator can fix it without re-pasting everything. Either
+   * way the keys never get echoed anywhere else: nothing here logs them,
+   * stores them past this state, or reflects them back into the UI.
+   *
+   * One helper, two callers — the launcher (dev) and the bundle each pass
+   * their own field and clear-on-success so they can sit in different
+   * sections of the panel.
    */
-  async function importKeysNow() {
-    if (!importKeys.trim()) return;
-    setBusy('import');
+  async function runImport({ what, keys, role, label, onSuccess }) {
+    if (!keys.trim()) return;
+    setBusy(what);
     try {
       const made = await api('/v5/wallets/import', 'POST', {
-        privateKeys: importKeys,
-        role: importRole,
-        label: importLabel.trim() || undefined,
+        privateKeys: keys,
+        role,
+        label: label && label.trim() ? label.trim() : undefined,
       });
-      report(`imported ${plural(made.length, 'wallet')} into ${importRole === ROLES.dev ? 'the launcher' : 'the bundle'}`);
-      setImportKeys('');
-      setImportLabel('');
+      report(`imported ${plural(made.length, 'wallet')} into ${role === ROLES.dev ? 'the launcher' : 'the bundle'}`);
+      onSuccess();
       await reload();
     } catch (err) {
       report(`ERROR: ${err.message}`);
@@ -113,6 +117,21 @@ export default function V5WalletsPanel({ step, dev, bundle, explorer, reload, re
       setBusy('');
     }
   }
+
+  const importLauncherNow = () =>
+    runImport({ what: 'import-dev', keys: devKey, role: ROLES.dev, onSuccess: () => setDevKey('') });
+
+  const importBundleNow = () =>
+    runImport({
+      what: 'import',
+      keys: importKeys,
+      role: ROLES.bundle,
+      label: importLabel,
+      onSuccess: () => {
+        setImportKeys('');
+        setImportLabel('');
+      },
+    });
 
   /** Pull N aged, pre-funded wallets out of the V4 seasoning pool into the v5 bundle role. */
   async function claimSeasoned() {
@@ -166,6 +185,7 @@ export default function V5WalletsPanel({ step, dev, bundle, explorer, reload, re
           <p>
             One wallet signs the launch and its atomic first buy. It is a singleton — the backend
             keeps exactly one, so the whole run has a single payer and a single first-buy position.
+            Generate a fresh one, or import a key you already hold (your funded dev wallet).
           </p>
           <div className="row">
             <Busy
@@ -178,6 +198,24 @@ export default function V5WalletsPanel({ step, dev, bundle, explorer, reload, re
               }
             >
               Create launcher wallet
+            </Busy>
+            <span className="hint">or import your own key →</span>
+          </div>
+          {/* Import a launcher key right here, where an operator looks for it —
+              not buried in the bundle section's control. Same guarantees as any
+              key entry: encrypted straight into the keystore, never logged, and
+              the field clears only on a successful import. */}
+          <div className="row" style={{ alignItems: 'flex-start', marginTop: 4 }}>
+            <input
+              value={devKey}
+              onChange={(e) => setDevKey(e.target.value)}
+              placeholder="0x… private key of an existing dev wallet"
+              spellCheck={false}
+              autoComplete="off"
+              style={{ flex: 1 }}
+            />
+            <Busy busy={busy === 'import-dev'} disabled={!devKey.trim()} onClick={importLauncherNow}>
+              Import launcher
             </Busy>
           </div>
         </div>
@@ -261,24 +299,19 @@ export default function V5WalletsPanel({ step, dev, bundle, explorer, reload, re
         no exemption list, so the only cost of more wallets is a longer fan-out. Run it again for more.
       </p>
 
-      {/* IMPORT — wallets the operator already holds the key for. Fresh
+      {/* IMPORT — bundle wallets the operator already holds the key for. Fresh
           wallets are a fingerprint (they all share a birth timestamp); keys
-          brought in from elsewhere do not. Role selector covers both v5
-          roles from one control, since a launcher key is imported exactly
-          the same way as a bundle key. */}
+          brought in from elsewhere do not. This imports into the bundle role
+          only — the launcher key is imported up in the Launcher section. */}
       <div className="row">
         <span className="ctl-label">Import</span>
-        <select value={importRole} onChange={(e) => setImportRole(e.target.value)} style={{ width: 140 }}>
-          <option value={ROLES.bundle}>Bundle wallet</option>
-          <option value={ROLES.dev}>Launcher</option>
-        </select>
         <input
           value={importLabel}
           onChange={(e) => setImportLabel(e.target.value)}
           placeholder="label (optional)"
           style={{ width: 160 }}
         />
-        <Busy busy={busy === 'import'} disabled={!importKeys.trim()} onClick={importKeysNow}>
+        <Busy busy={busy === 'import'} disabled={!importKeys.trim()} onClick={importBundleNow}>
           Import
         </Busy>
       </div>
@@ -289,13 +322,15 @@ export default function V5WalletsPanel({ step, dev, bundle, explorer, reload, re
           value={importKeys}
           onChange={(e) => setImportKeys(e.target.value)}
           placeholder="0x… one per line, or comma-separated"
+          spellCheck={false}
+          autoComplete="off"
           style={{ flex: 1 }}
         />
       </div>
       <p className="hint" style={{ margin: '0 0 12px' }}>
         Each key is encrypted straight into the keystore and never logged or shown again — the field
-        clears itself once the import succeeds. Launcher (v5dev) is a singleton: importing a second
-        fails loudly, the same way generating one does once a launcher already exists.
+        clears itself once the import succeeds. These land in the bundle; to import your launcher key,
+        use the Launcher wallet section above.
       </p>
 
       {/* SEASONED — aged, pre-funded wallets from the V4 tab's pool, pulled
