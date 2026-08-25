@@ -440,6 +440,58 @@ test('resolvePoolKey throws when no candidate hook has a live pool', async () =>
   );
 });
 
+// ── poolFeeStatus — the live tax read ────────────────────────────────────────
+function fakeFeeProvider({ currentPips, poolConfigs }) {
+  const sv = new Interface([
+    'function getSlot0(bytes32) view returns (uint160,int24,uint24,uint24)',
+    'function getLiquidity(bytes32) view returns (uint128)',
+  ]);
+  const hook = new Interface([
+    'function currentFeeRate(bytes32,address) view returns (uint256)',
+    'function poolConfigs(bytes32) view returns (address,uint40,uint16,uint24,uint24,uint32,bool)',
+  ]);
+  return {
+    async call(txReq) {
+      const sel = txReq.data.slice(0, 10);
+      if (sel === sv.getFunction('getSlot0').selector) return sv.encodeFunctionResult('getSlot0', [123n, 0, 0, 0]);
+      if (sel === sv.getFunction('getLiquidity').selector) return sv.encodeFunctionResult('getLiquidity', [10n ** 20n]);
+      if (sel === hook.getFunction('currentFeeRate').selector) return hook.encodeFunctionResult('currentFeeRate', [BigInt(currentPips)]);
+      if (sel === hook.getFunction('poolConfigs').selector) {
+        if (!poolConfigs) throw new Error('poolConfigs not expected for this hook');
+        return hook.encodeFunctionResult('poolConfigs', poolConfigs);
+      }
+      throw new Error('unexpected call ' + sel);
+    },
+  };
+}
+
+test('poolFeeStatus reports a FLAT rate (no decay) for a normal pool', async () => {
+  // The config (non-decay) hook: poolConfigs is never called; current == base.
+  const provider = fakeFeeProvider({ currentPips: 50000 }); // 5%
+  const res = await swap.poolFeeStatus({ token: CRYINGCAT, quote: NATIVE, hook: CONFIG_HOOK }, { provider });
+  assert.equal(res.currentPct, 5);
+  assert.equal(res.basePct, 5);
+  assert.equal(res.hasDecay, false);
+  assert.equal(res.premiumGoneAt, null);
+});
+
+test('poolFeeStatus reads the decay window on the anti-snipe hook', async () => {
+  const launchTime = 1785277604;
+  const provider = fakeFeeProvider({
+    currentPips: 80000, // 8% right now (mid-decay)
+    // creator, launchTime, creatorFeeBps, base(5%), launch(10%), decay(600s), exists
+    poolConfigs: ['0x0000000000000000000000000000000000000001', launchTime, 7000, 50000, 100000, 600, true],
+  });
+  const res = await swap.poolFeeStatus({ token: CRYINGCAT, quote: NATIVE, hook: CASHCAT_HOOK }, { provider });
+  assert.equal(res.currentPct, 8);
+  assert.equal(res.basePct, 5);
+  assert.equal(res.launchPct, 10);
+  assert.equal(res.decaySeconds, 600);
+  assert.equal(res.launchTime, launchTime);
+  assert.equal(res.premiumGoneAt, launchTime + 600);
+  assert.equal(res.hasDecay, true);
+});
+
 // ─────────────────────────────────────────────────────────────────────────────
 // The SAFE entry points: resolveAndBuildBuy / resolveAndBuildSell. One provider
 // answers BOTH the StateView probe (which hook is live) AND the V4Quoter call.

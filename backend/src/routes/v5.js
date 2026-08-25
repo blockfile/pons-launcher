@@ -31,6 +31,7 @@ const { prepareLaunch, fireLaunch, reconcileLaunch, approveQuoteForLaunch, quote
 const { prepareBundle, fireBundle } = require('../v5/bundle');
 const { prepareSell, fireSell } = require('../v5/sell');
 const { prepareBundleBuys, fireBundleBuys } = require('../v5/buy');
+const { poolFeeStatus } = require('../evm/v5/swap');
 const { launcherStatus, withdrawFromLauncher, cancelStuckLauncherTx } = require('../v5/launcher');
 
 const router = express.Router();
@@ -754,6 +755,22 @@ router.post('/v5/sell', requireApiKey, withSellLock(async (req, res, next) => {
     next(err);
   }
 }));
+
+// GET /api/v5/pool-fee — the live tax a normal wallet pays on this token's pool
+// right now, its base rate, and (only for the rare pool with an anti-snipe premium)
+// when the premium finishes decaying to base. In practice letscash launches are
+// FLAT, so hasDecay is almost always false and current == base. Read-only; the hook
+// is pinned from the launch record. ?token=… (and optional ?hook/?quote overrides).
+router.get('/v5/pool-fee', requireApiKey, async (req, res, next) => {
+  try {
+    const body = { token: req.query?.token, hook: req.query?.hook, quote: req.query?.quote };
+    const { hook } = resolveSellPool(req.user.id, body);
+    const out = await poolFeeStatus({ token: body.token, quote: 'eth', hook }, { provider });
+    res.json(jsonSafe(out));
+  } catch (err) {
+    next(err);
+  }
+});
 
 // POST /api/v5/bundle-buy/preflight — the V1-style bundle: build and SIGN a buy for
 // every bundle wallet that has a buy amount (each buys the token from the pool with

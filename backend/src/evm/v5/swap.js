@@ -154,6 +154,22 @@ const stateViewIface = new Interface([
   'function getLiquidity(bytes32 poolId) view returns (uint128 liquidity)',
 ]);
 
+// The CashCat fee HOOK's fee reads (reverse-engineered + verified against the live
+// contract). currentFeeRate is on every letscash hook and returns the fee a normal
+// trader pays RIGHT NOW (pips; 1e6 = 100%). poolConfigs is the anti-snipe-decay
+// hook's per-pool struct — only 0xEfe6…aEc carries a decay window; the others (and,
+// empirically, every real pool) launch FLAT, so launchFeeDecay is 0 there. See
+// poolFeeStatus for how the two are combined.
+const HOOK_DECAY_ADDRESS = '0xefe669814e5eec33406bd50ffa8331618d076aec';
+const hookFeeIface = new Interface([
+  'function currentFeeRate(bytes32 poolId, address swapper) view returns (uint256)',
+  'function poolConfigs(bytes32 poolId) view returns (address creator, uint40 launchTime, uint16 creatorFeeBps, uint24 baseFeeRate, uint24 launchFeeRate, uint32 launchFeeDecay, bool exists)',
+]);
+// swapper only matters for the factory's one-shot first-buy exemption in the launch
+// block; for any normal wallet it is always false, so a dead address gives the real
+// trader rate.
+const FEE_PROBE_SWAPPER = '0x000000000000000000000000000000000000dEaD';
+
 // ERC-20 approve + Permit2 approve, for the sell (and USDG-in buy) path.
 const erc20ApproveIface = new Interface([
   'function approve(address spender, uint256 amount) returns (bool)',
@@ -672,6 +688,73 @@ async function resolveAndBuildSell(
   return { ...tx, hook: resolved.hook, poolKey: resolved.poolKey, expectedOut, minOut };
 }
 
+/**
+ * The live TAX status of a pool: what a normal wallet pays RIGHT NOW, the base
+ * (steady-state) rate, and — for the one hook that carries an anti-snipe premium —
+ * when that premium finishes decaying to base. In practice letscash pools launch
+ * FLAT (no premium), so hasDecay is almost always false and currentPct == basePct;
+ * the decay fields are there for the rare pool that sets a window.
+ *
+ * @param {{token:string, quote?:string, hook:string}} input  hook = the pool's pinned hook.
+ * @returns {Promise<{poolId,hook,currentPips,currentPct,basePct,launchPct,decaySeconds,launchTime,premiumGoneAt,hasDecay}>}
+ */
+async function poolFeeStatus({ token, quote = 'eth', hook } = {}, deps) {
+  const d = resolveDeps(deps);
+  const resolved = await resolvePoolKey({ token, quote, hook }, deps); // verifies the pool is live
+  const poolId = resolved.poolId;
+  const hookAddr = norm(resolved.hook);
+
+  // The current rate — one call, works on every letscash hook, no clock skew.
+  let currentPips = 0;
+  try {
+    const ret = await d.provider.call({
+      to: hookAddr,
+      data: hookFeeIface.encodeFunctionData('currentFeeRate', [poolId, FEE_PROBE_SWAPPER]),
+    });
+    currentPips = Number(hookFeeIface.decodeFunctionResult('currentFeeRate', ret)[0]);
+  } catch (_e) {
+    // A hook without this view is unexpected — leave 0; the caller renders "—".
+  }
+
+  let hasDecay = false;
+  let basePips = currentPips;
+  let launchPips = currentPips;
+  let decaySeconds = 0;
+  let launchTime = null;
+  let premiumGoneAt = null;
+  // Only the decay-capable hook carries the poolConfigs struct with the window.
+  if (hookAddr.toLowerCase() === HOOK_DECAY_ADDRESS) {
+    try {
+      const ret = await d.provider.call({
+        to: hookAddr,
+        data: hookFeeIface.encodeFunctionData('poolConfigs', [poolId]),
+      });
+      const c = hookFeeIface.decodeFunctionResult('poolConfigs', ret);
+      basePips = Number(c.baseFeeRate);
+      launchPips = Number(c.launchFeeRate);
+      decaySeconds = Number(c.launchFeeDecay);
+      launchTime = Number(c.launchTime);
+      premiumGoneAt = launchTime + decaySeconds;
+      hasDecay = decaySeconds > 0 && launchPips > basePips;
+    } catch (_e) {
+      // Not the struct we expect — treat the pool as flat.
+    }
+  }
+
+  return {
+    poolId,
+    hook: hookAddr,
+    currentPips,
+    currentPct: currentPips / 1e4, // 10000 pips = 1%
+    basePct: basePips / 1e4,
+    launchPct: launchPips / 1e4,
+    decaySeconds,
+    launchTime,
+    premiumGoneAt, // unix seconds, or null when flat
+    hasDecay,
+  };
+}
+
 module.exports = {
   // constants (documented, exported for tests + callers)
   NATIVE,
@@ -693,6 +776,7 @@ module.exports = {
   // quotes
   quoteBuy,
   quoteSell,
+  poolFeeStatus,
   // calldata
   buildBuyTx,
   buildSellTx,
