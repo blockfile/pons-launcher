@@ -33,7 +33,17 @@ function fmt(v, dp = 4) {
 }
 
 /**
- * Step 4 — fan the launcher's first-buy position out to the bundle wallets.
+ * Bundle tools — an UNNUMBERED utility, below the numbered flow.
+ *
+ * The primary bundle now rides with the launch: step 3 (V5LaunchPanel) is the
+ * combined "Launch + bundle" that fires every wallet's buy the instant the
+ * launch confirms, uniform with the pons v1 Launcher tab. This panel is what is
+ * left over for the cases that combined step does not cover:
+ *   • the untaxed fan-out — distribute the launcher's first-buy supply by
+ *     transfer() instead of (or on top of) per-wallet buys;
+ *   • extra/manual per-wallet buys, to top up after the combined run;
+ *   • recovery — fire the bundle by hand when a combined launch confirmed but
+ *     skipped its buys (a USDG launch, an unreadable hook: `bundleSkipped`).
  *
  * THE EDGE: letscash taxes SWAPS (pool interactions) through its hook, but a
  * plain wallet→wallet ERC-20 transfer() never touches the pool, so it is
@@ -58,17 +68,15 @@ function fmt(v, dp = 4) {
  * action here — the guard clears itself the moment the in-flight tx confirms.
  * So this is shown as a plain "wait and try again" notice, not a button.
  *
- * METHOD TOGGLE. The user asked for step 4 to work like pons v1: every bundle
- * wallet BUYS the token from the pool with its own ETH, rather than only
- * receiving a transfer of the launcher's first-buy supply. `panelMode` picks
- * between the two — 'buy' (V1BuyPanel, DEFAULT, since that is the mechanic
- * asked for) and 'fanout' (everything below this comment, unchanged). Both
- * live inside this one Step so the numbered sequence still shows a single
- * step 4; the toggle is drawn once, at the top, and only ever changes which
- * body renders under it.
+ * METHOD TOGGLE. `panelMode` picks between the two mechanics — 'fanout' (the
+ * untaxed transfer(), DEFAULT here because the combined step 3 already handles
+ * the per-wallet buys, so this utility leads with the distribution step 3 does
+ * NOT do) and 'buy' (V5BuyPanel — manual per-wallet buys, for topping up or for
+ * recovering a skipped bundle). Both live inside this one shell; the toggle is
+ * drawn once, at the top, and only ever changes which body renders under it.
  */
 export default function V5BundlePanel({ step, dev, bundle, lastLaunch, live, explorer, reload, report }) {
-  const [panelMode, setPanelMode] = useState('buy'); // 'buy' (V1-style, default) | 'fanout' (untaxed transfer)
+  const [panelMode, setPanelMode] = useState('fanout'); // 'fanout' (untaxed transfer, default) | 'buy' (V1-style per-wallet)
   const [tokenOverride, setTokenOverride] = useState('');
   const [allowUnlisted, setAllowUnlisted] = useState(false);
   const [mode, setMode] = useState('equal');
@@ -201,8 +209,8 @@ export default function V5BundlePanel({ step, dev, bundle, lastLaunch, live, exp
         <label>
           Method
           <select value={panelMode} onChange={(e) => setPanelMode(e.target.value)}>
-            <option value="buy">Each wallet buys (V1-style)</option>
             <option value="fanout">Untaxed fan-out</option>
+            <option value="buy">Each wallet buys (extra/manual)</option>
           </select>
           <span className="hint">
             {panelMode === 'buy'

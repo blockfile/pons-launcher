@@ -31,6 +31,7 @@ const { prepareLaunch, fireLaunch, reconcileLaunch, approveQuoteForLaunch, quote
 const { prepareBundle, fireBundle } = require('../v5/bundle');
 const { prepareSell, fireSell } = require('../v5/sell');
 const { prepareBundleBuys, fireBundleBuys } = require('../v5/buy');
+const { launchThenBundle } = require('../v5/launchBundle');
 const { poolFeeStatus } = require('../evm/v5/swap');
 const { launcherStatus, withdrawFromLauncher, cancelStuckLauncherTx } = require('../v5/launcher');
 
@@ -650,6 +651,128 @@ router.post('/v5/launch/resolve', requireApiKey, async (req, res, next) => {
     resolving.delete(id);
   }
 });
+
+// POST /api/v5/launch-bundle/preflight — the money-risk REHEARSAL for the combined
+// Launch + bundle. It prepares (simulates + signs, broadcasts nothing) the LAUNCH,
+// which is the only part that can revert and burn a fee. The per-wallet bundle buys
+// cannot be quoted until the pool exists (the launch creates it), so they are echoed
+// back for review only; their real quote + floor is built at FIRE time against the
+// confirmed pool. Returns the launch plan (its signed launch stripped).
+router.post('/v5/launch-bundle/preflight', requireApiKey, async (req, res, next) => {
+  try {
+    const { buys, slippageBps, buyGas, confirm, ...launchInput } = req.body || {};
+    const plan = await prepareLaunch(launchInput, { keystore: keystoreFor(req.user.id) });
+    const intended = (Array.isArray(buys) ? buys : []).filter(
+      (b) => b && Number(String(b.amountEth ?? b.amount ?? '0').trim() || '0') > 0
+    );
+    res.json({
+      plan: publicPlan(plan),
+      simulate: jsonSafe(plan.simulate),
+      bundle: {
+        walletCount: intended.length,
+        note:
+          'the bundle buys fire the instant the launch confirms, against the real pool; their per-wallet ' +
+          'quote (and the flat tax they pay) is built then, so nothing is signed for them at preflight.',
+      },
+    });
+  } catch (err) {
+    next(err);
+  }
+});
+
+// POST /api/v5/launch-bundle — the COMBINED "Launch + bundle", uniform with the pons
+// v1 Launcher tab: fire the launch (with the launcher's atomic first buy inside it),
+// and the instant it confirms, fire every bundle wallet's buy against the real pool.
+// A MONEY PATH → { confirm: true }. It spends BOTH the launcher (launch + first buy)
+// AND the bundle wallets (their buys), so it holds the launch lock AND the buy lock,
+// and refuses to start while a sell or a standalone bundle buy is touching the same
+// bundle wallets. A launch that confirms is NEVER discarded for a bundle problem —
+// see v5/launchBundle.js: the response then carries `bundleSkipped` and the operator
+// fires the bundle from the Bundle step.
+router.post('/v5/launch-bundle', requireApiKey, withLaunchLock(async (req, res, next) => {
+  const id = req.user.id;
+  // The bundle portion spends the bundle wallets — refuse a concurrent sell/buy on
+  // them, and HOLD `buying` for the whole op so one cannot start mid-flight. (The
+  // launch lock, held by withLaunchLock, already excludes another launch/fan-out.)
+  if (selling.has(id) || buying.has(id)) {
+    return res.status(409).json({
+      error:
+        'a v5 sell or bundle buy is in progress on the bundle wallets — let it finish before a combined launch + bundle',
+    });
+  }
+  buying.add(id);
+  try {
+    if (req.body?.confirm !== true) {
+      throw new Error(
+        'refusing to launch + bundle without { confirm: true } — this signs and broadcasts the launch, ' +
+          'spends the first buy, and buys from every funded bundle wallet'
+      );
+    }
+    const ks = keystoreFor(id);
+    const { launch: result, launchPlan: plan, bundle, buyPlan, bundleSkipped } = await launchThenBundle(
+      req.body || {},
+      { keystore: ks }
+    );
+
+    // Park a launch whose receipt never arrived — identical to the standalone
+    // /v5/launch, so a retry cannot sign a second launch at the next nonce.
+    if (result.launch.status === 'pending') {
+      pendingLaunches.set(id, {
+        hash: result.launch.hash,
+        nonce: plan.launch.nonce,
+        walletId: plan.launch.walletId,
+        address: plan.launch.address,
+        symbol: plan.params.symbol,
+        token: plan.token,
+        poolId: plan.poolId,
+        quote: plan.quote,
+        configId: plan.configId,
+        firstBuyEth: plan.launch.firstBuyEth,
+        at: new Date().toISOString(),
+      });
+    }
+
+    // Record the launch first (this is what pins the token/pool/hook for a later
+    // manual bundle/sell, including the `bundleSkipped` recovery path).
+    activityFor(id).record(
+      'v5',
+      `[v5] launched ${plan.params.symbol} ${result.token || plan.token} (${result.launch.status})`,
+      launchActivityDetail(result, plan)
+    );
+
+    // Record the bundle buys, when any fired.
+    if (bundle && buyPlan) {
+      activityFor(id).record(
+        'v5',
+        `[v5] bundle buy ${buyPlan.symbol}: ${bundle.bought}/${buyPlan.walletCount} wallet(s) bought` +
+          (bundle.failed ? `, ${bundle.failed} failed` : '') +
+          (bundle.pending ? `, ${bundle.pending} pending` : ''),
+        {
+          kind: 'bundle-buy',
+          token: buyPlan.token,
+          symbol: buyPlan.symbol,
+          walletCount: buyPlan.walletCount,
+          totalEth: buyPlan.totalEth,
+          bought: bundle.bought,
+          failed: bundle.failed,
+          pending: bundle.pending,
+        }
+      );
+    }
+
+    res.json({
+      ...jsonSafe(result),
+      plan: publicPlan(plan),
+      bundle: bundle ? jsonSafe(bundle) : null,
+      buyPlan: buyPlan ? publicBuyPlan(buyPlan) : null,
+      bundleSkipped: bundleSkipped || null,
+    });
+  } catch (err) {
+    next(err);
+  } finally {
+    buying.delete(id);
+  }
+}));
 
 // POST /api/v5/bundle/preflight — build and SIGN the untaxed token fan-out from
 // the launcher to the bundle wallets, broadcast nothing. Returns the public plan

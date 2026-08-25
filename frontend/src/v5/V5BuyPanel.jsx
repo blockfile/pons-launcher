@@ -53,11 +53,13 @@ function countdown(seconds) {
 }
 
 /**
- * The V1-style half of step 4 — every bundle wallet BUYS the token from the
- * pool with its own ETH, instead of the launcher's fan-out transfer(). This
- * has no <Step> of its own: V5BundlePanel renders it inside its own Step once
- * the Method toggle there is set to "Each wallet buys", the same shell the
- * fan-out UI shares — see that file's `panelMode`.
+ * The per-wallet BUY half of the Bundle tools utility — every bundle wallet
+ * BUYS the token from the pool with its own ETH, instead of the launcher's
+ * fan-out transfer(). The PRIMARY per-wallet bundle now rides with the launch
+ * (the combined "Launch + bundle" step 3); this is the manual path, for topping
+ * up afterward or firing a bundle a combined run skipped. It has no <Step> of
+ * its own: V5BundlePanel renders it inside its own shell when the Method toggle
+ * there is set to "Each wallet buys" — see that file's `panelMode`.
  *
  * SAME TWO-ACTION SHAPE as every other v5 money path: Preflight (POST
  * /v5/bundle-buy/preflight) signs every wallet's buy against its own pending

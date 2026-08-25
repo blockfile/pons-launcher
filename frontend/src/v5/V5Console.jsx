@@ -18,7 +18,10 @@ import V5LauncherPanel from './V5LauncherPanel.jsx';
  * App renders one or the other; this component holds v5's launcher and bundle
  * wallets, and nothing it does can change what another tab is drawing.
  *
- * All six steps work: Wallets, Fund, Launch, Bundle, Sell and Sweep.
+ * Five numbered steps — Wallets, Fund, Launch + bundle, Sell, Sweep — uniform
+ * with the pons v1 Launcher tab, where the launch and the bundle are one action.
+ * Two unnumbered utilities follow: the manual Bundle tools (fan-out / extra
+ * buys / recovery) and the Launcher rescue.
  */
 
 export default function V5Console({ health, credential, report, output, reportedAt }) {
@@ -126,17 +129,16 @@ export default function V5Console({ health, credential, report, output, reported
       {
         key: 'launch',
         n: 3,
-        title: 'Launch',
+        title: 'Launch + bundle',
         done: Boolean(lastLaunch),
         detail: lastLaunch
           ? `${lastLaunch.plan?.params?.symbol || lastLaunch.token || '—'} · ${
               lastLaunch.launch?.status || (lastLaunch.pending ? 'pending' : '—')
             }`
-          : 'the letscash launch and its atomic first buy',
+          : 'launch, then every bundle wallet buys — one action',
       },
-      { key: 'bundle', n: 4, title: 'Bundle', done: false, detail: 'fan the first-buy supply out to the bundle' },
-      { key: 'sell', n: 5, title: 'Sell', done: false, detail: 'unwind the bundle back to ETH' },
-      { key: 'sweep', n: 6, title: 'Sweep', done: false, detail: 'collect what is left to one wallet' },
+      { key: 'sell', n: 4, title: 'Sell', done: false, detail: 'unwind the bundle back to ETH' },
+      { key: 'sweep', n: 5, title: 'Sweep', done: false, detail: 'collect what is left to one wallet' },
     ];
 
     let previousRequired = null;
@@ -216,23 +218,13 @@ export default function V5Console({ health, credential, report, output, reported
       <V5LaunchPanel
         step={step('launch')}
         dev={dev}
+        bundle={bundle}
         launchConfigs={launchConfigs}
         live={live}
         explorer={explorer}
         reload={loadWallets}
         report={report}
         onLaunched={setLastLaunch}
-      />
-
-      <V5BundlePanel
-        step={step('bundle')}
-        dev={dev}
-        bundle={bundle}
-        lastLaunch={lastLaunch}
-        live={live}
-        explorer={explorer}
-        reload={loadWallets}
-        report={report}
       />
 
       <V5SellPanel
@@ -247,7 +239,7 @@ export default function V5Console({ health, credential, report, output, reported
       />
 
       <V5SweepPanel
-        step={{ ...step('sweep'), last: true }}
+        step={step('sweep')}
         dev={dev}
         bundle={bundle}
         lastLaunch={lastLaunch}
@@ -257,7 +249,31 @@ export default function V5Console({ health, credential, report, output, reported
         report={report}
       />
 
-      {/* Not one of the six — a folded-away utility for the launcher's own
+      {/* Not one of the numbered steps — the combined step 3 already launches
+          AND buys the bundle. This is the MANUAL bundle: the untaxed fan-out,
+          topping up with extra per-wallet buys, or firing the bundle by hand
+          when a combined run confirmed the launch but skipped the buys
+          (bundleSkipped). Unnumbered and rendered here, after the flow, so the
+          step-by-step operator never has to choose between two "bundle" steps. */}
+      <V5BundlePanel
+        step={{
+          id: 'v5-bundle-tools',
+          n: null,
+          label: 'Utility',
+          title: 'Bundle tools — fan-out & extra buys',
+          state: 'later',
+          chip: null,
+        }}
+        dev={dev}
+        bundle={bundle}
+        lastLaunch={lastLaunch}
+        live={live}
+        explorer={explorer}
+        reload={loadWallets}
+        report={report}
+      />
+
+      {/* Not one of the numbered steps — a folded-away utility for the launcher's own
           value-OUT path (withdraw, and clearing a stuck tx). Last on the
           page, deliberately outside the numbered flow: see its own header
           comment for why it forces itself open when the launcher is stuck. */}
