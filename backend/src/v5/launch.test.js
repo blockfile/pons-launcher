@@ -20,8 +20,15 @@ const test = require('node:test');
 const assert = require('node:assert');
 const { Wallet, Transaction, parseEther, formatEther, getAddress, ZeroAddress } = require('ethers');
 
-const { prepareLaunch, fireLaunch, reconcileLaunch, resultFromReceipt } = require('./launch');
+const {
+  prepareLaunch,
+  fireLaunch,
+  reconcileLaunch,
+  resultFromReceipt,
+  approveQuoteForLaunch,
+} = require('./launch');
 const config = require('../config');
+const USDG = getAddress(config.letscash.usdg);
 
 const DEV = getAddress('0x' + '11'.repeat(20));
 const OTHER = getAddress('0x' + '22'.repeat(20));
@@ -228,30 +235,106 @@ test('prepareLaunch refuses to sign while the launcher has a tx in flight (resta
   assert.equal(ks.signCalls.length, 0, 'nothing is signed against an unsettled launcher');
 });
 
-test('a config quoted in something other than ETH refuses a non-zero first buy', async () => {
-  const { deps } = prepDeps({
-    getConfigs: async () => ({
-      launchEnabled: true,
-      launchFeeWei: FEE.toString(),
-      firstConfigId: 1000,
-      nextConfigId: 1003,
-      configs: [
-        {
-          configId: 1002,
-          quoteAsset: getAddress(require('../config').letscash.usdg),
-          quoteIsNative: false,
-          quoteSymbol: 'USDG',
-          enabled: true,
-          supply: '1',
-          taxLabel: '3%',
-          mode: 'creator',
-        },
-      ],
-    }),
+// ── USDG-quoted launches ──────────────────────────────────────────────────────
+// A USDG first buy is pulled from the launcher by the factory, so the launcher
+// must HOLD the USDG and have APPROVED the factory (a separate one-time action).
+function usdgDeps(over = {}) {
+  const ks = fakeKs();
+  const provider = fakeProvider();
+  return {
+    ks,
+    provider,
+    deps: {
+      keystore: ks,
+      factory: fakeFactory({
+        getConfigs: async () => ({
+          launchEnabled: true,
+          launchFeeWei: FEE.toString(),
+          firstConfigId: 1000,
+          nextConfigId: 1003,
+          configs: [
+            {
+              configId: 1002,
+              quoteAsset: USDG,
+              quoteIsNative: false,
+              quoteSymbol: 'USDG',
+              enabled: true,
+              supply: '1',
+              taxLabel: '3%',
+              mode: 'creator',
+            },
+          ],
+        }),
+      }),
+      provider,
+      runner: provider,
+      getFees: async () => ({ type: 2, maxFeePerGas: 1_000_000_000n, maxPriorityFeePerGas: 1_000_000n }),
+      getDecimals: async () => 6, // USDG
+      readQuoteBalance: over.readQuoteBalance || (async () => 1_000_000_000n), // 1000 USDG
+      readQuoteAllowance: over.readQuoteAllowance || (async () => 0n),
+    },
+  };
+}
+
+test('a USDG config refuses the first buy until the launcher has approved the factory', async () => {
+  const { deps, ks } = usdgDeps({ readQuoteAllowance: async () => 0n });
+  await assert.rejects(() => prepareLaunch({ ...baseInput, configId: 1002, firstBuy: '0.1', firstBuyEth: undefined }, deps), /has not approved the factory/);
+  assert.equal(ks.signCalls.length, 0, 'nothing is signed for an unapproved USDG launch');
+});
+
+test('a USDG config refuses when the launcher holds too little USDG', async () => {
+  const { deps } = usdgDeps({ readQuoteBalance: async () => 1n, readQuoteAllowance: async () => 10n ** 18n });
+  await assert.rejects(() => prepareLaunch({ ...baseInput, configId: 1002, firstBuy: '0.1', firstBuyEth: undefined }, deps), /fund the launcher with USDG/);
+});
+
+test('a USDG config with balance + allowance signs — fee in ETH, first buy in USDG', async () => {
+  const { deps, ks } = usdgDeps({
+    readQuoteBalance: async () => 1_000_000_000n,
+    readQuoteAllowance: async () => 1_000_000_000n,
   });
+  const plan = await prepareLaunch({ ...baseInput, configId: 1002, firstBuy: '0.1', firstBuyEth: undefined }, deps);
+  assert.equal(ks.signCalls.length, 1, 'the launch signs once');
+  assert.equal(ks.lastSignable.value, FEE, 'a USDG launch sends only the ETH fee in value (USDG is pulled)');
+  assert.equal(plan.firstBuyQuote, 'USDG');
+  assert.equal(plan.firstBuyAmount, '0.1', 'the first buy is reported in USDG units');
+  assert.equal(plan.launch.firstBuyEth, '0.0', 'no ETH rides along for a USDG first buy');
+});
+
+test('a USDG config rejects the legacy firstBuyEth field (units would be ambiguous)', async () => {
+  const { deps } = usdgDeps({ readQuoteAllowance: async () => 10n ** 18n });
   await assert.rejects(
-    () => prepareLaunch({ ...baseInput, configId: 1002 }, deps),
-    /non-ETH atomic first buy is not supported/
+    () => prepareLaunch({ ...baseInput, configId: 1002 }, deps), // baseInput carries firstBuyEth
+    /pass the first buy as `firstBuy`/
+  );
+});
+
+test('approveQuoteForLaunch broadcasts a MAX factory approval from the launcher', async () => {
+  const ks = fakeKs();
+  const provider = fakeProvider({ getTransactionReceipt: async () => ({ status: 1, blockNumber: 3 }) });
+  const out = await approveQuoteForLaunch(
+    {},
+    {
+      keystore: ks,
+      provider,
+      dryRun: false,
+      getFees: async () => ({ type: 2, maxFeePerGas: 1n, maxPriorityFeePerGas: 1n }),
+      getDecimals: async () => 6,
+      waitForReceipt: (rpc, h) => rpc.getTransactionReceipt(h),
+    }
+  );
+  assert.equal(out.status, 'confirmed');
+  assert.equal(out.amount, 'MAX');
+  assert.equal(provider.broadcasts.length, 1, 'exactly one approval is broadcast');
+});
+
+test('approveQuoteForLaunch refuses to approve ETH (needs no approval)', async () => {
+  await assert.rejects(
+    () =>
+      approveQuoteForLaunch(
+        { quote: '0x0000000000000000000000000000000000000000' },
+        { keystore: fakeKs(), provider: fakeProvider(), getFees: async () => ({ maxFeePerGas: 1n }), getDecimals: async () => 18 }
+      ),
+    /ETH needs no approval/
   );
 });
 

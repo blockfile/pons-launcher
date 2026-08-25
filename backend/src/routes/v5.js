@@ -22,7 +22,7 @@ const { requireApiKey } = require('../middleware/auth');
 const { provider } = require('../evm/provider');
 const v5roles = require('../v5/roles');
 const factoryModule = require('../evm/v5/factory');
-const { prepareLaunch, fireLaunch, reconcileLaunch } = require('../v5/launch');
+const { prepareLaunch, fireLaunch, reconcileLaunch, approveQuoteForLaunch, quoteAllowanceStatus } = require('../v5/launch');
 const { prepareBundle, fireBundle } = require('../v5/bundle');
 const { prepareSell, fireSell } = require('../v5/sell');
 
@@ -102,6 +102,10 @@ function launchActivityDetail(result, plan) {
     quote: plan.quote,
     configId: plan.configId,
     firstBuyEth: plan.launch.firstBuyEth,
+    // The first buy in the config's own quote units (USDG for a USDG launch); null
+    // on the reconcile path, which has no full plan.
+    firstBuyAmount: plan.launch.firstBuyAmount ?? null,
+    firstBuyQuote: plan.firstBuyQuote ?? null,
     firstBuyOut: result.firstBuyOut || null,
     launchHash: result.launch.hash,
     blockNumber: result.launch.blockNumber,
@@ -316,6 +320,39 @@ router.post('/v5/launch/preflight', requireApiKey, async (req, res, next) => {
   try {
     const plan = await prepareLaunch(req.body || {}, { keystore: keystoreFor(req.user.id) });
     res.json({ plan: publicPlan(plan), simulate: jsonSafe(plan.simulate) });
+  } catch (err) {
+    next(err);
+  }
+});
+
+// GET /api/v5/launch/quote-allowance — the launcher's USDG balance + its allowance
+// to the factory, so the console can tell whether a USDG first buy is fundable and
+// approved before a launch is attempted. ?quote overrides USDG (default).
+router.get('/v5/launch/quote-allowance', requireApiKey, async (req, res, next) => {
+  try {
+    const out = await quoteAllowanceStatus({ quote: req.query?.quote }, { keystore: keystoreFor(req.user.id) });
+    res.json(jsonSafe(out));
+  } catch (err) {
+    next(err);
+  }
+});
+
+// POST /api/v5/launch/approve — approve the factory to pull the launcher's USDG for
+// a first buy (a one-time setup, separate from the launch so the allowance exists
+// on-chain before preflight simulates). Broadcasts one approval from the launcher.
+// { amount } bounds it (whole USDG units); omit for MAX.
+router.post('/v5/launch/approve', requireApiKey, async (req, res, next) => {
+  try {
+    const out = await approveQuoteForLaunch(req.body || {}, { keystore: keystoreFor(req.user.id) });
+    activityFor(req.user.id).record('v5', `[v5] approved factory to pull ${out.amount} USDG (${out.status})`, {
+      kind: 'approve-quote',
+      quote: out.quote,
+      spender: out.spender,
+      amount: out.amount,
+      hash: out.hash,
+      status: out.status,
+    });
+    res.json(jsonSafe(out));
   } catch (err) {
     next(err);
   }

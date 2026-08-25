@@ -178,9 +178,22 @@ test('prepareSell REFUSES without a verified hook — the decoy-pool guard', asy
   assert.equal(ks.signCalls.length, 0, 'nothing is signed without a pinned pool');
 });
 
-test('prepareSell refuses a non-ETH quote (ETH-only exit for now)', async () => {
+test('prepareSell accepts a USDG quote and denominates the estimate in USDG', async () => {
+  // quoteSell returns 2_000_000 base units; with USDG decimals (6) that is 2.0 USDG.
+  const { deps: d } = deps({ swap: { quoteSell: async () => ({ expectedOut: 2_000_000n, minOut: 0n }) } });
+  d.getDecimals = async (addr) => (addr && addr.toLowerCase() === require('../config').letscash.usdg ? 6 : 18);
+  const plan = await prepareSell({ token: TOKEN, hook: HOOK, quote: 'usdg' }, d);
+  assert.equal(plan.quoteSymbol, 'USDG');
+  assert.equal(plan.quoteIsNative, false);
+  assert.equal(plan.wallets[0].estEthOut, '2.0', 'the estimate is denominated in USDG (6 dec), not ETH');
+});
+
+test('prepareSell refuses a quote that is neither ETH nor USDG', async () => {
   const { deps: d } = deps();
-  await assert.rejects(() => prepareSell({ token: TOKEN, hook: HOOK, quote: 'usdg' }, d), /exits to ETH only/);
+  await assert.rejects(
+    () => prepareSell({ token: TOKEN, hook: HOOK, quote: '0x00000000000000000000000000000000000000ff' }, d),
+    /ETH or USDG only/
+  );
 });
 
 test('prepareSell refuses a bad token and an empty bundle and a no-holders case', async () => {

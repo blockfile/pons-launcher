@@ -97,13 +97,17 @@ async function prepareSell(input, deps = {}) {
   if (!token || !isAddress(String(token))) throw new Error('token must be the launched ERC-20 address');
   const tokenAddr = getAddress(token);
 
-  // ETH-only exit for now — a USDG-quoted sell would route to USDG but is reported
-  // as an ETH exit, so refuse it rather than mis-denominate. (Matches the launch's
-  // ETH-only first-buy scope; USDG is a later phase.)
+  // The exit quote — ETH or USDG (the two letscash quotes). A USDG-quoted token
+  // sells token → USDG; proceeds are then denominated in USDG units, not ETH.
   const q = String(quote).toLowerCase();
-  if (q !== 'eth' && q !== 'native' && q !== '0x0000000000000000000000000000000000000000') {
-    throw new Error('the v5 sell exits to ETH only for now — omit quote or pass "eth"');
+  const usdgAddr = getAddress(config.letscash.usdg);
+  const isNativeQuote = q === 'eth' || q === 'native' || q === '0x0000000000000000000000000000000000000000';
+  const isUsdg = q === 'usdg' || (isAddress(q) && getAddress(q) === usdgAddr);
+  if (!isNativeQuote && !isUsdg) {
+    throw new Error('the v5 sell exits to ETH or USDG only — pass "eth" (default) or "usdg"');
   }
+  const quoteDecimals = isNativeQuote ? 18 : Number(await decimalsOf(usdgAddr));
+  const quoteSymbol = isNativeQuote ? 'ETH' : 'USDG';
 
   // THE decoy-pool guard. resolvePoolKey WITHOUT a hook probes candidate hooks and
   // takes the first live pool — and on the permissionless V4 PoolManager an
@@ -224,7 +228,9 @@ async function prepareSell(input, deps = {}) {
       address: wallet.address,
       tokens: formatUnits(balance, decimals),
       tokensRaw: balance.toString(),
-      estEthOut: estEthOut == null ? null : formatEther(estEthOut),
+      // The estimate is in the QUOTE's units (ETH or USDG); estEthOut keeps its
+      // name for back-compat but is denominated by quoteSymbol on the plan.
+      estEthOut: estEthOut == null ? null : formatUnits(estEthOut, quoteDecimals),
       estEthOutRaw: estEthOut == null ? null : estEthOut.toString(),
       approvals: signedApprovals,
       sell,
@@ -254,14 +260,16 @@ async function prepareSell(input, deps = {}) {
     decimals,
     hook: resolved.hook,
     poolId: resolved.poolId,
-    quote: 'eth',
+    quote: isNativeQuote ? 'eth' : usdgAddr,
+    quoteSymbol,
+    quoteIsNative: isNativeQuote,
     minOutFloor: slippageBps > 0 ? `${slippageBps}bps` : '0 (no floor)',
     dryRun,
     wallets: out,
     skipped,
     walletCount: out.length,
     totalTokens: formatUnits(totalTokens, decimals),
-    estEthOutTotal: estEthTotal > 0n ? formatEther(estEthTotal) : null,
+    estEthOutTotal: estEthTotal > 0n ? formatUnits(estEthTotal, quoteDecimals) : null,
     fees: stringifyFees(fees),
     erc20ApproveGas: ERC20_APPROVE_GAS.toString(),
     permit2ApproveGas: PERMIT2_APPROVE_GAS.toString(),

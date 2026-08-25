@@ -38,18 +38,31 @@
 // orchestrates them, signs, and broadcasts.
 // ─────────────────────────────────────────────────────────────────────────────
 
-const { parseEther, formatEther, getAddress, ZeroAddress, Transaction } = require('ethers');
+const { parseEther, parseUnits, formatEther, formatUnits, getAddress, ZeroAddress, Interface, Transaction } = require('ethers');
 const config = require('../config');
 const { provider, warmPool } = require('../evm/provider');
 const { getFees, gasCost } = require('../evm/fees');
 const { waitForReceipt } = require('../evm/receipt');
 const { keystoreFor } = require('../wallets/keystore');
+const { getDecimals } = require('../evm/erc20');
 const factoryModule = require('../evm/v5/factory');
 const v5roles = require('./roles');
+
+// balanceOf/allowance/approve for a USDG-quoted first buy. erc20.js exposes only
+// read+transfer, so the approval fragment lives here with the launch.
+const quoteErc20Iface = new Interface([
+  'function balanceOf(address) view returns (uint256)',
+  'function allowance(address owner, address spender) view returns (uint256)',
+  'function approve(address spender, uint256 amount) returns (bool)',
+]);
 
 // Same +25% headroom the pons launcher uses, so a launch is not the transaction
 // left behind when the base fee ticks up between preflight and broadcast.
 const FEE_BUMP_PCT = 25;
+
+// A USDG first buy needs the launcher to approve the factory to pull it. Generous;
+// unused gas is refunded.
+const APPROVE_GAS = 90_000n;
 
 // Vanity-salt search bounds. mineSalt runs the whole search inside ONE eth_call
 // (bounded by `rounds`), so a call is one round trip covering `rounds` tries. The
@@ -137,6 +150,21 @@ async function prepareLaunch(input, deps = {}) {
   const prov = deps.provider || provider;
   const runner = deps.runner || prov; // what the factory's read/build calls use
   const getFeesFn = deps.getFees || getFees;
+  const decimalsOf = deps.getDecimals || getDecimals; // for a USDG first buy's units
+  const readQuoteBalance =
+    deps.readQuoteBalance ||
+    (async (t, o) =>
+      quoteErc20Iface.decodeFunctionResult(
+        'balanceOf',
+        await prov.call({ to: t, data: quoteErc20Iface.encodeFunctionData('balanceOf', [o]) })
+      )[0]);
+  const readQuoteAllowance =
+    deps.readQuoteAllowance ||
+    (async (t, o, s) =>
+      quoteErc20Iface.decodeFunctionResult(
+        'allowance',
+        await prov.call({ to: t, data: quoteErc20Iface.encodeFunctionData('allowance', [o, s]) })
+      )[0]);
 
   const { params, configId } = input;
   if (params == null || !params.name || !params.symbol) {
@@ -209,19 +237,53 @@ async function prepareLaunch(input, deps = {}) {
   }
 
   // ── the atomic first buy ───────────────────────────────────────────────────
-  // Supported in ETH here. A non-ETH (USDG) first buy is pulled from the launcher
-  // via transferFrom and is denominated in the token's own 6-decimal units, which
-  // this path does not yet size or approve — so a non-native config may launch
-  // with NO first buy, but a non-zero first buy on one is refused rather than
-  // parsed at the wrong scale. (An ETH-quoted config is the bundler's normal case.)
-  const firstBuyEthNum = Number(input.firstBuyEth || 0);
-  if (!native && firstBuyEthNum > 0) {
+  // Denominated in the CONFIG'S QUOTE units: an ETH-quoted config takes ETH (18
+  // dec, ridden in msg.value), a USDG-quoted config takes USDG (6 dec, PULLED from
+  // the launcher by the factory via transferFrom — so it must be approved first,
+  // handled below). The amount comes from input.firstBuy (or the legacy
+  // firstBuyEth alias) as a decimal string in those units, never wei.
+  const quoteDecimals = native ? 18 : Number(await decimalsOf(quoteAddr));
+  // On a USDG config the amount is in USDG units, so it must come via `firstBuy`,
+  // NOT the legacy `firstBuyEth` alias — a caller passing firstBuyEth:"5" on a USDG
+  // config would otherwise silently buy 5 USDG, not 5-ETH-worth. Refuse the
+  // ambiguous field rather than mis-denominate.
+  if (!native && input.firstBuy == null && Number(String(input.firstBuyEth ?? '').trim() || 0) > 0) {
     throw new Error(
-      `config ${configId} is quoted in ${cfg.quoteSymbol}; a non-ETH atomic first buy is not ` +
-        'supported by this path yet — launch with firstBuyEth = 0, or choose an ETH-quoted config'
+      `config ${configId} is quoted in ${cfg.quoteSymbol} — pass the first buy as \`firstBuy\` in ` +
+        `${cfg.quoteSymbol} units, not \`firstBuyEth\``
     );
   }
-  const firstBuyIn = native ? parseEther(String(input.firstBuyEth || 0)) : 0n;
+  // Blank/empty means no first buy (0), not a parse error.
+  const firstBuyAmountStr = String(input.firstBuy ?? input.firstBuyEth ?? 0).trim() || '0';
+  const firstBuyIn = parseUnits(firstBuyAmountStr, quoteDecimals);
+
+  // A USDG first buy is PULLED from the launcher by the factory (transferFrom), so
+  // the launcher must both HOLD the USDG and have APPROVED the factory to pull it.
+  // That approval is a SEPARATE, one-time operator action (approveQuoteForLaunch /
+  // the Approve button), deliberately NOT folded into this signed launch: keeping
+  // the allowance on-chain BEFORE preflight is exactly what lets simulateLaunch —
+  // the "never sign a doomed launch" fail-safe — eth_call the real launch and pass
+  // (the factory's transferFrom would revert against an unapproved launcher). So we
+  // verify balance + allowance here and refuse with a clear instruction, rather
+  // than sign a launch that would revert.
+  if (!native && firstBuyIn > 0n) {
+    const [held, allowed] = await Promise.all([
+      readQuoteBalance(quoteAddr, dev.address),
+      readQuoteAllowance(quoteAddr, dev.address, config.letscash.factory),
+    ]);
+    if (held < firstBuyIn) {
+      throw new Error(
+        `the launcher holds ${formatUnits(held, quoteDecimals)} ${cfg.quoteSymbol} but the first buy ` +
+          `needs ${firstBuyAmountStr} — fund the launcher with ${cfg.quoteSymbol} first`
+      );
+    }
+    if (allowed < firstBuyIn) {
+      throw new Error(
+        `the launcher has not approved the factory to pull ${firstBuyAmountStr} ${cfg.quoteSymbol} — ` +
+          'approve it first (POST /v5/launch/approve, or the Approve button), then launch'
+      );
+    }
+  }
 
   // ── firstBuyMinOut: DEFAULT 0, and that is the SAFE choice here ─────────────
   // letscash's hook rejects partial fills, so a first buy that cannot clear its
@@ -339,9 +401,13 @@ async function prepareLaunch(input, deps = {}) {
   const needed = value + gasCost(fees, gasLimit);
   const balance = await prov.getBalance(dev.address);
   if (balance < needed) {
+    // value = fee + firstBuyIn for native, fee only for USDG (its first buy is
+    // pulled as USDG, not ridden in msg.value), so the ETH first-buy portion is
+    // value − fee: firstBuyIn for ETH, 0 for USDG. Report it honestly.
+    const ethFirstBuy = value - launchFee;
     throw new Error(
       `v5dev ${dev.address} holds ${formatEther(balance)} ETH but the launch needs ` +
-        `${formatEther(needed)} (fee ${formatEther(launchFee)} + first buy ${formatEther(firstBuyIn)} + gas)`
+        `${formatEther(needed)} (fee ${formatEther(launchFee)} + ETH first buy ${formatEther(ethFirstBuy)} + gas)`
     );
   }
 
@@ -389,13 +455,20 @@ async function prepareLaunch(input, deps = {}) {
     params: fullParams,
     firstBuyMinOut: firstBuyMinOut.toString(),
     launchFeeEth: formatEther(launchFee),
+    // The first buy in the CONFIG'S quote units (ETH or USDG), the authoritative
+    // figure. firstBuyEth stays for the native case / back-compat and is the ETH
+    // that actually rides in msg.value (0 for a USDG launch — its buy is pulled as
+    // USDG, not sent as ETH).
+    firstBuyAmount: formatUnits(firstBuyIn, quoteDecimals),
+    firstBuyQuote: cfg.quoteSymbol,
     launch: {
       walletId: dev.id,
       address: dev.address,
       raw, // SIGNED — the routes strip this before the plan ever leaves the server
       nonce,
       valueEth: formatEther(value),
-      firstBuyEth: formatEther(firstBuyIn),
+      firstBuyEth: formatEther(value - launchFee),
+      firstBuyAmount: formatUnits(firstBuyIn, quoteDecimals),
       gas: gasLimit.toString(),
     },
     // The preview the preflight route returns alongside the public plan.
@@ -686,10 +759,112 @@ async function reconcileLaunch(pending, deps = {}) {
   return resultFromReceipt(null, pending, pending.hash, { parseReceipt });
 }
 
+/**
+ * Read the launcher's quote (USDG) balance and its allowance to the factory, so
+ * the console can tell whether a USDG first buy is fundable + approved before the
+ * operator tries to launch. ETH needs neither, so a native quote answers trivially.
+ */
+async function quoteAllowanceStatus(input = {}, deps = {}) {
+  const ks = deps.keystore || keystoreFor();
+  const roles = deps.roles || v5roles;
+  const prov = deps.provider || provider;
+  const decimalsOf = deps.getDecimals || getDecimals;
+  const readBal =
+    deps.readQuoteBalance ||
+    (async (t, o) =>
+      quoteErc20Iface.decodeFunctionResult(
+        'balanceOf',
+        await prov.call({ to: t, data: quoteErc20Iface.encodeFunctionData('balanceOf', [o]) })
+      )[0]);
+  const readAllow =
+    deps.readQuoteAllowance ||
+    (async (t, o, s) =>
+      quoteErc20Iface.decodeFunctionResult(
+        'allowance',
+        await prov.call({ to: t, data: quoteErc20Iface.encodeFunctionData('allowance', [o, s]) })
+      )[0]);
+
+  const dev = roles.dev(ks);
+  if (!dev) throw new Error('no v5dev launcher wallet — generate one first');
+  const quoteAddr = getAddress(
+    input.quote && String(input.quote).toLowerCase() !== 'usdg' ? input.quote : config.letscash.usdg
+  );
+  const factoryAddr = getAddress(config.letscash.factory);
+  const decimals = Number(await decimalsOf(quoteAddr));
+  const [balance, allowance] = await Promise.all([
+    readBal(quoteAddr, dev.address),
+    readAllow(quoteAddr, dev.address, factoryAddr),
+  ]);
+  return {
+    quote: quoteAddr,
+    factory: factoryAddr,
+    decimals,
+    balance: formatUnits(balance, decimals),
+    balanceRaw: balance.toString(),
+    allowance: formatUnits(allowance, decimals),
+    allowanceRaw: allowance.toString(),
+  };
+}
+
+/**
+ * Approve the letscash factory to pull the launcher's USDG for a first buy. A
+ * one-time (or top-up) operator action, SEPARATE from the launch by design: the
+ * allowance must exist ON-CHAIN before preflight so simulateLaunch can eth_call
+ * the real launch (the factory's transferFrom reverts against an unapproved
+ * launcher). Approves MAX by default (reusable); pass an amount to bound it.
+ *
+ * @param {{ amount?: string, quote?: string }} input  amount in whole quote units; omit for MAX.
+ * @returns {Promise<object>} { hash, spender, quote, amount, status }
+ */
+async function approveQuoteForLaunch(input = {}, deps = {}) {
+  const ks = deps.keystore || keystoreFor();
+  const roles = deps.roles || v5roles;
+  const prov = deps.provider || provider;
+  const getFeesFn = deps.getFees || getFees;
+  const decimalsOf = deps.getDecimals || getDecimals;
+  const dryRun = deps.dryRun ?? config.dryRun;
+  const awaitReceipt = deps.waitForReceipt || waitForReceipt;
+
+  const dev = roles.dev(ks);
+  if (!dev) throw new Error('no v5dev launcher wallet — generate one first');
+
+  const quoteAddr = getAddress(
+    input.quote && String(input.quote).toLowerCase() !== 'usdg' ? input.quote : config.letscash.usdg
+  );
+  if (quoteAddr === ZeroAddress) {
+    throw new Error('ETH needs no approval — this action is for a USDG (ERC-20) first buy');
+  }
+  const factoryAddr = getAddress(config.letscash.factory);
+  const decimals = Number(await decimalsOf(quoteAddr));
+  const MAX_UINT256 = (1n << 256n) - 1n;
+  const amountWei = input.amount != null ? parseUnits(String(input.amount), decimals) : MAX_UINT256;
+  const amountLabel = input.amount != null ? String(input.amount) : 'MAX';
+
+  const data = quoteErc20Iface.encodeFunctionData('approve', [factoryAddr, amountWei]);
+  const fees = await getFeesFn(FEE_BUMP_PCT);
+  const chainId = BigInt(config.chainId);
+
+  if (dryRun) {
+    return { simulated: true, spender: factoryAddr, quote: quoteAddr, amount: amountLabel, status: 'simulated', hash: null };
+  }
+
+  const nonce = await prov.getTransactionCount(dev.address, 'pending');
+  const signer = ks.signer(dev.id, prov);
+  const raw = await signer.signTransaction(
+    toSignable({ to: quoteAddr, data, value: 0n }, { nonce, gasLimit: APPROVE_GAS, fees, chainId })
+  );
+  const resp = await prov.broadcastTransaction(raw);
+  const receipt = await awaitReceipt(prov, resp.hash);
+  const status = !receipt ? 'pending' : receipt.status === 1 ? 'confirmed' : 'reverted';
+  return { spender: factoryAddr, quote: quoteAddr, amount: amountLabel, hash: resp.hash, status };
+}
+
 module.exports = {
   prepareLaunch,
   fireLaunch,
   reconcileLaunch,
+  approveQuoteForLaunch,
+  quoteAllowanceStatus,
   // Exported for tests and reuse.
   resultFromReceipt,
   toSignable,

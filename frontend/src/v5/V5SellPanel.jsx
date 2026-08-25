@@ -157,6 +157,13 @@ export default function V5SellPanel({ step, dev, bundle, lastLaunch, live, explo
   const ready = tokenReady && !noWallets;
   const blocked = live && !armed;
 
+  // The quote a preflight's plan actually sold into — ETH by default before one
+  // has run, since the console has no signal of a token's quote asset before
+  // then (the exit auto-detects it via the pool). estEthOut / estEthOutTotal on
+  // the plan are already denominated in this unit, whatever it is; only the
+  // label here needs to say so honestly instead of assuming ETH.
+  const quoteSymbol = plan?.quoteSymbol || 'ETH';
+
   const results = Array.isArray(result?.wallets) ? result.wallets : [];
   const failedCount = result?.failed ?? results.filter((r) => r.status === 'reverted' || r.status === 'send-failed').length;
   const pendingCount = result?.pending ?? results.filter((r) => r.status === 'pending').length;
@@ -267,8 +274,8 @@ export default function V5SellPanel({ step, dev, bundle, lastLaunch, live, explo
               {plural(plan.walletCount, 'wallet')} exiting · {fmt(plan.totalTokens)} {plan.symbol}
             </li>
             <li>
-              est. ETH out{' '}
-              {plan.estEthOutTotal != null ? `${eth(plan.estEthOutTotal)} ETH` : 'unknown until it lands'}
+              est. {quoteSymbol} out{' '}
+              {plan.estEthOutTotal != null ? `${eth(plan.estEthOutTotal)} ${quoteSymbol}` : 'unknown until it lands'}
             </li>
             <li>minimum-out floor: {plan.minOutFloor}</li>
           </ul>
@@ -278,7 +285,7 @@ export default function V5SellPanel({ step, dev, bundle, lastLaunch, live, explo
                 <tr>
                   <th>Address</th>
                   <th className="num">Tokens</th>
-                  <th className="num">Est. ETH out</th>
+                  <th className="num">Est. {quoteSymbol} out</th>
                 </tr>
               </thead>
               <tbody>

@@ -17,7 +17,7 @@ const BLANK = {
   discord: '',
   website: '',
   extra: '',
-  firstBuyEth: '0',
+  firstBuyAmount: '0',
   configId: '',
 };
 
@@ -74,6 +74,11 @@ export default function V5LaunchPanel({ step, dev, launchConfigs, live, explorer
   const [armed, setArmed] = useState(false);
   const [pendingBody, setPendingBody] = useState(null); // the body a confirm dialog is about to fire
   const [parked, setParked] = useState(false);
+  // The launcher's USDG balance + its allowance to the factory (GET /v5/launch/
+  // quote-allowance), read whenever a non-native config is selected — an ETH
+  // config needs neither, so this stays null for one.
+  const [quoteInfo, setQuoteInfo] = useState(null);
+  const [quoteInfoBusy, setQuoteInfoBusy] = useState(false);
 
   const set = (k) => (e) => setF((prev) => ({ ...prev, [k]: e.target.value }));
   const setLogo = (logo) => setF((prev) => ({ ...prev, logo }));
@@ -89,18 +94,58 @@ export default function V5LaunchPanel({ step, dev, launchConfigs, live, explorer
     setF((prev) => ({ ...prev, configId: String(enabledConfigs[0].configId) }));
   }, [launchConfigs]);
 
-  // Only an ETH-quoted config can take a nonzero atomic first buy — a non-ETH
-  // (USDG) first buy is pulled by allowance and this path does not size or
-  // approve that yet (see v5/launch.js's prepareLaunch). Force it back to 0
-  // rather than let the field hold a value the server will refuse.
+  // A non-native (USDG) config's first buy is PULLED from the launcher by the
+  // factory's allowance, not ridden in msg.value — so the console needs to know
+  // that allowance (and the launcher's USDG balance) to gate Preflight/Launch
+  // and to offer the Approve button. Re-read it whenever the selected config
+  // changes to (or stays) a USDG one; an ETH config needs none of this.
   useEffect(() => {
-    if (cfg && !cfg.quoteIsNative && Number(f.firstBuyEth || 0) > 0) {
-      setF((prev) => ({ ...prev, firstBuyEth: '0' }));
+    if (!cfg || cfg.quoteIsNative) {
+      setQuoteInfo(null);
+      setQuoteInfoBusy(false);
+      return undefined;
     }
-  }, [cfg?.configId]);
+    let cancelled = false;
+    setQuoteInfoBusy(true);
+    (async () => {
+      try {
+        const out = await api('/v5/launch/quote-allowance?quote=usdg');
+        if (!cancelled) setQuoteInfo(out);
+      } catch (err) {
+        if (!cancelled) {
+          setQuoteInfo(null);
+          report(`ERROR: ${err.message}`);
+        }
+      } finally {
+        if (!cancelled) setQuoteInfoBusy(false);
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [cfg?.configId, cfg?.quoteIsNative]);
+
+  async function approveUsdg() {
+    setBusy('approve');
+    try {
+      // Approve exactly this first buy, not MAX: the launcher is a hot wallet and
+      // the factory is an upgradeable proxy, so a bounded, per-launch allowance
+      // keeps a compromised upgrade from ever pulling more than one first buy. The
+      // gate below re-shows this button if the amount is later raised.
+      const amount = f.firstBuyAmount && Number(f.firstBuyAmount) > 0 ? String(f.firstBuyAmount) : undefined;
+      const out = await api('/v5/launch/approve', 'POST', amount ? { amount } : {});
+      report(out);
+      const refreshed = await api('/v5/launch/quote-allowance?quote=usdg');
+      setQuoteInfo(refreshed);
+    } catch (err) {
+      report(`ERROR: ${err.message}`);
+    } finally {
+      setBusy('');
+    }
+  }
 
   function body() {
-    return {
+    const out = {
       params: {
         name: f.name.trim(),
         symbol: f.symbol.trim(),
@@ -115,8 +160,17 @@ export default function V5LaunchPanel({ step, dev, launchConfigs, live, explorer
         },
       },
       configId: Number(f.configId),
-      firstBuyEth: cfg && !cfg.quoteIsNative ? 0 : f.firstBuyEth || 0,
     };
+    // A USDG-quoted config's first buy is pulled by allowance, denominated in
+    // USDG units — sent as `firstBuy`, which the backend reads ahead of the
+    // legacy `firstBuyEth` alias (input.firstBuy ?? input.firstBuyEth). An
+    // ETH-quoted config keeps sending `firstBuyEth`, unchanged.
+    if (cfg && !cfg.quoteIsNative) {
+      out.firstBuy = f.firstBuyAmount || '0';
+    } else {
+      out.firstBuyEth = f.firstBuyAmount || '0';
+    }
+    return out;
   }
 
   async function preflight() {
@@ -188,14 +242,28 @@ export default function V5LaunchPanel({ step, dev, launchConfigs, live, explorer
   }
 
   const needed =
-    Number(launchConfigs?.launchFeeWei || 0) / 1e18 + (cfg && !cfg.quoteIsNative ? 0 : Number(f.firstBuyEth || 0));
+    Number(launchConfigs?.launchFeeWei || 0) / 1e18 + (cfg && !cfg.quoteIsNative ? 0 : Number(f.firstBuyAmount || 0));
   const devBalance = Number(dev?.balanceEth || 0);
   const underfunded = Boolean(dev) && needed > 0 && devBalance < needed;
+
+  // A USDG-quoted config with a nonzero typed first buy needs both a big-enough
+  // launcher balance and a big-enough factory allowance — read from quoteInfo,
+  // fetched above. While quoteInfo has not loaded (or failed to), treat the
+  // allowance as NOT proven sufficient: the backend will refuse an under-
+  // approved launch anyway, so guiding the operator to Approve first (or to
+  // wait for the read) is better than letting Preflight/Launch fail loudly.
+  const usdgQuoted = Boolean(cfg) && !cfg.quoteIsNative;
+  const usdgFirstBuy = usdgQuoted ? Number(f.firstBuyAmount || 0) : 0;
+  const usdgUnderfunded = usdgQuoted && usdgFirstBuy > 0 && quoteInfo != null && Number(quoteInfo.balance) < usdgFirstBuy;
+  const usdgAllowanceShort =
+    usdgQuoted && usdgFirstBuy > 0 && (quoteInfo == null || Number(quoteInfo.allowance) < usdgFirstBuy);
 
   const ready = Boolean(f.name.trim() && f.symbol.trim() && f.logo && f.configId) && !uploading;
   const blocked = live && !armed;
 
   const p = plan?.plan;
+  const pendingCfg = pendingBody ? enabledConfigs.find((c) => c.configId === pendingBody.configId) : null;
+  const pendingQuoteSymbol = pendingCfg?.quoteSymbol || 'ETH';
 
   return (
     <Step {...step}>
@@ -270,17 +338,16 @@ export default function V5LaunchPanel({ step, dev, launchConfigs, live, explorer
         </label>
 
         <label className="half">
-          First buy (ETH)
+          First buy ({cfg?.quoteSymbol || 'ETH'})
           <input
             type="number"
             step="0.0001"
-            value={f.firstBuyEth}
-            disabled={Boolean(cfg) && !cfg.quoteIsNative}
-            onChange={set('firstBuyEth')}
+            value={f.firstBuyAmount}
+            onChange={set('firstBuyAmount')}
           />
           <span className="hint">
             {cfg && !cfg.quoteIsNative
-              ? `config #${cfg.configId} is quoted in ${cfg.quoteSymbol} — an atomic first buy is ETH-only for now`
+              ? `pulled from the launcher's ${cfg.quoteSymbol} balance by allowance — approve the factory below before launching`
               : 'the guaranteed-first buy, made inside the launch itself — nothing can get ahead of it'}
           </span>
         </label>
@@ -326,6 +393,42 @@ export default function V5LaunchPanel({ step, dev, launchConfigs, live, explorer
         </div>
       )}
 
+      {usdgQuoted && (
+        <div className="row">
+          <span className="hint">
+            {quoteInfo
+              ? `launcher holds ${eth(quoteInfo.balance)} ${cfg.quoteSymbol} · allowance to the factory ${eth(quoteInfo.allowance)} ${cfg.quoteSymbol}`
+              : quoteInfoBusy
+                ? `reading the launcher's ${cfg.quoteSymbol} balance and allowance…`
+                : `could not read the launcher's ${cfg.quoteSymbol} balance — try reselecting the config`}
+          </span>
+        </div>
+      )}
+      {usdgUnderfunded && (
+        <div className="notice danger">
+          <h3>The launcher cannot cover this in {cfg.quoteSymbol}</h3>
+          <p>
+            It holds {eth(quoteInfo.balance)} {cfg.quoteSymbol} but this first buy needs {f.firstBuyAmount}{' '}
+            {cfg.quoteSymbol} — fund the launcher with {cfg.quoteSymbol} first.
+          </p>
+        </div>
+      )}
+      {usdgAllowanceShort && !usdgUnderfunded && (
+        <div className="notice warn">
+          <h3>Approve {cfg.quoteSymbol} first</h3>
+          <p>
+            The factory needs allowance to pull {f.firstBuyAmount} {cfg.quoteSymbol} from the launcher
+            for the atomic first buy.
+            {quoteInfo ? ` It currently allows ${eth(quoteInfo.allowance)} ${cfg.quoteSymbol}.` : ''}
+          </p>
+          <div className="row">
+            <Busy busy={busy === 'approve'} className="btn-primary" onClick={approveUsdg}>
+              Approve {cfg.quoteSymbol}
+            </Busy>
+          </div>
+        </div>
+      )}
+
       {parked && (
         <div className="notice danger">
           <h3>A previous launch never confirmed</h3>
@@ -350,8 +453,8 @@ export default function V5LaunchPanel({ step, dev, launchConfigs, live, explorer
             </li>
             <li>pool {p.poolId ? `${p.poolId.slice(0, 10)}…${p.poolId.slice(-6)}` : '—'}</li>
             <li>
-              value {p.launch?.valueEth} ETH · fee {p.launchFeeEth} ETH · first buy {p.launch?.firstBuyEth} ETH
-              · gas {p.launch?.gas}
+              value {p.launch?.valueEth} ETH · fee {p.launchFeeEth} ETH · first buy {p.firstBuyAmount}{' '}
+              {p.quoteSymbol} · gas {p.launch?.gas}
             </li>
           </ul>
           {p.warnings?.length > 0 && (
@@ -370,8 +473,16 @@ export default function V5LaunchPanel({ step, dev, launchConfigs, live, explorer
         <Busy
           busy={busy === 'preflight'}
           className="btn-primary"
-          disabled={!ready || !dev || launchesPaused}
-          title={!dev ? 'generate a launcher wallet first' : ready ? 'signs everything, broadcasts nothing' : 'fill in the config, name, symbol and a logo'}
+          disabled={!ready || !dev || launchesPaused || usdgAllowanceShort}
+          title={
+            !dev
+              ? 'generate a launcher wallet first'
+              : usdgAllowanceShort
+                ? `approve ${cfg.quoteSymbol} first — the factory needs allowance to pull the first buy`
+                : ready
+                  ? 'signs everything, broadcasts nothing'
+                  : 'fill in the config, name, symbol and a logo'
+          }
           onClick={preflight}
         >
           Preflight — signs, sends nothing
@@ -387,7 +498,7 @@ export default function V5LaunchPanel({ step, dev, launchConfigs, live, explorer
         <Busy
           busy={busy === 'launch'}
           className={live ? 'danger' : ''}
-          disabled={!ready || !dev || launchesPaused || blocked || parked}
+          disabled={!ready || !dev || launchesPaused || blocked || parked || usdgAllowanceShort}
           title={
             !dev
               ? 'generate a launcher wallet first'
@@ -395,9 +506,11 @@ export default function V5LaunchPanel({ step, dev, launchConfigs, live, explorer
                 ? 'fill in the config, name, symbol and a logo'
                 : parked
                   ? 'resolve the pending launch above first'
-                  : blocked
-                    ? 'flip Arm first — this spends real funds'
-                    : ''
+                  : usdgAllowanceShort
+                    ? `approve ${cfg.quoteSymbol} first — the factory needs allowance to pull the first buy`
+                    : blocked
+                      ? 'flip Arm first — this spends real funds'
+                      : ''
           }
           onClick={launch}
         >
@@ -417,7 +530,9 @@ export default function V5LaunchPanel({ step, dev, launchConfigs, live, explorer
         <div className="modal-facts">
           <Fact label="Symbol">{pendingBody?.params.symbol || '—'}</Fact>
           <Fact label="Config">#{pendingBody?.configId}</Fact>
-          <Fact label="First buy">{pendingBody?.firstBuyEth || 0} ETH</Fact>
+          <Fact label="First buy">
+            {pendingBody?.firstBuy ?? pendingBody?.firstBuyEth ?? 0} {pendingQuoteSymbol}
+          </Fact>
         </div>
       </Modal>
     </Step>
