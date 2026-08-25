@@ -32,6 +32,7 @@ const { prepareBundle, fireBundle } = require('../v5/bundle');
 const { prepareSell, fireSell } = require('../v5/sell');
 const { prepareBundleBuys, fireBundleBuys } = require('../v5/buy');
 const { launchThenBundle } = require('../v5/launchBundle');
+const relayFundJob = require('../v5/relayFundJob');
 const { poolFeeStatus } = require('../evm/v5/swap');
 const { launcherStatus, withdrawFromLauncher, cancelStuckLauncherTx } = require('../v5/launcher');
 
@@ -90,6 +91,14 @@ function withLaunchLock(handler) {
     // routes' own launching/bundling/selling checks).
     if (launcherBusy.has(id)) {
       return res.status(409).json({ error: 'a v5 launcher action (withdraw/cancel) is in progress — wait for it to finish' });
+    }
+    // The timed Relay funding job spends the launcher (deposits) at sequential
+    // nonces over minutes; a launch signing against the same wallet mid-run would
+    // collide on its nonce. Refuse until the funding job is stopped or done.
+    if (relayFundJob.status(id).running) {
+      return res.status(409).json({
+        error: 'v5 timed Relay funding is running on the launcher — stop it or let it finish before launching',
+      });
     }
     launching.add(id);
     try {
@@ -194,6 +203,9 @@ function withBundleLock(handler) {
     }
     if (launcherBusy.has(id)) {
       return res.status(409).json({ error: 'a v5 launcher action (withdraw/cancel) is in progress — wait for it to finish' });
+    }
+    if (relayFundJob.status(id).running) {
+      return res.status(409).json({ error: 'v5 timed Relay funding is running on the launcher — stop it or let it finish before fanning out' });
     }
     bundling.add(id);
     try {
@@ -652,6 +664,57 @@ router.post('/v5/launch/resolve', requireApiKey, async (req, res, next) => {
   }
 });
 
+// ── Relay-solver timed funding — the v5 Fund step ──────────────────────────────
+// Each bundle wallet is funded through a Relay SOLVER (its on-chain funder is the
+// solver, not the launcher — the shared-funder link is broken), one at a time,
+// 8-9s apart, by a SERVER-SIDE job that survives the browser closing. See
+// v5/relayFund.js (the single-wallet money path) + v5/relayFundJob.js (the pacing).
+
+// POST /api/v5/fund/relay — start the timed Relay funding job. A MONEY PATH (it
+// spends the launcher's ETH into Relay deposits), so it demands { confirm: true }.
+// Refused while the launcher is otherwise busy (a launch/bundle/launcher action,
+// or a launch parked-unconfirmed) so nothing else signs the launcher at the same
+// nonces the job's deposits use.
+router.post('/v5/fund/relay', requireApiKey, (req, res, next) => {
+  try {
+    const id = req.user.id;
+    if (req.body?.confirm !== true) {
+      throw new Error('refusing to start Relay funding without { confirm: true } — this spends the launcher');
+    }
+    if (launching.has(id) || bundling.has(id) || launcherBusy.has(id) || pendingLaunches.has(id)) {
+      return res.status(409).json({
+        error: 'the launcher is busy with a v5 launch / bundle / launcher action (or a launch is unresolved) — settle it before funding',
+      });
+    }
+    // Synchronous start (validates targets, schedules the first tick); its own
+    // guard refuses a second concurrent job. No await between the busy-check above
+    // and here, so nothing can grab the launcher in the gap.
+    res.json(jsonSafe(relayFundJob.start(id, req.body?.targets, { minGapMs: req.body?.minGapMs, maxGapMs: req.body?.maxGapMs })));
+  } catch (err) {
+    next(err);
+  }
+});
+
+// POST /api/v5/fund/relay/stop — halt the funding job. Wallets already funded stay
+// funded; the remaining wallets are left for a later run.
+router.post('/v5/fund/relay/stop', requireApiKey, (req, res, next) => {
+  try {
+    res.json(jsonSafe(relayFundJob.stop(req.user.id)));
+  } catch (err) {
+    next(err);
+  }
+});
+
+// GET /api/v5/fund/relay/status — poll the funding job's progress (per-wallet
+// state, sent/failed, next run time).
+router.get('/v5/fund/relay/status', requireApiKey, (req, res, next) => {
+  try {
+    res.json(jsonSafe(relayFundJob.status(req.user.id)));
+  } catch (err) {
+    next(err);
+  }
+});
+
 // POST /api/v5/launch-bundle/preflight — the money-risk REHEARSAL for the combined
 // Launch + bundle. It prepares (simulates + signs, broadcasts nothing) the LAUNCH,
 // which is the only part that can revert and burn a fee. The per-wallet bundle buys
@@ -964,6 +1027,11 @@ function withLauncherLock(handler) {
     const id = req.user.id;
     if (launcherBusy.has(id)) {
       return res.status(409).json({ error: 'a v5 launcher action is already in progress for this account' });
+    }
+    // A launcher withdraw/cancel signs the launcher too — don't let it race the
+    // timed Relay funding job's in-flight deposits on the launcher's nonce.
+    if (relayFundJob.status(id).running) {
+      return res.status(409).json({ error: 'v5 timed Relay funding is running on the launcher — stop it or let it finish first' });
     }
     launcherBusy.add(id);
     try {

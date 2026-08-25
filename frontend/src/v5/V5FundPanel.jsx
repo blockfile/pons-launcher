@@ -1,70 +1,121 @@
-import { useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { api } from '../api.js';
 import Step from '../components/Step.jsx';
 import { Busy } from '../components/Section.jsx';
 import Address from '../components/Address.jsx';
 import { eth, plural } from './roles.js';
 
+// The 409 the backend raises when the launcher is busy (a launch/bundle/launcher
+// action, or a parked launch) or a job is already running — read as "settle that
+// first / it's already going", not an error to fix.
+const BUSY_RE = /is busy|already running|unresolved/i;
+
+// Per-wallet state → colour, so the table reads like the launch/sell results.
+function stateColor(s) {
+  if (s === 'done' || s === 'sent') return 'var(--jade)';
+  if (s === 'funding' || s === 'next') return 'var(--dim)';
+  if (s === 'failed') return 'var(--vermilion)';
+  return 'var(--dim)';
+}
+
 /**
- * Step 2 — moving ETH into the launcher and out to the bundle wallets.
+ * Step 3 — Relay-fund the bundle wallets.
  *
- * TWO DIFFERENT PATHS, because the shared /fund route can only ever do one of
- * them:
+ * Each bundle wallet is funded through a Relay SOLVER, not by a direct transfer
+ * from the launcher: the launcher deposits into a Relay-quoted address and a
+ * solver delivers the amount to the wallet, so the wallet's on-chain funder is the
+ * solver — the shared-funder link every bundle otherwise leaves is broken. The
+ * deposits go out ONE AT A TIME with an 8–9s gap (Relay's rate limit + so they do
+ * not land as one burst), driven by a SERVER-SIDE job that keeps running even if
+ * this tab is closed — reopen it and the status below picks the run back up.
  *
- *   v5dev (the launcher)   funded from OUTSIDE this console. The shared
- *                          funding route sources ETH FROM the launcher and
- *                          sends it OUT — there is no route that puts ETH INTO
- *                          it, exactly the limitation DevWalletPanel states
- *                          for pons' own dev wallet (see components/
- *                          DevWalletPanel.jsx). So this panel shows the
- *                          launcher's address and balance and says where the
- *                          ETH has to come from; it never sends anything TO it.
- *   v5bundle (the bundle)  funded FROM the launcher, through POST /fund — the
- *                          same shared spine route pons' own FundPanel calls,
- *                          with the same body shape: `{ targets, variant }`,
- *                          targets being `{ walletId, amountEth }` pairs (see
- *                          components/FundPanel.jsx). Amounts are typed per
- *                          wallet right here — v5 has no upstream "rows" table
- *                          the way pons' step 3 does, so this panel owns that
- *                          little bit of state itself, per the tab isolation
- *                          rule (every tab owns its own modules).
- *
- * `variant: 'v5'` IS SENT DELIBERATELY, and MUST be. It resolves the funding
- * SOURCE: backend/src/wallets/variants.js maps 'v5' → { dev: 'v5dev', bundle:
- * 'v5bundle' }, so /fund sources ETH from the v5dev launcher and sends it to the
- * v5bundle wallets. Omitting `variant` would default to v1 and SILENTLY spend
- * v1's dev wallet instead — a real misdirection of funds — so it is always named
- * explicitly here. (variants.js also fails loud on an unknown variant rather than
- * falling back to v1, for the same reason.)
+ * The per-wallet amounts are the Fund column from step 2's table (the shared
+ * `rows`); edit any here before starting. The launcher pays every deposit + gas,
+ * so it must hold enough ETH (fund it from outside in step 1).
  */
-export default function V5FundPanel({ step, dev, bundle, explorer, reload, report, rows = {}, setRow = () => {} }) {
+export default function V5FundPanel({ step, dev, bundle, live, explorer, reload, report, rows = {}, setRow = () => {} }) {
   const [busy, setBusy] = useState('');
+  const [armed, setArmed] = useState(false);
+  const [job, setJob] = useState(null); // last GET /v5/fund/relay/status
+  const [blocked, setBlocked] = useState(false);
+  const [now, setNow] = useState(() => Date.now()); // ticks the next-run countdown
 
   const explorerFor = (address) => (explorer ? `${explorer}/address/${address}` : '');
-  // The per-wallet fund amount is the SHARED `rows.fund` the step-1 wallets table
-  // writes (its auto-fill fills it), so what was sized there is what this step
-  // sends — the v1 Launcher tab's split between the sizing table and the Fund step.
   const setFund = (walletId, value) => setRow(walletId, { fund: value });
 
-  // Exactly the shape components/FundPanel.jsx builds for pons' own /fund call
-  // — walletId + amountEth pairs, blank/zero rows skipped.
+  const running = Boolean(job?.running);
+
+  // Read the job status once on mount (a run may already be going from before this
+  // tab opened) and whenever the credential/panel remounts — quiet on failure.
+  const say = useRef(report);
+  say.current = report;
+  useEffect(() => {
+    let alive = true;
+    api('/v5/fund/relay/status')
+      .then((j) => alive && setJob(j))
+      .catch(() => {});
+    return () => {
+      alive = false;
+    };
+  }, []);
+
+  // Poll while a job is running, and once more right after it stops, so the final
+  // per-wallet states land. Also re-read wallet balances as funds arrive.
+  useEffect(() => {
+    if (!running) return undefined;
+    let alive = true;
+    const t = setInterval(async () => {
+      try {
+        const j = await api('/v5/fund/relay/status');
+        if (!alive) return;
+        setJob(j);
+        if (!j.running) reload();
+      } catch {
+        // transient — keep the last status
+      }
+    }, 2500);
+    return () => {
+      alive = false;
+      clearInterval(t);
+    };
+  }, [running, reload]);
+
+  // Tick the "next in Ns" countdown while running.
+  useEffect(() => {
+    if (!running) return undefined;
+    const t = setInterval(() => setNow(Date.now()), 1000);
+    return () => clearInterval(t);
+  }, [running]);
+
   const targets = bundle
     .map((w) => ({ walletId: w.walletId, amountEth: rows[w.walletId]?.fund }))
     .filter((t) => Number(t.amountEth) > 0);
   const total = targets.reduce((s, t) => s + Number(t.amountEth), 0);
 
-  async function send() {
-    setBusy('fund');
+  // Per-wallet job state, keyed by walletId, for the table.
+  const jobByWallet = new Map((job?.targets || []).map((t) => [t.walletId, t]));
+  const resultByWallet = new Map((job?.results || []).map((r) => [r.walletId, r]));
+
+  async function start() {
+    setBusy('start');
+    setBlocked(false);
     try {
-      const out = await api('/fund', 'POST', { targets, variant: 'v5' });
-      report(out);
-      // Clear the fund column for the wallets just funded — their buy amount is a
-      // separate field and stays. The balance column re-reads below to show the
-      // result.
-      targets.forEach((t) => setRow(t.walletId, { fund: '' }));
-      // Give the transfers a moment to land before re-reading balances — same
-      // pause pons' own FundPanel gives itself.
-      setTimeout(reload, 3000);
+      const j = await api('/v5/fund/relay', 'POST', { targets, confirm: true });
+      setJob(j);
+      setArmed(false);
+    } catch (err) {
+      report(`ERROR: ${err.message}`);
+      if (BUSY_RE.test(err.message)) setBlocked(true);
+    } finally {
+      setBusy('');
+    }
+  }
+
+  async function stop() {
+    setBusy('stop');
+    try {
+      setJob(await api('/v5/fund/relay/stop', 'POST'));
+      reload();
     } catch (err) {
       report(`ERROR: ${err.message}`);
     } finally {
@@ -72,110 +123,194 @@ export default function V5FundPanel({ step, dev, bundle, explorer, reload, repor
     }
   }
 
+  const ready = Boolean(dev) && targets.length > 0 && !running;
+  const blockedByArm = live && !armed;
+  const nextInSec = job?.nextRunAt ? Math.max(0, Math.round((Date.parse(job.nextRunAt) - now) / 1000)) : null;
+
   return (
     <Step {...step}>
       <p className="lede">
-        The launcher pays the launch fee and the atomic first buy; the bundle wallets each buy behind
-        it, so they need enough ETH for their own buy plus gas. Fund the launcher from outside first,
-        then send it out to the bundle wallets below. The per-wallet amounts here are the <b>Fund</b>{' '}
-        column from step 1 — <b>Auto-fill</b> there sizes them; edit any row before sending.
+        Each bundle wallet is funded through a <b>Relay solver</b> — its on-chain funder is the solver,
+        not your launcher, so the wallets don't share an obvious source. They go out one at a time,
+        <b> 8–9s apart</b>, from a server-side job that keeps running even if you close this tab. The
+        per-wallet amounts are the <b>Fund</b> column from step 2; edit any below before starting.
       </p>
 
-      <h3 style={{ margin: '0 0 8px' }}>Launcher wallet</h3>
-      {!dev ? (
-        <div className="notice">
+      {!dev && (
+        <div className="notice warn">
           <h3>No launcher wallet yet</h3>
-          <p>Generate it in step 1 before funding anything.</p>
-        </div>
-      ) : (
-        <div className="row">
-          <Address value={dev.address} full href={explorerFor(dev.address)} />
-          <span className="hint">{eth(dev.balanceEth)} ETH</span>
+          <p>Create it in step 1 — the launcher pays every Relay deposit.</p>
         </div>
       )}
-      {/* Nothing in this console can put ETH into the launcher — every route
-          that touches it, /fund included, only ever spends OUT of it. Said
-          plainly here for the same reason DevWalletPanel says it about pons'
-          dev wallet: an operator who does not know that reaches this step
-          with an empty launcher and a failure that reads like a bug. */}
+      {dev && (
+        <div className="row">
+          <span className="hint">launcher pays the deposits —</span>
+          <Address value={dev.address} plain href={explorerFor(dev.address)} />
+          <span className="hint">
+            {eth(dev.balanceEth)} ETH
+            {total > 0 ? ` · this run needs ≈${total.toFixed(4)} ETH + Relay fees + gas` : ''}
+          </span>
+        </div>
+      )}
       {dev && Number(dev.balanceEth) === 0 && (
         <div className="notice warn">
           <h3>The launcher is empty</h3>
-          <ul>
-            <li>
-              Send ETH to the address above from wherever you hold funds. Nothing in this console can
-              fund it — every transfer here spends out of it, straight to the bundle wallets below.
-            </li>
-            <li>It needs enough for the launch fee, the atomic first buy, and gas on top of both.</li>
-          </ul>
+          <p>Send ETH to it from outside first — nothing here can fund it, and it pays every Relay deposit.</p>
         </div>
       )}
 
-      <h3 style={{ margin: '16px 0 8px' }}>Bundle wallets</h3>
+      {blocked && (
+        <div className="notice danger">
+          <h3>The launcher is busy</h3>
+          <p>
+            A launch, bundle, or launcher action is running (or a launch is unresolved), or a funding
+            job is already going. Settle that first — the funding shares the launcher's nonces.
+          </p>
+        </div>
+      )}
+
       {bundle.length === 0 ? (
         <div className="notice">
           <h3>No bundle wallets yet</h3>
-          <p>Generate them in step 1 — this table fills in once they exist.</p>
+          <p>Generate them in step 2 and set each one's Fund amount there (or in the table below).</p>
         </div>
       ) : (
-        <div className="table-scroll" style={{ maxHeight: 460, overflowY: 'auto' }}>
-          <table className="wallet-list">
-            <thead>
-              <tr>
-                <th>Address</th>
-                <th className="num">Balance</th>
-                <th className="num">Fund (ETH)</th>
-              </tr>
-            </thead>
-            <tbody>
-              {bundle.map((w) => (
-                <tr key={w.walletId}>
-                  <td className="addr">
-                    <Address value={w.address} plain href={explorerFor(w.address)} />
-                  </td>
-                  <td className="num">
-                    {w.balanceEth == null ? (
-                      <span className="hint">unreadable</span>
-                    ) : (
-                      <span className={`bal ${Number(w.balanceEth) === 0 ? 'zero' : ''}`}>
-                        {eth(w.balanceEth)}
-                      </span>
-                    )}
-                  </td>
-                  <td className="num">
-                    <input
-                      type="number"
-                      step="0.0001"
-                      placeholder="0.0"
-                      value={rows[w.walletId]?.fund ?? ''}
-                      onChange={(e) => setFund(w.walletId, e.target.value)}
-                      style={{ width: 100 }}
-                    />
-                  </td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
-        </div>
-      )}
+        <>
+          {running && (
+            <div className="stats" style={{ marginTop: 12 }}>
+              <div className="stat ok">
+                <span>Funded</span>
+                <b>
+                  {job.sent}
+                  <span className="stat-of">/{job.total}</span>
+                </b>
+              </div>
+              <div className={`stat ${job.failed ? 'bad' : ''}`}>
+                <span>Failed</span>
+                <b>{job.failed}</b>
+              </div>
+              <div className="stat">
+                <span>Remaining</span>
+                <b>{job.remaining}</b>
+              </div>
+              <div className="stat">
+                <span>Next</span>
+                <b>{job.inFlight ? 'funding…' : nextInSec != null ? `${nextInSec}s` : '—'}</b>
+              </div>
+            </div>
+          )}
 
-      <div className="row" style={{ marginTop: 12 }}>
-        <Busy
-          busy={busy === 'fund'}
-          className="btn-primary"
-          disabled={!targets.length || !dev}
-          title={targets.length ? '' : 'enter a fund amount in the table above'}
-          onClick={send}
-        >
-          {targets.length
-            ? `Send ${total.toFixed(4)} ETH to ${plural(targets.length, 'wallet')}`
-            : 'Nothing to send'}
-        </Busy>
-        <span className="spacer" />
-        {targets.length > 0 && (
-          <span className="hint">from the launcher, one transfer per wallet</span>
-        )}
-      </div>
+          <div className="table-scroll" style={{ maxHeight: 460, overflowY: 'auto', marginTop: 10 }}>
+            <table className="wallet-list">
+              <thead>
+                <tr>
+                  <th>Address</th>
+                  <th className="num">Balance</th>
+                  <th className="num">Fund (ETH)</th>
+                  <th>State</th>
+                </tr>
+              </thead>
+              <tbody>
+                {bundle.map((w) => {
+                  const jt = jobByWallet.get(w.walletId);
+                  const jr = resultByWallet.get(w.walletId);
+                  const state = jr?.status || jt?.state || '';
+                  return (
+                    <tr key={w.walletId}>
+                      <td className="addr">
+                        <Address value={w.address} plain href={explorerFor(w.address)} />
+                      </td>
+                      <td className="num">
+                        {w.balanceEth == null ? (
+                          <span className="hint">unreadable</span>
+                        ) : (
+                          <span className={`bal ${Number(w.balanceEth) === 0 ? 'zero' : ''}`}>{eth(w.balanceEth)}</span>
+                        )}
+                      </td>
+                      <td className="num">
+                        <input
+                          type="number"
+                          step="0.0001"
+                          placeholder="0.0"
+                          disabled={running}
+                          value={rows[w.walletId]?.fund ?? ''}
+                          onChange={(e) => setFund(w.walletId, e.target.value)}
+                          style={{ width: 100 }}
+                        />
+                      </td>
+                      <td>
+                        {state ? (
+                          <span style={{ color: stateColor(state) }}>{state}</span>
+                        ) : (
+                          <span className="hint">—</span>
+                        )}
+                        {jr?.hash && (
+                          <div className="hint">
+                            <a href={explorer ? `${explorer}/tx/${jr.hash}` : undefined} target="_blank" rel="noreferrer">
+                              deposit {jr.hash.slice(0, 12)}…
+                            </a>
+                          </div>
+                        )}
+                        {jr?.error && <div className="hint">{jr.error}</div>}
+                      </td>
+                    </tr>
+                  );
+                })}
+              </tbody>
+            </table>
+          </div>
+
+          <div className={`arm ${live ? 'is-live' : ''}`} style={{ marginTop: 12 }}>
+            {live && !running && (
+              <label className={`switch ${armed ? 'armed' : ''}`}>
+                <input type="checkbox" checked={armed} onChange={(e) => setArmed(e.target.checked)} />
+                Arm
+              </label>
+            )}
+            {running ? (
+              <Busy busy={busy === 'stop'} className="danger" onClick={stop}>
+                Stop funding
+              </Busy>
+            ) : (
+              <Busy
+                busy={busy === 'start'}
+                className={live ? 'danger' : 'btn-primary'}
+                disabled={!ready || blockedByArm}
+                title={
+                  !dev
+                    ? 'create a launcher in step 1 first'
+                    : targets.length === 0
+                      ? 'set a Fund amount for at least one wallet'
+                      : blockedByArm
+                        ? 'flip Arm first — this spends the launcher'
+                        : ''
+                }
+                onClick={start}
+              >
+                {live
+                  ? `Start Relay funding — ${plural(targets.length, 'wallet')}, 8–9s apart`
+                  : `Start Relay funding (dry run) — ${plural(targets.length, 'wallet')}`}
+              </Busy>
+            )}
+            <span className="spacer" />
+            {job && !running && job.status !== 'idle' && (
+              <span className="hint">
+                last run: {job.sent}/{job.total} funded{job.failed ? `, ${job.failed} failed` : ''} · {job.status}
+              </span>
+            )}
+          </div>
+
+          {job?.status === 'complete' && job.failed > 0 && (
+            <div className="notice danger" style={{ marginTop: 10 }}>
+              <h3>Some deposits failed</h3>
+              <p>
+                {plural(job.failed, 'wallet')} didn't get funded — their ETH never left the launcher.
+                Re-run funding with just those wallets' amounts set.
+              </p>
+            </div>
+          )}
+        </>
+      )}
     </Step>
   );
 }

@@ -2,7 +2,8 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { api } from '../api.js';
 import Sequence from '../components/Sequence.jsx';
 import ResultPanel from '../components/ResultPanel.jsx';
-import { plural } from './roles.js';
+import { plural, eth } from './roles.js';
+import V5LauncherWalletPanel from './V5LauncherWalletPanel.jsx';
 import V5WalletsPanel from './V5WalletsPanel.jsx';
 import V5FundPanel from './V5FundPanel.jsx';
 import V5LaunchPanel from './V5LaunchPanel.jsx';
@@ -18,10 +19,11 @@ import V5LauncherPanel from './V5LauncherPanel.jsx';
  * App renders one or the other; this component holds v5's launcher and bundle
  * wallets, and nothing it does can change what another tab is drawing.
  *
- * Five numbered steps — Wallets, Fund, Launch + bundle, Sell, Sweep — uniform
- * with the pons v1 Launcher tab, where the launch and the bundle are one action.
- * Two unnumbered utilities follow: the manual Bundle tools (fan-out / extra
- * buys / recovery) and the Launcher rescue.
+ * Six numbered steps — Create launcher wallet, Bundle wallets, Fund (Relay,
+ * 8–9s apart), Launch + bundle, Sell, Sweep — mirroring the pons v1 Launcher
+ * tab's flow (its own step for the launcher wallet; launch and bundle as one
+ * action). Two unnumbered utilities follow: the manual Bundle tools (fan-out /
+ * extra buys / recovery) and the Launcher rescue.
  */
 
 export default function V5Console({ health, credential, report, output, reportedAt }) {
@@ -115,28 +117,30 @@ export default function V5Console({ health, credential, report, output, reported
   const steps = useMemo(() => {
     const plan = [
       {
-        key: 'wallets',
+        key: 'launcher',
         n: 1,
-        title: 'Wallets',
-        done: Boolean(dev) && bundle.length > 0,
-        detail: !dev
-          ? 'a launcher signs the launch; bundle wallets take the first buy'
-          : bundle.length
-            ? `launcher · ${plural(bundle.length, 'bundle wallet')}`
-            : 'launcher ready — generate the bundle wallets it feeds',
+        title: 'Create launcher wallet',
+        done: Boolean(dev),
+        detail: dev ? `launcher · ${eth(dev.balanceEth)} ETH` : 'the wallet that signs the launch + first buy, and funds the bundle',
+      },
+      {
+        key: 'wallets',
+        n: 2,
+        title: 'Bundle wallets',
+        done: bundle.length > 0,
+        detail: bundle.length ? plural(bundle.length, 'bundle wallet') : 'the wallets that buy behind the launch',
       },
       {
         key: 'fund',
-        n: 2,
+        n: 3,
         title: 'Fund',
-        // Mirrors App.jsx's own `funded > 0` for pons' step 4: at least one
-        // bundle wallet holding ETH is what "started funding" means here too.
+        // At least one bundle wallet holding ETH is what "started funding" means.
         done: bundle.some((w) => Number(w.balanceEth) > 0),
-        detail: 'ETH into the launcher and bundle wallets',
+        detail: 'Relay-fund the bundle wallets, 8–9s apart',
       },
       {
         key: 'launch',
-        n: 3,
+        n: 4,
         title: 'Launch + bundle',
         done: Boolean(lastLaunch),
         detail: lastLaunch
@@ -145,8 +149,8 @@ export default function V5Console({ health, credential, report, output, reported
             }`
           : 'launch, then every bundle wallet buys — one action',
       },
-      { key: 'sell', n: 4, title: 'Sell', done: false, detail: 'unwind the bundle back to ETH' },
-      { key: 'sweep', n: 5, title: 'Sweep', done: false, detail: 'collect what is left to one wallet' },
+      { key: 'sell', n: 5, title: 'Sell', done: false, detail: 'unwind the bundle back to ETH' },
+      { key: 'sweep', n: 6, title: 'Sweep', done: false, detail: 'collect what is left to one wallet' },
     ];
 
     let previousRequired = null;
@@ -191,6 +195,14 @@ export default function V5Console({ health, credential, report, output, reported
         }
       />
 
+      <V5LauncherWalletPanel
+        step={step('launcher')}
+        dev={dev}
+        explorer={explorer}
+        reload={loadWallets}
+        report={report}
+      />
+
       <V5WalletsPanel
         step={step('wallets')}
         dev={dev}
@@ -220,6 +232,7 @@ export default function V5Console({ health, credential, report, output, reported
         step={step('fund')}
         dev={dev}
         bundle={bundle}
+        live={live}
         explorer={explorer}
         reload={loadWallets}
         report={report}

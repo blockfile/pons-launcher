@@ -10,17 +10,16 @@ import IconButton from '../v4/IconButton.jsx';
 import { MAX_GENERATE, ROLES, eth, plural } from './roles.js';
 
 /**
- * Step 1 — the wallets a letscash run is built from.
+ * Step 2 — the BUNDLE wallets, and the table the whole run is sized in. The
+ * launcher (v5dev) has its own step 1 now (V5LauncherWalletPanel), mirroring the
+ * pons v1 Launcher tab's split of "Create dev wallet" from "Generate bundle
+ * wallets"; this panel is the v5bundle side only.
  *
- * TWO KINDS IN ONE PANEL, because they are set up together and neither is useful
- * without the other:
- *
- *   v5dev     the launcher. Signs the letscash launch and its atomic first buy,
- *             so the first-buy supply lands here before it is fanned out. A
- *             SINGLETON — the backend refuses a second, so once one exists the
- *             console offers a delete rather than another create.
- *   v5bundle  the wallets that first-buy supply is distributed to, and that make
- *             any optional extra on-curve buys. Plural, generated in a batch.
+ * The v5bundle wallets buy behind the launch and are the ones the Fund step
+ * Relay-funds. THREE WAYS to bring them in — generate fresh, import keys you hold,
+ * or claim aged/pre-funded ones from the V4 seasoning pool — and the table carries
+ * each wallet's Fund and Buy amounts (the shared `rows`), which step 3 (Fund) and
+ * step 4 (Launch + bundle) read.
  *
  * DELETE AND BACKUP ARE THE GENERIC CONTROLS, not v5's own. v5 exposes no
  * delete or backup route of its own — a wallet is deleted through
@@ -53,13 +52,9 @@ export default function V5WalletsPanel({ step, dev, bundle, explorer, reload, re
   // whether deleting it is a tidy-up or a mistake.
   const [deleting, setDeleting] = useState(null);
 
-  // IMPORT — existing wallets by private key. Two independent fields, one per
-  // role, so each import lives where that wallet is set up: the launcher key
-  // in the Launcher section, bundle keys in the Bundle section (an operator
-  // looking to import a dev wallet should not have to hunt for it under
-  // "Bundle wallets"). Keys never linger in state past a submit — each field
-  // clears only on success, see runImport below.
-  const [devKey, setDevKey] = useState('');
+  // IMPORT — existing BUNDLE wallets by private key (the launcher is imported in
+  // step 1's panel). Keys never linger in state past a submit — the field clears
+  // only on success, see importBundleNow below.
   const [importKeys, setImportKeys] = useState('');
   const [importLabel, setImportLabel] = useState('');
 
@@ -150,31 +145,24 @@ export default function V5WalletsPanel({ step, dev, bundle, explorer, reload, re
   }
 
   /**
-   * Import existing wallets by private key into a v5 role. The backend does
-   * the whitespace/comma/newline splitting (routes/v5.js), so the raw text is
-   * sent as-is rather than pre-split here.
-   *
-   * The source field is cleared ONLY on success — a rejected import (a bad
-   * key, or a second v5dev landing on the keystore's singleton guard) leaves
-   * it alone so the operator can fix it without re-pasting everything. Either
-   * way the keys never get echoed anywhere else: nothing here logs them,
-   * stores them past this state, or reflects them back into the UI.
-   *
-   * One helper, two callers — the launcher (dev) and the bundle each pass
-   * their own field and clear-on-success so they can sit in different
-   * sections of the panel.
+   * Import existing BUNDLE wallets by private key. The backend does the
+   * whitespace/comma/newline splitting (routes/v5.js), so the raw text is sent
+   * as-is. The field is cleared ONLY on success, so a rejected import leaves it
+   * alone to fix without re-pasting; the keys are never echoed anywhere else.
+   * (The launcher key is imported in step 1's panel.)
    */
-  async function runImport({ what, keys, role, label, onSuccess }) {
-    if (!keys.trim()) return;
-    setBusy(what);
+  async function importBundleNow() {
+    if (!importKeys.trim()) return;
+    setBusy('import');
     try {
       const made = await api('/v5/wallets/import', 'POST', {
-        privateKeys: keys,
-        role,
-        label: label && label.trim() ? label.trim() : undefined,
+        privateKeys: importKeys,
+        role: ROLES.bundle,
+        label: importLabel.trim() || undefined,
       });
-      report(`imported ${plural(made.length, 'wallet')} into ${role === ROLES.dev ? 'the launcher' : 'the bundle'}`);
-      onSuccess();
+      report(`imported ${plural(made.length, 'wallet')} into the bundle`);
+      setImportKeys('');
+      setImportLabel('');
       await reload();
     } catch (err) {
       report(`ERROR: ${err.message}`);
@@ -182,21 +170,6 @@ export default function V5WalletsPanel({ step, dev, bundle, explorer, reload, re
       setBusy('');
     }
   }
-
-  const importLauncherNow = () =>
-    runImport({ what: 'import-dev', keys: devKey, role: ROLES.dev, onSuccess: () => setDevKey('') });
-
-  const importBundleNow = () =>
-    runImport({
-      what: 'import',
-      keys: importKeys,
-      role: ROLES.bundle,
-      label: importLabel,
-      onSuccess: () => {
-        setImportKeys('');
-        setImportLabel('');
-      },
-    });
 
   /** Pull N aged, pre-funded wallets out of the V4 seasoning pool into the v5 bundle role. */
   async function claimSeasoned() {
@@ -247,9 +220,9 @@ export default function V5WalletsPanel({ step, dev, bundle, explorer, reload, re
   return (
     <Step {...step}>
       <p className="lede">
-        The launcher signs the letscash launch and takes the guaranteed first buy; the bundle wallets
-        buy behind it. This table is where the whole run is sized — what each wallet is funded with in
-        step 2 and what it buys in step 3 — the same shape as the Launcher tab. Nothing is funded yet.
+        The bundle wallets buy behind the launcher's first buy. This table is where the run is sized —
+        what each wallet is <b>funded</b> with (sent via Relay in step 3) and what it <b>buys</b> (step 4)
+        — the same shape as the Launcher tab. Nothing moves yet; the amounts here flow to those steps.
       </p>
 
       {/* The run at a glance, across the top of the step — the counts and figures
@@ -277,91 +250,16 @@ export default function V5WalletsPanel({ step, dev, bundle, explorer, reload, re
         </div>
       </div>
 
-      {/* The launcher — a singleton, so this is a create-once row that becomes a
-          delete once one exists. */}
-      <h3 style={{ margin: '0 0 8px' }}>Launcher wallet</h3>
-      {!dev ? (
-        <div className="notice">
+      {!dev && (
+        <div className="notice warn">
           <h3>No launcher wallet yet</h3>
-          <p>
-            One wallet signs the launch and its atomic first buy. It is a singleton — the backend
-            keeps exactly one, so the whole run has a single payer and a single first-buy position.
-            Generate a fresh one, or import a key you already hold (your funded dev wallet).
-          </p>
-          <div className="row">
-            <Busy
-              busy={busy === 'gen-dev'}
-              className="btn-primary"
-              onClick={() =>
-                act('gen-dev', () =>
-                  api('/v5/wallets/generate', 'POST', { count: 1, role: ROLES.dev, label: 'v5 launcher' })
-                )
-              }
-            >
-              Create launcher wallet
-            </Busy>
-            <span className="hint">or import your own key →</span>
-          </div>
-          {/* Import a launcher key right here, where an operator looks for it —
-              not buried in the bundle section's control. Same guarantees as any
-              key entry: encrypted straight into the keystore, never logged, and
-              the field clears only on a successful import. */}
-          <div className="row" style={{ alignItems: 'flex-start', marginTop: 4 }}>
-            <input
-              value={devKey}
-              onChange={(e) => setDevKey(e.target.value)}
-              placeholder="0x… private key of an existing dev wallet"
-              spellCheck={false}
-              autoComplete="off"
-              style={{ flex: 1 }}
-            />
-            <Busy busy={busy === 'import-dev'} disabled={!devKey.trim()} onClick={importLauncherNow}>
-              Import launcher
-            </Busy>
-          </div>
-        </div>
-      ) : (
-        <div className="table-scroll" style={{ marginBottom: 16 }}>
-          <table>
-            <thead>
-              <tr>
-                <th>Address</th>
-                <th className="num">Balance</th>
-                <th />
-              </tr>
-            </thead>
-            <tbody>
-              <tr>
-                <td>
-                  <Address value={dev.address} plain href={explorerFor(dev.address)} />
-                </td>
-                {/* null is "the RPC did not answer", not zero — a wallet drawn at
-                    0 that actually holds ETH is the reading that gets it topped
-                    up needlessly. */}
-                <td className="num">
-                  {dev.balanceEth == null ? <span className="hint">unreadable</span> : eth(dev.balanceEth)}
-                </td>
-                <td className="num">
-                  <IconButton
-                    icon={LuTrash2}
-                    danger
-                    label={`Delete launcher wallet ${dev.address}`}
-                    onClick={() => setDeleting(dev)}
-                  />
-                </td>
-              </tr>
-            </tbody>
-          </table>
+          <p>Create it in step 1 first — the bundle wallets buy behind its launch, and it funds them.</p>
         </div>
       )}
 
-      {/* The bundle — plural, generated in a batch. THREE WAYS IN, grouped
-          under one "Add wallets" idea because they are all just different
-          sources for the same table below: fresh (Generate), keys the
-          operator already holds (Import — either role), or aged/pre-funded
+      {/* The bundle — plural, generated in a batch. THREE WAYS IN: fresh
+          (Generate), keys the operator already holds (Import), or aged/pre-funded
           ones handed off from V4's seasoning pool (Seasoned). */}
-      <h3 style={{ margin: '4px 0 8px' }}>Bundle wallets</h3>
-
       <div className="row">
         <span className="ctl-label">Generate</span>
         <input
