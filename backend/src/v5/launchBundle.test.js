@@ -172,7 +172,7 @@ test('a confirmed launch is NEVER discarded when the bundle prep throws', async 
   const out = await launchThenBundle(BASE, d);
   assert.equal(out.launch.launch.status, 'confirmed', 'the launch success is banked');
   assert.equal(out.bundle, null);
-  assert.match(out.bundleSkipped, /could not be completed: no v5bundle wallets/);
+  assert.match(out.bundleSkipped, /could not run: no v5bundle wallets/);
   assert.equal(calls.fireBuys.length, 0, 'nothing is fired when prep failed');
 });
 
@@ -184,5 +184,5 @@ test('a confirmed launch is NEVER discarded when the bundle FIRE throws (post-co
   const out = await launchThenBundle(BASE, wrapped);
   assert.equal(out.launch.launch.status, 'confirmed', 'the launch success is banked even if the fire throws');
   assert.equal(out.bundle, null);
-  assert.match(out.bundleSkipped, /could not be completed: rpc exploded/);
+  assert.match(out.bundleSkipped, /could not run: rpc exploded/);
 });

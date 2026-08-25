@@ -148,12 +148,15 @@ async function launchThenBundle(input = {}, deps = {}) {
     return { launch: launchResult, launchPlan, bundle, buyPlan, bundleSkipped: null };
   } catch (err) {
     // The launch already succeeded and spent the fee — hand it back with the reason
-    // the bundle did not complete, never a thrown error that would erase it.
+    // the bundle did not complete, never a thrown error that would erase it. The
+    // launcher's atomic first buy already gave IT the tokens, so the recovery is to
+    // distribute them with the untaxed fan-out in the Bundle tools (a bigger first
+    // buy = more to fan out).
     return {
       ...none,
       bundleSkipped:
-        `the launch confirmed but the bundle could not be completed: ${err.message} ` +
-        '— fire it manually from the Bundle tools.',
+        `the launch confirmed but the per-wallet buys could not run: ${err.message} ` +
+        '— distribute to the wallets with the untaxed fan-out in the Bundle tools instead.',
     };
   }
 }

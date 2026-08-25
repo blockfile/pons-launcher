@@ -73,6 +73,8 @@ function deps(over = {}, ks = fakeKs(over.bundle)) {
       getDecimals: async () => 18,
       getSymbol: async () => 'CAT',
       deadline: 1_800_000_000,
+      sleep: async () => {}, // no real delay in the pool-resolve retry under test
+      ...(over.deps || {}),
     },
   };
 }
@@ -204,11 +206,28 @@ test('prepareBundleBuys broadcasts nothing', async () => {
   assert.equal(provider.broadcasts.length, 0);
 });
 
-test('refuses when there is no live pool (buying before launch)', async () => {
+test('refuses when there is no live pool after all retries (buying before launch)', async () => {
   const { deps: d } = deps({
     swap: { resolvePoolKey: async () => { throw new Error('No initialised letscash pool'); } },
   });
   await assert.rejects(() => prepareBundleBuys({ token: TOKEN, hook: HOOK, buys: BUYS }, d), /No initialised letscash pool/);
+});
+
+test('retries pool resolution when the pool is still propagating right after launch', async () => {
+  let calls = 0;
+  const { deps: d } = deps({
+    swap: {
+      resolvePoolKey: async () => {
+        calls += 1;
+        // First read misses (RPC node a block behind); the pool resolves on retry.
+        if (calls < 2) throw new Error('No initialised letscash pool');
+        return { poolKey: { currency0: '0x00', currency1: TOKEN, fee: 0, tickSpacing: 200, hooks: HOOK }, hook: HOOK, poolId: PID, liquidity: 10n ** 20n };
+      },
+    },
+  });
+  const plan = await prepareBundleBuys({ token: TOKEN, hook: HOOK, buys: BUYS }, d);
+  assert.equal(calls, 2, 'the still-propagating miss was retried, then it resolved');
+  assert.ok(plan.walletCount >= 1, 'the bundle prepares once the pool is readable');
 });
 
 // ── fireBundleBuys ────────────────────────────────────────────────────────────

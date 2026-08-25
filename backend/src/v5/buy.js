@@ -106,10 +106,26 @@ async function prepareBundleBuys(input, deps = {}) {
   const wallets = roles.bundle(ks);
   if (!wallets.length) throw new Error('no v5bundle wallets to buy from — generate or fund some first');
 
-  // Resolve + verify the pinned pool ONCE. Throws if it is not live (e.g. the
-  // launch has not happened / confirmed yet — you cannot buy a pool that does not
-  // exist).
-  const resolved = await swapClient.resolvePoolKey({ token: tokenAddr, quote, hook: hookAddr }, { provider: prov });
+  // Resolve + verify the pinned pool. The pool exists on-chain the instant the
+  // launch tx mines, but the bundle buys fire immediately after that (the combined
+  // Launch + bundle), and a load-balanced RPC can serve a node a block or two
+  // behind, so the FIRST read can miss a pool that is genuinely there. Retry a few
+  // times with a short delay before giving up — that is the difference between "the
+  // pool is still propagating" and "there is genuinely no pool". Tunable/injectable
+  // so a plain manual buy (pool long settled) and the offline tests don't wait.
+  const sleep = deps.sleep || ((ms) => (ms > 0 ? new Promise((r) => setTimeout(r, ms)) : Promise.resolve()));
+  const poolTries = input.poolWaitTries != null ? Number(input.poolWaitTries) : 5;
+  const poolDelayMs = input.poolWaitMs != null ? Number(input.poolWaitMs) : 2000;
+  let resolved;
+  for (let attempt = 0; ; attempt += 1) {
+    try {
+      resolved = await swapClient.resolvePoolKey({ token: tokenAddr, quote, hook: hookAddr }, { provider: prov });
+      break;
+    } catch (err) {
+      if (attempt >= poolTries) throw err;
+      await sleep(poolDelayMs);
+    }
+  }
   const [decimals, symbol] = await Promise.all([decimalsOf(tokenAddr), symbolOf(tokenAddr)]);
 
   // Match each requested buy to its bundle wallet (by id or address); drop zeros.
