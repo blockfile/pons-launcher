@@ -6,7 +6,7 @@
 // sequential round-trips against a public RPC is slow enough to matter when
 // you are funding minutes before a launch.
 
-const { parseEther, formatEther } = require('ethers');
+const { parseEther, formatEther, getAddress } = require('ethers');
 const config = require('../config');
 const { provider } = require('../evm/provider');
 const { getFees, gasCost } = require('../evm/fees');
@@ -27,9 +27,9 @@ const TOKEN_TRANSFER_GAS = 120000n;
  * What a native transfer really costs here, with headroom. Never throws: a
  * failed estimate falls back to the floor above rather than stopping a sweep.
  */
-async function transferGas(from, to) {
+async function transferGas(from, to, rpc = provider) {
   try {
-    const est = await provider.estimateGas({ from, to, value: 1n });
+    const est = await rpc.estimateGas({ from, to, value: 1n });
     const withHeadroom = (est * 12n) / 10n;
     return withHeadroom > TRANSFER_GAS ? withHeadroom : TRANSFER_GAS;
   } catch (_err) {
@@ -56,16 +56,80 @@ async function balances({ keystore: ks = keystore } = {}) {
 }
 
 /**
+ * Which disperser a forced-disperser run goes through. A body-supplied address
+ * is only ever honoured when it is one of the user's OWN configured contracts:
+ * accepting anything else would let a request route the dev wallet's ETH to an
+ * arbitrary address. Omitted → the first configured disperser.
+ */
+function resolveDisperser(requested, configured) {
+  if (!configured.length) throw new Error('no disperser deployed — deploy one in step 2 first');
+  if (requested === undefined || requested === null || requested === '') return getAddress(configured[0]);
+  let wanted;
+  try {
+    wanted = getAddress(String(requested));
+  } catch (_err) {
+    throw new Error(`disperser ${requested} is not one of your configured dispersers`);
+  }
+  const match = configured.map((a) => getAddress(a)).find((a) => a === wanted);
+  if (!match) throw new Error(`disperser ${wanted} is not one of your configured dispersers`);
+  return match;
+}
+
+/**
+ * ONE disperser transaction for every planned recipient, through `disperserAddress`.
+ * No fallback: the operator asked for the contract to be the on-chain source,
+ * so a failure is reported per wallet, not quietly re-sent as plain transfers.
+ */
+async function sendViaDisperser(planned, disperserAddress, { signer, fees, rpc, devAddress, build }) {
+  const rows = (extra) =>
+    planned.map((p) => ({
+      walletId: p.walletId,
+      address: p.address,
+      amountEth: formatEther(p.value),
+      ...extra,
+      disperser: disperserAddress,
+    }));
+  try {
+    const nonce = await rpc.getTransactionCount(devAddress, 'pending');
+    const tx = await build(
+      planned.map((p) => ({ address: p.address, value: p.value })),
+      disperserAddress
+    );
+    const sentTx = await signer.sendTransaction({ ...tx, nonce, ...fees });
+    return rows({ hash: sentTx.hash, batched: true });
+  } catch (err) {
+    return rows({ error: rpcMessage(err) });
+  }
+}
+
+/**
  * Send native ETH from the dev wallet to bundle wallets.
  * @param {Array<{walletId:string, amountEth:string|number}>} targets
  */
 async function disperse(
   targets,
-  { keystore: ks = keystore, userId = 'default', variant = DEFAULT_VARIANT } = {}
+  {
+    keystore: ks = keystore,
+    userId = 'default',
+    variant = DEFAULT_VARIANT,
+    // Force ONE disperser transaction regardless of recipient count, through
+    // `disperser` (must be one of the user's own) — the paced v1 funding path.
+    viaDisperser = false,
+    disperser: requestedDisperser,
+  } = {},
+  // Injection points for the offline tests only; production callers pass nothing.
+  {
+    provider: rpc = provider,
+    getFees: quoteFees = getFees,
+    buildDisperseTx: build = buildDisperseTx,
+    disperserAddresses = addresses,
+  } = {}
 ) {
   const dev = devWalletFor(ks, variant);
-  const signer = ks.signer(dev.id, provider);
-  const fees = await getFees(DISPERSE_FEE_BUMP_PCT);
+  // Resolved before any RPC call so a bad request fails fast and spends nothing.
+  const forcedDisperser = viaDisperser ? resolveDisperser(requestedDisperser, disperserAddresses(userId)) : null;
+  const signer = ks.signer(dev.id, rpc);
+  const fees = await quoteFees(DISPERSE_FEE_BUMP_PCT);
 
   const planned = targets.map((t) => ({
     walletId: t.walletId,
@@ -79,9 +143,9 @@ async function disperse(
 
   const total = planned.reduce((sum, p) => sum + p.value, 0n);
   // Every transfer in the batch is the same shape, so one estimate covers all.
-  const perTransferGas = await transferGas(dev.address, planned[0].address);
+  const perTransferGas = await transferGas(dev.address, planned[0].address, rpc);
   const cost = gasCost(fees, perTransferGas) * BigInt(planned.length);
-  const balance = await provider.getBalance(dev.address);
+  const balance = await rpc.getBalance(dev.address);
   if (balance < total + cost) {
     throw new Error(
       `dev wallet has ${formatEther(balance)} ETH but needs ${formatEther(total + cost)} (transfers + gas)`
@@ -98,19 +162,29 @@ async function disperse(
     }));
   }
 
+  if (forcedDisperser) {
+    return sendViaDisperser(planned, forcedDisperser, {
+      signer,
+      fees,
+      rpc,
+      devAddress: dev.address,
+      build,
+    });
+  }
+
   // Batched transfers beat N concurrent broadcasts once there are enough
   // recipients: cheaper, and they cannot be partially rate-limited. With
   // several dispersers configured the run is split across them, so one failing
   // batch costs only its own share.
   if (shouldBatch(planned.length, userId)) {
     const chunks = splitAcross(planned.map((p) => ({ ...p, value: p.value })), addresses(userId));
-    let batchNonce = await provider.getTransactionCount(dev.address, 'pending');
+    let batchNonce = await rpc.getTransactionCount(dev.address, 'pending');
 
     const results = await Promise.all(
       chunks.map(async (chunk) => {
         const nonce = batchNonce++;
         try {
-          const tx = await buildDisperseTx(
+          const tx = await build(
             chunk.targets.map((t) => ({ address: t.address, value: t.value })),
             chunk.disperser
           );
@@ -142,7 +216,7 @@ async function disperse(
     console.warn('[pons-launcher] every disperse batch failed — falling back to individual transfers');
   }
 
-  let nonce = await provider.getTransactionCount(dev.address, 'pending');
+  let nonce = await rpc.getTransactionCount(dev.address, 'pending');
   const sent = await Promise.all(
     planned.map(async (p) => {
       try {
