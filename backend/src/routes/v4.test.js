@@ -98,6 +98,45 @@ test('a backup can tell which wallets are old enough to use', () => {
   assert.equal(keep('s-new', 1), true);
 });
 
+test('seedCampaigns is the stable batch key: every claimed seed (funded OR pending), splits excluded', () => {
+  const campaigns = [
+    {
+      id: 'c1',
+      name: 'august seasoning',
+      createdAt: '2026-08-01T00:00:00.000Z',
+      transfers: [
+        { walletId: 's-old-sent', status: 'sent', sentAt: '2026-08-02T00:00:00.000Z' },
+        // Pending too — a wallet claimed by a campaign but not yet funded must
+        // still read as that batch, not as "unclaimed / freshly generated".
+        { walletId: 's-old-pending', status: 'pending', dueAt: 0 },
+      ],
+    },
+    {
+      id: 'c2',
+      name: 'sept batch',
+      createdAt: '2026-09-01T00:00:00.000Z',
+      transfers: [{ walletId: 's-new', status: 'pending', dueAt: 0 }],
+    },
+    // A split funds the MASTERS, not seeds — it must NOT put anything in the map,
+    // exactly as store.claimedSeedIds() excludes splits.
+    { id: 'c3', name: 'split', kind: 'split', createdAt: '2026-09-02T00:00:00.000Z', transfers: [{ walletId: 'm1' }] },
+  ];
+
+  const map = guards.seedCampaigns(campaigns);
+
+  assert.equal(map.get('s-old-sent').campaignId, 'c1');
+  assert.equal(map.get('s-old-sent').campaignCreatedAt, '2026-08-01T00:00:00.000Z');
+  assert.equal(map.get('s-old-pending').campaignId, 'c1'); // pending is still claimed
+  assert.equal(map.get('s-new').campaignId, 'c2');
+  assert.equal(map.get('s-new').campaignName, 'sept batch');
+  // c2 is newer than c1 — the frontend picks the max createdAt as "the new batch".
+  assert.ok(map.get('s-new').campaignCreatedAt > map.get('s-old-sent').campaignCreatedAt);
+  // The split contributed nothing.
+  assert.equal(map.get('m1'), undefined);
+  // A wallet in no campaign has no entry (→ the route writes campaignId:null).
+  assert.equal(map.get('s-never'), undefined);
+});
+
 test('a batch divides seeds evenly and leaves the remainder unclaimed', () => {
   const seeds = ['s1', 's2', 's3', 's4', 's5', 's6', 's7'];
   const funders = ['m1', 'm2', 'm3'];

@@ -181,6 +181,39 @@ function fundingFacts(campaigns, nowMs) {
   return byWallet;
 }
 
+/**
+ * Which campaign each seed belongs to — its id, name, and when it was created —
+ * over EVERY transfer (still-pending as well as sent), not just the sent ones
+ * fundingFacts covers.
+ *
+ * THIS IS THE STABLE BATCH KEY THE SEED TABLE GROUPS ON. A seed never leaves the
+ * campaign that claimed it, so grouping the table by this keeps an earlier run's
+ * wallets from mixing with a fresh batch as the fresh one ages — unlike a
+ * usable-vs-aging split, which a wallet CROSSES the moment it seasons (which was
+ * the whole confusion to avoid). It has to include pending transfers so a wallet
+ * claimed by the new campaign but not yet funded already reads as the new batch,
+ * not as "unclaimed / freshly generated".
+ *
+ * Splits fund the MASTERS, not seeds, so they hold no seed id — excluded exactly
+ * as store.claimedSeedIds() excludes them, so this agrees with `claimed`. The
+ * one-campaign-per-seed invariant (no campaign claims a wallet another holds)
+ * makes this a plain map, last writer irrelevant.
+ */
+function seedCampaigns(campaigns) {
+  const byWallet = new Map();
+  for (const c of campaigns) {
+    if ((c.kind || 'season') !== 'season') continue;
+    for (const t of c.transfers || []) {
+      byWallet.set(t.walletId, {
+        campaignId: c.id,
+        campaignName: c.name || c.id,
+        campaignCreatedAt: c.createdAt || null,
+      });
+    }
+  }
+  return byWallet;
+}
+
 function assertNotBusy(walletId, campaigns) {
   const LIVE = new Set(['running', 'paused', 'halted']);
   for (const c of campaigns) {
@@ -485,6 +518,9 @@ router.get('/v4/wallets', requireApiKey, async (req, res, next) => {
     const missingBackup = new Set(store.backedUp(seeds.map((w) => w.id)));
     const now = Date.now();
     const walletFacts = fundingFacts(store.campaigns(), now);
+    // Which campaign each seed belongs to (funded or not) — the batch key the
+    // seed table splits "seasoned pool" from "new campaign" on. See seedCampaigns.
+    const walletCampaign = seedCampaigns(store.campaigns());
 
     const masterRows = await Promise.all(
       masters.map(async (w) => ({ ...(await withMasterBalance(w)), inCampaign: busyMasters.has(w.id) }))
@@ -502,6 +538,13 @@ router.get('/v4/wallets', requireApiKey, async (req, res, next) => {
           // anything reading the chain can see, and it is not what decides
           // whether a wallet is safe to spend. See daysSinceFunded.
           ageDays: Math.floor((now - Date.parse(w.createdAt)) / plan.DAY_MS),
+          // The campaign that claimed this seed (null for a freshly generated one
+          // not yet in any campaign) — the batch key the seed table groups on.
+          ...(walletCampaign.get(w.id) || {
+            campaignId: null,
+            campaignName: null,
+            campaignCreatedAt: null,
+          }),
           // THE AGE THAT MATTERS. Generating a key touches nothing on chain, so
           // a wallet's visible life starts at the transfer that funds it — and
           // in a five-day campaign the wallets fed on the last day are four days
@@ -1048,6 +1091,7 @@ module.exports._private = {
   assertNotBusy,
   divideSeeds,
   fundingFacts,
+  seedCampaigns,
   assertGenerateCount,
   MAX_GENERATE_COUNT,
   onlyV4Wallets,

@@ -95,8 +95,6 @@ export default function V4SeedPanel({ step, wallets, masters, facts, explorer, r
   // since it was ticked cannot be carried into the next run by a stale id.
   const tickedHere = wallets.filter((w) => ticked.includes(w.id));
 
-  const allTicked = wallets.length > 0 && ticked.length === wallets.length;
-
   /**
    * How long a wallet has to sit before it is worth spending, and which ones
    * have.
@@ -116,6 +114,45 @@ export default function V4SeedPanel({ step, wallets, masters, facts, explorer, r
   const waiting = wallets.filter(
     (w) => w.daysSinceFunded != null && w.daysSinceFunded < season
   );
+
+  /**
+   * Split the seed table into "seasoned pool" (earlier campaigns) and "new
+   * campaign" (the newest campaign, plus any freshly generated wallet not yet in
+   * a campaign).
+   *
+   * THE BOUNDARY IS THE CAMPAIGN A WALLET BELONGS TO, NOT WHETHER IT HAS SEASONED
+   * YET. A seed carries the id of the campaign that claimed it (`campaignId`,
+   * null until one does), and it never leaves that campaign — so grouping on it
+   * keeps last run's wallets together as the new batch ages, instead of a wallet
+   * hopping from "new" to "done" the day it seasons (which is exactly the mix-up
+   * this split exists to prevent). "Newest" is the latest campaign createdAt among
+   * the wallets that carry one; a brand-new campaign claims its wallets up front,
+   * so its wallets read as new the moment it is started, funded or not.
+   *
+   * When only one campaign exists there is nothing older to be the pool, so every
+   * wallet is the "new"/current batch and the seasoned-pool section is empty — it
+   * appears the instant a second campaign gives the first one somewhere to go.
+   */
+  const newCampaign = wallets.reduce((newest, w) => {
+    if (!w.campaignId || !w.campaignCreatedAt) return newest;
+    if (!newest || w.campaignCreatedAt > newest.at) {
+      return { id: w.campaignId, at: w.campaignCreatedAt, name: w.campaignName };
+    }
+    return newest;
+  }, null);
+  const inNewBatch = (w) => !w.campaignId || (newCampaign && w.campaignId === newCampaign.id);
+  const newBatch = wallets.filter(inNewBatch);
+  const seasonedPool = wallets.filter((w) => !inNewBatch(w));
+
+  // Per-group figures for the section headers — the same derivations as the
+  // overall stat line, scoped to one group.
+  const groupStats = (list) => ({
+    total: list.length,
+    funded: list.filter((w) => facts[w.id]?.status === 'sent').length,
+    usable: list.filter((w) => (w.daysSinceFunded ?? -1) >= season).length,
+    aging: list.filter((w) => w.daysSinceFunded != null && w.daysSinceFunded < season).length,
+    fresh: list.filter((w) => !w.campaignId).length,
+  });
 
   /**
    * Delete the ticked wallets, one request each.
@@ -200,6 +237,183 @@ export default function V4SeedPanel({ step, wallets, masters, facts, explorer, r
       setBusy('');
     }
   }
+
+  // The rows for one group. The "No." is a within-section ordinal (restarts at 1
+  // per section), a label for the row rather than a global index.
+  function seedRows(list) {
+    return list.map((w, i) => {
+      const fact = facts[w.id];
+      return (
+        <tr key={w.id}>
+          <td>
+            <input
+              type="checkbox"
+              checked={ticked.includes(w.id)}
+              onChange={() =>
+                setTicked((cur) =>
+                  cur.includes(w.id) ? cur.filter((x) => x !== w.id) : [...cur, w.id]
+                )
+              }
+            />
+          </td>
+          <td className="num hint">{i + 1}</td>
+          <td>
+            {/* Still a link — `plain` drops only the decoration. A hundred blue
+                underlined rows is noise; the address is a label for the row rather
+                than the thing a reader came to click. Hover reveals it. */}
+            <Address
+              value={w.address}
+              plain
+              href={explorer ? `${explorer}/address/${w.address}` : ''}
+            />
+          </td>
+          <td className="num">
+            {!fact ? (
+              '—'
+            ) : fact.status === 'sent' ? (
+              eth(fact.amountEth)
+            ) : fact.status === 'abandoned' ? (
+              <span className="bal short">abandoned</span>
+            ) : (
+              <span className="hint">{eth(fact.amountEth)} due</span>
+            )}
+          </td>
+          <td>
+            {fact ? (
+              <>
+                {fact.campaign} <span className="hint">· day {fact.day}</span>
+              </>
+            ) : w.claimed ? (
+              <span className="hint">claimed</span>
+            ) : (
+              <span className="hint">unclaimed</span>
+            )}
+          </td>
+          <td>
+            {fact?.sentAt ? (
+              clock(fact.sentAt)
+            ) : fact?.dueAt ? (
+              <span className="hint">due {clock(new Date(fact.dueAt).toISOString())}</span>
+            ) : (
+              '—'
+            )}
+          </td>
+          {/* Days since it was FUNDED, not since the key was made. Generating a
+              key touches nothing on chain, so a wallet's visible life starts at
+              the transfer — and this is the number that decides whether it is safe
+              to spend. An unfunded wallet has no age at all, a different fact from
+              "zero days old". */}
+          <td className="num">
+            {w.daysSinceFunded == null ? (
+              <span className="hint">—</span>
+            ) : (
+              `${w.daysSinceFunded}d`
+            )}
+          </td>
+          <td>
+            <span style={{ display: 'inline-flex', alignItems: 'center', gap: 6, flexWrap: 'wrap' }}>
+              <span className={`fund-state ${w.backedUp ? 'is-in' : 'is-part'}`}>
+                {w.backedUp ? 'backed up' : 'no backup'}
+              </span>
+              {/* A neutral grey pill: withdrawn is a state the operator chose, not
+                  a shortfall (amber) or a good outcome (jade). The Restore beside
+                  it is the whole way back — reversible, so it sits on the row it
+                  undoes. */}
+              {withdrawnIds.has(w.id) && (
+                <>
+                  <span className="fund-state" title="held out of the V1/V3 claim pool — reversible">
+                    withdrawn
+                  </span>
+                  <IconButton
+                    icon={LuUndo2}
+                    label={`Restore ${w.address} to the claim pool`}
+                    disabled={busy === 'restore'}
+                    onClick={() => restoreWallets([w.id])}
+                  />
+                </>
+              )}
+            </span>
+          </td>
+          <td className="num">
+            {/* Offered on every row, including claimed ones. The server reads the
+                campaigns and refuses a wallet one still owes a transfer to, naming
+                it — a rule this table cannot evaluate, since `claimed` says a
+                campaign holds the wallet but not whether that campaign is still
+                live. Hiding the link on `claimed` would block deleting wallets from
+                a run that finished weeks ago. */}
+            <IconButton
+              icon={LuTrash2}
+              danger
+              label={`Archive seed wallet ${w.address}`}
+              onClick={() => setDeleting(w)}
+            />
+          </td>
+        </tr>
+      );
+    });
+  }
+
+  // One titled, scrollable section for a group of seeds. The header checkbox is
+  // scoped to THIS section — ticking it selects (or clears) only this group's
+  // wallets within the shared `ticked` set, so a select-all in the seasoned pool
+  // never sweeps the new batch into a bulk delete. Renders nothing for an empty
+  // group so a section only exists when it has wallets.
+  function seedSection(title, hint, list) {
+    if (!list.length) return null;
+    const ids = list.map((w) => w.id);
+    const allInSection = ids.every((id) => ticked.includes(id));
+    return (
+      <div style={{ marginBottom: 18 }}>
+        <div className="row" style={{ margin: '0 0 6px', alignItems: 'baseline', gap: 8 }}>
+          <b>{title}</b>
+          <span className="hint">{hint}</span>
+        </div>
+        <div className="table-scroll" style={{ maxHeight: 460, overflowY: 'auto' }}>
+          <table>
+            <thead>
+              <tr>
+                <th style={{ width: 32 }}>
+                  <input
+                    type="checkbox"
+                    checked={allInSection}
+                    onChange={(e) =>
+                      setTicked((cur) =>
+                        e.target.checked
+                          ? Array.from(new Set([...cur, ...ids]))
+                          : cur.filter((x) => !ids.includes(x))
+                      )
+                    }
+                  />
+                </th>
+                <th className="num">No.</th>
+                <th>Address</th>
+                <th className="num">Funded</th>
+                <th>Campaign</th>
+                <th>Funded at</th>
+                <th className="num">Age</th>
+                <th>Key</th>
+                <th />
+              </tr>
+            </thead>
+            <tbody>{seedRows(list)}</tbody>
+          </table>
+        </div>
+      </div>
+    );
+  }
+
+  const poolStats = groupStats(seasonedPool);
+  const newStats = groupStats(newBatch);
+  const poolHint = `${poolStats.total} wallet${poolStats.total === 1 ? '' : 's'} · ${poolStats.usable} usable · ${poolStats.aging} aging`;
+  // "New campaign" only reads right when there is an older pool to be new relative
+  // to; with a single batch it is simply the current one.
+  const newTitle = seasonedPool.length ? 'New campaign' : 'Current campaign';
+  const newHint =
+    (newCampaign?.name ? `${newCampaign.name} · ` : '') +
+    `${newStats.total} wallet${newStats.total === 1 ? '' : 's'}` +
+    (newStats.funded ? ` · ${newStats.funded} funded` : '') +
+    (newStats.aging ? ` · ${newStats.aging} aging` : '') +
+    (newStats.fresh ? ` · ${newStats.fresh} not yet in a campaign` : '');
 
   return (
     <Step {...step}>
@@ -416,171 +630,26 @@ export default function V4SeedPanel({ step, wallets, masters, facts, explorer, r
           </p>
         </div>
       ) : (
-        // Capped and scrolled rather than paged. A campaign funds hundreds of
-        // these, and drawing every one left step 3 a thousand rows below step
-        // 2 — but a pager splits the list into slices where a select-all can
-        // only honestly mean "the slice", and where the row an operator wants
-        // is on a page they have to guess at. Scrolling keeps ONE list:
-        // everything is reachable, the header checkbox can mean every wallet,
-        // and the panel still fits a screen.
-        <div className="table-scroll" style={{ maxHeight: 460, overflowY: 'auto' }}>
-          <table>
-            <thead>
-              <tr>
-                <th style={{ width: 32 }}>
-                  {/* All-or-none for the page. Ticking every row by hand across
-                      a hundred wallets is not a thing anyone does, and the
-                      count beside the button says what it will act on. */}
-                  {/* Every wallet, not a visible slice. The table scrolls, so
-                      everything this ticks is reachable by scrolling to it —
-                      which is the condition under which a select-all is honest
-                      rather than a way to delete rows nobody looked at. */}
-                  <input
-                    type="checkbox"
-                    checked={allTicked}
-                    onChange={(e) => setTicked(e.target.checked ? wallets.map((w) => w.id) : [])}
-                  />
-                </th>
-                <th className="num">No.</th>
-                <th>Address</th>
-                <th className="num">Funded</th>
-                <th>Campaign</th>
-                <th>Funded at</th>
-                <th className="num">Age</th>
-                <th>Key</th>
-                <th />
-              </tr>
-            </thead>
-            <tbody>
-              {wallets.map((w, i) => {
-                const fact = facts[w.id];
-                return (
-                  <tr key={w.id}>
-                    <td>
-                      <input
-                        type="checkbox"
-                        checked={ticked.includes(w.id)}
-                        onChange={() =>
-                          setTicked((cur) =>
-                            cur.includes(w.id) ? cur.filter((x) => x !== w.id) : [...cur, w.id]
-                          )
-                        }
-                      />
-                    </td>
-                    <td className="num hint">{i + 1}</td>
-                    <td>
-                      {/* Still a link — `plain` drops only the decoration. A
-                          hundred blue underlined rows is noise; the address is
-                          a label for the row rather than the thing a reader
-                          came to click. Hover reveals it. */}
-                      <Address
-                        value={w.address}
-                        plain
-                        href={explorer ? `${explorer}/address/${w.address}` : ''}
-                      />
-                    </td>
-                    <td className="num">
-                      {!fact ? (
-                        '—'
-                      ) : fact.status === 'sent' ? (
-                        eth(fact.amountEth)
-                      ) : fact.status === 'abandoned' ? (
-                        <span className="bal short">abandoned</span>
-                      ) : (
-                        <span className="hint">{eth(fact.amountEth)} due</span>
-                      )}
-                    </td>
-                    <td>
-                      {fact ? (
-                        <>
-                          {fact.campaign} <span className="hint">· day {fact.day}</span>
-                        </>
-                      ) : w.claimed ? (
-                        <span className="hint">claimed</span>
-                      ) : (
-                        <span className="hint">unclaimed</span>
-                      )}
-                    </td>
-                    <td>
-                      {fact?.sentAt ? (
-                        clock(fact.sentAt)
-                      ) : fact?.dueAt ? (
-                        <span className="hint">due {clock(new Date(fact.dueAt).toISOString())}</span>
-                      ) : (
-                        '—'
-                      )}
-                    </td>
-                    {/* Days since it was FUNDED, not since the key was made.
-                        Generating a key touches nothing on chain, so a wallet's
-                        visible life starts at the transfer — and this is the
-                        number that decides whether it is safe to spend. An
-                        unfunded wallet has no age at all, which is a different
-                        fact from "zero days old". */}
-                    <td className="num">
-                      {w.daysSinceFunded == null ? (
-                        <span className="hint">—</span>
-                      ) : (
-                        `${w.daysSinceFunded}d`
-                      )}
-                    </td>
-                    <td>
-                      <span
-                        style={{ display: 'inline-flex', alignItems: 'center', gap: 6, flexWrap: 'wrap' }}
-                      >
-                        <span className={`fund-state ${w.backedUp ? 'is-in' : 'is-part'}`}>
-                          {w.backedUp ? 'backed up' : 'no backup'}
-                        </span>
-                        {/* A neutral grey pill: withdrawn is a state the operator
-                            chose, not a shortfall (amber) or a good outcome
-                            (jade). The Restore beside it is the whole way back —
-                            reversible, so it sits right on the row it undoes. */}
-                        {withdrawnIds.has(w.id) && (
-                          <>
-                            <span
-                              className="fund-state"
-                              title="held out of the V1/V3 claim pool — reversible"
-                            >
-                              withdrawn
-                            </span>
-                            <IconButton
-                              icon={LuUndo2}
-                              label={`Restore ${w.address} to the claim pool`}
-                              disabled={busy === 'restore'}
-                              onClick={() => restoreWallets([w.id])}
-                            />
-                          </>
-                        )}
-                      </span>
-                    </td>
-                    <td className="num">
-                      {/* Offered on every row, including claimed ones. The
-                          server reads the campaigns and refuses a wallet one
-                          still owes a transfer to, naming it — a rule this
-                          table cannot evaluate, since `claimed` says a campaign
-                          holds the wallet but not whether that campaign is
-                          still live. Hiding the link on `claimed` would block
-                          deleting wallets from a run that finished weeks ago. */}
-                      <IconButton
-                        icon={LuTrash2}
-                        danger
-                        label={`Archive seed wallet ${w.address}`}
-                        onClick={() => setDeleting(w)}
-                      />
-                    </td>
-                  </tr>
-                );
-              })}
-            </tbody>
-          </table>
+        // TWO SECTIONS, split on the campaign a wallet belongs to (see the
+        // newCampaign / seasonedPool derivation): the earlier campaigns' wallets
+        // (the seasoned pool) and the newest campaign's + freshly generated ones
+        // (the batch being seasoned now). Each is its own scrolling table so an
+        // earlier run's still-aging wallets never sit in the same list as a fresh
+        // batch — the confusion this split exists to remove. A single campaign
+        // has no older pool, so only the "current campaign" section shows until a
+        // second campaign gives the first somewhere to go.
+        <>
+          {seedSection('Seasoned pool — earlier campaigns', poolHint, seasonedPool)}
+          {seedSection(newTitle, newHint, newBatch)}
 
-          {/* Said once, under the table, because the column heading cannot carry
+          {/* Said once, under the tables, because the column heading cannot carry
               it: "Funded" is the amount the PLAN sent, not a balance read back
-              off chain. A seed wallet receives one transfer and then sits, so
-              for an untouched wallet the two are the same figure — and reading
-              several hundred balances back on every poll would buy nothing for
-              hundreds of RPC calls a minute. Age is counted from the moment the
-              key was created, which is what "how long has this wallet existed"
-              means to anything looking at it from outside. */}
+              off chain. A seed wallet receives one transfer and then sits, so for
+              an untouched wallet the two are the same figure — and reading several
+              hundred balances back on every poll would buy nothing for hundreds of
+              RPC calls a minute. Age is counted from the transfer that funded each
+              wallet, which is what "how long has this wallet existed" means to
+              anything looking at it from the chain. */}
           <p className="hint">
             Funded is what the campaign sent, not a balance read back — these wallets receive once
             and are not spent from here. Age counts from the transfer that funded each wallet, not
@@ -588,7 +657,7 @@ export default function V4SeedPanel({ step, wallets, masters, facts, explorer, r
             visible life starts when a solver pays it. In a five-day campaign the last day's
             wallets stay four days younger than the first day's, permanently.
           </p>
-        </div>
+        </>
       )}
 
       {/* A seed wallet is worth something only for having sat untouched since
