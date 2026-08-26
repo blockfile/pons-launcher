@@ -121,17 +121,28 @@ function deadlineFor(w) {
  *
  * @returns {Promise<{token, quote, poolKey, poolId, hook, liquidity, creator}>}
  */
+// findLaunch is a log SCAN and dominates readPool's latency; a TokenLaunched event is
+// historical and never changes, so the launch (hook/poolId/creator) is cached per token.
+// The pool itself is still re-verified live on every call. The cache is skipped whenever a
+// caller injects its own factory/swap/rpc (the tests), so a fake never crosses into it.
+const _launchCache = new Map();
+
 async function readPool({ token, quote = 'eth' }, deps = {}) {
   const w = wire(deps);
   const addr = getAddress(token);
 
-  const launch = await w.factory.findLaunch(addr, { provider: w.rpc });
+  const live = !deps.factory && !deps.swap && !deps.rpc;
+  let launch = live ? _launchCache.get(addr) : undefined;
   if (!launch) {
-    throw new Error(
-      `${addr} is not a letscash launch — the factory has no TokenLaunched event for it, so v6 will not ` +
-        `approve or trade it. v6 only trades genuine letscash launchpad tokens (a decoy ERC-20 with a ` +
-        `look-alike pool is exactly the honeypot this refuses).`
-    );
+    launch = await w.factory.findLaunch(addr, { provider: w.rpc });
+    if (!launch) {
+      throw new Error(
+        `${addr} is not a letscash launch — the factory has no TokenLaunched event for it, so v6 will not ` +
+          `approve or trade it. v6 only trades genuine letscash launchpad tokens (a decoy ERC-20 with a ` +
+          `look-alike pool is exactly the honeypot this refuses).`
+      );
+    }
+    if (live) _launchCache.set(addr, launch);
   }
 
   // Verify the pool is live under the hook the FACTORY named (trusted), for the quote
@@ -189,9 +200,13 @@ async function poolFee({ token, quote = 'eth', pool }, deps = {}) {
  * that moved ETH OUT to the swapper (amount0 > 0). A token with buys but never a single
  * sell is a real buy-only honeypot; one with sells is sellable. Reads only.
  */
+const _soldPools = new Set(); // poolIds known to have had a sell (once true, always true)
+
 async function hasRecentSell({ pool }, deps = {}) {
   const w = wire(deps);
   const rpc = w.rpc;
+  const live = !deps.rpc && !deps.head;
+  if (live && _soldPools.has(pool.poolId)) return true; // a pool that has sold, always has
   const address = getAddress(config.letscash.poolManager);
   const topic = POOL_SWAP_IFACE.getEvent('Swap').topicHash;
   const base = { address, topics: [topic, pool.poolId] };
@@ -207,7 +222,10 @@ async function hasRecentSell({ pool }, deps = {}) {
     }
     for (const log of logs) {
       const p = POOL_SWAP_IFACE.parseLog({ topics: [...log.topics], data: log.data });
-      if (p.args.amount0 > 0n) return true; // ETH left the pool to a seller
+      if (p.args.amount0 > 0n) {
+        if (live) _soldPools.add(pool.poolId);
+        return true; // ETH left the pool to a seller
+      }
     }
     if (from === floor) break;
   }

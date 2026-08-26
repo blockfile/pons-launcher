@@ -22,18 +22,26 @@ export default function V6ExitPanel({ step, token, setToken, explorer, reload, r
   const [busy, setBusy] = useState('');
   const [preview, setPreview] = useState(null);
   const [arming, setArming] = useState(false);
+  const [loading, setLoading] = useState(false);
+  const [loadErr, setLoadErr] = useState(null);
 
   const load = useCallback(async () => {
     if (!token?.trim()) {
       setPreview(null);
+      setLoadErr(null);
       return;
     }
+    setLoading(true);
+    setLoadErr(null);
     try {
       setPreview(await api(`/v6/exit/preview?token=${encodeURIComponent(token.trim())}`));
-    } catch {
-      // A token that is not a letscash launch, or is not held, simply has no
-      // preview. The refusal that matters is the one the sell itself gives.
+    } catch (err) {
+      // Distinguish a real failure from "nothing held" — swallowing it silently made a
+      // slow or failing preview look like an empty one.
       setPreview(null);
+      setLoadErr(err.message);
+    } finally {
+      setLoading(false);
     }
   }, [token]);
 
@@ -74,7 +82,11 @@ export default function V6ExitPanel({ step, token, setToken, explorer, reload, r
         </button>
       </div>
 
-      {preview && preview.wallets.length > 0 ? (
+      {loading ? (
+        <p className="hint">Reading holdings…</p>
+      ) : loadErr ? (
+        <p className="warn">Could not read holdings: {loadErr}</p>
+      ) : preview && preview.wallets.length > 0 ? (
         <>
           <div className="table-card">
             <table>

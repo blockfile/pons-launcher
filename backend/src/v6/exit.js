@@ -59,11 +59,11 @@ async function readPositions(userId, { token }, deps = {}) {
   // is not a genuine letscash launch, or has no live pool for the quote).
   const pool = await w.trade.readPool({ token, quote: 'eth' }, deps);
 
-  const wallets = [];
-  for (const wallet of holders(ks)) {
-    const balance = await w.trade.tokenBalance(token, wallet.address, deps);
-    wallets.push({ wallet, balance });
-  }
+  // Balances read CONCURRENTLY — one round trip for the whole set, not one per wallet,
+  // which is what made the exit preview crawl once a run had claimed dozens of wallets.
+  const list = holders(ks);
+  const balances = await Promise.all(list.map((wallet) => w.trade.tokenBalance(token, wallet.address, deps)));
+  const wallets = list.map((wallet, i) => ({ wallet, balance: balances[i] }));
   return { pool, wallets };
 }
 
