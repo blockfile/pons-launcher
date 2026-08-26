@@ -29,7 +29,7 @@
  * with the gas the txs burned added back on the sell — the same technique v3/v5 use.
  */
 
-const { getAddress } = require('ethers');
+const { getAddress, Interface } = require('ethers');
 const config = require('../config');
 const { provider } = require('../evm/provider');
 const { rpcMessage } = require('../evm/errors');
@@ -37,6 +37,17 @@ const { getFees } = require('../evm/fees');
 const { waitForReceipt } = require('../evm/receipt');
 const { readTokenBalance } = require('../evm/erc20');
 const swap = require('../evm/v5/swap');
+
+// The V4 PoolManager Swap event — used to prove a token is SELLABLE from its on-chain
+// history when the quoter cannot (the CashCat hook's quote-side tax reverts the quoter's
+// sell simulation even though the real sell works). currency0 is the ETH side of an
+// ETH-quoted pool, so a Swap whose amount0 is positive is ETH LEAVING the pool to the
+// swapper — a sell that landed.
+const POOL_SWAP_IFACE = new Interface([
+  'event Swap(bytes32 indexed id, address indexed sender, int128 amount0, int128 amount1, uint160 sqrtPriceX96, uint128 liquidity, int24 tick, uint24 fee)',
+]);
+const SELL_SCAN_WINDOW = 9000;
+const SELL_SCAN_MAX_BLOCKS = 300_000;
 const factory = require('../evm/v5/factory');
 
 // The buy is a single V4 execute(); 500k is generous (unused gas refunded).
@@ -168,6 +179,39 @@ async function quoteBuyOut({ token, quote = 'eth', pool, amountWei }, deps = {})
 async function poolFee({ token, quote = 'eth', pool }, deps = {}) {
   const w = wire(deps);
   return w.swap.poolFeeStatus({ token: getAddress(token), quote, hook: pool.hook }, { provider: w.rpc });
+}
+
+/**
+ * Has a SELL ever landed on this pool? — the reliable sellability test when the quoter
+ * cannot price a sell (the CashCat hook reverts the quoter's sell simulation with a
+ * custom error even though the real UniversalRouter sell works). Scans the PoolManager's
+ * Swap events for this pool, newest windows first, and returns true at the first swap
+ * that moved ETH OUT to the swapper (amount0 > 0). A token with buys but never a single
+ * sell is a real buy-only honeypot; one with sells is sellable. Reads only.
+ */
+async function hasRecentSell({ pool }, deps = {}) {
+  const w = wire(deps);
+  const rpc = w.rpc;
+  const address = getAddress(config.letscash.poolManager);
+  const topic = POOL_SWAP_IFACE.getEvent('Swap').topicHash;
+  const base = { address, topics: [topic, pool.poolId] };
+  const head = deps.head ?? (await rpc.getBlockNumber());
+  const floor = Math.max(0, head - SELL_SCAN_MAX_BLOCKS);
+  for (let to = head; to >= floor; to -= SELL_SCAN_WINDOW) {
+    const from = Math.max(floor, to - SELL_SCAN_WINDOW + 1);
+    let logs;
+    try {
+      logs = await rpc.getLogs({ ...base, fromBlock: from, toBlock: to });
+    } catch {
+      continue; // a refused window is not evidence either way — keep scanning
+    }
+    for (const log of logs) {
+      const p = POOL_SWAP_IFACE.parseLog({ topics: [...log.topics], data: log.data });
+      if (p.args.amount0 > 0n) return true; // ETH left the pool to a seller
+    }
+    if (from === floor) break;
+  }
+  return false;
 }
 
 /**
@@ -322,6 +366,7 @@ module.exports = {
   FEE_BUMP_PCT,
   DEFAULT_BUY_SLIPPAGE_BPS,
   readPool,
+  hasRecentSell,
   tokenBalance,
   quoteSellOut,
   quoteBuyOut,

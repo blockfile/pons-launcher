@@ -146,25 +146,38 @@ async function feasibilityOf(run, deps = {}) {
   const walletCount = run.targets.length;
   const tokensBought = await t.quoteBuyOut({ token: run.token, pool: run.pool, amountWei: run.bigBuyWei }, deps);
 
-  // Quoting the sell back both PRICES the position and PROVES the token is sellable.
-  // A token that buys but reverts every sell (a custom-error honeypot, or sells locked
-  // to a specific router) would strand the big buy in tokens the run — and the exit —
-  // could never sell out of. So a reverting sell quote FAILS the run rather than pricing
-  // it; it is the exit-side half of the dusting guard.
+  // Quoting the sell back PRICES the position — but a reverting sell quote is NOT proof
+  // the token is unsellable. The letscash CashCat hook reverts the QUOTER's sell
+  // simulation (its quote-side tax) even for tokens that sell perfectly well through the
+  // real UniversalRouter; v6's actual sells use no quote. So when the sell quote reverts
+  // we fall back to the pool's on-chain history: if a sell has ever LANDED, the token is
+  // sellable and we only lose the precise price (a soft, estimated plan). Only a token
+  // whose pool shows buys but NEVER a sell is treated as a buy-only honeypot and blocked.
   let positionWei = 0n;
   let sellsRevert = false;
+  let pricingEstimated = false;
   let sellError = null;
   if (tokensBought > 0n) {
     try {
       positionWei = await t.quoteSellOut({ token: run.token, pool: run.pool, tokensIn: tokensBought }, deps);
     } catch (err) {
-      sellsRevert = true;
       sellError = revertSelector(err);
+      const sellable = await t.hasRecentSell({ pool: run.pool }, deps).catch(() => false);
+      if (sellable) {
+        // Sells DO land on this pool — the quoter just can't price them. Estimate the
+        // position as roughly the ETH put in (tax/impact aside); the engine sizes each
+        // cycle from the ACTUAL balance anyway, so this only affects the preview figures.
+        pricingEstimated = true;
+        positionWei = run.bigBuyWei;
+      } else {
+        sellsRevert = true; // buys but no sell has ever landed → buy-only honeypot
+        positionWei = 0n;
+      }
     }
   }
 
-  if (!walletCount) return { feasible: false, perWalletWei: 0n, reason: 'no-wallets', positionWei, tokensBought, sellsRevert, sellError };
-  if (sellsRevert) return { feasible: false, perWalletWei: 0n, reason: 'sells-revert', positionWei: 0n, tokensBought, sellsRevert, sellError };
+  if (!walletCount) return { feasible: false, perWalletWei: 0n, reason: 'no-wallets', positionWei, tokensBought, sellsRevert, pricingEstimated, sellError };
+  if (sellsRevert) return { feasible: false, perWalletWei: 0n, reason: 'sells-revert', positionWei: 0n, tokensBought, sellsRevert, pricingEstimated: false, sellError };
 
   const fees = await getFeesFn(engine.FEE_BUMP_PCT);
   const gas = engine.gasFigures(fees);
@@ -176,7 +189,7 @@ async function feasibilityOf(run, deps = {}) {
     buffer: gas.buffer,
     relayFeePct: engine.RELAY_FEE_PCT,
   });
-  return { ...est, positionWei, tokensBought, sellsRevert: false, sellError: null };
+  return { ...est, positionWei, tokensBought, sellsRevert: false, pricingEstimated, sellError };
 }
 
 /**
@@ -221,20 +234,30 @@ async function buildPlan(body, ks, deps = {}) {
         'own sell router, not a direct swap).'
     );
   } else {
+    if (feas.pricingEstimated) {
+      warnings.push(
+        `letscash's quoter reverts on sells for this pool${feas.sellError ? ` (custom error ${feas.sellError})` : ''}, ` +
+          'so the position value here is a ROUGH ESTIMATE (about the ETH put in). This does NOT mean the token ' +
+          "cannot be sold — sells HAVE landed on this pool on-chain, and the run's own sells use no quote, so " +
+          'they work. Only these preview figures are approximate; the engine sizes each cycle from the real balance.'
+      );
+    }
     warnings.push(
       'the sells in this run have NO slippage floor — every sell exits at whatever price it gets. The ' +
         `buys carry a ${run.buySlippageBps}bps floor (letscash buys require one).`
     );
-    warnings.push(
-      `buying the position and selling it back costs about ${bleedPct.toFixed(1)}% to the pool tax and ` +
-        `your own price impact, so the wallets share roughly ${formatEther(positionWei)} ETH rather than ` +
-        `the full ${formatEther(run.bigBuyWei)}`
-    );
-    if (bleedPct > 20) {
+    if (!feas.pricingEstimated) {
       warnings.push(
-        `that ${bleedPct.toFixed(1)}% is high, and it is price impact: this big buy is large relative to ` +
-          'the pool. A smaller big buy loses far less on the round trip.'
+        `buying the position and selling it back costs about ${bleedPct.toFixed(1)}% to the pool tax and ` +
+          `your own price impact, so the wallets share roughly ${formatEther(positionWei)} ETH rather than ` +
+          `the full ${formatEther(run.bigBuyWei)}`
       );
+      if (bleedPct > 20) {
+        warnings.push(
+          `that ${bleedPct.toFixed(1)}% is high, and it is price impact: this big buy is large relative to ` +
+            'the pool. A smaller big buy loses far less on the round trip.'
+        );
+      }
     }
     if (!feas.feasible) {
       warnings.push(
@@ -266,6 +289,9 @@ async function buildPlan(body, ks, deps = {}) {
     // A hard block, distinct from "feasible": the token cannot be sold out of, so the
     // console must refuse to start (it would strand the big buy) — see the start route.
     sellsRevert: feas.sellsRevert,
+    // Soft: the quoter could not price the sell, but sells DO land on-chain — the token
+    // is sellable and the position figures are estimated. Not a block.
+    pricingEstimated: feas.pricingEstimated,
     sellError: feas.sellError,
     targets: run.targets.map((x, i) => ({ index: i + 1, walletId: x.walletId, address: x.address })),
     position: {

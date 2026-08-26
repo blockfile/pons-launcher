@@ -106,3 +106,32 @@ test('findLaunch falls back to a windowed, splitting scan when the node refuses 
   assert.equal(out.poolId, poolId);
   assert.ok(calls >= 2, 'fell back past the refused full-range call to a bounded window');
 });
+
+// ── hasRecentSell — the on-chain sellability check (used when the quoter can't price) ──
+
+const { Interface } = require('ethers');
+const SWAP = new Interface([
+  'event Swap(bytes32 indexed id, address indexed sender, int128 amount0, int128 amount1, uint160 sqrtPriceX96, uint128 liquidity, int24 tick, uint24 fee)',
+]);
+function swapLog(poolId, amount0) {
+  const { data, topics } = SWAP.encodeEventLog(SWAP.getEvent('Swap'), [
+    poolId, '0x0000000000000000000000000000000000000abc', amount0, -amount0, 0n, 0n, 0, 0,
+  ]);
+  return { data, topics };
+}
+const POOL = { poolId: '0x' + 'ab'.repeat(32) };
+
+test('hasRecentSell returns true when a Swap moved ETH OUT (amount0 > 0 = a sell)', async () => {
+  const rpc = { getBlockNumber: async () => 1000, getLogs: async () => [swapLog(POOL.poolId, 5n)] };
+  assert.equal(await trade.hasRecentSell({ pool: POOL }, { rpc }), true);
+});
+
+test('hasRecentSell returns false when the pool shows only buys (amount0 < 0)', async () => {
+  const rpc = { getBlockNumber: async () => 1000, getLogs: async () => [swapLog(POOL.poolId, -5n)] };
+  assert.equal(await trade.hasRecentSell({ pool: POOL }, { rpc }), false);
+});
+
+test('hasRecentSell returns false when the pool has no swaps at all', async () => {
+  const rpc = { getBlockNumber: async () => 1000, getLogs: async () => [] };
+  assert.equal(await trade.hasRecentSell({ pool: POOL }, { rpc }), false);
+});
