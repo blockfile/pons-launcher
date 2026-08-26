@@ -244,16 +244,27 @@ function createEngine(deps = {}) {
     throw lastErr;
   }
 
-  async function waitForFill(record, address, needWei) {
+  // Waits for the Relay fill to CREDIT the recipient, measured as a rise ABOVE the
+  // balance it held before the transfer — never an absolute threshold. V6's bundle
+  // wallets are routinely claimed from the seasoning pool and already hold ETH, so an
+  // absolute `balance >= needWei` check would return the instant the wallet was armed,
+  // masking a deposit that never filled: the buy would then spend the wallet's OWN
+  // seasoning ETH while the sold proceeds sit stranded (refundable) at the deposit
+  // address, with no halt and no signal. The delta only clears when the fill actually
+  // lands. `baseline` is the pre-transfer snapshot; 0n falls back to the absolute
+  // check for any caller that has none.
+  async function waitForFill(record, address, needWei, baseline = 0n) {
+    const base = BigInt(baseline || 0n);
     const maxAttempts = Math.max(1, Math.ceil(fillTimeoutMs / fillPollMs));
     for (let attempt = 0; attempt < maxAttempts; attempt += 1) {
       const balance = BigInt(await rpc.getBalance(address));
-      if (balance >= needWei) return balance;
+      if (balance - base >= needWei) return balance;
       await sleepFn(fillPollMs);
     }
     throw new Error(
       `the Relay fill for ${address} did not arrive within ${Math.round(fillTimeoutMs / 1000)}s ` +
-        `(request ${record.requestId || 'unknown'}) — the deposit was sent, so check the order before retrying`
+        `(request ${record.requestId || 'unknown'}) — the deposit was sent and is refundable to the main ` +
+        `wallet, so check the order before retrying`
     );
   }
 
@@ -321,7 +332,26 @@ function createEngine(deps = {}) {
         { wallet: main, token: job.token, quote: 'eth', pool: job.pool, tokensIn },
         { ...tradeDeps, keystore: ks, rpc }
       );
-      if (sold.status === 'reverted') throw new Error('the sell reverted');
+      // Halt on ANYTHING that is not a confirmed sell — BEFORE marking the step done.
+      // A 'reverted' sell moved nothing (safe to resume: it re-sells cleanly). A
+      // 'pending' sell is a receipt that did not arrive in time: recording it as done
+      // would freeze ethRaised at 0 and every resume would then throw "raised 0 ETH"
+      // at the transfer forever — a dead run. Halting here keeps sellDone false, so a
+      // resume re-reads the main balance and re-slices. If the pending tx HAD landed,
+      // the balance is already lower and the re-slice simply continues from there (no
+      // ETH leaves the main wallet either way); if it had not, the retry sells as
+      // intended. The operator is told to check the balance first so they can exit
+      // instead of resuming when they would rather stop.
+      if (sold.status !== 'confirmed') {
+        throw new Error(
+          sold.status === 'reverted'
+            ? 'the sell reverted'
+            : `the sell did not confirm within the receipt window (status: ${sold.status}, tx ` +
+              `${sold.sellHash || 'unknown'}) — it may still land. Before resuming, check whether the main ` +
+              `wallet's token balance dropped: if it did the sell succeeded and resuming re-sells the NEXT ` +
+              `slice (safe, no ETH leaves main); if you would rather stop, run the exit instead.`
+        );
+      }
 
       record.tokensSold = tokensIn;
       record.ethRaised = sold.ethReceived;
@@ -342,6 +372,11 @@ function createEngine(deps = {}) {
     if (!record.transferDone) {
       record.step = 'transferring';
       record.state = 'transferring';
+
+      // Snapshot the recipient's balance BEFORE the transfer, so the fill is detected
+      // as a delta (see waitForFill). Persisted on the record: if the run halts at the
+      // fill step and resumes, the baseline the transfer was measured against survives.
+      record.preFillBalance = BigInt(await rpc.getBalance(target.address));
 
       const spendable = record.ethRaised - mainGas;
       if (spendable <= 0n) {
@@ -379,7 +414,7 @@ function createEngine(deps = {}) {
     if (!record.fillDone) {
       record.step = 'waiting-fill';
       record.state = 'waiting-fill';
-      await waitForFill(record, target.address, (record.transferredWei * 99n) / 100n);
+      await waitForFill(record, target.address, (record.transferredWei * 99n) / 100n, record.preFillBalance);
       record.fillDone = true;
     }
 

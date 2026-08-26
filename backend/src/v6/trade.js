@@ -96,11 +96,22 @@ function deadlineFor(w) {
  * per-pool; resolvePoolKey pins it against the chain and confirms it is initialised
  * and liquid before the run commits to it. Pass a known `hook` to skip the probe.
  *
+ * THE DUSTING GUARD. v6 takes both the token AND (optionally) the hook from untrusted
+ * operator input, so this passes restrictToKnown: an explicit hook that is not a known
+ * letscash hook is REFUSED — not probed — because a decoy ERC-20 paired with an
+ * attacker's own hook can seed a real, initialised, liquid pool that would otherwise
+ * satisfy "a pool exists" and then eat every buy (a honeypot). A real letscash token
+ * always trades under one of the known hooks. This is what the routes header means by
+ * "a real, initialised, liquid letscash V4 pool under a KNOWN letscash hook".
+ *
  * @returns {Promise<{token, quote, poolKey, poolId, hook, liquidity}>}
  */
 async function readPool({ token, quote = 'eth', hook }, deps = {}) {
   const w = wire(deps);
-  const r = await w.swap.resolvePoolKey({ token: getAddress(token), quote, hook }, { provider: w.rpc });
+  const r = await w.swap.resolvePoolKey(
+    { token: getAddress(token), quote, hook, restrictToKnown: true },
+    { provider: w.rpc }
+  );
   return { token: getAddress(token), quote, poolKey: r.poolKey, poolId: r.poolId, hook: r.hook, liquidity: r.liquidity };
 }
 

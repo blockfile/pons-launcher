@@ -495,6 +495,13 @@ router.get('/v6/exit/preview', requireApiKey, async (req, res, next) => {
 
 router.post('/v6/exit', requireApiKey, async (req, res, next) => {
   try {
+    // Refused mid-run: the exit sells the MAIN wallet too (exit.js includes it), and a
+    // live cycle is signing sells on that same wallet — firing both races the nonce and
+    // can sell main's position out from under a pending cycle. Stop the run first (the
+    // engine keeps its state; the exit is still there afterwards).
+    if (engine.isRunning(req.user.id)) {
+      throw new Error('a v6 run is in progress — stop it before selling everything, or the exit will race the engine on the main wallet');
+    }
     // exit.readPositions calls trade.readPool, which verifies a real letscash pool —
     // the same dusting guard the start takes (the exit approves every wallet's balance).
     res.json(jsonSafe(await exit.run(req.user.id, { token: req.body?.token, hook: req.body?.hook, confirm: req.body?.confirm })));
