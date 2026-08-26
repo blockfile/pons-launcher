@@ -120,31 +120,36 @@ export default function V4SeedPanel({ step, wallets, masters, facts, explorer, r
   );
 
   /**
-   * Split the seed table into "seasoned pool" (earlier campaigns) and "new
-   * campaign" (the newest campaign, plus any freshly generated wallet not yet in
-   * a campaign).
+   * Split the seed table into "seasoned pool" (earlier runs) and "new campaign"
+   * (the batch being seasoned now, plus any freshly generated wallet not yet in a
+   * campaign).
    *
-   * THE BOUNDARY IS THE CAMPAIGN A WALLET BELONGS TO, NOT WHETHER IT HAS SEASONED
-   * YET. A seed carries the id of the campaign that claimed it (`campaignId`,
-   * null until one does), and it never leaves that campaign — so grouping on it
-   * keeps last run's wallets together as the new batch ages, instead of a wallet
-   * hopping from "new" to "done" the day it seasons (which is exactly the mix-up
-   * this split exists to prevent). "Newest" is the latest campaign createdAt among
-   * the wallets that carry one; a brand-new campaign claims its wallets up front,
-   * so its wallets read as new the moment it is started, funded or not.
+   * THE BOUNDARY IS WHICH RUN A WALLET BELONGS TO, NOT WHETHER IT HAS SEASONED
+   * YET — so a wallet never hops from "new" to "done" the day it seasons, and last
+   * run's still-aging wallets stay with last run. A seed carries the createdAt of
+   * the campaign that claimed it (null until one does).
    *
-   * When only one campaign exists there is nothing older to be the pool, so every
-   * wallet is the "new"/current batch and the seasoned-pool section is empty — it
-   * appears the instant a second campaign gives the first one somewhere to go.
+   * A RUN IS NOT ALWAYS ONE CAMPAIGN. "Start on all N funders" fans a single
+   * action out into N sibling campaigns (e.g. 20 funders × 5 wallets = 100),
+   * created within moments of each other. Keying "new" off the SINGLE latest
+   * createdAt would show only one funder's 5 wallets and scatter the other 95 into
+   * the pool — so cluster every campaign created within a short window of the
+   * newest as ONE new batch. A genuinely earlier run (the previous seasoning,
+   * hours or days back) falls outside the window and stays in the pool.
+   *
+   * With only one run there is nothing older to be the pool, so every wallet is
+   * the current batch and the seasoned-pool section is empty — it appears the
+   * instant a later run gives the first one somewhere to go.
    */
-  const newCampaign = wallets.reduce((newest, w) => {
-    if (!w.campaignId || !w.campaignCreatedAt) return newest;
-    if (!newest || w.campaignCreatedAt > newest.at) {
-      return { id: w.campaignId, at: w.campaignCreatedAt, name: w.campaignName };
-    }
-    return newest;
-  }, null);
-  const inNewBatch = (w) => !w.campaignId || (newCampaign && w.campaignId === newCampaign.id);
+  const NEW_BATCH_WINDOW_MS = 15 * 60 * 1000; // a fan-out starts in well under this; separate runs are days apart
+  const newestCampaignAt = wallets.reduce(
+    (max, w) => (w.campaignCreatedAt && (!max || w.campaignCreatedAt > max) ? w.campaignCreatedAt : max),
+    null
+  );
+  const newBatchCutoff = newestCampaignAt ? Date.parse(newestCampaignAt) - NEW_BATCH_WINDOW_MS : null;
+  const inNewBatch = (w) =>
+    !w.campaignId ||
+    (newBatchCutoff != null && w.campaignCreatedAt && Date.parse(w.campaignCreatedAt) >= newBatchCutoff);
   // Withdrawn seeds — keys exported to spend elsewhere, held out of the V1/V3
   // claim pool — get their OWN section so they don't clutter the two active
   // groups (and can't be swept into a bulk delete meant for live ones). A wallet
@@ -459,8 +464,18 @@ export default function V4SeedPanel({ step, wallets, masters, facts, explorer, r
   // "New campaign" only reads right when there is an older pool to be new relative
   // to; with a single batch it is simply the current one.
   const newTitle = seasonedPool.length ? 'New campaign' : 'Current campaign';
+  // The new batch may be ONE campaign or a fan-out of many (Start on all N
+  // funders) — say which so 100 wallets across 20 campaigns don't read as a
+  // 5-wallet campaign. One campaign → its name; several → "across N campaigns".
+  const newCampaignCount = new Set(newBatch.map((w) => w.campaignId).filter(Boolean)).size;
+  const newCampaignLabel =
+    newCampaignCount > 1
+      ? `across ${newCampaignCount} campaigns · `
+      : newBatch.find((w) => w.campaignName)
+        ? `${newBatch.find((w) => w.campaignName).campaignName} · `
+        : '';
   const newHint =
-    (newCampaign?.name ? `${newCampaign.name} · ` : '') +
+    newCampaignLabel +
     `${newStats.total} wallet${newStats.total === 1 ? '' : 's'}` +
     (newStats.funded ? ` · ${newStats.funded} funded` : '') +
     (newStats.aging ? ` · ${newStats.aging} aging` : '') +
