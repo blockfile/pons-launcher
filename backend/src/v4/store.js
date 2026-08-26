@@ -40,7 +40,7 @@ function build(userId) {
   function load() {
     if (cache) return cache;
     if (!fs.existsSync(file)) {
-      cache = { version: 1, campaigns: [], backups: [], graduated: [], withdrawn: [] };
+      cache = { version: 1, campaigns: [], backups: [], graduated: [], withdrawn: [], superMains: [] };
       return cache;
     }
     try {
@@ -51,12 +51,13 @@ function build(userId) {
         backups: parsed.backups || [],
         graduated: parsed.graduated || [],
         withdrawn: parsed.withdrawn || [],
+        superMains: parsed.superMains || [],
       };
     } catch (_err) {
       // A corrupt file must not take the server down — but it must not be
       // silently overwritten either, so it is moved aside with a timestamp.
       fs.renameSync(file, `${file}.corrupt-${Date.now()}`);
-      cache = { version: 1, campaigns: [], backups: [], graduated: [], withdrawn: [] };
+      cache = { version: 1, campaigns: [], backups: [], graduated: [], withdrawn: [], superMains: [] };
     }
     return cache;
   }
@@ -209,6 +210,36 @@ function build(userId) {
     return load().withdrawn.slice();
   }
 
+  /**
+   * Designate funding wallets (v4master) as "super-mains" — the top tier that funds
+   * the OTHER funders through splits, kept in their own panel so they are never
+   * confused with the funders they pay. PURELY a label: it re-roles nothing and
+   * restricts nothing on chain — a super-main is still a v4master, and the split it
+   * runs is the same split any funder could. Idempotent, mirrors withdraw().
+   */
+  function markSuperMain(entries) {
+    const store = load();
+    const have = new Set(store.superMains.map((e) => e.id));
+    const fresh = entries.filter((e) => !have.has(e.id)).map((e) => ({ ...e }));
+    if (fresh.length === 0) return;
+    store.superMains.unshift(...fresh);
+    persist();
+  }
+
+  /** Return the given ids to the ordinary funder pool. */
+  function unmarkSuperMain(ids) {
+    const store = load();
+    const drop = new Set(ids);
+    const before = store.superMains.length;
+    store.superMains = store.superMains.filter((e) => !drop.has(e.id));
+    if (store.superMains.length !== before) persist();
+  }
+
+  /** The set of funding-wallet ids currently designated super-main. */
+  function superMainIds() {
+    return new Set(load().superMains.map((e) => e.id));
+  }
+
   function _reset() {
     cache = null;
   }
@@ -229,6 +260,9 @@ function build(userId) {
     restoreWithdrawn,
     withdrawnSeedIds,
     withdrawn,
+    markSuperMain,
+    unmarkSuperMain,
+    superMainIds,
     _reset,
   };
 }

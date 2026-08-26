@@ -196,3 +196,21 @@ test('restoreWithdrawn returns only the named ids to the pool', () => {
   s.restoreWithdrawn(['s1']);
   assert.deepEqual([...s.withdrawnSeedIds()], ['s2']);
 });
+
+test('markSuperMain records funder ids, is idempotent, and survives a round trip', () => {
+  const { store } = freshStore();
+  const s = store.storeFor('u');
+  s.markSuperMain([{ id: 'm1', address: '0x1', at: 'now' }, { id: 'm2', address: '0x2', at: 'now' }]);
+  s.markSuperMain([{ id: 'm1', address: '0x1', at: 'later' }]); // duplicate, ignored
+  assert.deepEqual([...s.superMainIds()].sort(), ['m1', 'm2']);
+  s._reset();
+  assert.deepEqual([...store.storeFor('u').superMainIds()].sort(), ['m1', 'm2'], 'persisted across reload');
+});
+
+test('unmarkSuperMain returns only the named ids to the funder pool', () => {
+  const { store } = freshStore();
+  const s = store.storeFor('u');
+  s.markSuperMain([{ id: 'm1', address: '0x1', at: 'now' }, { id: 'm2', address: '0x2', at: 'now' }]);
+  s.unmarkSuperMain(['m1']);
+  assert.deepEqual([...s.superMainIds()], ['m2']);
+});

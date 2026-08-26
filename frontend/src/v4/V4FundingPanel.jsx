@@ -4,7 +4,7 @@ import Step from '../components/Step.jsx';
 import { Busy } from '../components/Section.jsx';
 import Address from '../components/Address.jsx';
 import Modal from '../components/Modal.jsx';
-import { LuTrash2, LuX, LuKeyRound, LuSplit } from 'react-icons/lu';
+import { LuTrash2, LuX, LuKeyRound, LuSplit, LuArrowUp, LuArrowDown } from 'react-icons/lu';
 import IconButton, { IconAction } from './IconButton.jsx';
 import V4BackupControls from './V4BackupControls.jsx';
 import { ROLES, eth } from './roles.js';
@@ -67,6 +67,91 @@ export default function V4FundingPanel({
       setBusy('');
     }
   }
+
+  // Two tiers of funding wallet. A "super-main" is one the operator has flagged as the
+  // top tier — the wallet that fills the OTHER funders through a split. It is still an
+  // ordinary v4master (the flag re-roles nothing); the split, the backup and the delete
+  // all treat it the same. The only thing the flag changes is that it lives in its own
+  // group here, and the splitter draws its source from it, so the payer and the paid are
+  // never confused for one another.
+  const superMains = wallets.filter((w) => w.isSuperMain);
+  const funders = wallets.filter((w) => !w.isSuperMain);
+
+  const toggleSuperMain = (w) =>
+    act(`super-${w.id}`, () =>
+      api(w.isSuperMain ? '/v4/masters/super-main/clear' : '/v4/masters/super-main', 'POST', { ids: [w.id] }).then(
+        () => `${w.address.slice(0, 10)}… is now a ${w.isSuperMain ? 'funder' : 'super-main'}.`
+      )
+    );
+
+  // One funding-wallet table, reused for the super-main group and the funder group so
+  // the row (balance, campaign, promote/demote, archive) is written once. The up/down
+  // arrow moves a wallet between the two tiers; everything else is exactly the old row.
+  const walletTable = (rows, emptyHint) => (
+    <div className="table-scroll" style={{ maxHeight: 340, overflowY: 'auto' }}>
+      <table>
+        <thead>
+          <tr>
+            <th>Address</th>
+            <th className="num">Balance</th>
+            <th>Campaign</th>
+            <th />
+          </tr>
+        </thead>
+        <tbody>
+          {rows.length === 0 ? (
+            <tr>
+              <td colSpan={4}>
+                <span className="hint">{emptyHint}</span>
+              </td>
+            </tr>
+          ) : (
+            rows.map((w) => {
+              const held = campaignFor[w.id];
+              return (
+                <tr key={w.id}>
+                  <td>
+                    <Address value={w.address} plain href={explorer ? `${explorer}/address/${w.address}` : ''} />
+                  </td>
+                  <td className="num">
+                    {w.balanceEth == null ? <span className="hint">unreadable</span> : eth(w.balanceEth)}
+                  </td>
+                  <td>
+                    {held ? (
+                      <>
+                        {held.name} <span className="hint">· {held.status}</span>
+                      </>
+                    ) : w.inCampaign ? (
+                      <span className="hint">in a campaign</span>
+                    ) : (
+                      <span className="hint">free</span>
+                    )}
+                  </td>
+                  <td className="num">
+                    <IconButton
+                      icon={w.isSuperMain ? LuArrowDown : LuArrowUp}
+                      label={
+                        w.isSuperMain
+                          ? `Return ${w.address} to the funder pool`
+                          : `Make ${w.address} a super-main`
+                      }
+                      onClick={() => toggleSuperMain(w)}
+                    />
+                    <IconButton
+                      icon={LuTrash2}
+                      danger
+                      label={`Archive funding wallet ${w.address}`}
+                      onClick={() => setDeleting(w)}
+                    />
+                  </td>
+                </tr>
+              );
+            })
+          )}
+        </tbody>
+      </table>
+    </div>
+  );
 
   const create = (
     <Busy
@@ -146,7 +231,13 @@ export default function V4FundingPanel({
   // Every funding wallet except the one paying. The backend excludes the source
   // too — this is only so the count on screen matches what will actually be
   // funded, rather than promising one more wallet than the plan contains.
-  const targets = wallets.filter((w) => w.id !== source);
+  // A split pays the FUNDERS, never another super-main — so the targets are the funder
+  // tier minus the paying wallet. When no super-main is flagged, `funders` is every
+  // wallet and this is the old "everyone except the source" behaviour, unchanged.
+  const targets = funders.filter((w) => w.id !== source);
+  // The payer is chosen from the super-mains when any are flagged; otherwise from every
+  // funding wallet, so a setup with no super-mains still works exactly as before.
+  const sourceOptions = superMains.length > 0 ? superMains : wallets;
 
   /**
    * A split's shape, which is a campaign's shape with the dials turned down.
@@ -252,7 +343,7 @@ export default function V4FundingPanel({
                 }}
               >
                 <option value="">choose one…</option>
-                {wallets.map((w) => (
+                {sourceOptions.map((w) => (
                   <option key={w.id} value={w.id}>
                     {w.address.slice(0, 10)}… · {w.balanceEth == null ? 'unreadable' : `${Number(w.balanceEth).toFixed(4)} ETH`}
                   </option>
@@ -450,68 +541,31 @@ export default function V4FundingPanel({
               problem — but twenty-one of them still pushed step 2 off the
               screen. About nine rows before it scrolls, which keeps the whole
               step visible while every wallet stays reachable. */}
-          <div className="table-scroll" style={{ maxHeight: 340, overflowY: 'auto' }}>
-            <table>
-              <thead>
-                <tr>
-                  <th>Address</th>
-                  <th className="num">Balance</th>
-                  <th>Campaign</th>
-                  <th />
-                </tr>
-              </thead>
-              <tbody>
-                {wallets.map((w) => {
-                  const held = campaignFor[w.id];
-                  return (
-                    <tr key={w.id}>
-                      <td>
-                        {/* Still a link, without the decoration — see the note
-                            in V4SeedPanel. */}
-                        <Address
-                          value={w.address}
-                          plain
-                          href={explorer ? `${explorer}/address/${w.address}` : ''}
-                        />
-                      </td>
-                      {/* null is "the RPC did not answer", which is not the same
-                          statement as zero — a wallet drawn at 0.000000 when it
-                          holds two ETH is the one reading that would have an
-                          operator top up a wallet that did not need it. */}
-                      <td className="num">
-                        {w.balanceEth == null ? <span className="hint">unreadable</span> : eth(w.balanceEth)}
-                      </td>
-                      <td>
-                        {held ? (
-                          <>
-                            {held.name} <span className="hint">· {held.status}</span>
-                          </>
-                        ) : w.inCampaign ? (
-                          <span className="hint">in a campaign</span>
-                        ) : (
-                          <span className="hint">free</span>
-                        )}
-                      </td>
-                      <td className="num">
-                        {/* Offered on every row. The backend decides whether a
-                            wallet is actually free — it reads the campaigns,
-                            which this table only partly reflects — and refuses
-                            with the campaign's name and status. Hiding the
-                            control on a guess would leave an operator unable to
-                            delete a wallet the server would happily archive. */}
-                        <IconButton
-                          icon={LuTrash2}
-                          danger
-                          label={`Archive funding wallet ${w.address}`}
-                          onClick={() => setDeleting(w)}
-                        />
-                      </td>
-                    </tr>
-                  );
-                })}
-              </tbody>
-            </table>
-          </div>
+          {/* Offered on every row: the up/down arrow moves a wallet between the two
+              tiers, and delete is offered on every row because the BACKEND decides
+              whether a wallet is actually free — it reads the campaigns, which this
+              table only partly reflects — and refuses with the campaign's name and
+              status. Hiding a control on a guess would leave an operator unable to act
+              on a wallet the server would happily archive.
+
+              Capped rather than paged: funding wallets are counted in tens, and the
+              scroll keeps step 2 on screen while every wallet stays reachable. */}
+          {superMains.length > 0 ? (
+            <>
+              <div className="row" style={{ marginTop: 4 }}>
+                <b>Super-main funding wallets</b>
+                <span className="hint">· they fund the funders below, through splits</span>
+              </div>
+              {walletTable(superMains)}
+              <div className="row" style={{ marginTop: 12 }}>
+                <b>Funder wallets</b>
+                <span className="hint">· funded by the super-mains; each drips into seed wallets</span>
+              </div>
+              {walletTable(funders, 'No funders yet — every funding wallet is currently a super-main.')}
+            </>
+          ) : (
+            walletTable(wallets, 'No funding wallets yet.')
+          )}
         </>
       )}
     </Step>

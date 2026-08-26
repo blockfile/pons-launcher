@@ -516,6 +516,9 @@ router.get('/v4/wallets', requireApiKey, async (req, res, next) => {
 
     const claimed = store.claimedSeedIds();
     const missingBackup = new Set(store.backedUp(seeds.map((w) => w.id)));
+    // Which funders the operator has designated super-main (the top tier that funds the
+    // other funders through splits). Purely a grouping — see store.markSuperMain.
+    const superMains = store.superMainIds();
     const now = Date.now();
     const walletFacts = fundingFacts(store.campaigns(), now);
     // Which campaign each seed belongs to (funded or not) — the batch key the
@@ -523,7 +526,11 @@ router.get('/v4/wallets', requireApiKey, async (req, res, next) => {
     const walletCampaign = seedCampaigns(store.campaigns());
 
     const masterRows = await Promise.all(
-      masters.map(async (w) => ({ ...(await withMasterBalance(w)), inCampaign: busyMasters.has(w.id) }))
+      masters.map(async (w) => ({
+        ...(await withMasterBalance(w)),
+        inCampaign: busyMasters.has(w.id),
+        isSuperMain: superMains.has(w.id),
+      }))
     );
 
     res.json(
@@ -628,6 +635,49 @@ router.post('/v4/seasoned/restore', requireApiKey, (req, res, next) => {
     store.restoreWithdrawn(ids);
     activityFor(req.user.id).record('v4', `[v4] returned ${ids.length} seed wallet(s) to seasoning`, {});
     res.json({ withdrawn: store.withdrawn(), count: seasonedWallets.available(ks, store, Date.now()).length });
+  } catch (err) {
+    next(err);
+  }
+});
+
+// POST /api/v4/masters/super-main — designate funding wallets as super-mains (the
+// top tier that funds the other funders through splits). Grouping only: it re-roles
+// nothing and restricts nothing — a super-main is still a v4master. Mirrors
+// /v4/seasoned/withdraw.
+router.post('/v4/masters/super-main', requireApiKey, (req, res, next) => {
+  try {
+    const ks = keystoreFor(req.user.id);
+    const store = storeFor(req.user.id);
+    const ids = Array.isArray((req.body || {}).ids) ? req.body.ids : [];
+    if (ids.length === 0) throw new Error('ids[] is required');
+    // Only real funding wallets can be super-mains — a super-main funds funders, and a
+    // seed or another tab's wallet has no business in that tier.
+    const masters = new Map(v4roles.masters(ks).map((w) => [w.id, w]));
+    const at = new Date().toISOString();
+    const entries = ids.map((id) => {
+      const w = masters.get(id);
+      if (!w) throw new Error(`wallet ${id} is not a v4 funding wallet`);
+      return { id: w.id, address: w.address, at };
+    });
+    store.markSuperMain(entries);
+    activityFor(req.user.id).record('v4', `[v4] designated ${entries.length} funding wallet(s) as super-main`, {
+      addresses: entries.map((e) => e.address),
+    });
+    res.json({ superMains: store.superMainIds().size });
+  } catch (err) {
+    next(err);
+  }
+});
+
+// POST /api/v4/masters/super-main/clear — return super-mains to the ordinary funder pool.
+router.post('/v4/masters/super-main/clear', requireApiKey, (req, res, next) => {
+  try {
+    const store = storeFor(req.user.id);
+    const ids = Array.isArray((req.body || {}).ids) ? req.body.ids : [];
+    if (ids.length === 0) throw new Error('ids[] is required');
+    store.unmarkSuperMain(ids);
+    activityFor(req.user.id).record('v4', `[v4] returned ${ids.length} wallet(s) to the funder pool`, {});
+    res.json({ superMains: store.superMainIds().size });
   } catch (err) {
     next(err);
   }
