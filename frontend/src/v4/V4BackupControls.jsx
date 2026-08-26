@@ -20,9 +20,11 @@ import { downloadV4Backup } from './backup.js';
  * is recoverable from the server, with no way from there to the file that makes
  * that true when the archive later evicts it.
  *
- * THE FILE IS THE WHOLE OF V4 EITHER WAY, funders and seeds, whichever step it
- * was taken from — so the dialog counts both rather than letting the step it
- * was opened from imply a smaller scope.
+ * THE FULL BACKUP IS THE WHOLE OF V4, funders and seeds, whichever step it was
+ * taken from — so the dialog counts both. A FILTERED export (a named seed set, or
+ * an age filter) is narrower on purpose: it defaults to SEEDS ONLY and offers a box
+ * to add the funders back, so a file taken to move a few seeds elsewhere does not
+ * carry every funder's key unless the operator asks for it.
  *
  * The typed confirmation is deliberately not a click-through: this hands over
  * every key V4 holds, and a mis-click should not be enough to do it.
@@ -51,24 +53,39 @@ export default function V4BackupControls({
   // Blank means every wallet. A number means only seeds that have been sitting
   // at least that long — see the note beside the field for what it is for.
   const [minAge, setMinAge] = useState('');
+  // Whether the funding wallets ride along. They hold the ETH and there is no seed
+  // phrase behind them, so the FULL backup always takes them — but a filtered export
+  // (a named set, or an age filter) is usually taken to move a few seeds elsewhere and
+  // should NOT carry every funder's key unless asked, so it defaults to leaving them out.
+  const [includeFunders, setIncludeFunders] = useState(false);
 
   const selecting = Array.isArray(exportIds);
   const exported = masters.length + seeds.length;
   const age = selecting ? 0 : fixedMinAge || Math.max(0, Math.round(Number(minAge) || 0));
+  const isFiltered = selecting || age > 0;
+  // The full (unfiltered) backup always includes the funders; a filtered one obeys the box.
+  const funderIn = isFiltered ? includeFunders : true;
+  const funderCount = funderIn ? masters.length : 0;
   // Counted from each wallet's OWN funding, which is the only reading that is
   // useful: a wallet funded on the campaign's last day is young on the day the
   // campaign finishes, however old the run is. When a set is named it is exact —
-  // those seeds plus the funders.
+  // those seeds, plus the funders only if the box is ticked.
   const wouldExport = selecting
-    ? masters.length + exportIds.length
+    ? funderCount + exportIds.length
     : age
-      ? masters.length + seeds.filter((w) => (w.daysSinceFunded ?? -1) >= age).length
+      ? funderCount + seeds.filter((w) => (w.daysSinceFunded ?? -1) >= age).length
       : exported;
 
   async function run() {
     setBusy(true);
     try {
-      report(await downloadV4Backup(selecting ? { walletIds: exportIds } : { minAgeDays: age || undefined }));
+      report(
+        await downloadV4Backup(
+          selecting
+            ? { walletIds: exportIds, includeFunders: funderIn }
+            : { minAgeDays: age || undefined, includeFunders: funderIn }
+        )
+      );
       // RELOAD, or the gate goes on refusing wallets it now has on record.
       // The server marks each exported wallet backed up as a side effect of
       // this download, so the "N wallets have no key backup" state the console
@@ -114,9 +131,13 @@ export default function V4BackupControls({
         onCancel={() => setOpen(false)}
       >
         <p>
-          Anyone who opens that file can spend every one of them. It is V4's wallets only — all{' '}
-          {masters.length} funding {masters.length === 1 ? 'wallet' : 'wallets'} and all{' '}
-          {seeds.length} {seeds.length === 1 ? 'seed' : 'seeds'} — and never another tab's keys.
+          Anyone who opens that file can spend every one of them. These are V4's wallets only, never
+          another tab's keys.{' '}
+          {isFiltered
+            ? funderIn
+              ? 'This is a filtered export — the seeds below, plus the funding wallets.'
+              : 'This is a filtered export of SEEDS only — no funding wallets are in this file.'
+            : `It is all ${masters.length} funding ${masters.length === 1 ? 'wallet' : 'wallets'} and all ${seeds.length} ${seeds.length === 1 ? 'seed' : 'seeds'}.`}
         </p>
         {/* THE FILE'S REAL PROBLEM, NOT A CONVENIENCE. Every seed carries
             fundedAt and daysSinceFunded now, but a hundred keys in one file is
@@ -139,20 +160,45 @@ export default function V4BackupControls({
         )}
         {selecting ? (
           <p className="hint">
-            <b>{exportIds.length}</b> seed wallet(s) from this section, plus{' '}
-            {masters.length === 1 ? 'the funding wallet' : `all ${masters.length} funding wallets`}{' '}
-            (plumbing, always included). Only these seeds go in the file — nothing from the other
-            sections. Exporting marks these wallets backed up.
+            <b>{exportIds.length}</b> seed wallet(s) from this section
+            {funderIn
+              ? masters.length === 1
+                ? ', plus the funding wallet'
+                : `, plus all ${masters.length} funding wallets`
+              : ' — no funding wallets'}
+            . Only these go in the file — nothing from the other sections. Exporting marks these
+            wallets backed up.
           </p>
         ) : (
           age > 0 && (
             <p className="hint">
-              <b>{wouldExport}</b> of {exported} — {seeds.length - (wouldExport - masters.length)} seed
-              wallet(s) are younger than {age} day{age === 1 ? '' : 's'} and will be left out. Funding
-              wallets are always included; they are plumbing, not aged. Leaving wallets out does not
-              mark them backed up, so step 3 will still refuse a campaign covering them.
+              <b>{wouldExport}</b> of {exported} — {seeds.length - (wouldExport - funderCount)} seed
+              wallet(s) are younger than {age} day{age === 1 ? '' : 's'} and will be left out
+              {funderIn ? '. Funding wallets are included' : ', and no funding wallets are in this file'}.
+              Leaving wallets out does not mark them backed up, so step 3 will still refuse a campaign
+              covering them.
             </p>
           )
+        )}
+
+        {/* Off by default on a filtered export: that file is usually taken to move a
+            few seeds elsewhere, and it should not carry every funder's key unless the
+            operator ticks this. The full backup takes them regardless and never shows
+            this box. */}
+        {isFiltered && (
+          <label className="modal-check" style={{ display: 'flex', gap: 8, alignItems: 'flex-start', marginTop: 10 }}>
+            <input
+              type="checkbox"
+              checked={includeFunders}
+              onChange={(e) => setIncludeFunders(e.target.checked)}
+              style={{ width: 'auto', marginTop: 3 }}
+            />
+            <span>
+              Also include the {masters.length} funding {masters.length === 1 ? 'wallet' : 'wallets'} in
+              this file. They hold the ETH, so they belong in your full backup — not in every file you
+              take a few seeds out in.
+            </span>
+          </label>
         )}
 
         <label className="modal-type">

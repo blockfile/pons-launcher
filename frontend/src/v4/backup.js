@@ -7,15 +7,17 @@ import { getApiKey } from '../api.js';
  * A V4 operator backing up a campaign should not be handed v1's dev key in the
  * same file — and the campaign gate only needs V4's wallets on record.
  */
-export async function downloadV4Backup({ minAgeDays, walletIds } = {}) {
+export async function downloadV4Backup({ minAgeDays, walletIds, includeFunders = true } = {}) {
   // An explicit seed set (a per-section export — "the usable wallets in THIS
-  // pool") takes precedence over the age filter; the server includes the funding
-  // wallets either way. A withdrawn seed is simply never in the set, so a
-  // per-section export cannot re-export one held out of the pool.
+  // pool") takes precedence over the age filter. A withdrawn seed is simply never
+  // in the set, so a per-section export cannot re-export one held out of the pool.
+  // includeFunders decides whether the funding wallets ride along: the full backup
+  // keeps them (default true), a filtered export can leave them out.
   const ids = Array.isArray(walletIds) && walletIds.length ? walletIds : null;
   const body = { confirm: true };
   if (ids) body.walletIds = ids;
   else if (minAgeDays) body.minAgeDays = minAgeDays;
+  if (includeFunders === false) body.includeFunders = false;
 
   const res = await fetch('/api/v4/wallets/backup', {
     method: 'POST',
@@ -32,14 +34,18 @@ export async function downloadV4Backup({ minAgeDays, walletIds } = {}) {
   // The filter goes in the FILENAME, not only inside the file. Two downloads a
   // week apart otherwise differ by one character of date and carry completely
   // different sets — and the one that matters is the one holding fewer keys.
-  const tag = ids ? '-selected' : minAgeDays ? `-seasoned-${minAgeDays}d` : '';
+  // The filename records BOTH the filter and whether the funders rode along, so two
+  // downloads a week apart are never mistaken for one another.
+  const noFunders = includeFunders === false ? '-nofunders' : '';
+  const tag = ids ? `-selected${noFunders}` : minAgeDays ? `-seasoned-${minAgeDays}d${noFunders}` : '';
   a.download = `pons-v4-wallets${tag}-${new Date().toISOString().slice(0, 10)}.json`;
   a.click();
   URL.revokeObjectURL(url);
+  const funderNote = includeFunders === false ? 'no funding wallets' : 'plus every funding wallet';
   if (ids) {
-    return `Backed up ${json.wallets.length} key(s) — the wallets you selected, plus every funding wallet. Keep this file offline.`;
+    return `Backed up ${json.wallets.length} key(s) — the wallets you selected, ${funderNote}. Keep this file offline.`;
   }
   return minAgeDays
-    ? `Backed up ${json.wallets.length} key(s) — seed wallets funded ${minAgeDays}+ days ago, plus every funding wallet. Keep this file offline.`
+    ? `Backed up ${json.wallets.length} key(s) — seed wallets funded ${minAgeDays}+ days ago, ${funderNote}. Keep this file offline.`
     : `Backed up ${json.wallets.length} V4 wallet key(s). Keep this file offline.`;
 }

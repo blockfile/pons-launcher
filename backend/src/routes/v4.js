@@ -842,13 +842,21 @@ router.post(
         : null;
       const minAge = Number((req.body || {}).minAgeDays);
       const seasoned = Number.isFinite(minAge) && minAge > 0;
+      // Funding wallets used to be forced into EVERY export — the safety net's whole
+      // point. But a per-section or seasoned export is usually taken to move a handful
+      // of seeds elsewhere, and dumping every funder's key into that file is exposure
+      // the operator never asked for. So they are included only when the caller says so.
+      // Default TRUE keeps the plain "Download backup" a full backup and every older
+      // caller unchanged; an explicit includeFunders:false leaves the funders out.
+      const includeFunders = (req.body || {}).includeFunders !== false;
+      const keepFunder = (w) => includeFunders && w.role === v4roles.ROLES.master;
       const wallets = requestedIds
-        ? all.filter((w) => w.role === v4roles.ROLES.master || requestedIds.has(w.id))
+        ? all.filter((w) => keepFunder(w) || requestedIds.has(w.id))
         : seasoned
-          ? all.filter(
-              (w) => w.role === v4roles.ROLES.master || (w.daysSinceFunded ?? -1) >= minAge
-            )
-          : all;
+          ? all.filter((w) => keepFunder(w) || (w.daysSinceFunded ?? -1) >= minAge)
+          : includeFunders
+            ? all
+            : all.filter((w) => w.role === v4roles.ROLES.seed);
 
       // Recorded against what was EXPORTED, not what exists. A filtered
       // download must not mark the wallets it left out as backed up — the gate
@@ -870,16 +878,21 @@ router.post(
         // Said in the file, because the file is read months later by someone
         // who no longer remembers which button produced it.
         note: requestedIds
-          ? `Selected: ${wallets.filter((w) => w.role === v4roles.ROLES.seed).length} seed wallet(s) chosen from one section of the seed table, plus every funding wallet. ` +
+          ? `Selected: ${wallets.filter((w) => w.role === v4roles.ROLES.seed).length} seed wallet(s) chosen from one section of the seed table${includeFunders ? ', plus every funding wallet' : ' — NO funding wallets'}. ` +
             `${all.length - wallets.length} wallet(s) were left out and are NOT in this file.`
           : seasoned
-            ? `Filtered: seed wallets funded at least ${minAge} day(s) ago, plus every funding wallet. ` +
+            ? `Filtered: seed wallets funded at least ${minAge} day(s) ago${includeFunders ? ', plus every funding wallet' : ' — NO funding wallets'}. ` +
               `${all.length - wallets.length} wallet(s) were left out and are NOT in this file.`
-            : 'Every V4 wallet. Each seed carries fundedAt and daysSinceFunded — a wallet is only ' +
-              'worth what its age is worth, so check that before spending one.',
+            : includeFunders
+              ? 'Every V4 wallet. Each seed carries fundedAt and daysSinceFunded — a wallet is only ' +
+                'worth what its age is worth, so check that before spending one.'
+              : `Every SEED wallet — NO funding wallets. ${all.length - wallets.length} funding wallet(s) are NOT in this file.`,
         warning:
           'These private keys control real funds. Anyone holding this file can spend every wallet in it. ' +
-          'Store it offline. There are no mnemonics: the keystore holds private keys only.',
+          'Store it offline. There are no mnemonics: the keystore holds private keys only.' +
+          (includeFunders
+            ? ''
+            : ' This file has NO funding wallets — those hold the ETH, so make sure they are backed up somewhere else.'),
         wallets,
       });
     } catch (err) {
