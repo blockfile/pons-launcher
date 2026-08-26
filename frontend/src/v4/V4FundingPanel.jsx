@@ -53,6 +53,11 @@ export default function V4FundingPanel({
   // amount is arithmetic on this, and it is arithmetic an operator should not
   // be doing by hand — see splitSizing below.
   const [seedsPer, setSeedsPer] = useState(4);
+  // Max ETH each seed will receive in the season that follows. The split sizes every
+  // funder for this, so it must match what step 3 will actually use — blank falls back
+  // to the plan default. This is the field that decides how much ETH a super-main needs:
+  // a smaller seed amount funds far more funders from the same balance.
+  const [seedMaxEth, setSeedMaxEth] = useState('');
   const [split, setSplit] = useState(null);
   const [dividing, setDividing] = useState(false);
   // Which funders THIS split pays. Default: the IDLE ones (not already in a campaign),
@@ -361,7 +366,7 @@ export default function V4FundingPanel({
    * — it funds the next batch rather than being lost.
    */
   const splitSizing = () => {
-    const seedMax = Number(planDefaults?.amountMaxEth ?? 0.0089);
+    const seedMax = Number(seedMaxEth) > 0 ? Number(seedMaxEth) : Number(planDefaults?.amountMaxEth ?? 0.0089);
     const n = Math.max(1, Math.round(Number(seedsPer) || 0));
     // 3% Relay fee, and a gas allowance per transfer with room to spare — the
     // preview's own estimate is authoritative and will refuse if this is thin.
@@ -510,7 +515,28 @@ export default function V4FundingPanel({
                 style={{ width: 90 }}
               />
             </label>
+            <label>
+              max ETH per seed
+              <input
+                type="number"
+                step="0.0001"
+                min="0"
+                placeholder={planDefaults?.amountMaxEth ?? '0.0089'}
+                value={seedMaxEth}
+                onChange={(e) => {
+                  setSeedMaxEth(e.target.value);
+                  setSplit(null);
+                }}
+                style={{ width: 110 }}
+              />
+            </label>
           </div>
+          <p className="hint" style={{ marginTop: 4 }}>
+            Sizing: each funder receives about <b>{sizing.minEth}</b>–<b>{sizing.maxEth}</b> ETH (for{' '}
+            {sizing.seeds} seed{sizing.seeds === 1 ? '' : 's'} at up to {sizing.seedMax} ETH each). Set{' '}
+            <b>max ETH per seed</b> to what step 3 will actually use — a smaller amount funds far more
+            funders from the same super-main balance.
+          </p>
 
           {(source || superMains.length >= 2) && eligible.length > 0 && (
             <div style={{ marginTop: 8 }}>
