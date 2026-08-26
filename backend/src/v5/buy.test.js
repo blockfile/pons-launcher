@@ -249,6 +249,40 @@ test('uses a receipt-provided poolKey directly — no resolve, no probe, and the
   assert.ok(plan.walletCount >= 1);
 });
 
+test('FAST mode pre-signs BEFORE the token exists: no quote, no decimals/symbol reads, 1-wei floor', async () => {
+  // The regression: fast buys are signed before the launch creates the token, so
+  // decimals()/symbol() revert with BAD_DATA ("0x"). Fast mode must NOT read them,
+  // nor quote (the pool does not exist yet). Model both as throwing.
+  const POOLKEY = { currency0: '0x0000000000000000000000000000000000000000', currency1: TOKEN, fee: 0, tickSpacing: 200, hooks: HOOK };
+  let quoteCalls = 0;
+  const { deps: d } = deps({
+    swap: { quoteBuy: async () => { quoteCalls += 1; throw new Error('quoteBuy must not run in fast mode'); } },
+    deps: {
+      getDecimals: async () => { throw new Error('could not decode result data (value="0x") — token has no code yet'); },
+      getSymbol: async () => { throw new Error('could not decode result data (value="0x")'); },
+    },
+  });
+  const plan = await prepareBundleBuys(
+    { token: TOKEN, hook: HOOK, poolKey: POOLKEY, poolId: PID, buys: BUYS, fast: true },
+    d
+  );
+  assert.equal(quoteCalls, 0, 'fast mode never quotes');
+  assert.equal(plan.fast, true);
+  assert.equal(plan.walletCount, 2, 'both buys were pre-signed despite no token code');
+  assert.ok(plan.buys.every((b) => b.raw), 'every fast buy is signed');
+  assert.equal(plan.buys[0].minOut, '1', 'the 1-wei floor');
+  assert.equal(plan.buys[0].expectedTokens, null, 'no pre-quote → unknown token amount');
+  assert.equal(plan.totalExpectedTokens, null);
+});
+
+test('FAST mode is refused without the predicted { poolKey, poolId }', async () => {
+  const { deps: d } = deps();
+  await assert.rejects(
+    () => prepareBundleBuys({ token: TOKEN, hook: HOOK, buys: BUYS, fast: true }, d),
+    /fast bundle mode requires the predicted/
+  );
+});
+
 test('the receipt-pool branch REFUSES a poolKey whose hook differs from the pinned hook', async () => {
   // Defense in depth: the trust-the-key fast path skips resolvePoolKey's decoy-pool
   // guard, so a key must agree with the PINNED hook. A rigged key with a foreign hook

@@ -190,7 +190,14 @@ async function prepareBundleBuys(input, deps = {}) {
       }
     }
   }
-  const [decimals, symbol] = await Promise.all([decimalsOf(tokenAddr), symbolOf(tokenAddr)]);
+  // FAST mode pre-signs BEFORE the launch creates the token, so the token has no
+  // code yet and decimals()/symbol() would revert with BAD_DATA ("0x"). They are
+  // only used for DISPLAY (and fast mode nulls the token-amount fields anyway), and
+  // are NOT part of the signed buy — so skip the reads and use safe placeholders.
+  // ERC-20 decimals are 18 by convention; the real symbol shows on the launch card.
+  const [decimals, symbol] = fast
+    ? [18, null]
+    : await Promise.all([decimalsOf(tokenAddr), symbolOf(tokenAddr)]);
 
   // Match each requested buy to its bundle wallet (by id or address); drop zeros.
   const byId = new Map(wallets.map((w) => [w.id, w]));
