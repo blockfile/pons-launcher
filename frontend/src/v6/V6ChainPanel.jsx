@@ -175,42 +175,54 @@ export default function V6ChainPanel({
 
       {plan && !running && (
         <div className="notice">
-          <div className="row">
-            <span>
-              position after the big buy: <b>{Number(plan.position.eth).toFixed(4)} ETH</b>
-              {plan.position.usd && <> ({money(plan.position.usd)})</>}
-            </span>
-            <span className="spacer" />
-            <span className="hint">
-              {plural(plan.walletCount, 'cycle')} · about {duration(plan.estimatedRunMs)}
-            </span>
-          </div>
-          <div className="row">
-            <span>
-              each wallet buys with roughly{' '}
-              <b>
-                {plan.slice.meanUsd
-                  ? money(plan.slice.meanUsd)
-                  : `${Number(plan.slice.meanEth).toFixed(5)} ETH`}
-              </b>
-              {Number(variancePct) > 0 && (
-                <>
-                  {' '}
-                  — varying between{' '}
-                  {plan.slice.lowUsd
-                    ? `${money(plan.slice.lowUsd)} and ${money(plan.slice.highUsd)}`
-                    : `${Number(plan.slice.lowEth).toFixed(5)} and ${Number(plan.slice.highEth).toFixed(5)} ETH`}
-                </>
-              )}
-            </span>
-          </div>
-          {plan.poolTax && plan.poolTax.currentPct > 0 && (
+          {plan.sellsRevert ? (
             <p className="warn">
-              The pool tax is live at <b>{plan.poolTax.currentPct}%</b> and these wallets are not exempt —
-              every buy <b>and</b> sell in this run pays it. It is flat on letscash; there is no window to wait out.
+              <b>This token cannot be sold.</b> The buy quote works but every sell reverts
+              {plan.sellError ? <> (custom error {plan.sellError})</> : null}, so the run is blocked. The big
+              buy would land and then every sell — and the exit — would fail, stranding your ETH in tokens you
+              can’t sell back. It’s a honeypot, or the token locks sells to a specific router. Pick a
+              different token.
             </p>
+          ) : (
+            <>
+              <div className="row">
+                <span>
+                  position after the big buy: <b>{Number(plan.position.eth).toFixed(4)} ETH</b>
+                  {plan.position.usd && <> ({money(plan.position.usd)})</>}
+                </span>
+                <span className="spacer" />
+                <span className="hint">
+                  {plural(plan.walletCount, 'cycle')} · about {duration(plan.estimatedRunMs)}
+                </span>
+              </div>
+              <div className="row">
+                <span>
+                  each wallet buys with roughly{' '}
+                  <b>
+                    {plan.slice.meanUsd
+                      ? money(plan.slice.meanUsd)
+                      : `${Number(plan.slice.meanEth).toFixed(5)} ETH`}
+                  </b>
+                  {Number(variancePct) > 0 && (
+                    <>
+                      {' '}
+                      — varying between{' '}
+                      {plan.slice.lowUsd
+                        ? `${money(plan.slice.lowUsd)} and ${money(plan.slice.highUsd)}`
+                        : `${Number(plan.slice.lowEth).toFixed(5)} and ${Number(plan.slice.highEth).toFixed(5)} ETH`}
+                    </>
+                  )}
+                </span>
+              </div>
+              {plan.poolTax && plan.poolTax.currentPct > 0 && (
+                <p className="warn">
+                  The pool tax is live at <b>{plan.poolTax.currentPct}%</b> and these wallets are not exempt —
+                  every buy <b>and</b> sell in this run pays it. It is flat on letscash; there is no window to wait out.
+                </p>
+              )}
+            </>
           )}
-          {plan.warnings.map((w) => (
+          {(plan.sellsRevert ? plan.warnings.slice(1) : plan.warnings).map((w) => (
             <p className="hint" key={w}>
               {w}
             </p>
@@ -219,7 +231,7 @@ export default function V6ChainPanel({
       )}
 
       <div className="row">
-        <Busy busy={busy === 'start'} disabled={!ready || running} onClick={() => setArming(true)}>
+        <Busy busy={busy === 'start'} disabled={!ready || running || plan?.sellsRevert} onClick={() => setArming(true)}>
           Start the chain
         </Busy>
         <button

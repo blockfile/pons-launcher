@@ -63,6 +63,12 @@ function usd(wei, price) {
   return (Number(formatEther(wei)) * price).toFixed(2);
 }
 
+/** The 4-byte custom-error selector from a reverted eth_call, or null. */
+function revertSelector(err) {
+  const data = err?.data || err?.info?.error?.data || err?.error?.data || err?.value?.data;
+  return typeof data === 'string' && data.length >= 10 ? data.slice(0, 10) : null;
+}
+
 /**
  * Turn a request body into what the engine takes, refusing everything that cannot be
  * checked without reading the chain first. readPool is the load-bearing gate.
@@ -139,9 +145,26 @@ async function feasibilityOf(run, deps = {}) {
   const getFeesFn = deps.getFeesFn || getFees;
   const walletCount = run.targets.length;
   const tokensBought = await t.quoteBuyOut({ token: run.token, pool: run.pool, amountWei: run.bigBuyWei }, deps);
-  const positionWei =
-    tokensBought > 0n ? await t.quoteSellOut({ token: run.token, pool: run.pool, tokensIn: tokensBought }, deps) : 0n;
-  if (!walletCount) return { feasible: false, perWalletWei: 0n, reason: 'no-wallets', positionWei, tokensBought };
+
+  // Quoting the sell back both PRICES the position and PROVES the token is sellable.
+  // A token that buys but reverts every sell (a custom-error honeypot, or sells locked
+  // to a specific router) would strand the big buy in tokens the run — and the exit —
+  // could never sell out of. So a reverting sell quote FAILS the run rather than pricing
+  // it; it is the exit-side half of the dusting guard.
+  let positionWei = 0n;
+  let sellsRevert = false;
+  let sellError = null;
+  if (tokensBought > 0n) {
+    try {
+      positionWei = await t.quoteSellOut({ token: run.token, pool: run.pool, tokensIn: tokensBought }, deps);
+    } catch (err) {
+      sellsRevert = true;
+      sellError = revertSelector(err);
+    }
+  }
+
+  if (!walletCount) return { feasible: false, perWalletWei: 0n, reason: 'no-wallets', positionWei, tokensBought, sellsRevert, sellError };
+  if (sellsRevert) return { feasible: false, perWalletWei: 0n, reason: 'sells-revert', positionWei: 0n, tokensBought, sellsRevert, sellError };
 
   const fees = await getFeesFn(engine.FEE_BUMP_PCT);
   const gas = engine.gasFigures(fees);
@@ -153,7 +176,7 @@ async function feasibilityOf(run, deps = {}) {
     buffer: gas.buffer,
     relayFeePct: engine.RELAY_FEE_PCT,
   });
-  return { ...est, positionWei, tokensBought };
+  return { ...est, positionWei, tokensBought, sellsRevert: false, sellError: null };
 }
 
 /**
@@ -187,25 +210,39 @@ async function buildPlan(body, ks, deps = {}) {
 
   const bleedPct = run.bigBuyWei > 0n ? Number(((run.bigBuyWei - positionWei) * 10_000n) / run.bigBuyWei) / 100 : 0;
 
-  const warnings = [
-    'the sells in this run have NO slippage floor — every sell exits at whatever price it gets. The ' +
-      `buys carry a ${run.buySlippageBps}bps floor (letscash buys require one).`,
-    `buying the position and selling it back costs about ${bleedPct.toFixed(1)}% to the pool tax and ` +
-      `your own price impact, so the wallets share roughly ${formatEther(positionWei)} ETH rather than ` +
-      `the full ${formatEther(run.bigBuyWei)}`,
-  ];
-  if (bleedPct > 20) {
+  const warnings = [];
+  if (feas.sellsRevert) {
+    // The buy quote worked but the sell quote reverted — the token cannot be sold out of.
     warnings.push(
-      `that ${bleedPct.toFixed(1)}% is high, and it is price impact: this big buy is large relative to ` +
-        'the pool. A smaller big buy loses far less on the round trip.'
+      `THIS TOKEN'S SELLS REVERT${feas.sellError ? ` (custom error ${feas.sellError})` : ''}, so this run ` +
+        'CANNOT be started on it. A buy succeeds but every sell reverts — the big buy would land and then ' +
+        'every cycle sell, AND the exit, would fail, stranding your ETH in tokens you cannot sell back. ' +
+        'This is a honeypot or the token locks sells to a specific router (letscash sells may need their ' +
+        'own sell router, not a direct swap).'
     );
-  }
-  if (!feas.feasible) {
+  } else {
     warnings.push(
-      'this position may not fund every wallet — the per-wallet average is at or below the gas + buy a ' +
-        'cycle needs, so the run could halt partway. Reduce the wallet count, increase the big buy, or ' +
-        'pick a deeper-liquidity pool.'
+      'the sells in this run have NO slippage floor — every sell exits at whatever price it gets. The ' +
+        `buys carry a ${run.buySlippageBps}bps floor (letscash buys require one).`
     );
+    warnings.push(
+      `buying the position and selling it back costs about ${bleedPct.toFixed(1)}% to the pool tax and ` +
+        `your own price impact, so the wallets share roughly ${formatEther(positionWei)} ETH rather than ` +
+        `the full ${formatEther(run.bigBuyWei)}`
+    );
+    if (bleedPct > 20) {
+      warnings.push(
+        `that ${bleedPct.toFixed(1)}% is high, and it is price impact: this big buy is large relative to ` +
+          'the pool. A smaller big buy loses far less on the round trip.'
+      );
+    }
+    if (!feas.feasible) {
+      warnings.push(
+        'this position may not fund every wallet — the per-wallet average is at or below the gas + buy a ' +
+          'cycle needs, so the run could halt partway. Reduce the wallet count, increase the big buy, or ' +
+          'pick a deeper-liquidity pool.'
+      );
+    }
   }
   if (poolTax && poolTax.currentPct > 0) {
     warnings.push(
@@ -226,6 +263,10 @@ async function buildPlan(body, ks, deps = {}) {
     mainWallet: { walletId: run.main.id, address: run.main.address },
     walletCount,
     feasible: feas.feasible,
+    // A hard block, distinct from "feasible": the token cannot be sold out of, so the
+    // console must refuse to start (it would strand the big buy) — see the start route.
+    sellsRevert: feas.sellsRevert,
+    sellError: feas.sellError,
     targets: run.targets.map((x, i) => ({ index: i + 1, walletId: x.walletId, address: x.address })),
     position: {
       tokens: formatUnits(tokensBought, 18),
@@ -441,6 +482,17 @@ router.post('/v6/chain/start', requireApiKey, async (req, res, next) => {
     }
     const run = await resolveRun(req.body || {}, keystoreFor(req.user.id));
     const feas = await feasibilityOf(run);
+    // A HARD refusal — no force bypass. If the token's sells revert, the big buy would
+    // land and then every sell (and the exit) would fail, stranding the ETH in tokens
+    // that cannot be sold. This is the exit-side dusting guard.
+    if (feas.sellsRevert) {
+      throw new Error(
+        `refusing to start: this token's SELLS revert${feas.sellError ? ` (custom error ${feas.sellError})` : ''}. ` +
+          'A buy succeeds but every sell fails, so the run would strand the big buy in tokens you cannot sell ' +
+          'back — the exit could not recover them either. It is a honeypot or the token locks sells to a ' +
+          'specific router. Do NOT buy it with this strategy.'
+      );
+    }
     if (!feas.feasible && req.body?.force !== true) {
       throw new Error(
         "this position's per-wallet average is at or below the gas + buy a cycle needs — the run would halt " +
