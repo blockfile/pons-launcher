@@ -108,8 +108,10 @@ export default function V4SeedPanel({ step, wallets, masters, facts, explorer, r
    * whole feature exists to get past, and it is a field rather than a constant
    * because how long is long enough is a judgement about whoever is looking.
    */
-  const [seasonDays, setSeasonDays] = useState(3);
-  const season = Math.max(1, Math.round(Number(seasonDays) || 0));
+  // Seasoned = at least this many days since a wallet was funded. Fixed at 1: a
+  // one-day-old wallet is old enough for this pool, and leaving it editable only let an
+  // operator set a threshold that then hid usable wallets from step 3.
+  const season = 1;
   // Withdrawn seeds are set aside (key already exported, held out of the claim
   // pool), so they count as neither "usable" nor "aging" in the overall tally —
   // the same way the backend's available() drops them. Keeps the stat line honest
@@ -626,25 +628,6 @@ export default function V4SeedPanel({ step, wallets, masters, facts, explorer, r
               </>
             )
           )}
-        </div>
-      )}
-
-      {/* The seasoning gate as its own control, not buried in the count sentence:
-          this number is what splits "usable" from "still aging" above, and step 3
-          will not start a campaign until every funded seed clears it. */}
-      {funded > 0 && (
-        <div className="row" style={{ marginBottom: 12 }}>
-          <label className="hint" style={{ display: 'inline-flex', gap: 6, alignItems: 'center' }}>
-            Seasoned after
-            <input
-              type="number"
-              min="1"
-              value={seasonDays}
-              onChange={(e) => setSeasonDays(e.target.value)}
-              style={{ width: 56 }}
-            />
-            days
-          </label>
         </div>
       )}
 
