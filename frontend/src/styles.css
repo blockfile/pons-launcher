@@ -1155,6 +1155,32 @@ table {
    would scroll the lede and the stat tiles along with the table, and it would
    clip .stage-rail, which paints deliberately outside the card to thread the
    panels into one spine. */
+/* The header bar over each seed group (seasoned pool / new campaign / withdrawn).
+   Highlighted with a group accent so the three are told apart at a glance: a
+   left rule in the accent colour over a faint tint of it. The colour comes in
+   through --group-accent / --group-tint set inline per section, so one rule
+   serves all three and both themes (the tokens are theme-aware). */
+.seed-group-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 10px;
+  margin: 0;
+  padding: 8px 12px;
+  border-radius: 7px;
+  border-left: 3px solid var(--group-accent, var(--rule));
+  background: var(--group-tint, transparent);
+}
+.seed-group-head > b {
+  color: var(--ink);
+  letter-spacing: 0.2px;
+}
+/* The header owns the gap to its own table, so the wrapper's default top margin
+   would double it. */
+.seed-group-head + .table-scroll {
+  margin-top: 8px;
+}
+
 .table-scroll {
   overflow-x: auto;
   overscroll-behavior-x: contain;

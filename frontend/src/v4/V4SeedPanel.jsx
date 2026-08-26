@@ -110,9 +110,13 @@ export default function V4SeedPanel({ step, wallets, masters, facts, explorer, r
    */
   const [seasonDays, setSeasonDays] = useState(3);
   const season = Math.max(1, Math.round(Number(seasonDays) || 0));
-  const usable = wallets.filter((w) => (w.daysSinceFunded ?? -1) >= season);
+  // Withdrawn seeds are set aside (key already exported, held out of the claim
+  // pool), so they count as neither "usable" nor "aging" in the overall tally —
+  // the same way the backend's available() drops them. Keeps the stat line honest
+  // with the per-section export, which also never includes a withdrawn seed.
+  const usable = wallets.filter((w) => !withdrawnIds.has(w.id) && (w.daysSinceFunded ?? -1) >= season);
   const waiting = wallets.filter(
-    (w) => w.daysSinceFunded != null && w.daysSinceFunded < season
+    (w) => !withdrawnIds.has(w.id) && w.daysSinceFunded != null && w.daysSinceFunded < season
   );
 
   /**
@@ -365,15 +369,36 @@ export default function V4SeedPanel({ step, wallets, masters, facts, explorer, r
   // wallets within the shared `ticked` set, so a select-all in the seasoned pool
   // never sweeps the new batch into a bulk delete. Renders nothing for an empty
   // group so a section only exists when it has wallets.
-  function seedSection(title, hint, list) {
+  //
+  // `accent` is a CSS colour var ('jade' | 'sky' | 'grey') that highlights the
+  // header so the three groups are told apart at a glance. `exportLabel`, when
+  // given, draws a per-section export of the seeds that pass `exportPick` — its
+  // OWN usable set, never the whole page's.
+  function seedSection(title, hint, list, { accent = 'grey', exportLabel, exportPick } = {}) {
     if (!list.length) return null;
     const ids = list.map((w) => w.id);
     const allInSection = ids.every((id) => ticked.includes(id));
+    const exportSeeds = exportPick ? list.filter(exportPick) : [];
     return (
       <div style={{ marginBottom: 18 }}>
-        <div className="row" style={{ margin: '0 0 6px', alignItems: 'baseline', gap: 8 }}>
+        <div
+          className="seed-group-head"
+          style={{ '--group-accent': `var(--${accent})`, '--group-tint': `var(--tint-${accent})` }}
+        >
           <b>{title}</b>
           <span className="hint">{hint}</span>
+          {exportLabel && exportSeeds.length > 0 && (
+            <span style={{ marginLeft: 'auto' }}>
+              <V4BackupControls
+                masters={masters}
+                seeds={list}
+                report={report}
+                reload={reload}
+                exportIds={exportSeeds.map((w) => w.id)}
+                label={`${exportLabel} ${exportSeeds.length}`}
+              />
+            </span>
+          )}
         </div>
         <div className="table-scroll" style={{ maxHeight: 460, overflowY: 'auto' }}>
           <table>
@@ -466,22 +491,11 @@ export default function V4SeedPanel({ step, wallets, masters, facts, explorer, r
           not make them. One implementation, drawn here and in step 1 beside the
           funding wallets' deletes (see V4BackupControls' header). */}
       <div className="row">
+        {/* Just the whole-tab safety backup here. The "usable" export is now PER
+            SECTION — each pool exports only its own usable seeds (see seedSection),
+            so it never bundles another section's wallets, and a withdrawn seed
+            (its key already exported) is never swept into a pool's file. */}
         <V4BackupControls masters={masters} seeds={wallets} report={report} reload={reload} />
-        {/* ONLY DRAWN WHEN SOMETHING IS ACTUALLY USABLE — the file an operator
-            opens on the day they intend to SPEND, containing only wallets that
-            have sat out the seasoning. A button offering "usable wallets" on a
-            day there are none would assert something untrue about the very thing
-            this panel exists to track. */}
-        {usable.length > 0 && (
-          <V4BackupControls
-            masters={masters}
-            seeds={wallets}
-            report={report}
-            reload={reload}
-            fixedMinAge={seasonDays}
-            label={`Export ${usable.length} usable`}
-          />
-        )}
       </div>
 
       {/* Read-only. Once a seed is claimed by V1 or V3 it re-roles out of this
@@ -647,13 +661,25 @@ export default function V4SeedPanel({ step, wallets, masters, facts, explorer, r
         // has no older pool, so only the "current campaign" section shows until a
         // second campaign gives the first somewhere to go.
         <>
-          {seedSection('Seasoned pool — earlier campaigns', poolHint, seasonedPool)}
-          {seedSection(newTitle, newHint, newBatch)}
+          {seedSection('Seasoned pool — earlier campaigns', poolHint, seasonedPool, {
+            accent: 'jade',
+            exportLabel: 'Export usable',
+            exportPick: (w) => (w.daysSinceFunded ?? -1) >= season,
+          })}
+          {seedSection(newTitle, newHint, newBatch, {
+            accent: 'sky',
+            exportLabel: 'Export usable',
+            exportPick: (w) => (w.daysSinceFunded ?? -1) >= season,
+          })}
           {/* Set aside, drawn last: keys already exported, held out of the claim
               pool. Its own section so a live-batch select-all never reaches them
               and they don't pad the seasoned-pool counts. Each row keeps its
-              Restore. */}
-          {seedSection('Withdrawn — set aside', withdrawnHint, withdrawnList)}
+              Restore, and its export re-downloads exactly these set-aside keys. */}
+          {seedSection('Withdrawn — set aside', withdrawnHint, withdrawnList, {
+            accent: 'grey',
+            exportLabel: 'Export',
+            exportPick: () => true,
+          })}
 
           {/* Said once, under the tables, because the column heading cannot carry
               it: "Funded" is the amount the PLAN sent, not a balance read back

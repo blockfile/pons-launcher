@@ -780,13 +780,25 @@ router.post(
       // rows by hand and get it wrong once. Funding wallets are never filtered
       // out: they are not aged, they are plumbing, and a backup missing the
       // wallet holding the ETH is the one gap this file must never have.
+      //
+      // Optional and taking precedence: an EXPLICIT seed set (walletIds). The
+      // seed table exports per section now — "the usable wallets in THIS pool",
+      // not every aged seed on the page — so the caller names exactly which seeds
+      // to include. A withdrawn seed simply isn't in the caller's set, so a
+      // per-section export never re-exports a wallet held out of the pool (the age
+      // filter alone could not tell them apart). Funders are still always included.
+      const requestedIds = Array.isArray((req.body || {}).walletIds)
+        ? new Set((req.body).walletIds.map(String))
+        : null;
       const minAge = Number((req.body || {}).minAgeDays);
       const seasoned = Number.isFinite(minAge) && minAge > 0;
-      const wallets = seasoned
-        ? all.filter(
-            (w) => w.role === v4roles.ROLES.master || (w.daysSinceFunded ?? -1) >= minAge
-          )
-        : all;
+      const wallets = requestedIds
+        ? all.filter((w) => w.role === v4roles.ROLES.master || requestedIds.has(w.id))
+        : seasoned
+          ? all.filter(
+              (w) => w.role === v4roles.ROLES.master || (w.daysSinceFunded ?? -1) >= minAge
+            )
+          : all;
 
       // Recorded against what was EXPORTED, not what exists. A filtered
       // download must not mark the wallets it left out as backed up — the gate
@@ -804,14 +816,17 @@ router.post(
         exportedAt: new Date().toISOString(),
         chainId: config.chainId,
         count: wallets.length,
-        minAgeDays: seasoned ? minAge : null,
+        minAgeDays: requestedIds ? null : seasoned ? minAge : null,
         // Said in the file, because the file is read months later by someone
         // who no longer remembers which button produced it.
-        note: seasoned
-          ? `Filtered: seed wallets funded at least ${minAge} day(s) ago, plus every funding wallet. ` +
+        note: requestedIds
+          ? `Selected: ${wallets.filter((w) => w.role === v4roles.ROLES.seed).length} seed wallet(s) chosen from one section of the seed table, plus every funding wallet. ` +
             `${all.length - wallets.length} wallet(s) were left out and are NOT in this file.`
-          : 'Every V4 wallet. Each seed carries fundedAt and daysSinceFunded — a wallet is only ' +
-            'worth what its age is worth, so check that before spending one.',
+          : seasoned
+            ? `Filtered: seed wallets funded at least ${minAge} day(s) ago, plus every funding wallet. ` +
+              `${all.length - wallets.length} wallet(s) were left out and are NOT in this file.`
+            : 'Every V4 wallet. Each seed carries fundedAt and daysSinceFunded — a wallet is only ' +
+              'worth what its age is worth, so check that before spending one.',
         warning:
           'These private keys control real funds. Anyone holding this file can spend every wallet in it. ' +
           'Store it offline. There are no mnemonics: the keystore holds private keys only.',

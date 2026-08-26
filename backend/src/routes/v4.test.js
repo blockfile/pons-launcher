@@ -664,3 +664,30 @@ test('GET /v4/seasoned excludes a seed funded too recently', async () => {
   assert.deepEqual(res.body.wallets, []);
   assert.deepEqual(res.body.graduated, []);
 });
+
+test('POST /v4/wallets/backup honors an explicit walletIds set (per-section export), always keeping funders', async () => {
+  const userId = 'route-backup-ids';
+  const ks = keystoreFor(userId);
+  const [master] = ks.generate(1, { role: 'v4master', label: 'funder' });
+  const seeds = ks.generate(3, { role: 'v4seed', label: 'seed' });
+
+  const handler = findRouteHandler('post', '/v4/wallets/backup');
+  const res = fakeRes();
+  await handler(
+    { user: { id: userId }, body: { confirm: true, walletIds: [seeds[0].id, seeds[2].id] } },
+    res,
+    (err) => {
+      if (err) throw err;
+    }
+  );
+
+  // Exactly the two NAMED seeds + the funder (plumbing, always included). The
+  // un-named seed is left out — this is what makes a per-section export export
+  // only that section's wallets, and what keeps a withdrawn seed (never in the
+  // caller's set) out of another section's file.
+  const ids = res.body.wallets.map((w) => w.id).sort();
+  assert.deepEqual(ids, [master.id, seeds[0].id, seeds[2].id].sort());
+  assert.equal(res.body.wallets.some((w) => w.id === seeds[1].id), false);
+  assert.equal(res.body.count, 3);
+  assert.equal(res.body.minAgeDays, null);
+});

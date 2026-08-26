@@ -39,6 +39,11 @@ export default function V4BackupControls({
   // exists to answer one question — what can I spend today — and a filter an
   // operator has to remember to type is not an answer.
   fixedMinAge = 0,
+  // When set, this exports EXACTLY these seed ids (plus the funders the server
+  // always adds), not an age filter over every seed on the page. This is the
+  // per-section export: "the usable wallets in THIS pool". A withdrawn seed is
+  // never in the set, so it can't be re-exported from another section's button.
+  exportIds = null,
 }) {
   const [busy, setBusy] = useState(false);
   const [open, setOpen] = useState(false);
@@ -47,19 +52,23 @@ export default function V4BackupControls({
   // at least that long — see the note beside the field for what it is for.
   const [minAge, setMinAge] = useState('');
 
+  const selecting = Array.isArray(exportIds);
   const exported = masters.length + seeds.length;
-  const age = fixedMinAge || Math.max(0, Math.round(Number(minAge) || 0));
+  const age = selecting ? 0 : fixedMinAge || Math.max(0, Math.round(Number(minAge) || 0));
   // Counted from each wallet's OWN funding, which is the only reading that is
   // useful: a wallet funded on the campaign's last day is young on the day the
-  // campaign finishes, however old the run is.
-  const wouldExport = age
-    ? masters.length + seeds.filter((w) => (w.daysSinceFunded ?? -1) >= age).length
-    : exported;
+  // campaign finishes, however old the run is. When a set is named it is exact —
+  // those seeds plus the funders.
+  const wouldExport = selecting
+    ? masters.length + exportIds.length
+    : age
+      ? masters.length + seeds.filter((w) => (w.daysSinceFunded ?? -1) >= age).length
+      : exported;
 
   async function run() {
     setBusy(true);
     try {
-      report(await downloadV4Backup(age || undefined));
+      report(await downloadV4Backup(selecting ? { walletIds: exportIds } : { minAgeDays: age || undefined }));
       // RELOAD, or the gate goes on refusing wallets it now has on record.
       // The server marks each exported wallet backed up as a side effect of
       // this download, so the "N wallets have no key backup" state the console
@@ -78,7 +87,7 @@ export default function V4BackupControls({
       <Busy
         busy={busy}
         className="ghost"
-        disabled={!exported}
+        disabled={selecting ? !wouldExport : !exported}
         onClick={() => {
           setTyped('');
           setOpen(true);
@@ -91,7 +100,7 @@ export default function V4BackupControls({
         open={open}
         danger
         title={
-          age
+          age || selecting
             ? `This downloads the PRIVATE KEY of ${wouldExport} V4 wallets.`
             : `This downloads the PRIVATE KEY of all ${exported} V4 wallets.`
         }
@@ -116,7 +125,7 @@ export default function V4BackupControls({
             funding: in a five-day campaign the last day's wallets are three
             days behind the first day's, forever. Filtering here means the file
             you open on the day contains only what is safe to spend that day. */}
-        {!fixedMinAge && (
+        {!fixedMinAge && !selecting && (
           <label className="modal-type">
             Only seed wallets funded at least this many days ago — blank for all
             <input
@@ -128,13 +137,22 @@ export default function V4BackupControls({
             />
           </label>
         )}
-        {age > 0 && (
+        {selecting ? (
           <p className="hint">
-            <b>{wouldExport}</b> of {exported} — {seeds.length - (wouldExport - masters.length)} seed
-            wallet(s) are younger than {age} day{age === 1 ? '' : 's'} and will be left out. Funding
-            wallets are always included; they are plumbing, not aged. Leaving wallets out does not
-            mark them backed up, so step 3 will still refuse a campaign covering them.
+            <b>{exportIds.length}</b> seed wallet(s) from this section, plus{' '}
+            {masters.length === 1 ? 'the funding wallet' : `all ${masters.length} funding wallets`}{' '}
+            (plumbing, always included). Only these seeds go in the file — nothing from the other
+            sections. Exporting marks these wallets backed up.
           </p>
+        ) : (
+          age > 0 && (
+            <p className="hint">
+              <b>{wouldExport}</b> of {exported} — {seeds.length - (wouldExport - masters.length)} seed
+              wallet(s) are younger than {age} day{age === 1 ? '' : 's'} and will be left out. Funding
+              wallets are always included; they are plumbing, not aged. Leaving wallets out does not
+              mark them backed up, so step 3 will still refuse a campaign covering them.
+            </p>
+          )
         )}
 
         <label className="modal-type">
