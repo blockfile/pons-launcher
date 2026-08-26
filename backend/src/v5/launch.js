@@ -636,9 +636,27 @@ async function fireLaunch(plan, deps = {}) {
     // Unparseable raw is caught by the no-raw guard above; leave null.
   }
 
+  // FAST BUNDLE — PARALLEL BURST. Initiate the launch broadcast AND the caller's
+  // pre-signed bundle in the SAME synchronous tick, so all 31 transactions reach the
+  // sequencer together instead of the buys going out a full round-trip AFTER the
+  // launch broadcast comes back (which was landing them ~2 blocks behind on this
+  // sub-second chain). The launch request is issued first and carries the HIGHER gas,
+  // so a gas-ordered sequencer keeps it ahead of the buys; a buy that somehow lands
+  // before the pool exists reverts (ETH kept — see buy.js FAST_MIN_OUT_WEI). The buys
+  // are handed the DETERMINISTIC signedHash (known pre-broadcast). onBroadcast never
+  // throws past here (its rejection is swallowed) — the caller owns the bundle result.
+  //
+  // TRADE-OFF: the buys fire even if the launch broadcast is then REJECTED — a rare
+  // case after prepareLaunch's simulate + estimate + balance checks — in which they
+  // simply revert against a pool that never existed and waste only gas, never principal.
+  const launchSend = rpc.broadcastTransaction(plan.launch.raw); // (1) launch out first
+  const bundleSend = deps.onBroadcast // (2) bundle out in the same tick, not after
+    ? Promise.resolve(deps.onBroadcast(signedHash)).catch(() => {})
+    : null;
+
   let resp;
   try {
-    resp = await rpc.broadcastTransaction(plan.launch.raw);
+    resp = await launchSend;
   } catch (err) {
     // CRITICAL: broadcastTransaction can throw AFTER the node accepted the tx — a
     // timed-out / lost eth_sendRawTransaction response on a busy RPC. We cannot
@@ -646,7 +664,9 @@ async function fireLaunch(plan, deps = {}) {
     // in-flight park: a fresh launch would then sign at the next nonce and, if the
     // first did land, spend a second fee + first buy. Return a PENDING outcome
     // carrying the deterministic hash so the route parks the wallet exactly as a
-    // receipt timeout does — resolvable via /v5/launch/resolve.
+    // receipt timeout does — resolvable via /v5/launch/resolve. The bundle already
+    // fired (parallel); let it finish broadcasting before returning.
+    if (bundleSend) await bundleSend;
     return resultFromReceipt(null, plan, signedHash, {
       parseReceipt,
       pendingReason:
@@ -655,22 +675,9 @@ async function fireLaunch(plan, deps = {}) {
     });
   }
 
-  // FAST BUNDLE — the launch is now live in the mempool (resp.hash). Fire the
-  // caller's pre-signed bundle buys at THIS instant, before the receipt the slow
-  // path waits ~seconds for, so the bundle lands in the same/next block ahead of a
-  // sniper. onBroadcast must NEVER throw past here: it is launchThenBundle's fast
-  // bundle, wrapped so a bundle failure cannot lose the launch's pending-park below
-  // (the launch already spent its fee; the buys are independent per-wallet ETH that
-  // revert harmlessly if the pool is not there). The buys target the launch's OWN
-  // verified pool key, so a launch that reverts just reverts the buys — no strand.
-  if (deps.onBroadcast) {
-    try {
-      await deps.onBroadcast(resp.hash);
-    } catch (_err) {
-      // The caller (launchThenBundle) owns and records the bundle outcome; a fault
-      // here must not stop the launch from being awaited/parked.
-    }
-  }
+  // Let the parallel bundle finish being broadcast (its buys settle concurrently with
+  // the launch receipt below; launchThenBundle awaits the full bundle result itself).
+  if (bundleSend) await bundleSend;
 
   // The tx is now BROADCAST (resp.hash is live). Awaiting/parsing the receipt must
   // never throw PAST this point: if awaitReceipt or the parse fault (e.g. a provider

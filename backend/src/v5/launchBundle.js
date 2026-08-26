@@ -226,12 +226,13 @@ async function launchThenBundle(input = {}, deps = {}) {
           `the fast bundle could not be pre-signed: ${prepError ? prepError.message : 'no buys prepared'} ` +
           '— the launch fired alone; bundle manually from the Bundle tools.';
       } else if (!bundlePromise) {
-        // onBroadcast never ran: the launch's broadcast response was lost (parked
-        // pending), so the pre-signed buys were deliberately NOT fired. Say so, so a
-        // pending launch + a signed-but-unfired bundle is never read as "bundled".
+        // Defensive: onBroadcast fires in parallel with the launch broadcast now, so
+        // it should always set bundlePromise. If it did not (e.g. the signed plan was
+        // malformed and fireBundleBuys threw synchronously at the very start), the
+        // bundle did not go out — say so rather than imply it did.
         bundleSkipped =
-          'the launch broadcast did not come back confirmed-live, so the pre-signed bundle was NOT ' +
-          'fired — resolve the launch (/v5/launch/resolve), then fire the bundle from the Bundle tools.';
+          'the pre-signed bundle did not go out — fire it manually from the Bundle tools once the ' +
+          'launch is confirmed on the explorer.';
       } else if (fireError) {
         bundleSkipped =
           `the pre-signed bundle failed to broadcast: ${fireError.message} — bundle manually from the Bundle tools.`;

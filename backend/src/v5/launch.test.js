@@ -432,6 +432,46 @@ test('fireLaunch broadcasts, THEN awaits the receipt (broadcast precedes any rec
   assert.equal(res.launch.blockNumber, 4242);
 });
 
+test('fireLaunch fires onBroadcast IN PARALLEL with the launch broadcast (not after it returns)', async () => {
+  // The anti-sniper change: the pre-signed bundle must go out in the SAME tick as the
+  // launch, not a round-trip later. Gate the broadcast so it cannot resolve until we
+  // let it, and assert onBroadcast already fired while it was still in flight.
+  const raw = await signedLaunchRaw();
+  const order = [];
+  let releaseBroadcast;
+  const gate = new Promise((r) => { releaseBroadcast = r; });
+  const provider = fakeProvider({
+    broadcastTransaction: async () => { order.push('broadcast-start'); await gate; order.push('broadcast-done'); return { hash: 'H' }; },
+    getTransactionReceipt: async () => confirmedReceipt({ token: TOKEN, poolId: POOLID, hook: RECEIPT_HOOK, firstBuyIn: '0', firstBuyOut: '0', creator: DEV, feeRecipient: DEV, quote: ZeroAddress, pool: null, poolIdMismatch: false }),
+  });
+  const firePromise = fireLaunch(planFor(raw), {
+    provider, factory: fakeFactory(), dryRun: false, warmPool: async () => {},
+    waitForReceipt: (rpc, hash) => rpc.getTransactionReceipt(hash),
+    onBroadcast: async () => { order.push('onBroadcast'); },
+  });
+  await new Promise((r) => setImmediate(r)); // let the parallel microtasks run
+  assert.ok(order.includes('onBroadcast'), 'onBroadcast fired while the launch broadcast was still in flight');
+  assert.ok(order.indexOf('onBroadcast') < order.indexOf('broadcast-done') || !order.includes('broadcast-done'),
+    'onBroadcast precedes the launch broadcast completing');
+  releaseBroadcast();
+  await firePromise;
+});
+
+test('fireLaunch still fires onBroadcast even if the launch broadcast is LOST (bundle already in flight)', async () => {
+  const raw = await signedLaunchRaw();
+  let onBroadcastFired = false;
+  const provider = fakeProvider({
+    broadcastTransaction: async () => { throw new Error('eth_sendRawTransaction response lost'); },
+  });
+  const res = await fireLaunch(planFor(raw), {
+    provider, factory: fakeFactory(), dryRun: false, warmPool: async () => {},
+    waitForReceipt: (rpc, hash) => rpc.getTransactionReceipt(hash),
+    onBroadcast: async () => { onBroadcastFired = true; },
+  });
+  assert.equal(onBroadcastFired, true, 'the pre-signed bundle fired in parallel, before the loss was known');
+  assert.equal(res.launch.status, 'pending', 'the lost launch is still parked pending');
+});
+
 test('the per-pool HOOK is taken from the receipt, not from the config default', async () => {
   const raw = await signedLaunchRaw();
   const provider = fakeProvider({
