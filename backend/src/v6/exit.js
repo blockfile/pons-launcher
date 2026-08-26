@@ -52,11 +52,12 @@ function holders(ks) {
   return [...(main ? [main] : []), ...v6roles.bundle(ks)];
 }
 
-async function readPositions(userId, { token, hook }, deps = {}) {
+async function readPositions(userId, { token }, deps = {}) {
   const w = wire(deps);
   const ks = w.ks(userId);
-  // Resolve + verify the pool ONCE (throws if there is no live letscash pool).
-  const pool = await w.trade.readPool({ token, quote: 'eth', hook }, deps);
+  // Resolve + verify the pool ONCE — the provenance dusting guard (throws if the token
+  // is not a genuine letscash launch, or has no live pool for the quote).
+  const pool = await w.trade.readPool({ token, quote: 'eth' }, deps);
 
   const wallets = [];
   for (const wallet of holders(ks)) {
@@ -67,9 +68,9 @@ async function readPositions(userId, { token, hook }, deps = {}) {
 }
 
 /** What the exit would sell, per wallet. Reads only. */
-async function preview(userId, { token, hook }, deps = {}) {
+async function preview(userId, { token }, deps = {}) {
   const w = wire(deps);
-  const { pool, wallets } = await readPositions(userId, { token, hook }, deps);
+  const { pool, wallets } = await readPositions(userId, { token }, deps);
 
   const held = wallets.filter((x) => x.balance > 0n);
   const total = held.reduce((sum, x) => sum + x.balance, 0n);
@@ -97,14 +98,14 @@ async function preview(userId, { token, hook }, deps = {}) {
  *
  * @param {boolean} input.confirm required — irreversible, touches every wallet, no floor.
  */
-async function run(userId, { token, hook, confirm }, deps = {}) {
+async function run(userId, { token, confirm }, deps = {}) {
   const w = wire(deps);
 
   if (confirm !== true) {
     throw new Error('the v6 exit is irreversible and has no slippage floor — requires { confirm: true }');
   }
 
-  const { pool, wallets } = await readPositions(userId, { token, hook }, deps);
+  const { pool, wallets } = await readPositions(userId, { token }, deps);
 
   const fees = await w.getFeesFn(FEE_BUMP_PCT);
   const reserve = gasCost(fees, EXIT_GAS);

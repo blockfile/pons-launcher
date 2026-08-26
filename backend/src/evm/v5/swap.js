@@ -328,35 +328,16 @@ async function poolIsInitialized(poolId, deps) {
 // requireLiquidity:false to accept an initialised-but-empty pool (rare; e.g. the
 // instant after a launch, before the seed add is observed by StateView).
 //
-// restrictToKnown pins a supplied `hook` to the candidate (known-letscash) set:
-// with it on, an explicit hook that is NOT a known letscash hook is REFUSED
-// rather than probed. This is the fund-safe mode for callers who take the token
-// AND the hook from untrusted operator input (v6): a decoy ERC-20 paired with an
-// attacker's own hook seeds a real, initialised, liquid pool that would otherwise
-// pass the "a pool exists" check — the honeypot then eats every buy. A real
-// letscash token always trades under one of the known hooks; anything else is not
-// letscash. Callers with trusted provenance (v5 launches its own token and reads
-// the hook from its own receipt) leave this off so a brand-new hook deployment
-// still works. The no-hook probe path is unaffected (it only ever tries the
-// candidate set already).
+// A note on TRUST: an explicit hook is verified for LIVENESS (initialised + liquid)
+// but not for PROVENANCE — this only proves a pool exists under that hook, not that
+// the (token, hook) pair is a genuine launch. A caller that takes the token from
+// untrusted input (v6) must establish provenance BEFORE calling here and pass the
+// hook the factory itself assigned — see factory.findLaunch(). v5 launches its own
+// token and reads the hook from its own receipt, so its provenance is inherent.
 // ─────────────────────────────────────────────────────────────────────────────
-async function resolvePoolKey({ token, quote, hook, requireLiquidity = true, restrictToKnown = false } = {}, deps) {
+async function resolvePoolKey({ token, quote, hook, requireLiquidity = true } = {}, deps) {
   const d = resolveDeps(deps);
-  let hooksToTry;
-  if (hook) {
-    const wanted = norm(hook);
-    if (restrictToKnown && !d.candidateHooks.includes(wanted)) {
-      throw new Error(
-        `hook ${wanted} is not a known letscash hook — refusing to resolve a pool under an ` +
-          `unrecognised hook. A real letscash token trades under one of ${d.candidateHooks.join(', ')}; ` +
-          `an arbitrary hook is how a decoy pool masquerades as a launch. Omit the hook to probe the ` +
-          `known hooks, or add this deployment's hook to candidateHooks if it is genuinely letscash.`
-      );
-    }
-    hooksToTry = [wanted];
-  } else {
-    hooksToTry = d.candidateHooks;
-  }
+  const hooksToTry = hook ? [norm(hook)] : d.candidateHooks;
   const tried = [];
   for (const h of hooksToTry) {
     const { poolKey, poolId, quoteIsCurrency0 } = poolKeyFor({ token, quote, hook: h }, deps);

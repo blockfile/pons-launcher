@@ -620,9 +620,83 @@ function parseLaunchReceipt(receipt, _deps = {}) {
   };
 }
 
+// ─────────────────────────── provenance lookup ──────────────────────────────
+
+const LOG_WINDOW = 500_000; // backward-walk window when the node refuses the whole range
+const MAX_SPLIT_DEPTH = 12; // caps the halving recursion for one refused window
+
+// getLogs for [from,to], halving the range whenever the node refuses it (block-range
+// caps, response-size caps). Appends into `out`. The same technique v2/holdings.js
+// uses for the pons factory's TokenLaunched scan, kept local so v5/v6 own their copy.
+async function getLogsSplitting(rpc, base, from, to, out, depth = 0) {
+  try {
+    const logs = await rpc.getLogs({ ...base, fromBlock: from, toBlock: to });
+    out.push(...logs);
+  } catch (err) {
+    if (depth >= MAX_SPLIT_DEPTH || from >= to) throw err;
+    const mid = Math.floor((from + to) / 2);
+    await getLogsSplitting(rpc, base, from, mid, out, depth + 1);
+    await getLogsSplitting(rpc, base, mid + 1, to, out, depth + 1);
+  }
+}
+
+/**
+ * Verify a token is a GENUINE letscash launch and return the authoritative hook +
+ * poolId the factory assigned it — the provenance gate v6's dusting guard needs (a
+ * decoy ERC-20 with a look-alike pool is exactly the honeypot this refuses).
+ *
+ * It filters the factory's own TokenLaunched events by the token (an indexed topic),
+ * so a hit is proof the launchpad minted this token, and the event's `hook` is the
+ * real per-pool hook — INCLUDING a per-token vanity hook, which an allowlist of known
+ * hooks could never accept. Reads only; returns null when the factory never launched
+ * this token.
+ *
+ * Fast path is one getLogs over the whole range; a node that refuses it triggers a
+ * backward windowed walk that splits any window it still refuses, so the lookup is
+ * reliable regardless of the RPC's range cap. Set config.letscash.factoryDeployBlock
+ * to bound the scan to a single fast call.
+ *
+ * @returns {Promise<null|{token:string,creator:string,poolId:string,hook:string,configId:number}>}
+ */
+async function findLaunch(token, deps = {}) {
+  const rpc = deps.provider || provider;
+  const address = getAddress(config.letscash.factory);
+  const tokenAddr = getAddress(token);
+  // TokenLaunched(token indexed, creator indexed, poolId indexed, ...): filter on the
+  // token topic alone, leaving creator/poolId unconstrained.
+  const base = { address, topics: FACTORY_IFACE.encodeFilterTopics('TokenLaunched', [tokenAddr]) };
+  const from = deps.fromBlock ?? config.letscash.factoryDeployBlock ?? 0;
+  const head = deps.head ?? (await rpc.getBlockNumber());
+
+  const raw = [];
+  try {
+    raw.push(...(await rpc.getLogs({ ...base, fromBlock: from, toBlock: head })));
+  } catch {
+    // The node refused the whole range — walk it from the head down, one window at a
+    // time, splitting any window it still refuses, stopping at the first hit.
+    for (let to = head; to >= from && raw.length === 0; to -= LOG_WINDOW) {
+      const lo = Math.max(from, to - LOG_WINDOW + 1);
+      await getLogsSplitting(rpc, base, lo, to, raw);
+    }
+  }
+  if (raw.length === 0) return null;
+
+  // The most recent, on the vanishingly unlikely chance a token address recurs.
+  const log = raw[raw.length - 1];
+  const p = FACTORY_IFACE.parseLog({ topics: [...log.topics], data: log.data });
+  return {
+    token: getAddress(p.args.token),
+    creator: getAddress(p.args.creator),
+    poolId: p.args.poolId,
+    hook: getAddress(p.args.hook),
+    configId: Number(p.args.configId),
+  };
+}
+
 module.exports = {
   // reads
   getConfigs,
+  findLaunch,
   approvedQuote,
   predictToken,
   mineSalt,

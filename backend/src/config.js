@@ -207,6 +207,11 @@ const config = {
   // launch's atomic firstBuyIn is the only guaranteed-first entry.
   letscash: {
     factory: (process.env.LETSCASH_FACTORY || '0x5bd1Fbe78a78fe8236fa00CF48fbEBA74ae34661').toLowerCase(),
+    // Block the factory was deployed at, so a TokenLaunched provenance lookup
+    // (factory.findLaunch — v6's dusting guard) can bound its getLogs range. 0 scans
+    // from genesis, splitting any window the node refuses; set
+    // LETSCASH_FACTORY_DEPLOY_BLOCK once known to make it a single fast call.
+    factoryDeployBlock: num(process.env.LETSCASH_FACTORY_DEPLOY_BLOCK, 0),
     hook: (process.env.LETSCASH_HOOK || '0x75A54357D9C78a2Db19004a5FDc76c50F9242AEC').toLowerCase(),
     poolManager: (process.env.LETSCASH_POOL_MANAGER || '0x8366a39CC670B4001A1121B8F6A443A643e40951').toLowerCase(),
     universalRouter: (process.env.LETSCASH_UNIVERSAL_ROUTER || '0x8876789976deCBFcbbBe364623c63652DB8c0904').toLowerCase(),

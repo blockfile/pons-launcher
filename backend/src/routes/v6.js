@@ -11,11 +11,12 @@
  * WHERE THE DUSTING GUARD LIVES. v3 refuses a token the pons-v2 factory has no
  * record of, launched by a wallet the account never held — because a run signs token
  * approvals and an approval to a hostile ERC-20 is the dusting attack. V6's guard is
- * trade.readPool(): it resolves and VERIFIES a real, initialised, liquid letscash V4
- * pool (under a KNOWN letscash hook) for the token before anything is signed. A
- * hostile decoy ERC-20 has no such pool, so an approval is only ever signed for a
- * token that trades on a real letscash pool. The operator may pass an explicit `hook`
- * (e.g. from the launch record) to pin it; otherwise resolvePoolKey probes.
+ * trade.readPool(), and it is the same PROVENANCE idea: it requires the token to have
+ * a genuine TokenLaunched event on the letscash factory (factory.findLaunch), which
+ * both rejects a decoy ERC-20 (no such event) AND yields the AUTHORITATIVE hook the
+ * factory assigned it — a per-token vanity hook included. It then verifies the pool is
+ * initialised and liquid under THAT hook before anything is signed. An operator-supplied
+ * hook is never trusted; the only hook used is the one the factory itself emitted.
  */
 
 const express = require('express');
@@ -77,7 +78,7 @@ async function resolveRun(body = {}, ks, deps = {}) {
   // The dusting guard + the pool the run trades: resolve + VERIFY a live letscash
   // pool. Throws if there is no initialised, liquid pool — so no approval is ever
   // signed for a token that does not really trade on letscash.
-  const pool = await t.readPool({ token, quote: 'eth', hook: body.hook }, deps);
+  const pool = await t.readPool({ token, quote: 'eth' }, deps);
 
   const main = v6roles.main(ks); // throws naming v6main
   const bundle = v6roles.bundle(ks);
@@ -487,7 +488,7 @@ router.post('/v6/chain/resume', requireApiKey, (req, res, next) => {
 
 router.get('/v6/exit/preview', requireApiKey, async (req, res, next) => {
   try {
-    res.json(jsonSafe(await exit.preview(req.user.id, { token: req.query.token, hook: req.query.hook })));
+    res.json(jsonSafe(await exit.preview(req.user.id, { token: req.query.token })));
   } catch (err) {
     next(err);
   }
@@ -504,7 +505,7 @@ router.post('/v6/exit', requireApiKey, async (req, res, next) => {
     }
     // exit.readPositions calls trade.readPool, which verifies a real letscash pool —
     // the same dusting guard the start takes (the exit approves every wallet's balance).
-    res.json(jsonSafe(await exit.run(req.user.id, { token: req.body?.token, hook: req.body?.hook, confirm: req.body?.confirm })));
+    res.json(jsonSafe(await exit.run(req.user.id, { token: req.body?.token, confirm: req.body?.confirm })));
   } catch (err) {
     next(err);
   }

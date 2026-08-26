@@ -37,6 +37,7 @@ const { getFees } = require('../evm/fees');
 const { waitForReceipt } = require('../evm/receipt');
 const { readTokenBalance } = require('../evm/erc20');
 const swap = require('../evm/v5/swap');
+const factory = require('../evm/v5/factory');
 
 // The buy is a single V4 execute(); 500k is generous (unused gas refunded).
 const BUY_GAS = BigInt(config.buyGasLimit || 500_000);
@@ -72,6 +73,7 @@ function wire(deps = {}) {
     rpc: deps.rpc || provider,
     ks: deps.keystore,
     swap: deps.swap || swap,
+    factory: deps.factory || factory,
     await: deps.waitForReceiptFn || waitForReceipt,
     readBal: deps.readTokenBalance || readTokenBalance,
     getFeesFn: deps.getFeesFn || getFees,
@@ -92,27 +94,48 @@ function deadlineFor(w) {
 }
 
 /**
- * Resolve + VERIFY the pool for a token, ONCE (replaces v3's readCurve). The hook is
- * per-pool; resolvePoolKey pins it against the chain and confirms it is initialised
- * and liquid before the run commits to it. Pass a known `hook` to skip the probe.
+ * Resolve + VERIFY the pool for a token, ONCE (replaces v3's readCurve).
  *
- * THE DUSTING GUARD. v6 takes both the token AND (optionally) the hook from untrusted
- * operator input, so this passes restrictToKnown: an explicit hook that is not a known
- * letscash hook is REFUSED — not probed — because a decoy ERC-20 paired with an
- * attacker's own hook can seed a real, initialised, liquid pool that would otherwise
- * satisfy "a pool exists" and then eat every buy (a honeypot). A real letscash token
- * always trades under one of the known hooks. This is what the routes header means by
- * "a real, initialised, liquid letscash V4 pool under a KNOWN letscash hook".
+ * THE DUSTING GUARD, and it is a PROVENANCE gate, not a "does a pool exist" check. v6
+ * takes the token from untrusted operator input, and a run signs token approvals — an
+ * approval to a hostile ERC-20 is the dusting attack. A decoy token can be paired with
+ * an attacker's own hook to seed a real, initialised, liquid pool that would satisfy a
+ * bare liveness check and then eat every buy (a honeypot). So the gate is:
+ *   1. factory.findLaunch(token) — the token MUST have a genuine TokenLaunched event on
+ *      the letscash factory. This rejects a decoy (no such event) AND yields the
+ *      AUTHORITATIVE hook the factory assigned — including a per-token vanity hook.
+ *   2. resolvePoolKey against THAT hook — confirm the pool is initialised and liquid.
+ * Any operator-supplied `hook` is IGNORED: the only hook trusted is the one the factory
+ * itself emitted. `hook` is accepted in the signature for call-site symmetry only.
  *
- * @returns {Promise<{token, quote, poolKey, poolId, hook, liquidity}>}
+ * @returns {Promise<{token, quote, poolKey, poolId, hook, liquidity, creator}>}
  */
-async function readPool({ token, quote = 'eth', hook }, deps = {}) {
+async function readPool({ token, quote = 'eth' }, deps = {}) {
   const w = wire(deps);
-  const r = await w.swap.resolvePoolKey(
-    { token: getAddress(token), quote, hook, restrictToKnown: true },
-    { provider: w.rpc }
-  );
-  return { token: getAddress(token), quote, poolKey: r.poolKey, poolId: r.poolId, hook: r.hook, liquidity: r.liquidity };
+  const addr = getAddress(token);
+
+  const launch = await w.factory.findLaunch(addr, { provider: w.rpc });
+  if (!launch) {
+    throw new Error(
+      `${addr} is not a letscash launch — the factory has no TokenLaunched event for it, so v6 will not ` +
+        `approve or trade it. v6 only trades genuine letscash launchpad tokens (a decoy ERC-20 with a ` +
+        `look-alike pool is exactly the honeypot this refuses).`
+    );
+  }
+
+  // Verify the pool is live under the hook the FACTORY named (trusted), for the quote
+  // v6 trades. Throws if that pool is not initialised/liquid (e.g. the token launched
+  // against USDG and has no ETH pool).
+  const r = await w.swap.resolvePoolKey({ token: addr, quote, hook: launch.hook }, { provider: w.rpc });
+  return {
+    token: addr,
+    quote,
+    poolKey: r.poolKey,
+    poolId: r.poolId,
+    hook: r.hook,
+    liquidity: r.liquidity,
+    creator: launch.creator,
+  };
 }
 
 /** A wallet's balance of one token. */
