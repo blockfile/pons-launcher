@@ -149,6 +149,9 @@ function launchActivityDetail(result, plan) {
     poolId: confirmed ? result.poolId || null : null,
     hook: result.hook || null, // receipt hook or null — fireLaunch never uses the config default
     hookResolved: Boolean(result.hook),
+    // The symbol, so a later session that lost the in-memory launch can still name
+    // the token in the Sell step after recovering it from this record (GET /v5/launches).
+    symbol: plan?.params?.symbol ?? null,
     quote: plan.quote,
     configId: plan.configId,
     firstBuyEth: plan.launch.firstBuyEth,
@@ -1003,6 +1006,42 @@ router.get('/v5/pool-fee', requireApiKey, async (req, res, next) => {
   }
 });
 
+// GET /api/v5/launches — this account's own recorded launches, newest first,
+// distinct by token. The in-memory "last launch" the console pins is gone after a
+// page refresh, so without this a Sell/Bundle of a token launched moments ago is
+// wrongly treated as an UNLISTED token (demanding a manually-typed pool hook). The
+// launch RECORD already holds the authoritative token + receipt hook + quote, so
+// the console can recover it and pin it exactly as if the launch just happened —
+// the same record assertOwnLaunchedToken and launchedTokenHook already trust. Read
+// only; identified by the launchHash marker launchActivityDetail alone writes.
+function launchesFromActivity(entries) {
+  const seen = new Set();
+  const launches = [];
+  for (const e of entries || []) {
+    if (!e || !e.launchHash || !e.token) continue; // launch records with a confirmed token only
+    const key = String(e.token).toLowerCase();
+    if (seen.has(key)) continue; // newest wins — list() is newest-first
+    seen.add(key);
+    launches.push({
+      token: e.token,
+      symbol: e.symbol || null,
+      hook: e.hook || null,
+      hookResolved: Boolean(e.hook),
+      quote: e.quote || null,
+      status: e.status || null,
+      at: e.at || null,
+    });
+  }
+  return launches;
+}
+router.get('/v5/launches', requireApiKey, (req, res, next) => {
+  try {
+    res.json({ launches: launchesFromActivity(activityFor(req.user.id).list({ kind: 'v5', limit: 500 })) });
+  } catch (err) {
+    next(err);
+  }
+});
+
 // A client body safe to pass to prepareBundleBuys from the STANDALONE buy route.
 // prepareBundleBuys has a fast path that TRUSTS a caller-supplied { poolKey, poolId }
 // (skipping resolvePoolKey's decoy-pool guard) — that path exists ONLY for the
@@ -1185,3 +1224,4 @@ module.exports.launchedTokenHook = launchedTokenHook;
 module.exports.launchedTokenQuote = launchedTokenQuote;
 module.exports.resolveSellPool = resolveSellPool;
 module.exports.safeBundleBuyBody = safeBundleBuyBody;
+module.exports.launchesFromActivity = launchesFromActivity;

@@ -48,6 +48,9 @@ export default function V5Console({ health, credential, report, output, reported
   // nothing at all. Not persisted: a reload of the page forgets it, same as
   // every other piece of state here.
   const [lastLaunch, setLastLaunch] = useState(null);
+  // Recovered from the server (GET /v5/launches) so a refresh does not lose the
+  // token — the newest is Sell's fallback pin when this session has no lastLaunch.
+  const [recentLaunches, setRecentLaunches] = useState([]);
 
   // The explorer base comes with the v5 config; fall back to the health readout,
   // which carries the same value, so a slow config fetch does not blank the links.
@@ -95,13 +98,27 @@ export default function V5Console({ health, credential, report, output, reported
     }
   }, []);
 
+  // This account's recorded launches (newest first), so a page refresh — which
+  // wipes the in-memory `lastLaunch` — does not leave the Sell step treating a
+  // token launched moments ago as an unlisted one. The newest is handed to Sell as
+  // a fallback pin; the server still holds the authoritative hook for the exit.
+  const loadRecentLaunches = useCallback(async () => {
+    try {
+      const out = await api('/v5/launches');
+      setRecentLaunches(out.launches || []);
+    } catch {
+      // Non-blocking: the operator can still type the token by hand.
+    }
+  }, []);
+
   useEffect(() => {
     if (!credential) return undefined;
     loadConfig();
     loadWallets();
     loadLaunchConfigs();
+    loadRecentLaunches();
     return undefined;
-  }, [credential, loadConfig, loadWallets, loadLaunchConfigs]);
+  }, [credential, loadConfig, loadWallets, loadLaunchConfigs, loadRecentLaunches]);
 
   /**
    * The order of work, and where in it the operator is standing.
@@ -258,6 +275,7 @@ export default function V5Console({ health, credential, report, output, reported
         dev={dev}
         bundle={bundle}
         lastLaunch={lastLaunch}
+        recoveredLaunch={recentLaunches[0] || null}
         live={live}
         explorer={explorer}
         reload={loadWallets}

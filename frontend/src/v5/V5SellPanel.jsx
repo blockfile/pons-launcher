@@ -52,7 +52,7 @@ function fmt(v, dp = 4) {
  * fan-out finishes. So this is a plain "wait and try again" notice, not a
  * button, the same shape V5BundlePanel uses for its own not-settled case.
  */
-export default function V5SellPanel({ step, dev, bundle, lastLaunch, live, explorer, reload, report }) {
+export default function V5SellPanel({ step, dev, bundle, lastLaunch, recoveredLaunch, live, explorer, reload, report }) {
   const [tokenOverride, setTokenOverride] = useState('');
   const [allowUnlisted, setAllowUnlisted] = useState(false);
   const [hookOverride, setHookOverride] = useState('');
@@ -66,13 +66,22 @@ export default function V5SellPanel({ step, dev, bundle, lastLaunch, live, explo
 
   const explorerFor = (address) => (explorer ? `${explorer}/address/${address}` : '');
 
+  // The token this step defaults to: this session's launch if we still have it,
+  // else the most recent one RECOVERED from the server. A page refresh wipes the
+  // in-memory lastLaunch, but the launch is on record — recoveredLaunch carries it
+  // back, and the server resolves the real pool hook from that same record, so a
+  // token this account launched needs NO manually-typed hook whether the pin came
+  // from the session or the recovery.
+  const pinnedToken = lastLaunch?.token || recoveredLaunch?.token || '';
+  const pinnedSymbol = lastLaunch?.plan?.params?.symbol || recoveredLaunch?.symbol || '';
   const typed = tokenOverride.trim();
-  const token = typed || lastLaunch?.token || '';
+  const token = typed || pinnedToken;
   // True the moment the typed override names something other than the pinned
-  // launch — including the case where there is no pinned launch at all, which
-  // is just as "unlisted" from this account's point of view.
-  const differsFromLaunch = Boolean(typed) && typed.toLowerCase() !== String(lastLaunch?.token || '').toLowerCase();
-  const symbol = plan?.symbol || (!differsFromLaunch ? lastLaunch?.plan?.params?.symbol : '') || '';
+  // launch. It no longer forces the unlisted path — the server still recognises
+  // any token THIS account launched — it only decides whether to offer the
+  // "launched elsewhere" escape hatch below.
+  const differsFromLaunch = Boolean(typed) && typed.toLowerCase() !== pinnedToken.toLowerCase();
+  const symbol = plan?.symbol || (!differsFromLaunch ? pinnedSymbol : '') || '';
 
   // The checkbox only makes sense while it is actually being asked for.
   useEffect(() => {
@@ -98,7 +107,10 @@ export default function V5SellPanel({ step, dev, bundle, lastLaunch, live, explo
     const b = { token };
     const bps = Number(slippageBps);
     if (slippageBps.trim() && bps > 0) b.slippageBps = bps;
-    if (differsFromLaunch && allowUnlisted) {
+    // Only when the operator explicitly opts in — for a token this account did NOT
+    // launch (so the server has no record to pin). A token launched here needs none
+    // of this: a bare { token } lets the server resolve the recorded hook itself.
+    if (allowUnlisted) {
       b.allowUnlistedToken = true;
       // An unlisted token has no recorded launch hook for the server to pin, so
       // the exact pool hook must be supplied here — the server refuses the sell
@@ -150,10 +162,11 @@ export default function V5SellPanel({ step, dev, bundle, lastLaunch, live, explo
     }
   }
 
-  // For an unlisted token the operator must also supply the pool hook — the exit
-  // refuses without it, so keep the buttons disabled until it is given.
-  const tokenReady =
-    Boolean(token) && (!differsFromLaunch || (allowUnlisted && Boolean(hookOverride.trim())));
+  // A token alone is enough — the server resolves the recorded pool hook for any
+  // token this account launched (this session OR recovered after a refresh). The
+  // pool hook is required ONLY when the operator ticks "launched elsewhere", the
+  // one case the server has no record to pin.
+  const tokenReady = Boolean(token) && (!allowUnlisted || Boolean(hookOverride.trim()));
   const ready = tokenReady && !noWallets;
   const blocked = live && !armed;
 
@@ -196,16 +209,17 @@ export default function V5SellPanel({ step, dev, bundle, lastLaunch, live, explo
       )}
 
       <h3 style={{ margin: '0 0 8px' }}>Token</h3>
-      {lastLaunch?.token ? (
+      {pinnedToken ? (
         <div className="row">
-          <span className="hint">from your last launch —</span>
-          <b>{lastLaunch.plan?.params?.symbol || ''}</b>
-          <Address value={lastLaunch.token} plain href={explorerFor(lastLaunch.token)} />
+          <span className="hint">
+            {lastLaunch?.token ? 'from your last launch —' : 'your most recent launch —'}
+          </span>
+          <b>{pinnedSymbol}</b>
+          <Address value={pinnedToken} plain href={explorerFor(pinnedToken)} />
         </div>
       ) : (
         <p className="hint">
-          No launch this session yet — type the token address below if you're exiting one launched
-          earlier.
+          No launch on record — type the token address below if you're exiting one launched earlier.
         </p>
       )}
       <div className="grid" style={{ marginTop: 8 }}>
@@ -214,10 +228,20 @@ export default function V5SellPanel({ step, dev, bundle, lastLaunch, live, explo
           <input
             value={tokenOverride}
             onChange={(e) => setTokenOverride(e.target.value)}
-            placeholder={lastLaunch?.token || '0x…'}
+            placeholder={pinnedToken || '0x…'}
           />
         </label>
       </div>
+      {/* The token pin survives a refresh now, and a token this account launched
+          needs no manual hook — just Preflight. The box below is only for a token
+          launched from a DIFFERENT account, which the server has no record to pin. */}
+      {token && (
+        <p className="hint" style={{ margin: '6px 0 0' }}>
+          {differsFromLaunch
+            ? 'If you launched this token from THIS account, just Preflight — the pool hook is recovered from your launch record. Tick below only if it was launched from a different account.'
+            : 'This is your most recent launch — just Preflight; the pool hook comes from its launch record.'}
+        </p>
+      )}
       {differsFromLaunch && (
         <label className="row" style={{ marginTop: 8 }}>
           <input type="checkbox" checked={allowUnlisted} onChange={(e) => setAllowUnlisted(e.target.checked)} />

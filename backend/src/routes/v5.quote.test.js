@@ -10,7 +10,7 @@ const assert = require('node:assert');
 const fs = require('fs');
 
 const v5 = require('./v5');
-const { launchedTokenQuote, launchedTokenHook, assertOwnLaunchedToken, resolveSellPool, safeBundleBuyBody } = v5;
+const { launchedTokenQuote, launchedTokenHook, assertOwnLaunchedToken, resolveSellPool, safeBundleBuyBody, launchesFromActivity } = v5;
 const { activityFor } = require('../store/activity');
 const config = require('../config');
 
@@ -75,6 +75,30 @@ test('resolveSellPool requires an explicit quote for an unlisted token given a h
   const r = resolveSellPool(USER, { token: unlisted, hook: HOOK, quote: 'usdg' });
   assert.equal(r.quote, 'usdg');
   assert.equal(r.hook, HOOK);
+});
+
+test('launchesFromActivity recovers launch records (newest-first, distinct token, hook/quote intact)', () => {
+  // A page refresh loses the in-memory lastLaunch; this is how the Sell step gets
+  // the token + recorded hook back so it never treats an own launch as unlisted.
+  const entries = [
+    // newest first (list() unshifts), two records for the SAME token — newest wins
+    { at: '2026-08-26T10:00:00.000Z', kind: 'v5', launchHash: '0xh2', token: '0xAAA', symbol: 'CATB', hook: '0xHOOK2', quote: '0x0', status: 'confirmed' },
+    { at: '2026-08-25T10:00:00.000Z', kind: 'v5', launchHash: '0xh1', token: '0xAAA', symbol: 'CATA', hook: '0xHOOK1', quote: '0x0', status: 'confirmed' },
+    { at: '2026-08-24T10:00:00.000Z', kind: 'v5', launchHash: '0xh0', token: '0xBBB', symbol: 'DOG', hook: '0xHOOKB', quote: USDG, status: 'confirmed' },
+    // non-launch rows (no launchHash) and a pending/no-token launch are skipped
+    { at: '2026-08-26T11:00:00.000Z', kind: 'sell', token: '0xCCC', symbol: 'X' },
+    { at: '2026-08-26T09:00:00.000Z', kind: 'v5', launchHash: '0xh9', token: null, status: 'pending' },
+  ];
+  const out = launchesFromActivity(entries);
+  assert.equal(out.length, 2, 'two distinct launched tokens');
+  assert.equal(out[0].token, '0xAAA');
+  assert.equal(out[0].symbol, 'CATB'); // newest record for 0xAAA wins
+  assert.equal(out[0].hook, '0xHOOK2');
+  assert.equal(out[0].hookResolved, true);
+  assert.equal(out[1].token, '0xBBB');
+  assert.equal(out[1].quote, USDG);
+  // The sell row and the token-less pending launch are not in the list.
+  assert.equal(out.some((l) => l.token === '0xCCC'), false);
 });
 
 test('safeBundleBuyBody strips a client-injected poolKey/poolId/hook/quote', () => {
