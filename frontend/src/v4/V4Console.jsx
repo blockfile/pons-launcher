@@ -7,6 +7,7 @@ import V4FundingPanel from './V4FundingPanel.jsx';
 import V4SeedPanel from './V4SeedPanel.jsx';
 import V4PlanPanel from './V4PlanPanel.jsx';
 import V4CampaignsPanel from './V4CampaignsPanel.jsx';
+import V4GatherPanel from './V4GatherPanel.jsx';
 
 /**
  * The V4 tab, whole.
@@ -266,6 +267,15 @@ export default function V4Console({ health, credential, report, output, reported
           ? `${plural(campaigns.filter((c) => c.status === 'running').length, 'campaign')} running`
           : 'weeks, unattended, across restarts',
       },
+      {
+        key: 'gather',
+        n: 5,
+        // Optional and repeatable — like v3's exit/sweep, an empty set of wallets is
+        // both "gathered" and "never run", so there is nothing honest to mark done.
+        done: false,
+        title: 'Gather the ETH back',
+        detail: 'sweep leftover ETH to a super-main, through Relay',
+      },
     ];
 
     let previousRequired = null;
@@ -367,12 +377,20 @@ export default function V4Console({ health, credential, report, output, reported
       />
 
       <V4CampaignsPanel
-        step={{ ...step('run'), last: true }}
+        step={step('run')}
         campaigns={campaigns}
         details={details}
         lastSent={lastSent}
         explorer={explorer}
         reload={loadCampaigns}
+        report={report}
+      />
+
+      <V4GatherPanel
+        step={{ ...step('gather'), last: true }}
+        masters={masters}
+        explorer={explorer}
+        reload={loadWallets}
         report={report}
       />
     </div>

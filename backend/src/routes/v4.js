@@ -49,6 +49,7 @@ const { storeFor } = require('../v4/store');
 const runner = require('../v4/runner');
 const rng = require('../v4/rng');
 const seasonedWallets = require('../v4/seasoned');
+const sweep = require('../v4/sweep');
 
 const router = express.Router();
 
@@ -1157,6 +1158,49 @@ router.post('/v4/campaigns/:id/resume', requireApiKey, (req, res, next) => {
 router.post('/v4/campaigns/:id/cancel', requireApiKey, (req, res, next) => {
   try {
     res.json(jsonSafe(runner.cancel(req.user.id, req.params.id)));
+  } catch (err) {
+    next(err);
+  }
+});
+
+// ── gather / sweep ────────────────────────────────────────────────────────────
+
+// GET /api/v4/sweep/preview — what a gather would move, to the chosen super-main from
+// the chosen categories. Reads only. `categories` is comma-separated (funding,seeds,withdrawn).
+router.get('/v4/sweep/preview', requireApiKey, async (req, res, next) => {
+  try {
+    const categories = String(req.query.categories || 'funding')
+      .split(',')
+      .map((c) => c.trim())
+      .filter(Boolean);
+    res.json(
+      jsonSafe(
+        await sweep.preview(req.user.id, {
+          destinationId: req.query.destinationId,
+          categories,
+          minSweepEth: req.query.minSweepEth,
+        })
+      )
+    );
+  } catch (err) {
+    next(err);
+  }
+});
+
+// POST /api/v4/sweep — gather ETH to a super-main through Relay. Never direct (see
+// v4/sweep.js): a direct sweep would re-link the seasoned wallets to the super-main.
+router.post('/v4/sweep', requireApiKey, async (req, res, next) => {
+  try {
+    res.json(
+      jsonSafe(
+        await sweep.run(req.user.id, {
+          destinationId: req.body?.destinationId,
+          categories: req.body?.categories,
+          minSweepEth: req.body?.minSweepEth,
+          confirm: req.body?.confirm,
+        })
+      )
+    );
   } catch (err) {
     next(err);
   }
