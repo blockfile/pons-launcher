@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import { LazyMotion, MotionConfig, domMax } from 'framer-motion';
-import { LuRocket, LuArrowRightLeft, LuLink, LuClock, LuBanknote } from 'react-icons/lu';
+import { LuRocket, LuArrowRightLeft, LuLink, LuClock, LuBanknote, LuRepeat } from 'react-icons/lu';
 import ThemeToggle from './ThemeToggle.jsx';
 import { api, getApiKey, setApiKey } from './api.js';
 import { shortAddress } from './format.js';
@@ -31,6 +31,9 @@ import Toaster from './components/Toaster.jsx';
 import V3Console from './v3/V3Console.jsx';
 import V4Console from './v4/V4Console.jsx';
 import V5Console from './v5/V5Console.jsx';
+// V6 is V3's relay chain re-pointed at letscash V4 pools — its own console, its
+// own directory, sharing no state with any tab. Same branch-not-blend rule as V3.
+import V6Console from './v6/V6Console.jsx';
 
 const { bundleShare } = bundleShareModule;
 
@@ -53,6 +56,7 @@ const TAB_TITLE = {
   v3: 'V3 · relay chain',
   v4: 'V4 · seasoning',
   v5: 'V5 · letscash',
+  v6: 'V6 · letscash relay',
 };
 
 // What a launch cannot be armed without, in the order step 5 asks for it, and
@@ -463,6 +467,14 @@ export default function App() {
                 <LuBanknote size={16} aria-hidden="true" />
                 V5 · letscash
               </button>
+              <button
+                type="button"
+                className={tab === 'v6' ? 'side-item is-on' : 'side-item'}
+                onClick={() => setTab('v6')}
+              >
+                <LuRepeat size={16} aria-hidden="true" />
+                V6 · letscash relay
+              </button>
             </nav>
             <div className="side-foot">
               <ThemeToggle />
@@ -484,7 +496,9 @@ export default function App() {
                       ? 'not a launcher — distributes a live token, one wallet at a time'
                       : tab === 'v4'
                         ? 'not a launcher — drips ETH into fresh wallets over weeks'
-                        : 'the letscash.fun bundler — launcher first buy, fanned out to a bundle'}
+                        : tab === 'v5'
+                          ? 'the letscash.fun bundler — launcher first buy, fanned out to a bundle'
+                          : 'not a launcher — distributes a live letscash token through Relay, one wallet at a time'}
               </span>
             </div>
 
@@ -574,6 +588,14 @@ export default function App() {
             />
           ) : tab === 'v5' ? (
             <V5Console
+              health={health}
+              credential={credential}
+              report={report}
+              output={output}
+              reportedAt={reportedAt}
+            />
+          ) : tab === 'v6' ? (
+            <V6Console
               health={health}
               credential={credential}
               report={report}

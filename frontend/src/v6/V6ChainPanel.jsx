@@ -1,0 +1,359 @@
+import { useState } from 'react';
+import { api } from '../api.js';
+import Step from '../components/Step.jsx';
+import { Busy } from '../components/Section.jsx';
+import Modal, { Fact } from '../components/Modal.jsx';
+import Address from '../components/Address.jsx';
+import { plural } from './roles.js';
+
+// What each cycle state says on screen. The engine's own strings, spelled out:
+// a stall is only useful if it names the step it stalled on.
+const STATE_LABEL = {
+  pending: 'waiting',
+  selling: 'selling',
+  transferring: 'transferring',
+  'waiting-fill': 'waiting for the fill',
+  buying: 'buying',
+  done: 'done',
+  failed: 'failed',
+};
+
+const DEFAULT_INTERVAL_MS = 7000;
+const DEFAULT_VARIANCE_PCT = 30;
+
+const money = (v) => (v == null ? null : `$${Number(v).toLocaleString(undefined, { maximumFractionDigits: 2 })}`);
+
+function duration(ms) {
+  const s = Math.round(ms / 1000);
+  if (s < 90) return `${s}s`;
+  const m = Math.floor(s / 60);
+  return m < 60 ? `${m}m ${s % 60}s` : `${Math.floor(m / 60)}h ${m % 60}m`;
+}
+
+export default function V6ChainPanel({
+  step,
+  wallets,
+  job,
+  token,
+  setToken,
+  explorer,
+  reload,
+  reloadWallets,
+  report,
+}) {
+  const [busy, setBusy] = useState('');
+  const [bigBuy, setBigBuy] = useState('');
+  const [intervalMs, setIntervalMs] = useState(DEFAULT_INTERVAL_MS);
+  const [jitterPct, setJitterPct] = useState(0);
+  const [variancePct, setVariancePct] = useState(DEFAULT_VARIANCE_PCT);
+  const [plan, setPlan] = useState(null);
+  const [arming, setArming] = useState(false);
+
+  const body = () => ({
+    token: token.trim(),
+    bigBuyEth: bigBuy.trim(),
+    // Every bundle wallet, in table order. There is no per-wallet amount: the
+    // run divides the position across them as it goes.
+    targets: wallets.map((w) => ({ walletId: w.id })),
+    intervalMs: Number(intervalMs),
+    jitterPct: Number(jitterPct),
+    variancePct: Number(variancePct),
+  });
+
+  async function act(what, fn) {
+    setBusy(what);
+    try {
+      const out = await fn();
+      report(out);
+      await reload();
+      await reloadWallets();
+      return out;
+    } catch (err) {
+      report(`ERROR: ${err.message}`);
+      throw err;
+    } finally {
+      setBusy('');
+    }
+  }
+
+  const running = Boolean(job?.running);
+  const resumable = job && (job.status === 'stopped' || job.status === 'failed');
+  const ready = token.trim() && Number(bigBuy) > 0 && wallets.length > 0;
+  const link = (hash) => (explorer && hash ? `${explorer}/tx/${hash}` : '');
+
+  return (
+    <Step {...step}>
+      <p className="lede">
+        One big buy from the main wallet, then a cycle per wallet: sell a slice of the position, move
+        the proceeds through Relay, and buy with what arrives. Every{' '}
+        {(Number(intervalMs) / 1000).toFixed(1)}s until the position is gone.
+      </p>
+
+      <div className="row">
+        <input
+          type="text"
+          placeholder="token address the chain trades"
+          value={token}
+          onChange={(e) => setToken(e.target.value)}
+          style={{ flex: 1, minWidth: 260 }}
+          disabled={running}
+        />
+      </div>
+
+      <div className="row">
+        <label>
+          big buy (ETH)
+          <input
+            type="text"
+            inputMode="decimal"
+            value={bigBuy}
+            onChange={(e) => setBigBuy(e.target.value)}
+            style={{ width: 120 }}
+            disabled={running}
+          />
+        </label>
+        <label>
+          interval (ms)
+          <input
+            type="number"
+            min="3000"
+            max="600000"
+            step="500"
+            value={intervalMs}
+            onChange={(e) => setIntervalMs(e.target.value)}
+            style={{ width: 120 }}
+            disabled={running}
+          />
+        </label>
+        <label>
+          jitter (%)
+          <input
+            type="number"
+            min="0"
+            max="50"
+            value={jitterPct}
+            onChange={(e) => setJitterPct(e.target.value)}
+            style={{ width: 90 }}
+            disabled={running}
+          />
+        </label>
+        <label>
+          size variance (%)
+          <input
+            type="number"
+            min="0"
+            max="90"
+            value={variancePct}
+            onChange={(e) => setVariancePct(e.target.value)}
+            style={{ width: 90 }}
+            disabled={running}
+          />
+        </label>
+        <span className="spacer" />
+        <Busy
+          busy={busy === 'plan'}
+          className="btn-primary"
+          disabled={!ready || running}
+          onClick={() =>
+            act('plan', async () => {
+              const out = await api('/v6/chain/plan', 'POST', body());
+              setPlan(out);
+              return out;
+            })
+          }
+        >
+          Preview
+        </Busy>
+      </div>
+
+      <p className="hint">
+        <b>Jitter</b> spreads the time between buys; <b>size variance</b> spreads how big each one is.
+        {Number(variancePct) === 0 && ' At 0% every buy is the same size, which is a pattern in itself.'}
+        {Number(jitterPct) === 0 &&
+          ` Buys land exactly ${(Number(intervalMs) / 1000).toFixed(1)}s apart at the moment.`}
+      </p>
+
+      {plan && !running && (
+        <div className="notice">
+          <div className="row">
+            <span>
+              position after the big buy: <b>{Number(plan.position.eth).toFixed(4)} ETH</b>
+              {plan.position.usd && <> ({money(plan.position.usd)})</>}
+            </span>
+            <span className="spacer" />
+            <span className="hint">
+              {plural(plan.walletCount, 'cycle')} · about {duration(plan.estimatedRunMs)}
+            </span>
+          </div>
+          <div className="row">
+            <span>
+              each wallet buys with roughly{' '}
+              <b>
+                {plan.slice.meanUsd
+                  ? money(plan.slice.meanUsd)
+                  : `${Number(plan.slice.meanEth).toFixed(5)} ETH`}
+              </b>
+              {Number(variancePct) > 0 && (
+                <>
+                  {' '}
+                  — varying between{' '}
+                  {plan.slice.lowUsd
+                    ? `${money(plan.slice.lowUsd)} and ${money(plan.slice.highUsd)}`
+                    : `${Number(plan.slice.lowEth).toFixed(5)} and ${Number(plan.slice.highEth).toFixed(5)} ETH`}
+                </>
+              )}
+            </span>
+          </div>
+          {plan.poolTax && plan.poolTax.currentPct > 0 && (
+            <p className="warn">
+              The pool tax is live at <b>{plan.poolTax.currentPct}%</b> and these wallets are not exempt —
+              every buy <b>and</b> sell in this run pays it. It is flat on letscash; there is no window to wait out.
+            </p>
+          )}
+          {plan.warnings.map((w) => (
+            <p className="hint" key={w}>
+              {w}
+            </p>
+          ))}
+        </div>
+      )}
+
+      <div className="row">
+        <Busy busy={busy === 'start'} disabled={!ready || running} onClick={() => setArming(true)}>
+          Start the chain
+        </Busy>
+        <button
+          className="ghost"
+          disabled={!running}
+          onClick={() => act('stop', () => api('/v6/chain/stop', 'POST'))}
+        >
+          Stop
+        </button>
+        <button
+          className="ghost"
+          disabled={!resumable}
+          onClick={() => act('resume', () => api('/v6/chain/resume', 'POST'))}
+        >
+          Resume
+        </button>
+        <span className="spacer" />
+        {job && job.status !== 'idle' && (
+          <span className="hint">
+            {job.status} · {job.completed}/{job.total} bought
+          </span>
+        )}
+      </div>
+
+      {job?.failure && (
+        <p className="warn">
+          Halted while <b>{STATE_LABEL[job.failure.step] || job.failure.step}</b>
+          {job.failure.address ? ' for ' : ''}
+          {job.failure.address && <Address value={job.failure.address} />} — {job.failure.error}.
+          Nothing after it ran; Resume picks up at that step.
+        </p>
+      )}
+
+      {job?.cycles?.length > 0 && (
+        <div className="table-card">
+          <table>
+            <thead>
+              <tr>
+                <th>#</th>
+                <th>Wallet</th>
+                <th>State</th>
+                <th className="num">Sold for</th>
+                <th className="num">Bought with</th>
+                <th>Sell</th>
+                <th>Buy tx</th>
+              </tr>
+            </thead>
+            <tbody>
+              {job.cycles.map((c) => (
+                <tr key={c.index} className={c.state === 'failed' ? 'is-bad' : ''}>
+                  <td>{c.kind === 'big-buy' ? '—' : c.index}</td>
+                  <td>
+                    {c.kind === 'big-buy' ? (
+                      <b>big buy</b>
+                    ) : (
+                      <Address
+                        value={c.address}
+                        href={explorer ? `${explorer}/address/${c.address}` : ''}
+                      />
+                    )}
+                  </td>
+                  <td>
+                    {STATE_LABEL[c.state] || c.state}
+                    {c.finalSlice && c.kind === 'cycle' && <span className="hint"> · remainder</span>}
+                  </td>
+                  <td className="num">{c.ethRaised ? Number(c.ethRaised).toFixed(5) : '—'}</td>
+                  <td className="num">{c.buyEth ? Number(c.buyEth).toFixed(5) : '—'}</td>
+                  <td>
+                    {c.sellHash ? (
+                      <a href={link(c.sellHash)} target="_blank" rel="noreferrer">
+                        tx
+                      </a>
+                    ) : (
+                      '—'
+                    )}
+                  </td>
+                  <td>
+                    {c.buyHash ? (
+                      <a href={link(c.buyHash)} target="_blank" rel="noreferrer">
+                        tx
+                      </a>
+                    ) : (
+                      '—'
+                    )}
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+          {job.cycles.some((c) => c.error) && (
+            <p className="hint">{job.cycles.find((c) => c.error)?.error}</p>
+          )}
+        </div>
+      )}
+
+      <Modal
+        open={arming}
+        title="Start the chain?"
+        danger
+        question="This sells and re-buys the whole position, with no slippage floor anywhere in it."
+        onCancel={() => setArming(false)}
+        confirmLabel="Start it"
+        onConfirm={async () => {
+          await act('start', () => api('/v6/chain/start', 'POST', { ...body(), confirm: true }));
+          setArming(false);
+        }}
+      >
+        <p>
+          The main wallet buys, then sells a slice per cycle to fund each wallet through Relay. There
+          is no minimum on any trade — every sell and every buy takes whatever price it gets. A
+          failure at any step halts the run and keeps everything else untouched.
+        </p>
+        <Fact label="Token" mono>
+          {token}
+        </Fact>
+        <Fact label="Big buy">
+          {bigBuy} ETH{plan?.bigBuyUsd ? ` (${money(plan.bigBuyUsd)})` : ''}
+        </Fact>
+        <Fact label="Cycles">{plural(wallets.length, 'wallet')}</Fact>
+        {plan && (
+          <Fact label="Each buys about">
+            {plan.slice.meanUsd ? money(plan.slice.meanUsd) : `${Number(plan.slice.meanEth).toFixed(5)} ETH`}
+            {Number(variancePct) > 0 ? ` ± ${variancePct}%` : ''}
+          </Fact>
+        )}
+        <Fact label="Cadence">
+          {(Number(intervalMs) / 1000).toFixed(1)}s
+          {Number(jitterPct) > 0 ? ` ± ${jitterPct}%` : ' exactly'}
+        </Fact>
+        {plan && <Fact label="Takes about">{duration(plan.estimatedRunMs)}</Fact>}
+        {plan?.poolTax?.currentPct > 0 && (
+          <Fact label="Pool tax">{plan.poolTax.currentPct}% — these wallets are not exempt</Fact>
+        )}
+      </Modal>
+    </Step>
+  );
+}
