@@ -28,6 +28,19 @@ const BLANK = {
 // already in progress") is a different guard — an overlapping request, not a
 // parked one — and is deliberately NOT matched here.
 const NEVER_CONFIRMED = /never confirmed/i;
+// A launcher too poor to cover fee + first buy + gas surfaces as a node
+// "insufficient funds" — which the launch path wraps as "the launch would revert,
+// so nothing was signed", reading like a CONTRACT problem, not a funding one. Map
+// it back to the real cause so it never looks like "the dev buy failed". No fee is
+// spent: the launch is atomic and refuses before signing.
+const LAUNCHER_UNDERFUNDED = /insufficient funds|holds .* but the launch needs/i;
+function explainLaunchError(msg) {
+  return LAUNCHER_UNDERFUNDED.test(msg)
+    ? `the launcher can't cover the launch — fund v5dev with the launch fee + first buy (the dev buy) + gas, ` +
+        `then retry. Funding the bundle wallets in step 3 spends this same wallet, so fund it for both. ` +
+        `Nothing was signed and no fee was spent. (${msg})`
+    : msg;
+}
 
 // Token amounts (the bundle's expected output) arrive as decimal strings.
 function fmt(v, dp = 4) {
@@ -217,7 +230,7 @@ export default function V5LaunchPanel({ step, dev, bundle = [], launchConfigs, l
       setPlan(out);
       report(out);
     } catch (err) {
-      report(`ERROR: ${err.message}`);
+      report(`ERROR: ${explainLaunchError(err.message)}`);
       if (NEVER_CONFIRMED.test(err.message)) setParked(true);
     } finally {
       setBusy('');
@@ -254,7 +267,7 @@ export default function V5LaunchPanel({ step, dev, bundle = [], launchConfigs, l
       }
       setTimeout(reload, 3000);
     } catch (err) {
-      report(`ERROR: ${err.message}`);
+      report(`ERROR: ${explainLaunchError(err.message)}`);
       if (NEVER_CONFIRMED.test(err.message)) setParked(true);
     } finally {
       setBusy('');
@@ -278,9 +291,22 @@ export default function V5LaunchPanel({ step, dev, bundle = [], launchConfigs, l
     }
   }
 
-  const needed =
-    Number(launchConfigs?.launchFeeWei || 0) / 1e18 + (usdgQuoted ? 0 : Number(f.firstBuyAmount || 0));
+  // A conservative ETH gas headroom for the launch tx, folded into `needed` so the
+  // frontend gate matches the backend's fee + first buy + GAS check (launch.js:435)
+  // instead of stopping a hair short of it. Gas is tiny on chain 4663, so this
+  // over-reserves only trivially — far better than letting an underfunded launch
+  // arm and then fail at the node with a raw "insufficient funds" that reads like
+  // the dev buy broke.
+  const GAS_RESERVE_ETH = 0.0005;
+  const feeEth = Number(launchConfigs?.launchFeeWei || 0) / 1e18;
+  const needed = feeEth + (usdgQuoted ? 0 : Number(f.firstBuyAmount || 0)) + (feeEth > 0 ? GAS_RESERVE_ETH : 0);
   const devBalance = Number(dev?.balanceEth || 0);
+  // The launcher's ETH pays the launch fee + (for an ETH config) the dev first buy
+  // + gas. If step 3 funded the bundle wallets FROM this same launcher, that ETH is
+  // already gone — so this is checked against the live balance, and it BLOCKS the
+  // launch (below), it is not just a warning: the backend refuses an underfunded
+  // launch atomically (no fee lost), but arming into that refusal reads as "the dev
+  // buy failed", which is the confusion this gate removes.
   const underfunded = Boolean(dev) && needed > 0 && devBalance < needed;
 
   const usdgFirstBuy = usdgQuoted ? Number(f.firstBuyAmount || 0) : 0;
@@ -421,7 +447,7 @@ export default function V5LaunchPanel({ step, dev, bundle = [], launchConfigs, l
         <div className="row">
           <span className="hint">
             launcher holds {eth(dev.balanceEth)} ETH
-            {needed > 0 ? ` · needs ≈${needed.toFixed(4)} ETH (fee + first buy, gas on top)` : ''}
+            {needed > 0 ? ` · needs ≈${needed.toFixed(4)} ETH (fee + first buy + gas)` : ''}
           </span>
         </div>
       )}
@@ -429,8 +455,10 @@ export default function V5LaunchPanel({ step, dev, bundle = [], launchConfigs, l
         <div className="notice danger">
           <h3>The launcher cannot cover this</h3>
           <p>
-            It holds {eth(dev.balanceEth)} ETH but this launch needs ≈{needed.toFixed(4)} ETH before
-            gas — fund it in step 3 first.
+            It holds {eth(dev.balanceEth)} ETH but this launch needs ≈{needed.toFixed(4)} ETH — the
+            launch fee, the {eth(f.firstBuyAmount || 0)} ETH first buy (the <b>dev buy</b>), and gas.
+            Top up the <b>launcher</b> — note that funding the bundle wallets in step 3 spends this same
+            wallet, so fund it for both. Preflight and Launch stay disabled until it is covered.
           </p>
         </div>
       )}
@@ -615,15 +643,19 @@ export default function V5LaunchPanel({ step, dev, bundle = [], launchConfigs, l
         <Busy
           busy={busy === 'preflight'}
           className="btn-primary"
-          disabled={!ready || !dev || launchesPaused || usdgAllowanceShort}
+          disabled={!ready || !dev || launchesPaused || usdgAllowanceShort || underfunded || usdgUnderfunded}
           title={
             !dev
               ? 'generate a launcher wallet first'
-              : usdgAllowanceShort
-                ? `approve ${cfg.quoteSymbol} first — the factory needs allowance to pull the first buy`
-                : ready
-                  ? 'signs everything, broadcasts nothing'
-                  : 'fill in the config, name, symbol and a logo'
+              : underfunded
+                ? `fund the launcher — it needs ≈${needed.toFixed(4)} ETH (fee + first buy + gas)`
+                : usdgUnderfunded
+                  ? `fund the launcher with ${cfg.quoteSymbol} — the first buy needs ${f.firstBuyAmount} ${cfg.quoteSymbol}`
+                  : usdgAllowanceShort
+                    ? `approve ${cfg.quoteSymbol} first — the factory needs allowance to pull the first buy`
+                    : ready
+                      ? 'signs everything, broadcasts nothing'
+                      : 'fill in the config, name, symbol and a logo'
           }
           onClick={preflight}
         >
@@ -632,7 +664,12 @@ export default function V5LaunchPanel({ step, dev, bundle = [], launchConfigs, l
 
         {live && (
           <label className={`switch ${armed ? 'armed' : ''}`}>
-            <input type="checkbox" checked={armed} onChange={(e) => setArmed(e.target.checked)} />
+            <input
+              type="checkbox"
+              checked={armed}
+              disabled={underfunded || usdgUnderfunded}
+              onChange={(e) => setArmed(e.target.checked)}
+            />
             Arm
           </label>
         )}
@@ -640,19 +677,25 @@ export default function V5LaunchPanel({ step, dev, bundle = [], launchConfigs, l
         <Busy
           busy={busy === 'launch'}
           className={live ? 'danger' : ''}
-          disabled={!ready || !dev || launchesPaused || blocked || parked || usdgAllowanceShort}
+          disabled={
+            !ready || !dev || launchesPaused || blocked || parked || usdgAllowanceShort || underfunded || usdgUnderfunded
+          }
           title={
             !dev
               ? 'generate a launcher wallet first'
               : !ready
                 ? 'fill in the config, name, symbol and a logo'
-                : parked
-                  ? 'resolve the pending launch above first'
-                  : usdgAllowanceShort
-                    ? `approve ${cfg.quoteSymbol} first — the factory needs allowance to pull the first buy`
-                    : blocked
-                      ? 'flip Arm first — this spends real funds'
-                      : ''
+                : underfunded
+                  ? `fund the launcher — it needs ≈${needed.toFixed(4)} ETH (fee + first buy + gas)`
+                  : usdgUnderfunded
+                    ? `fund the launcher with ${cfg.quoteSymbol} — the first buy needs ${f.firstBuyAmount} ${cfg.quoteSymbol}`
+                    : parked
+                      ? 'resolve the pending launch above first'
+                      : usdgAllowanceShort
+                        ? `approve ${cfg.quoteSymbol} first — the factory needs allowance to pull the first buy`
+                        : blocked
+                          ? 'flip Arm first — this spends real funds'
+                          : ''
           }
           onClick={launch}
         >

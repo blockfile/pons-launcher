@@ -160,6 +160,18 @@ export default function V5FundPanel({ step, dev, bundle, live, explorer, reload,
           <p>Send ETH to it from outside first — nothing here can fund it, and it pays every Relay deposit.</p>
         </div>
       )}
+      {/* THE TRAP this panel most often springs: the launcher is ALSO the wallet
+          that pays the step-4 launch (fee + the dev first buy + gas). Funding the
+          bundle here spends it, so draining it now leaves the launch unable to
+          afford the dev buy — the launch then refuses ("insufficient funds") or the
+          operator zeroes the dev buy to get through. Say so before it happens. */}
+      {dev && Number(dev.balanceEth) > 0 && total > 0 && (
+        <p className="hint" style={{ margin: '4px 0 0' }}>
+          This wallet also pays your <b>launch</b> in step 4 — the launch fee, your <b>dev first buy</b>,
+          and gas. Funding the bundle here spends it, so leave enough for both: fund the launcher for
+          (this run ≈{total.toFixed(4)} ETH + Relay fees) <b>plus</b> (launch fee + dev first buy + gas).
+        </p>
+      )}
 
       {blocked && (
         <div className="notice danger">
