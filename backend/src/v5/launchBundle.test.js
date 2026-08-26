@@ -158,6 +158,19 @@ test('confirmed launch but UNREADABLE hook → keeps the launch, skips the bundl
   assert.equal(calls.prepareBuys.length, 0, 'never sign a buy against an unpinned pool');
 });
 
+test('confirmed launch flagged poolSuspect → keeps the launch, skips the bundle with a reason', async () => {
+  // The receipt disagreed with itself about which pool it seeded (poolIdMismatch →
+  // poolSuspect). Honor that: bank the launch, skip the auto-bundle, let the operator
+  // fire it by hand once the real pool is confirmed — never sign against a pool the
+  // receipt itself distrusts.
+  const { d, calls } = deps({ launchResult: launchResult({ poolSuspect: true }) });
+  const out = await launchThenBundle(BASE, d);
+  assert.equal(out.launch.launch.status, 'confirmed');
+  assert.equal(out.bundle, null);
+  assert.match(out.bundleSkipped, /suspect/);
+  assert.equal(calls.prepareBuys.length, 0, 'never sign a buy against a receipt-suspect pool');
+});
+
 test('confirmed USDG-quoted launch → keeps the launch, skips the ETH-only bundle', async () => {
   const { d, calls } = deps({ launchResult: launchResult({ quote: USDG }) });
   const out = await launchThenBundle(BASE, d);

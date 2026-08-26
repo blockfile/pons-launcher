@@ -19,7 +19,7 @@
 // swap client (resolvePoolKey / quoteBuy / buildBuyTx).
 // ─────────────────────────────────────────────────────────────────────────────
 
-const { formatEther, formatUnits, getAddress, isAddress, parseEther } = require('ethers');
+const { formatEther, formatUnits, getAddress, isAddress, parseEther, ZeroAddress } = require('ethers');
 const config = require('../config');
 const { provider, warmPool } = require('../evm/provider');
 const { getFees, gasCost } = require('../evm/fees');
@@ -117,16 +117,26 @@ async function prepareBundleBuys(input, deps = {}) {
   let resolved;
   if (input.poolKey && input.poolId) {
     const pk = input.poolKey;
+    const pkHook = getAddress(pk.hooks);
+    const c0 = getAddress(pk.currency0);
+    const c1 = getAddress(pk.currency1);
+    // DEFENSE IN DEPTH. This trust-the-key branch skips resolvePoolKey's decoy-pool
+    // guard, so it must only ever run on the launch RECEIPT's key (the standalone
+    // route strips a client poolKey — see safeBundleBuyBody). Still, verify the key
+    // agrees with the PINNED hook and is exactly the {ETH, token} pair, so a
+    // mismatched/rigged key can never reach signing: the whole point of the guard
+    // is that ETH is only ever settled into the pool we actually verified.
+    if (pkHook !== hookAddr) {
+      throw new Error('the pool key hook does not match the pinned launch-receipt hook — refusing to buy an unverified pool');
+    }
+    const pair = new Set([getAddress(ZeroAddress), tokenAddr]);
+    if (c0 === c1 || !pair.has(c0) || !pair.has(c1)) {
+      throw new Error('the pool key currencies are not this token / ETH pair — refusing to buy an unverified pool');
+    }
     resolved = {
-      poolKey: {
-        currency0: getAddress(pk.currency0),
-        currency1: getAddress(pk.currency1),
-        fee: Number(pk.fee),
-        tickSpacing: Number(pk.tickSpacing),
-        hooks: getAddress(pk.hooks),
-      },
+      poolKey: { currency0: c0, currency1: c1, fee: Number(pk.fee), tickSpacing: Number(pk.tickSpacing), hooks: pkHook },
       poolId: input.poolId,
-      hook: getAddress(pk.hooks),
+      hook: pkHook,
     };
   } else {
     // No receipt pool (a plain manual buy). Resolve against the chain, and retry a

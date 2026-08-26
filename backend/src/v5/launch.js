@@ -644,8 +644,25 @@ async function fireLaunch(plan, deps = {}) {
     });
   }
 
-  const receipt = await awaitReceipt(rpc, resp.hash);
-  return resultFromReceipt(receipt, plan, resp.hash, { parseReceipt });
+  // The tx is now BROADCAST (resp.hash is live). Awaiting/parsing the receipt must
+  // never throw PAST this point: if awaitReceipt or the parse fault (e.g. a provider
+  // wiring fault), fireLaunch throwing here would make the route skip its pending-park
+  // + activity record, losing the token/pool/hook pinning for a launch that may well
+  // confirm — the settled-nonce gate still blocks a double-spend, but Sell/Bundle
+  // could no longer find the token. Same guarantee as the lost-broadcast branch
+  // above: on any fault return a 'pending' result carrying the live hash so the route
+  // parks it and /v5/launch/resolve recovers it.
+  try {
+    const receipt = await awaitReceipt(rpc, resp.hash);
+    return resultFromReceipt(receipt, plan, resp.hash, { parseReceipt });
+  } catch (err) {
+    return resultFromReceipt(null, plan, resp.hash, {
+      parseReceipt,
+      pendingReason:
+        `the launch was broadcast but its receipt could not be read (${explain(err)}) — the tx MAY be ` +
+        'live. Check the hash on the explorer and resolve it before retrying, so it is not sent twice.',
+    });
+  }
 }
 
 /**
@@ -739,6 +756,13 @@ function resultFromReceipt(receipt, planLike, hash, { parseReceipt, pendingReaso
     result.mismatch = `launch created token ${parsed.token}, but preflight predicted ${planToken}`;
   }
   if (parsed.poolIdMismatch) {
+    // The receipt disagrees with ITSELF about which pool this launch seeded (the
+    // TokenLaunched poolId ≠ the V4 Initialize poolId). Surface it as a machine-
+    // readable flag, not only a human string, so the auto-bundle path can honor the
+    // receipt's own suspicion and skip rather than sign buys against a pool the
+    // receipt itself flags as untrustworthy. (No fund loss either way — the buys
+    // carry a minOut floor — but "the receipt says suspect" means fire it by hand.)
+    result.poolSuspect = true;
     result.warning =
       `the TokenLaunched poolId and the V4 Initialize poolId disagree ` +
       `(${parsed.poolId} vs ${parsed.pool?.poolId}) — treat the pool as suspect`;

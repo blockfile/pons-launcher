@@ -120,6 +120,19 @@ async function launchThenBundle(input = {}, deps = {}) {
           'buys manually from the Bundle tools once the pool is confirmed on the explorer.',
       };
     }
+    // The receipt flagged its OWN pool suspect (the TokenLaunched poolId and the V4
+    // Initialize poolId disagree). We would otherwise sign the buys against the
+    // Initialize pool this same receipt distrusts — no fund loss (self-consistent key
+    // + minOut floor → worst case a revert), but honor the receipt's suspicion and let
+    // the operator fire it by hand once the real pool is confirmed on the explorer.
+    if (launchResult.poolSuspect === true) {
+      return {
+        ...none,
+        bundleSkipped:
+          'the launch confirmed but its receipt reported two disagreeing pool ids (the pool is flagged ' +
+          'suspect) — fire the bundle buys manually from the Bundle tools once the real pool is confirmed.',
+      };
+    }
     // Per-wallet buys are ETH-only for now (a USDG buy needs Permit2, like the
     // sell's input side). A USDG-quoted launch cannot be bundle-bought this way yet.
     const nativeQuote = !launchResult.quote || getAddress(launchResult.quote) === ZeroAddress;

@@ -249,6 +249,35 @@ test('uses a receipt-provided poolKey directly — no resolve, no probe, and the
   assert.ok(plan.walletCount >= 1);
 });
 
+test('the receipt-pool branch REFUSES a poolKey whose hook differs from the pinned hook', async () => {
+  // Defense in depth: the trust-the-key fast path skips resolvePoolKey's decoy-pool
+  // guard, so a key must agree with the PINNED hook. A rigged key with a foreign hook
+  // (the drain-into-attacker-pool primitive) must be rejected before any signing.
+  const EVIL = '0x1111111111111111111111111111111111111111';
+  const BADKEY = { currency0: '0x0000000000000000000000000000000000000000', currency1: TOKEN, fee: 0, tickSpacing: 60, hooks: EVIL };
+  const { deps: d } = deps({
+    swap: { resolvePoolKey: async () => { throw new Error('must not resolve — should reject on the key check'); } },
+  });
+  await assert.rejects(
+    () => prepareBundleBuys({ token: TOKEN, hook: HOOK, poolKey: BADKEY, poolId: PID, buys: BUYS }, d),
+    /does not match the pinned launch-receipt hook/
+  );
+});
+
+test('the receipt-pool branch REFUSES a poolKey that is not this token / ETH pair', async () => {
+  // A key pinned to the right hook but pointing at a DIFFERENT token (or a non-ETH
+  // currency0) would still route ETH into a pool other than the launched one.
+  const OTHER = '0x2222222222222222222222222222222222222222';
+  const BADKEY = { currency0: OTHER, currency1: TOKEN, fee: 0, tickSpacing: 60, hooks: HOOK };
+  const { deps: d } = deps({
+    swap: { resolvePoolKey: async () => { throw new Error('must not resolve — should reject on the currency check'); } },
+  });
+  await assert.rejects(
+    () => prepareBundleBuys({ token: TOKEN, hook: HOOK, poolKey: BADKEY, poolId: PID, buys: BUYS }, d),
+    /not this token \/ ETH pair/
+  );
+});
+
 // ── fireBundleBuys ────────────────────────────────────────────────────────────
 function buyPlan(buys) {
   return { protocol: 'v5', kind: 'bundle-buy', token: TOKEN, symbol: 'CAT', buys };

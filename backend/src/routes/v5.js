@@ -38,9 +38,26 @@ const relayFundJob = require('../v5/relayFundJob');
 // tick's deposit is still in flight (a stop/complete flips status before the last
 // fundOne resolves). The launcher-signing locks must refuse across BOTH so nothing
 // else signs v5dev at a nonce the job's deposit still holds.
+//
+// One more window past those two: fundOneViaRelay returns at BROADCAST, not at the
+// receipt, so when the FINAL tick finishes, `inFlight` clears and status leaves
+// 'running' while that last deposit may still be unmined (pending > latest on the
+// launcher). /v5/launcher/cancel exists to replace a stuck launcher tx and would
+// then replace that fresh, perfectly-healthy deposit at its nonce — no fund loss
+// (the ETH stays in the launcher) but the wallet is silently left unfunded. So hold
+// the funding "active" for a short DRAIN grace after a job completes/stops: on this
+// sub-second-block chain the deposit mines well within it, and a tx still unsettled
+// after the grace is genuinely stuck — exactly when cancel SHOULD be allowed.
+const RELAY_DRAIN_GRACE_MS = 15_000;
 const relayFundingActive = (id) => {
   const s = relayFundJob.status(id);
-  return Boolean(s.running || s.inFlight);
+  if (s.running || s.inFlight) return true;
+  const endedAt = s.completedAt || s.stoppedAt;
+  if (endedAt) {
+    const ended = Date.parse(endedAt);
+    if (Number.isFinite(ended) && Date.now() - ended < RELAY_DRAIN_GRACE_MS) return true;
+  }
+  return false;
 };
 const { poolFeeStatus } = require('../evm/v5/swap');
 const { launcherStatus, withdrawFromLauncher, cancelStuckLauncherTx } = require('../v5/launcher');
@@ -216,6 +233,15 @@ function withBundleLock(handler) {
     if (relayFundingActive(id)) {
       return res.status(409).json({ error: 'v5 timed Relay funding is running on the launcher — stop it or let it finish before fanning out' });
     }
+    // Symmetric with withSellLock/withBuyLock, which both refuse while `bundling`.
+    // A fan-out lands tokens INTO the bundle wallets; a sell/buy already signed
+    // against those wallets would miss whatever the fan-out adds mid-flight (a
+    // recoverable strand, not a loss) — so don't start a fan-out on top of one.
+    if (selling.has(id) || buying.has(id)) {
+      return res
+        .status(409)
+        .json({ error: 'a v5 sell or bundle buy is in progress on the bundle wallets — let it finish before fanning out' });
+    }
     bundling.add(id);
     try {
       await handler(req, res, next);
@@ -290,11 +316,16 @@ function assertOwnLaunchedToken(userId, token, allowUnlisted) {
   const launched = new Set(
     activityFor(userId)
       .list({ kind: 'v5', limit: 500 })
-      // activity.record spreads the detail at the TOP LEVEL of the entry (not under
-      // e.detail), so the launched token is e.token, not e.detail.token.
-      .map((e) => e.token)
-      .filter(Boolean)
-      .map((t) => String(t).toLowerCase())
+      // Count ONLY real launch records. activity.record spreads the detail at the
+      // TOP LEVEL of the entry (not under e.detail), and MANY v5 entries carry an
+      // e.token that is NOT one this account launched — above all a launcher/withdraw
+      // of an ARBITRARY ERC-20 (kind:'launcher-withdraw', token: any address), plus
+      // sell / bundle / bundle-buy rows. Keying "launched" off any e.token would let
+      // a token you merely touched pass this anti-dusting gate. launchHash is set by
+      // launchActivityDetail alone, so it is the positive launch-record marker; token
+      // is non-null on it only when the launch CONFIRMED — exactly the set we want.
+      .filter((e) => e && e.launchHash && e.token)
+      .map((e) => String(e.token).toLowerCase())
   );
   if (!launched.has(want)) {
     throw new Error(
@@ -972,6 +1003,18 @@ router.get('/v5/pool-fee', requireApiKey, async (req, res, next) => {
   }
 });
 
+// A client body safe to pass to prepareBundleBuys from the STANDALONE buy route.
+// prepareBundleBuys has a fast path that TRUSTS a caller-supplied { poolKey, poolId }
+// (skipping resolvePoolKey's decoy-pool guard) — that path exists ONLY for the
+// combined launch+bundle, which builds the key from the launch RECEIPT. A client
+// must never reach it: an injected poolKey could point the buys at a rigged pool
+// and drain the wallets' ETH. So strip poolKey/poolId (and hook/quote, which the
+// route pins itself) from any client body here.
+function safeBundleBuyBody(body) {
+  const { poolKey, poolId, hook, quote, ...rest } = body || {};
+  return rest;
+}
+
 // POST /api/v5/bundle-buy/preflight — the V1-style bundle: build and SIGN a buy for
 // every bundle wallet that has a buy amount (each buys the token from the pool with
 // its own ETH), broadcast nothing. Returns the plan raw-stripped, with the per-wallet
@@ -980,7 +1023,7 @@ router.post('/v5/bundle-buy/preflight', requireApiKey, async (req, res, next) =>
   try {
     assertOwnLaunchedToken(req.user.id, req.body?.token, req.body?.allowUnlistedToken);
     const { hook, quote } = resolveSellPool(req.user.id, req.body || {});
-    const plan = await prepareBundleBuys({ ...(req.body || {}), hook, quote }, { keystore: keystoreFor(req.user.id) });
+    const plan = await prepareBundleBuys({ ...safeBundleBuyBody(req.body), hook, quote }, { keystore: keystoreFor(req.user.id) });
     res.json(publicBuyPlan(plan));
   } catch (err) {
     next(err);
@@ -998,7 +1041,7 @@ router.post('/v5/bundle-buy', requireApiKey, withBuyLock(async (req, res, next) 
     assertOwnLaunchedToken(req.user.id, req.body?.token, req.body?.allowUnlistedToken);
     const { hook, quote } = resolveSellPool(req.user.id, req.body || {});
     const ks = keystoreFor(req.user.id);
-    const plan = await prepareBundleBuys({ ...(req.body || {}), hook, quote }, { keystore: ks });
+    const plan = await prepareBundleBuys({ ...safeBundleBuyBody(req.body), hook, quote }, { keystore: ks });
     const result = await fireBundleBuys(plan, {});
 
     activityFor(req.user.id).record(
@@ -1141,3 +1184,4 @@ module.exports.publicBuyPlan = publicBuyPlan;
 module.exports.launchedTokenHook = launchedTokenHook;
 module.exports.launchedTokenQuote = launchedTokenQuote;
 module.exports.resolveSellPool = resolveSellPool;
+module.exports.safeBundleBuyBody = safeBundleBuyBody;
