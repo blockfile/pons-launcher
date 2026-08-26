@@ -51,6 +51,12 @@ export default function V4FundingPanel({
   // be doing by hand — see splitSizing below.
   const [seedsPer, setSeedsPer] = useState(4);
   const [split, setSplit] = useState(null);
+  // Which funders THIS split pays. Default: the IDLE ones (not already in a campaign),
+  // so a new batch is pre-selected and the running ones are left alone — but every
+  // funder has a checkbox, so the operator chooses exactly who receives. Held as
+  // explicit overrides OVER that default, so generating more funders never resets a
+  // choice already made (a funder with no entry falls back to its idle default).
+  const [pick, setPick] = useState({});
   // The wallet a delete is being asked about, or null. Held as the whole record
   // rather than an id so the dialog can state its balance — which is the fact
   // that decides whether deleting it is a tidy-up or a mistake.
@@ -234,7 +240,23 @@ export default function V4FundingPanel({
   // A split pays the FUNDERS, never another super-main — so the targets are the funder
   // tier minus the paying wallet. When no super-main is flagged, `funders` is every
   // wallet and this is the old "everyone except the source" behaviour, unchanged.
-  const targets = funders.filter((w) => w.id !== source);
+  // Every funder that could receive (all funders except the paying wallet). Each is
+  // picked by default when idle; the operator overrides per wallet.
+  const eligible = funders.filter((w) => w.id !== source);
+  const isPicked = (w) => (w.id in pick ? pick[w.id] : !w.inCampaign);
+  const togglePick = (w) => {
+    setPick((p) => ({ ...p, [w.id]: !isPicked(w) }));
+    setSplit(null);
+  };
+  const setAllPicks = (value) => {
+    setPick(Object.fromEntries(eligible.map((w) => [w.id, value])));
+    setSplit(null);
+  };
+  const resetPicks = () => {
+    setPick({});
+    setSplit(null);
+  };
+  const targets = eligible.filter(isPicked);
   // The payer is chosen from the super-mains when any are flagged; otherwise from every
   // funding wallet, so a setup with no super-mains still works exactly as before.
   const sourceOptions = superMains.length > 0 ? superMains : wallets;
@@ -366,13 +388,61 @@ export default function V4FundingPanel({
             </label>
           </div>
 
+          {source && eligible.length > 0 && (
+            <div style={{ marginTop: 8 }}>
+              <div className="row" style={{ alignItems: 'center', gap: 8 }}>
+                <span className="hint">
+                  Funders this split pays — <b>{targets.length}</b> of {eligible.length} selected
+                  {' '}(new/idle funders are ticked by default)
+                </span>
+                <span className="spacer" />
+                <button type="button" className="link" onClick={() => setAllPicks(true)}>
+                  all
+                </button>
+                <button type="button" className="link" onClick={resetPicks}>
+                  idle only
+                </button>
+                <button type="button" className="link" onClick={() => setAllPicks(false)}>
+                  none
+                </button>
+              </div>
+              <div className="table-scroll" style={{ maxHeight: 200, overflowY: 'auto', marginTop: 4 }}>
+                <table>
+                  <tbody>
+                    {eligible.map((w) => (
+                      <tr key={w.id}>
+                        <td style={{ width: 28 }}>
+                          <input
+                            type="checkbox"
+                            checked={isPicked(w)}
+                            onChange={() => togglePick(w)}
+                            style={{ width: 'auto' }}
+                            aria-label={`Fund ${w.address}`}
+                          />
+                        </td>
+                        <td>
+                          <Address value={w.address} plain href={explorer ? `${explorer}/address/${w.address}` : ''} />
+                        </td>
+                        <td className="num">
+                          {w.balanceEth == null ? <span className="hint">unreadable</span> : eth(w.balanceEth)}
+                        </td>
+                        <td>
+                          <span className="hint">{w.inCampaign ? 'in a campaign' : 'idle'}</span>
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            </div>
+          )}
+
           <p className="hint">
             {source
-              ? `${targets.length} wallet(s) will be funded — every funding wallet except the one paying — ` +
-                `${sizing.minEth}–${sizing.maxEth} ETH each. That covers ${sizing.seeds} seed ` +
-                `wallet(s) per funder even if every one of them draws the top of the ${sizing.seedMax} ETH ` +
-                `range, so no campaign can be refused later for a funder that happened to draw low. ` +
-                `Anything unspent stays in the funder.`
+              ? `${targets.length} funder(s) selected — ${sizing.minEth}–${sizing.maxEth} ETH each. ` +
+                `That covers ${sizing.seeds} seed wallet(s) per funder even if every one of them draws ` +
+                `the top of the ${sizing.seedMax} ETH range, so no campaign can be refused later for a ` +
+                `funder that happened to draw low. Anything unspent stays in the funder.`
               : 'Pick the wallet holding the ETH.'}
           </p>
 
