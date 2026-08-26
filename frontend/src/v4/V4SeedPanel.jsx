@@ -371,14 +371,21 @@ export default function V4SeedPanel({ step, wallets, masters, facts, explorer, r
   // group so a section only exists when it has wallets.
   //
   // `accent` is a CSS colour var ('jade' | 'sky' | 'grey') that highlights the
-  // header so the three groups are told apart at a glance. `exportLabel`, when
-  // given, draws a per-section export of the seeds that pass `exportPick` — its
-  // OWN usable set, never the whole page's.
-  function seedSection(title, hint, list, { accent = 'grey', exportLabel, exportPick } = {}) {
+  // header so the three groups are told apart at a glance.
+  //
+  // EVERY section gets a "Back up N" of ALL its wallets — no age gate — because a
+  // backup is a SAFETY net, and the wallets that most need one are the fresh,
+  // unfunded batch you are about to send real ETH to (step 3 refuses to start a
+  // campaign until they are backed up). `showUsable` adds a second "Export usable
+  // N" for the aged subset (the file you open on the day you spend), but only when
+  // it is a real subset — no point offering it when every wallet already qualifies.
+  function seedSection(title, hint, list, { accent = 'grey', showUsable = false } = {}) {
     if (!list.length) return null;
     const ids = list.map((w) => w.id);
     const allInSection = ids.every((id) => ticked.includes(id));
-    const exportSeeds = exportPick ? list.filter(exportPick) : [];
+    const usableSeeds = showUsable
+      ? list.filter((w) => (w.daysSinceFunded ?? -1) >= season)
+      : [];
     return (
       <div style={{ marginBottom: 18 }}>
         <div
@@ -387,18 +394,30 @@ export default function V4SeedPanel({ step, wallets, masters, facts, explorer, r
         >
           <b>{title}</b>
           <span className="hint">{hint}</span>
-          {exportLabel && exportSeeds.length > 0 && (
-            <span style={{ marginLeft: 'auto' }}>
+          <span style={{ marginLeft: 'auto', display: 'inline-flex', gap: 8 }}>
+            {/* All of this section's keys — the pre-funding safety backup, and
+                what gives the fresh batch a backup button at all. */}
+            <V4BackupControls
+              masters={masters}
+              seeds={list}
+              report={report}
+              reload={reload}
+              exportIds={ids}
+              label={`Back up ${list.length}`}
+            />
+            {/* Only the aged ones — the "safe to spend today" file — and only when
+                that is fewer than the whole section, else it just repeats Back up. */}
+            {usableSeeds.length > 0 && usableSeeds.length < list.length && (
               <V4BackupControls
                 masters={masters}
                 seeds={list}
                 report={report}
                 reload={reload}
-                exportIds={exportSeeds.map((w) => w.id)}
-                label={`${exportLabel} ${exportSeeds.length}`}
+                exportIds={usableSeeds.map((w) => w.id)}
+                label={`Export usable ${usableSeeds.length}`}
               />
-            </span>
-          )}
+            )}
+          </span>
         </div>
         <div className="table-scroll" style={{ maxHeight: 460, overflowY: 'auto' }}>
           <table>
@@ -663,23 +682,14 @@ export default function V4SeedPanel({ step, wallets, masters, facts, explorer, r
         <>
           {seedSection('Seasoned pool — earlier campaigns', poolHint, seasonedPool, {
             accent: 'jade',
-            exportLabel: 'Export usable',
-            exportPick: (w) => (w.daysSinceFunded ?? -1) >= season,
+            showUsable: true,
           })}
-          {seedSection(newTitle, newHint, newBatch, {
-            accent: 'sky',
-            exportLabel: 'Export usable',
-            exportPick: (w) => (w.daysSinceFunded ?? -1) >= season,
-          })}
+          {seedSection(newTitle, newHint, newBatch, { accent: 'sky', showUsable: true })}
           {/* Set aside, drawn last: keys already exported, held out of the claim
               pool. Its own section so a live-batch select-all never reaches them
               and they don't pad the seasoned-pool counts. Each row keeps its
-              Restore, and its export re-downloads exactly these set-aside keys. */}
-          {seedSection('Withdrawn — set aside', withdrawnHint, withdrawnList, {
-            accent: 'grey',
-            exportLabel: 'Export',
-            exportPick: () => true,
-          })}
+              Restore; "Back up N" re-downloads exactly these set-aside keys. */}
+          {seedSection('Withdrawn — set aside', withdrawnHint, withdrawnList, { accent: 'grey' })}
 
           {/* Said once, under the tables, because the column heading cannot carry
               it: "Funded" is the amount the PLAN sent, not a balance read back
