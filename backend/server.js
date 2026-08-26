@@ -20,6 +20,7 @@ const distributorRoutes = require('./src/routes/distributor');
 const v3Routes = require('./src/routes/v3');
 const v4Routes = require('./src/routes/v4');
 const v5Routes = require('./src/routes/v5');
+const v6Routes = require('./src/routes/v6');
 // Holder-fee sharing: re-point a launched v2 token's creator fee at a per-token
 // distributor so it pays the holders. Its own router, sharing only the factory
 // and the keystore — see src/routes/holderFees.js. Unrelated to distributorRoutes
@@ -72,6 +73,7 @@ app.use('/api', distributorRoutes);
 app.use('/api', v3Routes);
 app.use('/api', v4Routes);
 app.use('/api', v5Routes);
+app.use('/api', v6Routes);
 app.use('/api', holderFeeRoutes);
 
 app.use((req, res) => {
