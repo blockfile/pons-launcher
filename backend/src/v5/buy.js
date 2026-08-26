@@ -34,6 +34,13 @@ const v5roles = require('./roles');
 const BUY_GAS = 500_000n;
 const DEADLINE_SECONDS = 3600;
 const FEE_BUMP_PCT = 25;
+// FAST-mode default priority-fee bump. The fast bundle races a sniper for the same
+// early block, so its buys go out with a much higher priority fee than a normal buy
+// — enough to outbid a next-block sniper on a fee-ordered sequencer. The operator
+// can override it (input.feeBumpPct); bounded below so a fast buy is never LESS
+// urgent than a normal one, and capped above so a fat-finger can't set an absurd fee.
+const FAST_FEE_BUMP_PCT = 200;
+const MAX_FEE_BUMP_PCT = 5000; // 50× — a sane ceiling on the operator override
 // Default slippage floor on a bundle buy — a buy MUST carry a positive floor
 // (buildBuyTx refuses minOut 0). This is NOT just preflight→broadcast drift: the
 // bundle wallets all buy the SAME pool in the same/adjacent blocks, so each buy is
@@ -209,7 +216,18 @@ async function prepareBundleBuys(input, deps = {}) {
   }
   if (!requested.length) throw new Error('no wallet has a positive buy amount — set at least one');
 
-  const fees = deps.fees || (await getFeesFn(FEE_BUMP_PCT));
+  // Priority-fee bump. A normal buy uses FEE_BUMP_PCT; a FAST buy uses a much
+  // higher default (FAST_FEE_BUMP_PCT) to outbid a sniper, and the operator can
+  // crank it via input.feeBumpPct. Bounded so a fast buy is never below the normal
+  // bump, and capped so it can't be set absurdly high.
+  const feeBumpPct = (() => {
+    const base = fast ? FAST_FEE_BUMP_PCT : FEE_BUMP_PCT;
+    if (input.feeBumpPct == null) return base;
+    const p = Math.round(Number(input.feeBumpPct));
+    if (!Number.isFinite(p)) return base;
+    return Math.min(MAX_FEE_BUMP_PCT, Math.max(fast ? FEE_BUMP_PCT : 0, p));
+  })();
+  const fees = deps.fees || (await getFeesFn(feeBumpPct));
   const chainId = BigInt(deps.chainId ?? config.chainId);
   const gasReserve = gasCost(fees, buyGasLimit);
   const nowSec = deps.nowMs != null ? Math.floor(deps.nowMs / 1000) : Math.floor(Date.now() / 1000);
@@ -432,4 +450,6 @@ module.exports = {
   BUY_GAS,
   DEFAULT_SLIPPAGE_BPS,
   FEE_BUMP_PCT,
+  FAST_FEE_BUMP_PCT,
+  MAX_FEE_BUMP_PCT,
 };

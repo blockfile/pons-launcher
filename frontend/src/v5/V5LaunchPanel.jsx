@@ -99,6 +99,9 @@ export default function V5LaunchPanel({ step, dev, bundle = [], launchConfigs, l
   // the launch's own predicted pool), instead of waiting for the confirmation — so it
   // lands ahead of a sniper. Off by default (the safe confirmed-pool path).
   const [fastBundle, setFastBundle] = useState(false);
+  // The priority-fee boost (%) the fast race rides — how hard the bundle outbids a
+  // sniper. Blank uses the server default; the launch is auto-bumped above the buys.
+  const [feeBumpPct, setFeeBumpPct] = useState('200');
 
   // The bundle's per-wallet buys are set in the step-1 wallets table (the shared
   // `rows`), the same way the v1 Launcher tab sizes buys in its wallets table and
@@ -219,7 +222,12 @@ export default function V5LaunchPanel({ step, dev, bundle = [], launchConfigs, l
     if (!usdgQuoted && namedBuys.length) out.buys = namedBuys;
     // Fast bundle: only meaningful when a real ETH bundle rides with this launch.
     // The server verifies the predicted pool and safely falls back if it can't.
-    if (!usdgQuoted && namedBuys.length && fastBundle) out.fast = true;
+    if (!usdgQuoted && namedBuys.length && fastBundle) {
+      out.fast = true;
+      // The priority-fee boost that outbids the sniper. Sent only in fast mode; the
+      // server bumps the launch a margin above this so it still orders first.
+      if (feeBumpPct.trim() && Number(feeBumpPct) >= 0) out.feeBumpPct = Math.round(Number(feeBumpPct));
+    }
     const bps = Number(slippageBps);
     if (slippageBps.trim() && bps > 0) out.slippageBps = bps;
     return out;
@@ -623,6 +631,20 @@ export default function V5LaunchPanel({ step, dev, bundle = [], launchConfigs, l
                   </span>
                 </span>
               </label>
+              {fastBundle && (
+                <label className="hint" style={{ display: 'inline-flex', gap: 6, alignItems: 'center', marginTop: 8, marginLeft: 24 }}>
+                  Priority gas boost
+                  <input
+                    type="number"
+                    min="0"
+                    step="25"
+                    value={feeBumpPct}
+                    onChange={(e) => setFeeBumpPct(e.target.value)}
+                    style={{ width: 70 }}
+                  />
+                  % — higher = more likely to land ahead of the sniper (the launch is auto-bumped above it)
+                </label>
+              )}
             </div>
           )}
         </>

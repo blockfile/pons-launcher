@@ -50,6 +50,11 @@ const factoryModule = require('../evm/v5/factory');
 const launchModule = require('./launch');
 const buyModule = require('./buy');
 
+// In FAST mode the launch takes the buys' priority-fee bump PLUS this margin, so a
+// fee-ordered sequencer keeps the launch ahead of its own pre-signed buys (else the
+// buys could execute before the pool exists and revert). Percentage points.
+const LAUNCH_ORDER_MARGIN_PCT = 25;
+
 // ─────────────────────────────────────────────────────────────────────────────
 // FAST-BUNDLE pool prediction.
 //
@@ -117,7 +122,7 @@ async function launchThenBundle(input = {}, deps = {}) {
   // Keep the bundle fields OUT of the launch input: prepareLaunch reads none of
   // them, and passing slippageBps would make it emit a spurious first-buy-floor
   // warning meant for the bundle. `confirm` is the route's gate, not a launch field.
-  const { buys: rawBuys, slippageBps, buyGas, confirm, fast: _fast, ...launchInput } = input || {};
+  const { buys: rawBuys, slippageBps, buyGas, confirm, fast: _fast, feeBumpPct: _feeBumpPct, ...launchInput } = input || {};
 
   // Drop zero / blank buys up front — an all-zero bundle is just a launch. An
   // 'all − gas' entry carries NO amountEth (its size is resolved from the live
@@ -133,10 +138,25 @@ async function launchThenBundle(input = {}, deps = {}) {
   const fast = Boolean(input.fast);
   const resolvePoolFn = deps.resolvePredictedPool || resolvePredictedPool;
 
+  // Priority-fee bumps for the fast race. The BUYS ride a high bump (default
+  // FAST_FEE_BUMP_PCT, operator-overridable via input.feeBumpPct) to outbid a
+  // sniper; the LAUNCH must ride an even HIGHER bump so a fee-ordered sequencer
+  // keeps it ahead of its own buys — otherwise the buys could run before the pool
+  // exists and revert. Only in fast mode; a normal launch/bundle is untouched.
+  const operatorBump =
+    input.feeBumpPct != null && Number.isFinite(Number(input.feeBumpPct))
+      ? Math.round(Number(input.feeBumpPct))
+      : null;
+  const buyBump = fast ? (operatorBump != null ? operatorBump : buyModule.FAST_FEE_BUMP_PCT) : null;
+  const launchBump = fast ? buyBump + LAUNCH_ORDER_MARGIN_PCT : null;
+
   // ── 1. PREPARE THE LAUNCH ────────────────────────────────────────────────────
   // Mines the vanity salt, runs the launch as a static call, and reads back the
   // AUTHORITATIVE token + poolId the launch will create. Signs; broadcasts nothing.
-  const launchPlan = await prepareLaunchFn(launchInput, { keystore: ks });
+  const launchPlan = await prepareLaunchFn(
+    { ...launchInput, ...(launchBump != null ? { feeBumpPct: launchBump } : {}) },
+    { keystore: ks }
+  );
 
   // ── FAST BUNDLE (opt-in): pre-sign the buys against the launch's OWN verified
   //    pool, then fire them the instant the launch broadcasts — same/next block,
@@ -162,6 +182,7 @@ async function launchThenBundle(input = {}, deps = {}) {
             fast: true,
             poolId: pool.poolId,
             poolKey: pool.poolKey,
+            feeBumpPct: buyBump, // the high priority bump that outbids the sniper
             ...(slippageBps != null ? { slippageBps } : {}),
             ...(buyGas != null ? { buyGas } : {}),
           },

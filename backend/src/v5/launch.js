@@ -426,7 +426,18 @@ async function prepareLaunch(input, deps = {}) {
   const poolId = sim.poolId;
 
   // ── fees, gas, and "can the launcher actually pay for this?" ───────────────
-  const fees = await getFeesFn(FEE_BUMP_PCT);
+  // A fee-bump override lets the combined FAST launch+bundle raise the launch's
+  // priority fee so it stays ordered AHEAD of its own pre-signed bundle buys (which
+  // ride a high bump to beat a sniper); if the buys outbid the launch, a fee-ordered
+  // sequencer could run them before the pool exists and they would revert. Default
+  // unchanged; bounded.
+  const feeBumpPct = (() => {
+    if (input.feeBumpPct == null) return FEE_BUMP_PCT;
+    const p = Math.round(Number(input.feeBumpPct));
+    if (!Number.isFinite(p)) return FEE_BUMP_PCT;
+    return Math.min(5000, Math.max(FEE_BUMP_PCT, p));
+  })();
+  const fees = await getFeesFn(feeBumpPct);
   const chainId = BigInt(config.chainId);
   const gasLimit = await estimateLaunchGasOrThrow(txFields, dev.address, {
     provider: prov,

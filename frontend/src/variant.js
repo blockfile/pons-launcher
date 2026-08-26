@@ -20,6 +20,9 @@ export const VARIANTS = {
   // every shared field for that reason.
   v1: { dev: 'dev', bundle: 'bundle', dispersers: true, label: 'V1' },
   v2: { dev: 'v2dev', bundle: 'v2bundle', dispersers: false, label: 'V2' },
+  // v5 (letscash) funds through the SAME shared spine with its own role strings —
+  // must mirror the backend's VARIANTS.v5 exactly (the drift test enforces it).
+  v5: { dev: 'v5dev', bundle: 'v5bundle', dispersers: false, label: 'V5' },
 };
 
 export const DEFAULT_VARIANT = 'v1';

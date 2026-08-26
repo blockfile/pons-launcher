@@ -210,14 +210,17 @@ const PREDICTED_POOL = {
 };
 
 function fastDeps(over = {}) {
-  const calls = { resolvePool: 0, prepareBuys: [], fireBuys: [], onBroadcastFired: 0 };
+  const calls = { resolvePool: 0, prepareBuys: [], fireBuys: [], onBroadcastFired: 0, launchInput: null };
   const d = {
     keystore: {},
-    prepareLaunch: async () => ({
-      launch: { walletId: 'dev', address: '0xdev', nonce: 3, firstBuyEth: '0.05' },
-      token: TOKEN, params: { symbol: 'CAT' }, quote: '0x0', quoteIsNative: true,
-      poolId: PREDICTED_POOL.poolId, configId: 1000,
-    }),
+    prepareLaunch: async (launchInput) => {
+      calls.launchInput = launchInput;
+      return {
+        launch: { walletId: 'dev', address: '0xdev', nonce: 3, firstBuyEth: '0.05' },
+        token: TOKEN, params: { symbol: 'CAT' }, quote: '0x0', quoteIsNative: true,
+        poolId: PREDICTED_POOL.poolId, configId: 1000,
+      };
+    },
     // null models "could not verify the predicted pool" → fall back to slow path.
     resolvePredictedPool: async () => { calls.resolvePool += 1; return over.pool === undefined ? PREDICTED_POOL : over.pool; },
     // A fireLaunch that fires onBroadcast the instant it "broadcasts", like the real one.
@@ -268,6 +271,24 @@ test('FAST: a pre-sign failure fires the launch ALONE and reports it — the lau
   assert.equal(calls.onBroadcastFired, 0, 'no onBroadcast when there is no signed bundle');
   assert.equal(out.bundle, null);
   assert.match(out.bundleSkipped, /could not be pre-signed/);
+});
+
+test('FAST: the launch is bumped a margin ABOVE the buys so it still orders first', async () => {
+  const { d, calls } = fastDeps();
+  await launchThenBundle({ ...BASE, fast: true, feeBumpPct: 300 }, d);
+  assert.equal(calls.prepareBuys[0].feeBumpPct, 300, 'buys ride the operator bump');
+  assert.equal(calls.launchInput.feeBumpPct, 325, 'launch rides buys + the 25pt ordering margin');
+});
+
+test('FAST: default gas bump is used when the operator names none, and never reaches a normal launch', async () => {
+  const { d, calls } = fastDeps();
+  await launchThenBundle({ ...BASE, fast: true }, d); // no feeBumpPct
+  assert.equal(calls.prepareBuys[0].feeBumpPct, 200, 'buys default to FAST_FEE_BUMP_PCT');
+  assert.equal(calls.launchInput.feeBumpPct, 225, 'launch default + margin');
+  // A NON-fast launch never gets a feeBumpPct (its own default stands).
+  const { d: d2, calls: c2 } = fastDeps();
+  await launchThenBundle(BASE, d2);
+  assert.equal(c2.launchInput.feeBumpPct, undefined, 'a normal launch is untouched');
 });
 
 test('FAST is opt-in: without fast:true the slow confirmed-pool path runs even with a resolver present', async () => {
