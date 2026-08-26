@@ -619,6 +619,16 @@ export default function V4FundingPanel({
               reload={reload}
               label="Export keys"
             />
+            {/* Funding wallets on their own — they hold the ETH, and keeping that tier
+                backed up separately from the seeds is its own need. */}
+            <V4BackupControls
+              fundersOnly
+              masters={wallets}
+              seeds={seeds}
+              report={report}
+              reload={reload}
+              label="Export funding wallets"
+            />
             <span className="spacer" />
             <span className="hint">one campaign at a time per wallet — make another to run two</span>
           </div>

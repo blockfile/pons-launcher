@@ -849,14 +849,19 @@ router.post(
       // Default TRUE keeps the plain "Download backup" a full backup and every older
       // caller unchanged; an explicit includeFunders:false leaves the funders out.
       const includeFunders = (req.body || {}).includeFunders !== false;
+      // The funding-wallet-only export: the tier that holds the ETH, on its own, so it
+      // can be kept offline separately from the seeds.
+      const fundersOnly = (req.body || {}).fundersOnly === true;
       const keepFunder = (w) => includeFunders && w.role === v4roles.ROLES.master;
-      const wallets = requestedIds
-        ? all.filter((w) => keepFunder(w) || requestedIds.has(w.id))
-        : seasoned
-          ? all.filter((w) => keepFunder(w) || (w.daysSinceFunded ?? -1) >= minAge)
-          : includeFunders
-            ? all
-            : all.filter((w) => w.role === v4roles.ROLES.seed);
+      const wallets = fundersOnly
+        ? all.filter((w) => w.role === v4roles.ROLES.master)
+        : requestedIds
+          ? all.filter((w) => keepFunder(w) || requestedIds.has(w.id))
+          : seasoned
+            ? all.filter((w) => keepFunder(w) || (w.daysSinceFunded ?? -1) >= minAge)
+            : includeFunders
+              ? all
+              : all.filter((w) => w.role === v4roles.ROLES.seed);
 
       // Recorded against what was EXPORTED, not what exists. A filtered
       // download must not mark the wallets it left out as backed up — the gate
@@ -877,7 +882,9 @@ router.post(
         minAgeDays: requestedIds ? null : seasoned ? minAge : null,
         // Said in the file, because the file is read months later by someone
         // who no longer remembers which button produced it.
-        note: requestedIds
+        note: fundersOnly
+          ? `Funding wallets only — ${wallets.length} wallet(s), the tier that holds the ETH. No seeds are in this file.`
+          : requestedIds
           ? `Selected: ${wallets.filter((w) => w.role === v4roles.ROLES.seed).length} seed wallet(s) chosen from one section of the seed table${includeFunders ? ', plus every funding wallet' : ' — NO funding wallets'}. ` +
             `${all.length - wallets.length} wallet(s) were left out and are NOT in this file.`
           : seasoned

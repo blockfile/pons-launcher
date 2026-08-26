@@ -46,6 +46,10 @@ export default function V4BackupControls({
   // per-section export: "the usable wallets in THIS pool". A withdrawn seed is
   // never in the set, so it can't be re-exported from another section's button.
   exportIds = null,
+  // When set, this exports ONLY the funding wallets — no seeds at all. They hold
+  // the ETH with no seed phrase behind them, so backing up just that tier (offline,
+  // on its own) is its own need. No age filter, no seed selection, no checkbox.
+  fundersOnly = false,
 }) {
   const [busy, setBusy] = useState(false);
   const [open, setOpen] = useState(false);
@@ -59,10 +63,10 @@ export default function V4BackupControls({
   // should NOT carry every funder's key unless asked, so it defaults to leaving them out.
   const [includeFunders, setIncludeFunders] = useState(false);
 
-  const selecting = Array.isArray(exportIds);
-  const exported = masters.length + seeds.length;
-  const age = selecting ? 0 : fixedMinAge || Math.max(0, Math.round(Number(minAge) || 0));
-  const isFiltered = selecting || age > 0;
+  const selecting = !fundersOnly && Array.isArray(exportIds);
+  const exported = fundersOnly ? masters.length : masters.length + seeds.length;
+  const age = selecting || fundersOnly ? 0 : fixedMinAge || Math.max(0, Math.round(Number(minAge) || 0));
+  const isFiltered = !fundersOnly && (selecting || age > 0);
   // The full (unfiltered) backup always includes the funders; a filtered one obeys the box.
   const funderIn = isFiltered ? includeFunders : true;
   const funderCount = funderIn ? masters.length : 0;
@@ -70,20 +74,24 @@ export default function V4BackupControls({
   // useful: a wallet funded on the campaign's last day is young on the day the
   // campaign finishes, however old the run is. When a set is named it is exact —
   // those seeds, plus the funders only if the box is ticked.
-  const wouldExport = selecting
-    ? funderCount + exportIds.length
-    : age
-      ? funderCount + seeds.filter((w) => (w.daysSinceFunded ?? -1) >= age).length
-      : exported;
+  const wouldExport = fundersOnly
+    ? masters.length
+    : selecting
+      ? funderCount + exportIds.length
+      : age
+        ? funderCount + seeds.filter((w) => (w.daysSinceFunded ?? -1) >= age).length
+        : exported;
 
   async function run() {
     setBusy(true);
     try {
       report(
         await downloadV4Backup(
-          selecting
-            ? { walletIds: exportIds, includeFunders: funderIn }
-            : { minAgeDays: age || undefined, includeFunders: funderIn }
+          fundersOnly
+            ? { fundersOnly: true }
+            : selecting
+              ? { walletIds: exportIds, includeFunders: funderIn }
+              : { minAgeDays: age || undefined, includeFunders: funderIn }
         )
       );
       // RELOAD, or the gate goes on refusing wallets it now has on record.
@@ -117,9 +125,11 @@ export default function V4BackupControls({
         open={open}
         danger
         title={
-          age || selecting
-            ? `This downloads the PRIVATE KEY of ${wouldExport} V4 wallets.`
-            : `This downloads the PRIVATE KEY of all ${exported} V4 wallets.`
+          fundersOnly
+            ? `This downloads the PRIVATE KEY of ${masters.length} funding ${masters.length === 1 ? 'wallet' : 'wallets'}.`
+            : age || selecting
+              ? `This downloads the PRIVATE KEY of ${wouldExport} V4 wallets.`
+              : `This downloads the PRIVATE KEY of all ${exported} V4 wallets.`
         }
         question={null}
         confirmLabel="Download"
@@ -133,11 +143,13 @@ export default function V4BackupControls({
         <p>
           Anyone who opens that file can spend every one of them. These are V4's wallets only, never
           another tab's keys.{' '}
-          {isFiltered
-            ? funderIn
-              ? 'This is a filtered export — the seeds below, plus the funding wallets.'
-              : 'This is a filtered export of SEEDS only — no funding wallets are in this file.'
-            : `It is all ${masters.length} funding ${masters.length === 1 ? 'wallet' : 'wallets'} and all ${seeds.length} ${seeds.length === 1 ? 'seed' : 'seeds'}.`}
+          {fundersOnly
+            ? `It is the ${masters.length} funding ${masters.length === 1 ? 'wallet' : 'wallets'} only — no seeds. These are the wallets that hold the ETH.`
+            : isFiltered
+              ? funderIn
+                ? 'This is a filtered export — the seeds below, plus the funding wallets.'
+                : 'This is a filtered export of SEEDS only — no funding wallets are in this file.'
+              : `It is all ${masters.length} funding ${masters.length === 1 ? 'wallet' : 'wallets'} and all ${seeds.length} ${seeds.length === 1 ? 'seed' : 'seeds'}.`}
         </p>
         {/* THE FILE'S REAL PROBLEM, NOT A CONVENIENCE. Every seed carries
             fundedAt and daysSinceFunded now, but a hundred keys in one file is
@@ -146,7 +158,7 @@ export default function V4BackupControls({
             funding: in a five-day campaign the last day's wallets are three
             days behind the first day's, forever. Filtering here means the file
             you open on the day contains only what is safe to spend that day. */}
-        {!fixedMinAge && !selecting && (
+        {!fixedMinAge && !selecting && !fundersOnly && (
           <label className="modal-type">
             Only seed wallets funded at least this many days ago — blank for all
             <input
