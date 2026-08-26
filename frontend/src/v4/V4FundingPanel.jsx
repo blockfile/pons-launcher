@@ -54,6 +54,7 @@ export default function V4FundingPanel({
   // be doing by hand — see splitSizing below.
   const [seedsPer, setSeedsPer] = useState(4);
   const [split, setSplit] = useState(null);
+  const [dividing, setDividing] = useState(false);
   // Which funders THIS split pays. Default: the IDLE ones (not already in a campaign),
   // so a new batch is pre-selected and the running ones are left alone — but every
   // funder has a checkbox, so the operator chooses exactly who receives. Held as
@@ -384,10 +385,10 @@ export default function V4FundingPanel({
       ? Number(sizing.totalEth) - Number(sourceWallet.balanceEth)
       : 0;
 
-  const splitParams = () => ({
+  const splitParams = (count = targets.length) => ({
     days: 1,
-    perDayMin: targets.length,
-    perDayMax: targets.length,
+    perDayMin: count,
+    perDayMax: count,
     amountMinEth: sizing.minEth,
     amountMaxEth: sizing.maxEth,
     gapMinMs: 10 * 60_000,
@@ -399,6 +400,56 @@ export default function V4FundingPanel({
     // was paid.
     promptStart: true,
   });
+
+  /**
+   * Divide the selected funders evenly across ALL super-mains and start one split per
+   * super-main — the automatic version of running the split three times by hand.
+   *
+   * Round-robins the funders across the super-mains so each pays an even share and no
+   * super-main ever touches another's funders. Each super-main's split is previewed
+   * (its own feasibility check — is it holding enough ETH for its share?) and then
+   * started; a super-main that is short is skipped and named rather than stopping the
+   * others. Each split is the same Relay-hopped campaign the single "Start split" runs.
+   */
+  async function divideAcross() {
+    const groups = new Map(superMains.map((sm) => [sm.id, []]));
+    targets.forEach((w, i) => groups.get(superMains[i % superMains.length].id).push(w));
+
+    let started = 0;
+    const failures = [];
+    const stamp = new Date().toISOString().slice(0, 16).replace('T', ' ');
+    for (let i = 0; i < superMains.length; i += 1) {
+      const sm = superMains[i];
+      const share = groups.get(sm.id);
+      if (!share.length) continue;
+      try {
+        const preview = await api('/v4/campaigns/preview', 'POST', {
+          kind: 'split',
+          masterWalletId: sm.id,
+          walletIds: share.map((w) => w.id),
+          params: splitParams(share.length),
+        });
+        if (!preview.feasible?.ok) {
+          failures.push(`${sm.address.slice(0, 10)}…: ${preview.feasible.reason}`);
+          continue;
+        }
+        await api('/v4/campaigns', 'POST', {
+          kind: 'split',
+          name: `divide ${stamp} #${i + 1}`,
+          masterWalletId: sm.id,
+          walletIds: preview.walletIds,
+          seed: preview.seed,
+          params: splitParams(share.length),
+        });
+        started += 1;
+      } catch (err) {
+        failures.push(`${sm.address.slice(0, 10)}…: ${err.message}`);
+      }
+    }
+    setShowSplit(false);
+    const failNote = failures.length ? ` ${failures.length} could not start: ${failures[0]}` : '';
+    return `Started ${started} split campaign(s), one per super-main.${failNote}`;
+  }
 
   /**
    * Spread one funding wallet across the others, through Relay.
@@ -461,11 +512,11 @@ export default function V4FundingPanel({
             </label>
           </div>
 
-          {source && eligible.length > 0 && (
+          {(source || superMains.length >= 2) && eligible.length > 0 && (
             <div style={{ marginTop: 8 }}>
               <div className="row" style={{ alignItems: 'center', gap: 8 }}>
                 <span className="hint">
-                  Funders this split pays — <b>{targets.length}</b> of {eligible.length} selected
+                  Funders to fund — <b>{targets.length}</b> of {eligible.length} selected
                   {' '}(new/idle funders are ticked by default)
                 </span>
                 <span className="spacer" />
@@ -587,6 +638,35 @@ export default function V4FundingPanel({
             </IconAction>
           </div>
 
+          {/* The automatic 3-way (or N-way) divide: instead of picking one FROM wallet
+              and running the split once per super-main by hand, this partitions the
+              selected funders evenly across ALL super-mains and starts one split each. */}
+          {superMains.length >= 2 && (
+            <div className="notice" style={{ marginTop: 14 }}>
+              <h3>Or divide across all {superMains.length} super-mains</h3>
+              <p className="hint">
+                Splits the <b>{targets.length}</b> selected funder(s) into {superMains.length} even groups —
+                about {Math.ceil(targets.length / Math.max(1, superMains.length))} each — and starts ONE split
+                from every super-main at once, ignoring the FROM wallet above. Each pays only its own group,
+                through the same Relay hop, so no super-main touches another's funders. Each super-main needs
+                enough ETH for its share; any that is short is skipped and named.
+              </p>
+              <div className="row">
+                <Busy
+                  busy={busy === 'divide'}
+                  className="btn-primary"
+                  disabled={targets.length < superMains.length}
+                  onClick={() => setDividing(true)}
+                >
+                  Divide across super-mains
+                </Busy>
+                {targets.length > 0 && targets.length < superMains.length && (
+                  <span className="hint">need at least one funder per super-main</span>
+                )}
+              </div>
+            </div>
+          )}
+
           <p className="hint">
             The Relay hop costs a fee a direct transfer would not, and it puts this hop and the
             seasoning that follows in the same solver's records. What it buys is that no one reading
@@ -653,6 +733,19 @@ export default function V4FundingPanel({
           act('delete', () => deleteTicked(list));
         }}
         onCancel={() => setBulk(null)}
+      />
+
+      <Modal
+        open={dividing}
+        danger
+        title={`Divide ${targets.length} funder(s) across ${superMains.length} super-mains?`}
+        question="This starts one split campaign per super-main at once — each pays its own even group of funders through Relay. Irreversible: the campaigns begin funding immediately."
+        confirmLabel={`Start ${superMains.length} splits`}
+        onConfirm={() => {
+          setDividing(false);
+          act('divide', divideAcross);
+        }}
+        onCancel={() => setDividing(false)}
       />
 
       {/* Empty is where this tab STARTS, not a failure. It says what the wallet
