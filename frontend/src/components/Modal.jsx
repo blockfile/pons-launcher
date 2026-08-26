@@ -1,4 +1,4 @@
-import { useEffect, useRef } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
 
 /**
@@ -42,6 +42,24 @@ export default function Modal({
   // re-rendered handler while the dialog is open.
   const cancel = useRef(onCancel);
   cancel.current = onCancel;
+
+  // While a confirm is in flight the button reads "working…" and refuses a second
+  // press. onConfirm here is frequently a Relay transfer or a launch — seconds long —
+  // and without this the dialog just sits there looking dead, which is exactly the
+  // moment an operator clicks again. Cancel stays live so a hang is never a trap.
+  const [submitting, setSubmitting] = useState(false);
+
+  async function handleConfirm() {
+    if (submitting || confirmDisabled) return;
+    setSubmitting(true);
+    try {
+      await onConfirm?.();
+    } finally {
+      // onConfirm usually closes the dialog (this component then renders null but
+      // stays mounted), so this resets the flag for the next time it opens.
+      setSubmitting(false);
+    }
+  }
 
   useEffect(() => {
     if (!open) return undefined;
@@ -155,10 +173,10 @@ export default function Modal({
           <button
             type="button"
             className={danger ? 'danger' : ''}
-            disabled={confirmDisabled}
-            onClick={onConfirm}
+            disabled={confirmDisabled || submitting}
+            onClick={handleConfirm}
           >
-            {confirmLabel}
+            {submitting ? 'working…' : confirmLabel}
           </button>
         </div>
       </div>
