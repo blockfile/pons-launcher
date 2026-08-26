@@ -141,8 +141,15 @@ export default function V4SeedPanel({ step, wallets, masters, facts, explorer, r
     return newest;
   }, null);
   const inNewBatch = (w) => !w.campaignId || (newCampaign && w.campaignId === newCampaign.id);
-  const newBatch = wallets.filter(inNewBatch);
-  const seasonedPool = wallets.filter((w) => !inNewBatch(w));
+  // Withdrawn seeds — keys exported to spend elsewhere, held out of the V1/V3
+  // claim pool — get their OWN section so they don't clutter the two active
+  // groups (and can't be swept into a bulk delete meant for live ones). A wallet
+  // is in exactly one of the three: withdrawn first, then split the rest by
+  // campaign. `withdrawnIds` is derived above from /v4/seasoned.
+  const withdrawnList = wallets.filter((w) => withdrawnIds.has(w.id));
+  const active = wallets.filter((w) => !withdrawnIds.has(w.id));
+  const newBatch = active.filter(inNewBatch);
+  const seasonedPool = active.filter((w) => !inNewBatch(w));
 
   // Per-group figures for the section headers — the same derivations as the
   // overall stat line, scoped to one group.
@@ -414,6 +421,7 @@ export default function V4SeedPanel({ step, wallets, masters, facts, explorer, r
     (newStats.funded ? ` · ${newStats.funded} funded` : '') +
     (newStats.aging ? ` · ${newStats.aging} aging` : '') +
     (newStats.fresh ? ` · ${newStats.fresh} not yet in a campaign` : '');
+  const withdrawnHint = `${withdrawnList.length} wallet${withdrawnList.length === 1 ? '' : 's'} · keys exported, held out of the claim pool · Restore on any row to return it`;
 
   return (
     <Step {...step}>
@@ -641,6 +649,11 @@ export default function V4SeedPanel({ step, wallets, masters, facts, explorer, r
         <>
           {seedSection('Seasoned pool — earlier campaigns', poolHint, seasonedPool)}
           {seedSection(newTitle, newHint, newBatch)}
+          {/* Set aside, drawn last: keys already exported, held out of the claim
+              pool. Its own section so a live-batch select-all never reaches them
+              and they don't pad the seasoned-pool counts. Each row keeps its
+              Restore. */}
+          {seedSection('Withdrawn — set aside', withdrawnHint, withdrawnList)}
 
           {/* Said once, under the tables, because the column heading cannot carry
               it: "Funded" is the amount the PLAN sent, not a balance read back
