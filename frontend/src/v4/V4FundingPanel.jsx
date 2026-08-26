@@ -44,6 +44,9 @@ export default function V4FundingPanel({
   // thing you go and open rather than a thing sitting under the cursor.
   const [showImport, setShowImport] = useState(false);
   const [keys, setKeys] = useState('');
+  // How many funding wallets to generate at once — the backend takes up to 5000, so a
+  // batch of 80 is one click, not eighty.
+  const [genCount, setGenCount] = useState(1);
   const [showSplit, setShowSplit] = useState(false);
   const [source, setSource] = useState('');
   // What each funder is being filled FOR, rather than how much to send it. The
@@ -159,18 +162,32 @@ export default function V4FundingPanel({
     </div>
   );
 
+  const genN = Math.min(5000, Math.max(1, Math.round(Number(genCount) || 1)));
   const create = (
-    <Busy
-      busy={busy === 'generate'}
-      className="btn-primary"
-      onClick={() =>
-        act('generate', () =>
-          api('/v4/wallets/generate', 'POST', { count: 1, role: ROLES.master, label: 'v4 funding' })
-        )
-      }
-    >
-      Create funding wallet
-    </Busy>
+    <div className="row" style={{ gap: 8, alignItems: 'center' }}>
+      <input
+        type="number"
+        min="1"
+        max="5000"
+        value={genCount}
+        onChange={(e) => setGenCount(e.target.value)}
+        style={{ width: 90 }}
+        aria-label="how many funding wallets to create"
+      />
+      <Busy
+        busy={busy === 'generate'}
+        className="btn-primary"
+        onClick={() =>
+          act('generate', () =>
+            api('/v4/wallets/generate', 'POST', { count: genN, role: ROLES.master, label: 'v4 funding' }).then(
+              (made) => `Created ${made.length} funding wallet${made.length === 1 ? '' : 's'}.`
+            )
+          )
+        }
+      >
+        {genN === 1 ? 'Create funding wallet' : `Create ${genN} funding wallets`}
+      </Busy>
+    </div>
   );
 
   /**
