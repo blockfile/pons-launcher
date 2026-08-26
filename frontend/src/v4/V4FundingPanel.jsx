@@ -64,6 +64,9 @@ export default function V4FundingPanel({
   // rather than an id so the dialog can state its balance — which is the fact
   // that decides whether deleting it is a tidy-up or a mistake.
   const [deleting, setDeleting] = useState(null);
+  // Ticked ids for a bulk delete, and the frozen list the confirmation shows.
+  const [ticked, setTicked] = useState([]);
+  const [bulk, setBulk] = useState(null);
 
   async function act(what, fn) {
     setBusy(what);
@@ -93,74 +96,127 @@ export default function V4FundingPanel({
       )
     );
 
+  const toggleTick = (id) =>
+    setTicked((prev) => (prev.includes(id) ? prev.filter((x) => x !== id) : [...prev, id]));
+
+  // Delete the ticked funding wallets, one request each, CARRYING ON PAST FAILURES —
+  // the server refuses a wallet a live campaign still needs, and that refusal is per
+  // wallet. Sequential, because every delete rewrites the whole keystore file.
+  async function deleteTicked(list) {
+    let done = 0;
+    const failures = [];
+    for (const w of list) {
+      try {
+        await api(`/v4/wallets/${w.id}`, 'DELETE');
+        done++;
+      } catch (err) {
+        failures.push(err.message);
+      }
+    }
+    setTicked([]);
+    const refused = failures.length ? ` ${failures.length} refused: ${failures[0]}` : '';
+    return `Archived ${done} funding wallet(s).${refused}`;
+  }
+
+  // Ticked wallets that still exist (an id ticked then deleted by another action
+  // cannot be carried into the confirm), used for the bulk bar and the dialog.
+  const tickedWallets = wallets.filter((w) => ticked.includes(w.id));
+
   // One funding-wallet table, reused for the super-main group and the funder group so
   // the row (balance, campaign, promote/demote, archive) is written once. The up/down
   // arrow moves a wallet between the two tiers; everything else is exactly the old row.
-  const walletTable = (rows, emptyHint) => (
-    <div className="table-scroll" style={{ maxHeight: 340, overflowY: 'auto' }}>
-      <table>
-        <thead>
-          <tr>
-            <th>Address</th>
-            <th className="num">Balance</th>
-            <th>Campaign</th>
-            <th />
-          </tr>
-        </thead>
-        <tbody>
-          {rows.length === 0 ? (
+  const walletTable = (rows, emptyHint) => {
+    const ids = rows.map((w) => w.id);
+    const allTicked = rows.length > 0 && ids.every((id) => ticked.includes(id));
+    // Select-all is per group, so ticking every super-main never sweeps the funders
+    // into the same bulk delete, and vice versa.
+    const toggleAll = () =>
+      setTicked((prev) => (allTicked ? prev.filter((id) => !ids.includes(id)) : [...new Set([...prev, ...ids])]));
+    return (
+      <div className="table-scroll" style={{ maxHeight: 340, overflowY: 'auto' }}>
+        <table>
+          <thead>
             <tr>
-              <td colSpan={4}>
-                <span className="hint">{emptyHint}</span>
-              </td>
+              <th style={{ width: 28 }}>
+                <input
+                  type="checkbox"
+                  checked={allTicked}
+                  onChange={toggleAll}
+                  disabled={rows.length === 0}
+                  style={{ width: 'auto' }}
+                  aria-label="select all in this group"
+                />
+              </th>
+              <th>Address</th>
+              <th className="num">Balance</th>
+              <th>Campaign</th>
+              <th />
             </tr>
-          ) : (
-            rows.map((w) => {
-              const held = campaignFor[w.id];
-              return (
-                <tr key={w.id}>
-                  <td>
-                    <Address value={w.address} plain href={explorer ? `${explorer}/address/${w.address}` : ''} />
-                  </td>
-                  <td className="num">
-                    {w.balanceEth == null ? <span className="hint">unreadable</span> : eth(w.balanceEth)}
-                  </td>
-                  <td>
-                    {held ? (
-                      <>
-                        {held.name} <span className="hint">· {held.status}</span>
-                      </>
-                    ) : w.inCampaign ? (
-                      <span className="hint">in a campaign</span>
-                    ) : (
-                      <span className="hint">free</span>
-                    )}
-                  </td>
-                  <td className="num">
-                    <IconButton
-                      icon={w.isSuperMain ? LuArrowDown : LuArrowUp}
-                      label={
-                        w.isSuperMain
-                          ? `Return ${w.address} to the funder pool`
-                          : `Make ${w.address} a super-main`
-                      }
-                      onClick={() => toggleSuperMain(w)}
-                    />
-                    <IconButton
-                      icon={LuTrash2}
-                      danger
-                      label={`Archive funding wallet ${w.address}`}
-                      onClick={() => setDeleting(w)}
-                    />
-                  </td>
-                </tr>
-              );
-            })
-          )}
-        </tbody>
-      </table>
-    </div>
-  );
+          </thead>
+          <tbody>
+            {rows.length === 0 ? (
+              <tr>
+                <td colSpan={5}>
+                  <span className="hint">{emptyHint}</span>
+                </td>
+              </tr>
+            ) : (
+              rows.map((w) => {
+                const held = campaignFor[w.id];
+                return (
+                  <tr key={w.id} className={ticked.includes(w.id) ? 'is-on' : ''}>
+                    <td>
+                      <input
+                        type="checkbox"
+                        checked={ticked.includes(w.id)}
+                        onChange={() => toggleTick(w.id)}
+                        style={{ width: 'auto' }}
+                        aria-label={`Select ${w.address}`}
+                      />
+                    </td>
+                    <td>
+                      <Address value={w.address} plain href={explorer ? `${explorer}/address/${w.address}` : ''} />
+                    </td>
+                    <td className="num">
+                      {w.balanceEth == null ? <span className="hint">unreadable</span> : eth(w.balanceEth)}
+                    </td>
+                    <td>
+                      {held ? (
+                        <>
+                          {held.name} <span className="hint">· {held.status}</span>
+                        </>
+                      ) : w.inCampaign ? (
+                        <span className="hint">in a campaign</span>
+                      ) : (
+                        <span className="hint">free</span>
+                      )}
+                    </td>
+                    <td className="num">
+                      <IconButton
+                        icon={w.isSuperMain ? LuArrowDown : LuArrowUp}
+                        label={
+                          w.isSuperMain
+                            ? `Return ${w.address} to the funder pool`
+                            : `Make ${w.address} a super-main`
+                        }
+                        onClick={() => toggleSuperMain(w)}
+                      />
+                      <IconButton
+                        icon={LuTrash2}
+                        danger
+                        label={`Archive funding wallet ${w.address}`}
+                        onClick={() => setDeleting(w)}
+                      />
+                    </td>
+                  </tr>
+                );
+              })
+            )}
+          </tbody>
+        </table>
+      </div>
+    );
+  };
 
   const genN = Math.min(5000, Math.max(1, Math.round(Number(genCount) || 1)));
   const create = (
@@ -577,6 +633,28 @@ export default function V4FundingPanel({
         onCancel={() => setDeleting(null)}
       />
 
+      {/* The bulk version. It leads with how many of the selection still hold ETH,
+          because that is the fact that decides whether this is tidying up or a
+          mistake — a batch ticked at once is exactly where a wallet holding real ETH
+          gets swept in unseen. Any a live campaign needs are refused and left alone. */}
+      <Modal
+        open={Boolean(bulk)}
+        danger
+        title={`Archive ${bulk ? bulk.length : 0} funding wallet${bulk && bulk.length === 1 ? '' : 's'}?`}
+        question={
+          bulk && bulk.some((w) => w.balanceEth != null && Number(w.balanceEth) > 0)
+            ? `${bulk.filter((w) => w.balanceEth != null && Number(w.balanceEth) > 0).length} of them still hold ETH. Archiving does not move it — sweep those first, or the balance sits at an address this console no longer lists.`
+            : 'Their keys move to the encrypted archive beside the keystore and can be restored from the server. Any a live campaign still needs will be refused and left alone.'
+        }
+        confirmLabel={`Archive ${bulk ? bulk.length : 0} wallets`}
+        onConfirm={() => {
+          const list = bulk;
+          setBulk(null);
+          act('delete', () => deleteTicked(list));
+        }}
+        onCancel={() => setBulk(null)}
+      />
+
       {/* Empty is where this tab STARTS, not a failure. It says what the wallet
           is for and what to do next rather than drawing an empty table. */}
       {wallets.length === 0 ? (
@@ -647,6 +725,22 @@ export default function V4FundingPanel({
 
               Capped rather than paged: funding wallets are counted in tens, and the
               scroll keeps step 2 on screen while every wallet stays reachable. */}
+          {tickedWallets.length > 0 && (
+            <div className="row" style={{ marginBottom: 8, alignItems: 'center', gap: 8 }}>
+              <span className="hint">{tickedWallets.length} selected</span>
+              <button type="button" className="link" onClick={() => setTicked([])}>
+                clear
+              </button>
+              <span className="spacer" />
+              <Busy
+                busy={busy === 'delete'}
+                className="ghost danger"
+                onClick={() => setBulk(tickedWallets)}
+              >
+                Delete {tickedWallets.length} selected
+              </Busy>
+            </div>
+          )}
           {superMains.length > 0 ? (
             <>
               <div className="row" style={{ marginTop: 4 }}>
