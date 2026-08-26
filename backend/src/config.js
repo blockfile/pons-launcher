@@ -103,6 +103,9 @@ const config = {
   // halt if Relay is still refusing. See v3/relay.js transfer().
   v3RelayQuoteRetries: Math.max(0, num(process.env.V3_RELAY_QUOTE_RETRIES, 4)),
   v3RelayQuoteBackoffMs: Math.max(0, num(process.env.V3_RELAY_QUOTE_BACKOFF_MS, 2000)),
+  // v6 (letscash relay chain) — its own quote retry/backoff, mirroring v3's.
+  v6RelayQuoteRetries: Math.max(0, num(process.env.V6_RELAY_QUOTE_RETRIES, 4)),
+  v6RelayQuoteBackoffMs: Math.max(0, num(process.env.V6_RELAY_QUOTE_BACKOFF_MS, 2000)),
 
   // ethers' tx.wait() polls every 4s by default, which is forty blocks on this
   // chain. v2 reads the curve address out of the launch receipt, so that delay

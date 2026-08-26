@@ -403,12 +403,22 @@ async function quoteBuy({ token, quote, amountInWei, slippageBps = 0, hook, pool
  * slippageBps 0 mirrors the pons sell path's no-floor behaviour; pass a value to
  * get a floor.
  */
-async function quoteSell({ token, quote, tokensInWei, slippageBps = 0, hook } = {}, deps) {
-  const { poolKey, quoteIsCurrency0 } = poolKeyFor({ token, quote, hook }, deps);
+async function quoteSell({ token, quote, tokensInWei, slippageBps = 0, hook, poolKey } = {}, deps) {
+  const d = resolveDeps(deps);
+  // Prefer a pre-resolved poolKey (with the pool's ACTUAL fee/tickSpacing) over
+  // re-deriving from a hardcoded fee/tickSpacing — mirrors quoteBuy, and lets a
+  // caller (e.g. the v6 relay chain) quote the exact pool resolvePoolKey found.
+  let key = poolKey;
+  let quoteIsCurrency0;
+  if (key) {
+    quoteIsCurrency0 = norm(key.currency0) === quoteAddress(quote, d);
+  } else {
+    ({ poolKey: key, quoteIsCurrency0 } = poolKeyFor({ token, quote, hook }, deps));
+  }
   // SELL spends the token; zeroForOne is true iff the TOKEN is currency0, i.e.
   // the opposite of the buy direction.
   const expectedOut = await quoteExactInSingle(
-    { poolKey, zeroForOne: !quoteIsCurrency0, amountIn: BigInt(tokensInWei) },
+    { poolKey: key, zeroForOne: !quoteIsCurrency0, amountIn: BigInt(tokensInWei) },
     deps
   );
   return { expectedOut, minOut: applySlippage(expectedOut, slippageBps) };

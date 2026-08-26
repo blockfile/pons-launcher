@@ -150,6 +150,13 @@ const ROLES = new Set([
   // SINGLETON_ROLES below; v5bundle is plural.
   'v5dev',
   'v5bundle',
+  // v6dev / v6main / v6bundle are the seventh owner — the letscash RELAY CHAIN
+  // (v3's strategy on a letscash V4 pool). Names live in v6/roles.js, v6's own
+  // table (shares nothing with the others). v6dev + v6main are singletons and join
+  // SINGLETON_ROLES below; v6bundle is plural.
+  'v6dev',
+  'v6main',
+  'v6bundle',
 ]);
 // v3main joins the singletons: the chain sells from one position, and a second
 // main wallet would mean half the supply sitting somewhere the engine never
@@ -165,6 +172,10 @@ const SINGLETON_ROLES = new Set([
   // The letscash launcher: one launch, one position, one payer — a second v5dev
   // would mean half the first-buy supply sitting where the tab never looks.
   'v5dev',
+  // The v6 relay chain: one treasury, one main (holds the whole position and makes
+  // every sell). A second v6main would strand half the supply the engine never sees.
+  'v6dev',
+  'v6main',
 ]);
 const instances = new Map();
 // Same alphabet as users.slug() (backend/src/users/users.js). Duplicated
