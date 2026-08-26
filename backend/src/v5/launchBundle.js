@@ -43,9 +43,54 @@
 // ─────────────────────────────────────────────────────────────────────────────
 
 const { getAddress, ZeroAddress } = require('ethers');
+const config = require('../config');
 const { keystoreFor } = require('../wallets/keystore');
+const { provider } = require('../evm/provider');
+const factoryModule = require('../evm/v5/factory');
 const launchModule = require('./launch');
 const buyModule = require('./buy');
+
+// ─────────────────────────────────────────────────────────────────────────────
+// FAST-BUNDLE pool prediction.
+//
+// The SLOW path bundles against the launch RECEIPT's pool — safest, but it must
+// wait ~seconds for the confirmation, and a sniper watching for the new pool buys
+// in the very next block, ahead of the bundle. The FAST path closes that gap by
+// PRE-SIGNING the bundle buys before the launch broadcasts and firing them the
+// instant it hits the mempool. To pre-sign safely it needs the pool key the launch
+// WILL create — which is knowable at fire time, because prepareLaunch already ran
+// the launch as a static call (simulateLaunch) and got the AUTHORITATIVE poolId the
+// launch produces (launchPlan.poolId).
+//
+// This derives the full pool key from the launch's own token + the config's hook
+// (module set) + tickSpacing, and SELF-VERIFIES it by requiring the derived poolId
+// to equal the simulation's authoritative poolId. A mismatch, a USDG launch, or any
+// read failure returns null → the caller falls back to the safe slow path. So a fast
+// buy is only ever pre-signed against the exact pool this launch creates; if the
+// launch fails, the buys hit an uninitialised pool and REVERT (funds safe).
+// ─────────────────────────────────────────────────────────────────────────────
+async function resolvePredictedPool(launchPlan, deps = {}) {
+  if (!launchPlan || !launchPlan.poolId || !launchPlan.token) return null;
+  if (launchPlan.quoteIsNative === false) return null; // fast bundle is ETH-only
+  const prov = deps.provider || provider;
+  try {
+    const f = factoryModule.factory(prov);
+    const cfg = await f.getLaunchConfig(launchPlan.configId); // tickSpacing, moduleSetId
+    const ms = await f.getModuleSet(cfg.moduleSetId); // the pool's hook
+    const { key, poolId } = factoryModule.poolKeyFor({
+      token: launchPlan.token,
+      quote: ZeroAddress,
+      hook: ms.hook,
+      tickSpacing: cfg.tickSpacing,
+      fee: config.letscash.poolFee,
+    });
+    // Only trust a key that reproduces the launch simulation's authoritative poolId.
+    if (String(poolId).toLowerCase() !== String(launchPlan.poolId).toLowerCase()) return null;
+    return { poolKey: key, poolId: launchPlan.poolId, hook: getAddress(ms.hook) };
+  } catch (_err) {
+    return null; // any read fault → fall back to the slow, confirmed-pool path
+  }
+}
 
 /**
  * Fire the launch, then — only if it confirms — fire the per-wallet bundle buys.
@@ -72,7 +117,7 @@ async function launchThenBundle(input = {}, deps = {}) {
   // Keep the bundle fields OUT of the launch input: prepareLaunch reads none of
   // them, and passing slippageBps would make it emit a spurious first-buy-floor
   // warning meant for the bundle. `confirm` is the route's gate, not a launch field.
-  const { buys: rawBuys, slippageBps, buyGas, confirm, ...launchInput } = input || {};
+  const { buys: rawBuys, slippageBps, buyGas, confirm, fast: _fast, ...launchInput } = input || {};
 
   // Drop zero / blank buys up front — an all-zero bundle is just a launch. An
   // 'all − gas' entry carries NO amountEth (its size is resolved from the live
@@ -85,8 +130,100 @@ async function launchThenBundle(input = {}, deps = {}) {
         Number(String(b.amountEth ?? b.amount ?? '0').trim() || '0') > 0)
   );
 
-  // ── 1. LAUNCH ──────────────────────────────────────────────────────────────
+  const fast = Boolean(input.fast);
+  const resolvePoolFn = deps.resolvePredictedPool || resolvePredictedPool;
+
+  // ── 1. PREPARE THE LAUNCH ────────────────────────────────────────────────────
+  // Mines the vanity salt, runs the launch as a static call, and reads back the
+  // AUTHORITATIVE token + poolId the launch will create. Signs; broadcasts nothing.
   const launchPlan = await prepareLaunchFn(launchInput, { keystore: ks });
+
+  // ── FAST BUNDLE (opt-in): pre-sign the buys against the launch's OWN verified
+  //    pool, then fire them the instant the launch broadcasts — same/next block,
+  //    ahead of a sniper — instead of waiting for the receipt. Only when it can be
+  //    done SAFELY: ETH launch, buys present, and the predicted pool key reproduces
+  //    the simulation's poolId (resolvePredictedPool). Otherwise fall through to the
+  //    slow, confirmed-receipt path below. ──
+  if (fast && buys.length) {
+    const pool = await resolvePoolFn(launchPlan, deps.resolvePoolDeps || {});
+    if (pool) {
+      // Pre-sign the buys against the predicted pool (no pre-quote — the pool does
+      // not exist yet; see buy.js fast mode). A pre-sign failure (e.g. every wallet
+      // short of ETH) must not stop the launch: fire it alone and report why.
+      let buyPlan = null;
+      let prepError = null;
+      try {
+        buyPlan = await prepareBuysFn(
+          {
+            token: launchPlan.token,
+            hook: pool.hook,
+            quote: 'eth',
+            buys,
+            fast: true,
+            poolId: pool.poolId,
+            poolKey: pool.poolKey,
+            ...(slippageBps != null ? { slippageBps } : {}),
+            ...(buyGas != null ? { buyGas } : {}),
+          },
+          { keystore: ks }
+        );
+      } catch (err) {
+        prepError = err;
+      }
+
+      // Fire the launch; the instant it is in the mempool, fireLaunch calls
+      // onBroadcast, which START the pre-signed buys (broadcasting them) but does NOT
+      // await their receipts — so the launch-receipt wait runs CONCURRENTLY with the
+      // buys settling, instead of behind them. If the launch reverts or never mines,
+      // those buys hit an uninitialised pool and revert — funds safe.
+      let bundlePromise = null;
+      const launchResult = await fireLaunchFn(launchPlan, {
+        ...(deps.fireLaunchDeps || {}),
+        onBroadcast: buyPlan
+          ? async () => {
+              bundlePromise = fireBuysFn(buyPlan, deps.fireBuysDeps || {});
+            }
+          : undefined,
+      });
+
+      // Now collect the bundle outcome (it broadcast at onBroadcast; this awaits the
+      // per-buy receipts it was gathering meanwhile). fireBundleBuys is built not to
+      // throw, but guard anyway so a fault here never loses the launch result.
+      let bundle = null;
+      let fireError = null;
+      if (bundlePromise) {
+        try {
+          bundle = await bundlePromise;
+        } catch (err) {
+          fireError = err;
+        }
+      }
+
+      let bundleSkipped = null;
+      if (!buyPlan) {
+        bundleSkipped =
+          `the fast bundle could not be pre-signed: ${prepError ? prepError.message : 'no buys prepared'} ` +
+          '— the launch fired alone; bundle manually from the Bundle tools.';
+      } else if (!bundlePromise) {
+        // onBroadcast never ran: the launch's broadcast response was lost (parked
+        // pending), so the pre-signed buys were deliberately NOT fired. Say so, so a
+        // pending launch + a signed-but-unfired bundle is never read as "bundled".
+        bundleSkipped =
+          'the launch broadcast did not come back confirmed-live, so the pre-signed bundle was NOT ' +
+          'fired — resolve the launch (/v5/launch/resolve), then fire the bundle from the Bundle tools.';
+      } else if (fireError) {
+        bundleSkipped =
+          `the pre-signed bundle failed to broadcast: ${fireError.message} — bundle manually from the Bundle tools.`;
+      }
+
+      return { launch: launchResult, launchPlan, bundle, buyPlan, fast: true, bundleSkipped };
+    }
+    // else: predicted pool could not be verified — fall through to the slow path,
+    // which bundles against the confirmed receipt instead (safe, just not same-block).
+  }
+
+  // ── SLOW PATH: launch, wait for the confirmation, then bundle against the real
+  //    receipt pool. ──────────────────────────────────────────────────────────────
   const launchResult = await fireLaunchFn(launchPlan, deps.fireLaunchDeps || {});
 
   const none = { launch: launchResult, launchPlan, bundle: null, buyPlan: null, bundleSkipped: null };
@@ -193,4 +330,4 @@ async function launchThenBundle(input = {}, deps = {}) {
   }
 }
 
-module.exports = { launchThenBundle };
+module.exports = { launchThenBundle, resolvePredictedPool };

@@ -644,6 +644,23 @@ async function fireLaunch(plan, deps = {}) {
     });
   }
 
+  // FAST BUNDLE — the launch is now live in the mempool (resp.hash). Fire the
+  // caller's pre-signed bundle buys at THIS instant, before the receipt the slow
+  // path waits ~seconds for, so the bundle lands in the same/next block ahead of a
+  // sniper. onBroadcast must NEVER throw past here: it is launchThenBundle's fast
+  // bundle, wrapped so a bundle failure cannot lose the launch's pending-park below
+  // (the launch already spent its fee; the buys are independent per-wallet ETH that
+  // revert harmlessly if the pool is not there). The buys target the launch's OWN
+  // verified pool key, so a launch that reverts just reverts the buys — no strand.
+  if (deps.onBroadcast) {
+    try {
+      await deps.onBroadcast(resp.hash);
+    } catch (_err) {
+      // The caller (launchThenBundle) owns and records the bundle outcome; a fault
+      // here must not stop the launch from being awaited/parked.
+    }
+  }
+
   // The tx is now BROADCAST (resp.hash is live). Awaiting/parsing the receipt must
   // never throw PAST this point: if awaitReceipt or the parse fault (e.g. a provider
   // wiring fault), fireLaunch throwing here would make the route skip its pending-park

@@ -199,3 +199,82 @@ test('a confirmed launch is NEVER discarded when the bundle FIRE throws (post-co
   assert.equal(out.bundle, null);
   assert.match(out.bundleSkipped, /could not run: rpc exploded/);
 });
+
+// ── FAST bundle: pre-signed against the predicted pool, fired AT the launch
+//    broadcast (not after confirmation) so it lands ahead of a sniper. ──────────
+
+const PREDICTED_POOL = {
+  poolKey: { currency0: '0x0000000000000000000000000000000000000000', currency1: TOKEN, fee: 0, tickSpacing: 200, hooks: HOOK },
+  poolId: '0x' + 'cd'.repeat(32),
+  hook: HOOK,
+};
+
+function fastDeps(over = {}) {
+  const calls = { resolvePool: 0, prepareBuys: [], fireBuys: [], onBroadcastFired: 0 };
+  const d = {
+    keystore: {},
+    prepareLaunch: async () => ({
+      launch: { walletId: 'dev', address: '0xdev', nonce: 3, firstBuyEth: '0.05' },
+      token: TOKEN, params: { symbol: 'CAT' }, quote: '0x0', quoteIsNative: true,
+      poolId: PREDICTED_POOL.poolId, configId: 1000,
+    }),
+    // null models "could not verify the predicted pool" → fall back to slow path.
+    resolvePredictedPool: async () => { calls.resolvePool += 1; return over.pool === undefined ? PREDICTED_POOL : over.pool; },
+    // A fireLaunch that fires onBroadcast the instant it "broadcasts", like the real one.
+    fireLaunch: async (_plan, fdeps) => {
+      if (fdeps && fdeps.onBroadcast) { calls.onBroadcastFired += 1; await fdeps.onBroadcast('0xlaunchhash'); }
+      return over.launchResult || launchResult();
+    },
+    prepareBundleBuys: async (input) => {
+      calls.prepareBuys.push(input);
+      if (over.prepareBuysThrows) throw new Error(over.prepareBuysThrows);
+      return { kind: 'bundle-buy', token: input.token, symbol: 'CAT', walletCount: 2, buys: [{ walletId: 'b1', raw: '0xr1' }] };
+    },
+    fireBundleBuys: async (plan) => { calls.fireBuys.push(plan); return { kind: 'bundle-buy', token: plan.token, bought: 2, failed: 0, pending: 0, buys: [] }; },
+  };
+  return { d, calls };
+}
+
+test('FAST: pre-signs against the predicted pool and fires the bundle AT the launch broadcast', async () => {
+  const { d, calls } = fastDeps();
+  const out = await launchThenBundle({ ...BASE, fast: true }, d);
+  assert.equal(out.fast, true);
+  assert.equal(calls.resolvePool, 1);
+  assert.equal(calls.prepareBuys.length, 1);
+  assert.equal(calls.prepareBuys[0].fast, true, 'buys are pre-signed in fast (no-quote) mode');
+  assert.equal(calls.prepareBuys[0].poolId, PREDICTED_POOL.poolId, 'signed against the predicted poolId');
+  assert.equal(calls.prepareBuys[0].poolKey.hooks, HOOK);
+  assert.equal(calls.onBroadcastFired, 1, 'the bundle fired at broadcast, NOT after the receipt');
+  assert.equal(calls.fireBuys.length, 1);
+  assert.ok(out.bundle);
+  assert.equal(out.bundleSkipped, null);
+});
+
+test('FAST: falls back to the slow confirmed-pool path when the pool cannot be verified', async () => {
+  const { d, calls } = fastDeps({ pool: null }); // resolvePredictedPool → null
+  const out = await launchThenBundle({ ...BASE, fast: true }, d);
+  assert.notEqual(out.fast, true, 'not the fast path');
+  assert.equal(calls.prepareBuys.length, 1);
+  assert.notEqual(calls.prepareBuys[0].fast, true, 'slow path does not pre-sign');
+  assert.equal(calls.onBroadcastFired, 0, 'slow path does not fire at broadcast');
+  assert.ok(out.bundle);
+});
+
+test('FAST: a pre-sign failure fires the launch ALONE and reports it — the launch is never lost', async () => {
+  const { d, calls } = fastDeps({ prepareBuysThrows: 'every wallet short of ETH' });
+  const out = await launchThenBundle({ ...BASE, fast: true }, d);
+  assert.equal(out.fast, true);
+  assert.equal(out.launch.launch.status, 'confirmed', 'the launch still fired');
+  assert.equal(calls.onBroadcastFired, 0, 'no onBroadcast when there is no signed bundle');
+  assert.equal(out.bundle, null);
+  assert.match(out.bundleSkipped, /could not be pre-signed/);
+});
+
+test('FAST is opt-in: without fast:true the slow confirmed-pool path runs even with a resolver present', async () => {
+  const { d, calls } = fastDeps();
+  const out = await launchThenBundle(BASE, d); // no fast:true
+  assert.notEqual(out.fast, true);
+  assert.equal(calls.resolvePool, 0, 'the predicted-pool resolver is never consulted');
+  assert.equal(calls.onBroadcastFired, 0);
+  assert.ok(out.bundle);
+});

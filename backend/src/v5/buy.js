@@ -46,6 +46,28 @@ const FEE_BUMP_PCT = 25;
 // it for a single buy. The operator can always override via slippageBps.
 const DEFAULT_SLIPPAGE_BPS = 3000;
 
+// FAST (pre-launch) mode floor. In `fast` mode the buys are pre-signed BEFORE the
+// launch broadcasts, so the pool does not exist yet and cannot be quoted — the
+// whole point is to fire the bundle in the same/next block as the launch, ahead of
+// a sniper, instead of waiting for the launch receipt. A quote is impossible, so
+// the floor is a nominal 1 base unit: it is still POSITIVE (buildBuyTx requires
+// that), and a V4 swap into a pool that is not yet initialised REVERTS — so if the
+// launch fails or has not mined, every fast buy reverts and each wallet keeps its
+// ETH (only gas is spent). It can never settle ETH into "nothing": an uninitialised
+// pool reverts, and the pool key is pinned to THIS launch's own (verified) pool, so
+// no decoy pool can exist under it (the token is created by the launch itself).
+//
+// THE TRADE-OFF (opt-in, economic, NOT a fund-loss). A 1-wei floor gives NO price
+// protection on the HAPPY path: once the pool is real, the buy fills at whatever
+// price it gets, so a mempool sandwich bot could front/back-run the pre-signed buys
+// for a worse fill. That is inherent to racing a same-block entry (you cannot both
+// pre-commit before the pool exists AND hold a real slippage floor) and is the
+// deliberate cost of beating the sniper. The ETH is never lost — it always buys
+// real tokens — it can just buy fewer than a quoted buy would. The operator opts
+// into this per launch (the "fire in the launch block" checkbox); the safe,
+// quoted, confirmed-pool path stays the default.
+const FAST_MIN_OUT_WEI = 1n;
+
 function toSignable({ to, data, value = 0n }, { nonce, gasLimit, fees, chainId }) {
   return { to, data, value: BigInt(value), nonce, gasLimit, chainId, ...fees };
 }
@@ -76,7 +98,13 @@ async function prepareBundleBuys(input, deps = {}) {
   const symbolOf = deps.getSymbol || getSymbol;
   const dryRun = deps.dryRun ?? config.dryRun;
 
-  const { token, quote = 'eth', hook, buys, slippageBps = DEFAULT_SLIPPAGE_BPS } = input || {};
+  const { token, quote = 'eth', hook, buys, slippageBps = DEFAULT_SLIPPAGE_BPS, fast = false } = input || {};
+  // Fast mode ONLY makes sense with the caller's verified predicted pool key —
+  // there is no live pool to resolve/quote against yet. Refuse it otherwise so it
+  // can never silently degrade into an unpinned buy.
+  if (fast && !(input.poolKey && input.poolId)) {
+    throw new Error('fast bundle mode requires the predicted { poolKey, poolId } (verified against the launch simulation)');
+  }
   if (!token || !isAddress(String(token))) throw new Error('token must be the launched ERC-20 address');
   const tokenAddr = getAddress(token);
 
@@ -217,28 +245,35 @@ async function prepareBundleBuys(input, deps = {}) {
 
     // Quote the buy — this is where the CURRENT anti-snipe tax shows up: a buy made
     // while the premium is high returns fewer tokens than the same ETH after decay.
-    let expectedOut;
-    let minOut;
-    try {
-      const qres = await swapClient.quoteBuy(
-        { token: tokenAddr, quote, amountInWei: amountWei, slippageBps, hook: hookAddr, poolKey: resolved.poolKey },
-        { provider: prov }
-      );
-      expectedOut = qres.expectedOut;
-      minOut = qres.minOut;
-    } catch (_err) {
-      const why = 'could not quote the buy (is the pool live and past launch?) — skipped';
-      skipped.push({ walletId: wallet.id, address: wallet.address, reason: why });
-      warnings.push(`${wallet.address}: ${why}`);
-      continue;
-    }
-    if (expectedOut == null || expectedOut <= 0n || minOut == null || minOut <= 0n) {
-      // buildBuyTx refuses a non-positive floor, and a buy with no price protection
-      // is exactly what we must not sign.
-      const why = 'the quote returned no output — refusing a buy with no price floor';
-      skipped.push({ walletId: wallet.id, address: wallet.address, reason: why });
-      warnings.push(`${wallet.address}: ${why}`);
-      continue;
+    // FAST mode skips the quote entirely: the pool does not exist yet (we pre-sign
+    // BEFORE the launch broadcasts), so there is nothing to quote. The floor is a
+    // nominal 1 base unit — positive (buildBuyTx requires it) and enough to REVERT
+    // the buy if the launch never creates the pool, so no ETH is stranded. See
+    // FAST_MIN_OUT_WEI.
+    let expectedOut = null;
+    let minOut = FAST_MIN_OUT_WEI;
+    if (!fast) {
+      try {
+        const qres = await swapClient.quoteBuy(
+          { token: tokenAddr, quote, amountInWei: amountWei, slippageBps, hook: hookAddr, poolKey: resolved.poolKey },
+          { provider: prov }
+        );
+        expectedOut = qres.expectedOut;
+        minOut = qres.minOut;
+      } catch (_err) {
+        const why = 'could not quote the buy (is the pool live and past launch?) — skipped';
+        skipped.push({ walletId: wallet.id, address: wallet.address, reason: why });
+        warnings.push(`${wallet.address}: ${why}`);
+        continue;
+      }
+      if (expectedOut == null || expectedOut <= 0n || minOut == null || minOut <= 0n) {
+        // buildBuyTx refuses a non-positive floor, and a buy with no price protection
+        // is exactly what we must not sign.
+        const why = 'the quote returned no output — refusing a buy with no price floor';
+        skipped.push({ walletId: wallet.id, address: wallet.address, reason: why });
+        warnings.push(`${wallet.address}: ${why}`);
+        continue;
+      }
     }
 
     // Per-wallet settled-nonce skip (mirror the sell): never sign a buy past an
@@ -268,8 +303,10 @@ async function prepareBundleBuys(input, deps = {}) {
       address: wallet.address,
       ethIn: formatEther(amountWei),
       ethInWei: amountWei.toString(),
-      expectedTokens: formatUnits(expectedOut, decimals),
-      expectedTokensWei: expectedOut.toString(),
+      // Unknown in fast mode (no pre-launch quote) — the buy fills at whatever the
+      // just-created pool's price is, which is exactly what a same-block bundle wants.
+      expectedTokens: expectedOut == null ? null : formatUnits(expectedOut, decimals),
+      expectedTokensWei: expectedOut == null ? null : expectedOut.toString(),
       minOut: minOut.toString(),
       nonce: pendingNonce,
       raw, // SIGNED — the route strips this before the plan leaves the server
@@ -284,7 +321,7 @@ async function prepareBundleBuys(input, deps = {}) {
   }
 
   const totalEth = out.reduce((s, w) => s + BigInt(w.ethInWei), 0n);
-  const totalTokens = out.reduce((s, w) => s + BigInt(w.expectedTokensWei), 0n);
+  const totalTokens = out.reduce((s, w) => s + BigInt(w.expectedTokensWei || 0), 0n);
   return {
     protocol: 'v5',
     kind: 'bundle-buy',
@@ -295,9 +332,10 @@ async function prepareBundleBuys(input, deps = {}) {
     poolId: resolved.poolId,
     quote: 'eth',
     slippageBps,
+    fast, // whether these were pre-signed against the predicted pool (no pre-quote)
     walletCount: out.length,
     totalEth: formatEther(totalEth),
-    totalExpectedTokens: formatUnits(totalTokens, decimals),
+    totalExpectedTokens: fast ? null : formatUnits(totalTokens, decimals),
     buys: out,
     skipped,
     fees: stringifyFees(fees),

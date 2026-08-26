@@ -95,6 +95,10 @@ export default function V5LaunchPanel({ step, dev, bundle = [], launchConfigs, l
   const [parked, setParked] = useState(false);
   const [quoteInfo, setQuoteInfo] = useState(null);
   const [quoteInfoBusy, setQuoteInfoBusy] = useState(false);
+  // Opt-in: fire the bundle in the SAME/next block as the launch (pre-signed against
+  // the launch's own predicted pool), instead of waiting for the confirmation — so it
+  // lands ahead of a sniper. Off by default (the safe confirmed-pool path).
+  const [fastBundle, setFastBundle] = useState(false);
 
   // The bundle's per-wallet buys are set in the step-1 wallets table (the shared
   // `rows`), the same way the v1 Launcher tab sizes buys in its wallets table and
@@ -213,6 +217,9 @@ export default function V5LaunchPanel({ step, dev, bundle = [], launchConfigs, l
     // server-side — dropping them here keeps the confirm dialog and button
     // honest ("launch only"), while the in-form warning explains why.
     if (!usdgQuoted && namedBuys.length) out.buys = namedBuys;
+    // Fast bundle: only meaningful when a real ETH bundle rides with this launch.
+    // The server verifies the predicted pool and safely falls back if it can't.
+    if (!usdgQuoted && namedBuys.length && fastBundle) out.fast = true;
     const bps = Number(slippageBps);
     if (slippageBps.trim() && bps > 0) out.slippageBps = bps;
     return out;
@@ -591,6 +598,32 @@ export default function V5LaunchPanel({ step, dev, bundle = [], launchConfigs, l
               {fixedTotal > 0 ? ` · ${fixedTotal.toFixed(6)} ETH fixed` : ''}
               {allCount > 0 ? ` · ${allCount} on all − gas` : ''}
             </p>
+          )}
+
+          {/* Opt-in anti-sniper timing. Off = the safe path (bundle fires once the
+              launch CONFIRMS, signed against the real pool). On = pre-sign the bundle
+              against the launch's own predicted pool and fire it in the same/next
+              block as the launch, ahead of a sniper. If the launch fails, the buys
+              hit a pool that does not exist and REVERT — the wallets keep their ETH,
+              only gas is spent. */}
+          {bundleWillFire && (
+            <div style={{ marginTop: 10 }}>
+              <label className="row" style={{ gap: 8, alignItems: 'flex-start' }}>
+                <input type="checkbox" checked={fastBundle} onChange={(e) => setFastBundle(e.target.checked)} />
+                <span>
+                  <b>Fire the bundle in the launch block (beat snipers)</b>
+                  <span className="hint" style={{ display: 'block', marginTop: 2 }}>
+                    Pre-signs the bundle against this launch's own pool and fires it the instant the
+                    launch broadcasts — same/next block, ahead of a sniper — instead of waiting for
+                    the confirmation. No pre-quote is possible (the pool is brand new), so these buys
+                    have <b>no slippage floor</b>: they fill at whatever the opening price is, which a
+                    sandwich bot could worsen. Your ETH still buys real tokens (never lost) — just
+                    possibly fewer. If the launch fails, the buys revert and the wallets keep their ETH
+                    (only gas spent). Off = the safe, quoted, confirmed-pool path.
+                  </span>
+                </span>
+              </label>
+            </div>
           )}
         </>
       )}
