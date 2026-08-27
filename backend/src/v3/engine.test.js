@@ -63,6 +63,8 @@ function harness({
   fillAfter = 1, // polls before the ETH shows up
   fillNever = false,
   graduatedAt = null, // cycle index at which the curve reports graduated
+  readyToGradAt = null, // cycle index at which the curve reports readyToGraduate
+  thinCurveAt = null, // cycle index at which the curve returns a dust quote reserve
   clock = fakeClock(),
   cycleCostMs = 0, // how long each cycle's work takes on the fake clock
   readFailTimes = 0, // make the FIRST readCurve throw this many times, then succeed
@@ -116,16 +118,21 @@ function harness({
           readFails += 1;
           throw new Error('rpc read blip');
         }
+        const buysSoFar = calls.filter((c) => c.step === 'buy').length;
+        const thin = thinCurveAt !== null && buysSoFar >= thinCurveAt;
         return {
         address: CURVE,
         token: TOKEN,
         isNativeQuote: true,
-        quoteReserve: parseEther('40'),
+        // A dust (but non-zero) quote reserve models a momentary drain / thin read: it is a
+        // VALID read, so the empty-reserve retry does not fire — the pre-sell viability check
+        // must catch it and halt BEFORE selling.
+        quoteReserve: thin ? parseEther('0.00000001') : parseEther('40'),
         tokenReserve: TOKENS(800_000_000),
         feeBps: 100,
         creatorTaxBps: 100,
-        graduated: graduatedAt !== null && calls.filter((c) => c.step === 'buy').length >= graduatedAt,
-        readyToGraduate: false,
+        graduated: graduatedAt !== null && buysSoFar >= graduatedAt,
+        readyToGraduate: readyToGradAt !== null && buysSoFar >= readyToGradAt,
         };
       },
       buy: async ({ wallet }) => {
@@ -506,6 +513,87 @@ test('a position that is already gone halts the run rather than selling nothing'
   const job = engine.status(USER);
   assert.equal(job.status, 'failed');
   assert.match(job.failure.error, /nothing left to distribute/);
+});
+
+test('a thin curve quote halts the cycle BEFORE selling — no dust sell, no wedge', async () => {
+  // Cycle 1 is healthy; at cycle 2 the curve returns a dust (valid, non-zero) quote reserve,
+  // so a slice would raise almost nothing. The fix must catch this on the EXPECTED raise and
+  // halt before the sell — otherwise a dust sell is recorded done and Resume re-hits it
+  // forever, and re-selling would sell the position twice.
+  const h = harness({ targets: [W1, W2, W3], thinCurveAt: 2 });
+  await h.engine.start(USER, h.input);
+  await h.clock.drain();
+
+  const job = h.engine.status(USER);
+  assert.equal(job.status, 'failed', 'the thin cycle halts the run');
+  assert.match(job.failure.error, /too thin|NOTHING WAS SOLD/i);
+
+  // Cycle 1 sold once; cycle 2 must NOT have reached the sell at all.
+  assert.deepEqual(
+    steps(h.calls),
+    ['buy0', 'sell1', 'transfer1', 'buy1'],
+    'the run stops at cycle 2 BEFORE its sell — sell2 never happens'
+  );
+  const sells = h.calls.filter((c) => c.step === 'sell');
+  assert.equal(sells.length, 1, 'exactly one sell happened — the position was not sold a second time');
+  assert.equal(job.failure.step, 'selling', 'it halted in the sell step, before broadcasting');
+});
+
+test('a curve that becomes readyToGraduate mid-run halts before another sell', async () => {
+  // The start route refuses readyToGraduate; the engine must re-check it every cycle too, or
+  // a run whose own buys push the curve to the graduation line keeps selling into it.
+  const h = harness({ targets: [W1, W2, W3], readyToGradAt: 2 });
+  await h.engine.start(USER, h.input);
+  await h.clock.drain();
+
+  const job = h.engine.status(USER);
+  assert.equal(job.status, 'failed');
+  assert.match(job.failure.error, /ready to graduate/i);
+  assert.deepEqual(
+    steps(h.calls),
+    ['buy0', 'sell1', 'transfer1', 'buy1'],
+    'it halts at cycle 2 before selling into a graduating curve'
+  );
+});
+
+test('a graduated curve that also reports empty reserves still gives the graduated message', async () => {
+  // The empty-reserve reject must not shadow the graduated halt: a graduated curve that
+  // zeroes its reserves should still tell the operator to run the exit, not "empty reserves".
+  const h = harness({ targets: [W1, W2] });
+  const good = h.deps.trade.readCurve;
+  h.deps.trade.readCurve = async (...args) => ({
+    ...(await good(...args)),
+    graduated: true,
+    quoteReserve: 0n,
+    tokenReserve: 0n,
+  });
+  const engine = createEngine(h.deps);
+  await engine.start(USER, h.input);
+  await h.clock.drain();
+  const job = engine.status(USER);
+  assert.equal(job.status, 'failed');
+  assert.match(job.failure.error, /graduated/i, 'graduated message wins over empty-reserve');
+});
+
+test('an empty-reserve read is retried in place, not sold against', async () => {
+  // A zero-reserve read is a transient RPC glitch, not a real state: it must be retried
+  // (within the read-retry budget) rather than trusted and sold against as a dust position.
+  const h = harness({ targets: [W1, W2] });
+  let firstReadDone = false;
+  const good = h.deps.trade.readCurve;
+  h.deps.trade.readCurve = async (...args) => {
+    const c = await good(...args);
+    // Make only the very first read of cycle 1 come back with empty reserves.
+    if (!firstReadDone) {
+      firstReadDone = true;
+      return { ...c, quoteReserve: 0n, tokenReserve: 0n };
+    }
+    return c;
+  };
+  const engine = createEngine(h.deps);
+  await engine.start(USER, h.input);
+  await h.clock.drain();
+  assert.equal(engine.status(USER).status, 'complete', 'the empty read was retried and the run finished');
 });
 
 test('start refuses an interval below the floor', async () => {

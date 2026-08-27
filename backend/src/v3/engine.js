@@ -360,11 +360,39 @@ function createEngine(deps = {}) {
       record.step = 'selling';
       record.state = 'selling';
 
-      // Read fresh every cycle: a curve that graduated mid-run must stop the
-      // run here, before another sell is signed against it.
-      const curve = await retryRead(() => trade.readCurve(job.curve, { ...tradeDeps, rpc }));
+      // Read fresh every cycle, and REJECT a degenerate read so a transient RPC glitch
+      // (empty / half-migrated reserves) is retried rather than trusted. A bad read would
+      // otherwise value the whole position at dust, size a dust slice, and sell it — the
+      // exact failure that then wedges the cycle. retryRead retries a throw, so a
+      // zero-reserve read throws here and is retried instead of being sold against.
+      const curve = await retryRead(async () => {
+        const c = await trade.readCurve(job.curve, { ...tradeDeps, rpc });
+        // A graduated / ready-to-graduate curve is a REAL terminal state, not a blip — return
+        // it so the clear "graduated — run the exit" halt below fires. (A pons curve may zero
+        // its reserves at graduation; without this, that would be retried as an empty read and
+        // then halt with the less-actionable "empty reserves" message.)
+        if (c.graduated || c.readyToGraduate) return c;
+        if (c.quoteReserve <= 0n || c.tokenReserve <= 0n) {
+          throw new Error('the curve returned empty reserves this read — retrying before sizing a sell');
+        }
+        return c;
+      });
+      // A curve that graduated — OR is about to — mid-run must stop the run here, before
+      // another sell is signed against it. readyToGraduate is the same line the START route
+      // refuses on: past it the remaining position can only be sold on the migrated pool,
+      // not on the curve, so continuing would strand it. The run's own bundle buys push
+      // toward this, so a long run can cross it even though the start was clear.
       if (curve.graduated) {
-        throw new Error('the curve graduated mid-run — the remaining position cannot be sold here');
+        throw new Error(
+          'the curve graduated mid-run — the remaining position cannot be sold on the curve. Run the exit to ' +
+            'recover it on the migrated pool.'
+        );
+      }
+      if (curve.readyToGraduate) {
+        throw new Error(
+          'the curve is ready to graduate mid-run — the remaining position can only be sold on the migrated ' +
+            'pool now, not on the curve. Run the exit to recover it.'
+        );
       }
 
       const balance = await retryRead(() => trade.tokenBalance(curve.token, main.address, { ...tradeDeps, rpc }));
@@ -414,6 +442,27 @@ function createEngine(deps = {}) {
         });
         if (tokensIn > balance) tokensIn = balance;
         record.sliceWei = sliceWei;
+
+        // VIABILITY, CHECKED BEFORE THE SELL — not after. This slice's EXPECTED raise
+        // (sliceWei) must cover the main wallet's own next-round gas and still leave enough,
+        // after the Relay fee, to fund the next buy. If it cannot, HALT NOW WITHOUT SELLING.
+        // The whole point: a sell that raised dust would be recorded done and freeze
+        // record.ethRaised below the gas floor, so Resume would re-hit the same wall forever,
+        // and re-selling on Resume would sell the position twice. Halting before the sell
+        // means NOTHING was sold — so a Resume re-sizes against a fresh read and sells this
+        // slice exactly once. Healthy curve → this was a momentary thin read, Resume clears
+        // it; genuinely too small → run the Exit.
+        const expectSpendable = sliceWei - mainGas;
+        const expectTransfer = expectSpendable > 0n ? (expectSpendable * BigInt(100 - RELAY_FEE_PCT)) / 100n : 0n;
+        if (expectSpendable <= 0n || expectTransfer <= buyGas + buffer) {
+          throw new Error(
+            `this cycle's quote came back too thin to continue — the curve valued the position at ` +
+              `${formatEther(valueWei)} ETH this read, so a slice would raise about ${formatEther(sliceWei)} ETH, ` +
+              `under the ${formatEther(mainGas + buyGas + buffer)} ETH of gas + buy the next step needs. ` +
+              `NOTHING WAS SOLD. If the curve is healthy this was a momentary bad read — press Resume to retry; ` +
+              `if the position is genuinely too small to divide further, run the Exit to recover it.`
+          );
+        }
       }
 
       const sold = await trade.sell(
@@ -453,9 +502,15 @@ function createEngine(deps = {}) {
 
       const spendable = record.ethRaised - mainGas;
       if (spendable <= 0n) {
+        // The pre-sell viability check above normally stops a thin cycle BEFORE selling. If
+        // it still gets here, the sell fired against a healthy quote but FILLED far below it
+        // — the curve moved (a large sell landed) between the read and the sell. The slice's
+        // tokens are already sold, so Resume would re-hit this same step; the honest path is
+        // the Exit, which sells the remaining position at market and recovers it.
         throw new Error(
-          `this cycle raised ${formatEther(record.ethRaised)} ETH, which does not cover the ` +
-            `${formatEther(mainGas)} ETH of gas the next one needs — the slices have become too small to continue`
+          `this cycle's sell filled at only ${formatEther(record.ethRaised)} ETH — below the ${formatEther(mainGas)} ` +
+            `ETH of gas the next step needs. The curve moved between the quote and the sell, so those tokens are ` +
+            `already spent and Resume would stop here again. Run the Exit to sell the remaining position and recover it.`
         );
       }
 
