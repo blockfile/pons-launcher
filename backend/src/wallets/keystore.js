@@ -157,6 +157,13 @@ const ROLES = new Set([
   'v6dev',
   'v6main',
   'v6bundle',
+  // v7dev / v7main / v7bundle are the eighth owner — the flap.sh RELAY CHAIN
+  // (v6's strategy on a flap bonding curve, non-graduated native-quoted tokens).
+  // Names live in v7/roles.js, v7's own table (shares nothing with the others).
+  // v7dev + v7main are singletons and join SINGLETON_ROLES below; v7bundle is plural.
+  'v7dev',
+  'v7main',
+  'v7bundle',
 ]);
 // v3main joins the singletons: the chain sells from one position, and a second
 // main wallet would mean half the supply sitting somewhere the engine never
@@ -176,6 +183,10 @@ const SINGLETON_ROLES = new Set([
   // every sell). A second v6main would strand half the supply the engine never sees.
   'v6dev',
   'v6main',
+  // The v7 flap relay chain: same shape — one treasury, one main holding the whole
+  // curve position and making every sell. A second v7main would strand supply.
+  'v7dev',
+  'v7main',
 ]);
 const instances = new Map();
 // Same alphabet as users.slug() (backend/src/users/users.js). Duplicated

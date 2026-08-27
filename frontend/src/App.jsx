@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import { LazyMotion, MotionConfig, domMax } from 'framer-motion';
-import { LuRocket, LuArrowRightLeft, LuLink, LuClock, LuBanknote, LuRepeat } from 'react-icons/lu';
+import { LuRocket, LuArrowRightLeft, LuLink, LuClock, LuBanknote, LuRepeat, LuFlame } from 'react-icons/lu';
 import ThemeToggle from './ThemeToggle.jsx';
 import { api, getApiKey, setApiKey } from './api.js';
 import { shortAddress } from './format.js';
@@ -34,6 +34,10 @@ import V5Console from './v5/V5Console.jsx';
 // V6 is V3's relay chain re-pointed at letscash V4 pools — its own console, its
 // own directory, sharing no state with any tab. Same branch-not-blend rule as V3.
 import V6Console from './v6/V6Console.jsx';
+// V7 is V6's relay chain re-pointed at flap.sh bonding curves (non-graduated,
+// native-quoted flap tokens) — its own console, its own directory, sharing no
+// state with any tab. Same branch-not-blend rule as V3/V6.
+import V7Console from './v7/V7Console.jsx';
 
 const { bundleShare } = bundleShareModule;
 
@@ -57,6 +61,7 @@ const TAB_TITLE = {
   v4: 'V4 · seasoning',
   v5: 'V5 · letscash',
   v6: 'V6 · letscash relay',
+  v7: 'V7 · flap relay',
 };
 
 // What a launch cannot be armed without, in the order step 5 asks for it, and
@@ -475,6 +480,19 @@ export default function App() {
                 <LuRepeat size={16} aria-hidden="true" />
                 V6 · letscash relay
               </button>
+              {/* V7 · flap relay — HIDDEN for now. The tab is fully built and wired
+                  (import, TAB_TITLE entry, and the `tab === 'v7'` render branch below
+                  all remain); only this nav button is removed so it cannot be reached
+                  from the UI. To re-enable, uncomment this button.
+              <button
+                type="button"
+                className={tab === 'v7' ? 'side-item is-on' : 'side-item'}
+                onClick={() => setTab('v7')}
+              >
+                <LuFlame size={16} aria-hidden="true" />
+                V7 · flap relay
+              </button>
+              */}
             </nav>
             <div className="side-foot">
               <ThemeToggle />
@@ -596,6 +614,14 @@ export default function App() {
             />
           ) : tab === 'v6' ? (
             <V6Console
+              health={health}
+              credential={credential}
+              report={report}
+              output={output}
+              reportedAt={reportedAt}
+            />
+          ) : tab === 'v7' ? (
+            <V7Console
               health={health}
               credential={credential}
               report={report}

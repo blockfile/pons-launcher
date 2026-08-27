@@ -106,6 +106,9 @@ const config = {
   // v6 (letscash relay chain) — its own quote retry/backoff, mirroring v3's.
   v6RelayQuoteRetries: Math.max(0, num(process.env.V6_RELAY_QUOTE_RETRIES, 4)),
   v6RelayQuoteBackoffMs: Math.max(0, num(process.env.V6_RELAY_QUOTE_BACKOFF_MS, 2000)),
+  // v7 (flap curve relay chain) — its own quote retry/backoff, mirroring v6's.
+  v7RelayQuoteRetries: Math.max(0, num(process.env.V7_RELAY_QUOTE_RETRIES, 4)),
+  v7RelayQuoteBackoffMs: Math.max(0, num(process.env.V7_RELAY_QUOTE_BACKOFF_MS, 2000)),
 
   // ethers' tx.wait() polls every 4s by default, which is forty blocks on this
   // chain. v2 reads the curve address out of the launch receipt, so that delay
@@ -245,6 +248,52 @@ const config = {
     tickSpacing: num(process.env.LETSCASH_TICK_SPACING, 200),
     // The factory's flat launch fee, on top of firstBuyIn (0.0005 ETH observed).
     launchFeeEth: process.env.LETSCASH_LAUNCH_FEE_ETH || '0.0005',
+  },
+
+  // ── v7: flap.sh bonding-curve relay chain, on this same chain (4663) ────────
+  // V6's relay chain re-pointed at NON-GRADUATED, native-quoted flap tokens. flap
+  // is a pump.fun-style bonding curve that graduates to a UniswapV2 pair; V7 trades
+  // the state-0 CURVE only. The venue is ONE shared launcher (not a per-token pool);
+  // the token is an explicit calldata arg, and native ETH is the sentinel address(0),
+  // so every Relay hop stays native. All addresses verified on-chain; selectors and
+  // getTokenV8 offsets proven by live eth_call. Env-overridable so a redeploy needs no
+  // code change. See the flap-contract-map notes.
+  flap: {
+    // The curve orchestrator every state-0 buy/sell bottoms out in (swapExactInput /
+    // quoteExactInput). Holds the curve inventory and the native proceeds; V7 calls it
+    // DIRECTLY (bypassing the periphery router's signature gate), exactly as v3/v6 call
+    // their venues.
+    launcher: (process.env.FLAP_LAUNCHER || '0x26605f322f7fF986f381bB9A6e3f5DAb0bEaEb09').toLowerCase(),
+    // v7's FAST dusting guard (one eth_getCode, no getLogs): a real flap token is an
+    // EIP-1167 minimal-proxy CLONE of one of these masters. Seeded with the verified
+    // FlapTaxTokenV3. Comma-separated, env-overridable.
+    tokenMasters: (process.env.FLAP_TOKEN_MASTERS || '0x7777C8743C88B3aff3cf262135beF2c8b2e83333')
+      .split(',')
+      .map((s) => s.trim())
+      .filter(Boolean),
+    // WNATIVE (WETH9 on this chain) — the quoteToken() a native-quoted flap curve reports.
+    // V7 trades ONLY tokens whose quoteToken() == this, so proceeds come out as native and
+    // every Relay hop is native → native. A token quoted in another ERC-20 is refused.
+    wnative: (process.env.FLAP_WNATIVE || '0x0Bd7D308f8E1639FAb988df18A8011f41EAcAD73').toLowerCase(),
+    // The state() value that means "still on the bonding curve". A token whose state() is
+    // anything else has begun migrating / graduated to the V2 pair (a different venue) and
+    // V7 refuses it — the curve is the whole V7 surface.
+    bondingState: num(process.env.FLAP_BONDING_STATE, 0),
+    // The curve fee (bps) getFeeRate() returns — informational only; the quoter already
+    // nets it out of every quote.
+    feeBps: num(process.env.FLAP_FEE_BPS, 100),
+    // Big-buy graduation guard. Graduation fires when circulatingSupply (tokens sold off
+    // the curve) reaches dexSupplyThresh. A single buy is hard-capped by the curve at the
+    // remaining headroom, so it can never overshoot into a mid-run venue switch — but a buy
+    // sized too close SATURATES the curve (you overpay for capped tokens) and can graduate
+    // the token, stranding the chain. V7 refuses a big buy whose quoted output would consume
+    // more than this fraction of (dexSupplyThresh − circulatingSupply). 0.8 = leave 20% head.
+    maxHeadroomFrac: Number(process.env.FLAP_MAX_HEADROOM_FRAC || '0.8'),
+    // Generous gas caps (unused gas is refunded). The launcher wraps/unwraps native
+    // internally, so both legs are heavier than a bare swap. The sell is TWO txs
+    // (approve + swapExactInput); no Permit2 leg.
+    buyGas: num(process.env.FLAP_BUY_GAS, 550000),
+    sellGas: num(process.env.FLAP_SELL_GAS, 650000),
   },
 };
 

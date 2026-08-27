@@ -21,6 +21,10 @@ const v3Routes = require('./src/routes/v3');
 const v4Routes = require('./src/routes/v4');
 const v5Routes = require('./src/routes/v5');
 const v6Routes = require('./src/routes/v6');
+// V7, the flap.sh bonding-curve relay chain. Its own router and modules under src/v7,
+// no edit to any earlier tab's money path — unmounting this line removes the whole
+// strategy. See src/v7/roles.js for why it does not share with v6.
+const v7Routes = require('./src/routes/v7');
 // Holder-fee sharing: re-point a launched v2 token's creator fee at a per-token
 // distributor so it pays the holders. Its own router, sharing only the factory
 // and the keystore — see src/routes/holderFees.js. Unrelated to distributorRoutes
@@ -74,6 +78,7 @@ app.use('/api', v3Routes);
 app.use('/api', v4Routes);
 app.use('/api', v5Routes);
 app.use('/api', v6Routes);
+app.use('/api', v7Routes);
 app.use('/api', holderFeeRoutes);
 
 app.use((req, res) => {
