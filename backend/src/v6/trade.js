@@ -226,36 +226,39 @@ async function hasRecentSell({ pool }, deps = {}) {
   return found;
 }
 
-// Fast sellability scan: an actively-traded token has a sell in the RECENT window (one
-// quick call); a quiet/honeypot pool is then settled by ONE whole-range call (few logs to
-// return); only if the node refuses that range do we fall back to a bounded windowed walk.
-// This replaces the old always-windowed scan that took ~10s on a no-sell token.
+// Bound any single RPC read so a slow/hung endpoint cannot push a request toward the 60s
+// gateway timeout. On expiry the read rejects and the caller treats sellability as
+// "could not verify" — never a 60s hang.
+const SCAN_CALL_TIMEOUT_MS = 12_000;
+function withTimeout(promise, ms, label) {
+  let timer;
+  const cap = new Promise((_, reject) => {
+    timer = setTimeout(() => reject(new Error(`${label} timed out after ${ms}ms`)), ms);
+    if (timer.unref) timer.unref();
+  });
+  return Promise.race([promise, cap]).finally(() => clearTimeout(timer));
+}
+
+// Fast, BOUNDED sellability scan — at most two getLogs calls, each time-capped:
+//   1. the RECENT window (an actively-traded token's sell is here — one quick call);
+//   2. the WHOLE history in one call (settles a quiet/honeypot pool; few logs to return).
+// Returns true (a sell landed) or false (the whole range was read and held none). If the
+// node REFUSES the whole-range call or it times out, this THROWS "inconclusive" rather than
+// grinding dozens of windows — the caller then allows the run with a warning instead of
+// blocking a possibly-fine token or hanging until a 504.
 async function scanForSell(rpc, base, head, deps) {
   const recentFrom = Math.max(0, head - SELL_SCAN_WINDOW + 1);
   try {
-    if (anySell(await rpc.getLogs({ ...base, fromBlock: recentFrom, toBlock: head }))) return true;
+    if (anySell(await withTimeout(rpc.getLogs({ ...base, fromBlock: recentFrom, toBlock: head }), SCAN_CALL_TIMEOUT_MS, 'sell scan (recent)'))) {
+      return true;
+    }
   } catch {
-    /* fall through */
+    /* recent window unavailable — the whole-range call below is the real decider */
   }
   const floor = deps.floor ?? config.letscash.factoryDeployBlock ?? 0;
-  try {
-    return anySell(await rpc.getLogs({ ...base, fromBlock: floor, toBlock: head }));
-  } catch {
-    /* whole range refused — windowed fallback below */
-  }
-  const wFloor = Math.max(0, head - SELL_SCAN_MAX_BLOCKS);
-  for (let to = head; to >= wFloor; to -= SELL_SCAN_WINDOW) {
-    const from = Math.max(wFloor, to - SELL_SCAN_WINDOW + 1);
-    let logs;
-    try {
-      logs = await rpc.getLogs({ ...base, fromBlock: from, toBlock: to });
-    } catch {
-      continue;
-    }
-    if (anySell(logs)) return true;
-    if (from === wFloor) break;
-  }
-  return false;
+  // A throw here (range refused / timed out) propagates as "inconclusive" — deliberately
+  // NOT caught, so we never fall into a many-window grind.
+  return anySell(await withTimeout(rpc.getLogs({ ...base, fromBlock: floor, toBlock: head }), SCAN_CALL_TIMEOUT_MS, 'sell scan (full)'));
 }
 
 /**

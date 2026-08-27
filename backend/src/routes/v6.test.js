@@ -75,3 +75,15 @@ test('a normally-quotable sell is priced with no estimate and no block', async (
   assert.equal(feas.pricingEstimated, false);
   assert.equal(feas.positionWei, 900_000n);
 });
+
+test('sell quote reverts and the sellability scan is INCONCLUSIVE (throws) → allowed, sellUnverified', async () => {
+  const trade = {
+    quoteBuyOut: async () => 500n,
+    quoteSellOut: revertingSell,
+    hasRecentSell: async () => { throw new Error('the node refused the range'); },
+  };
+  const feas = await feasibilityOf(RUN, { trade, ...FEES });
+  assert.equal(feas.sellsRevert, false, 'an inconclusive scan never blocks');
+  assert.equal(feas.sellUnverified, true);
+  assert.equal(feas.pricingEstimated, true);
+});

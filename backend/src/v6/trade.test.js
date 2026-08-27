@@ -135,3 +135,8 @@ test('hasRecentSell returns false when the pool has no swaps at all', async () =
   const rpc = { getBlockNumber: async () => 1000, getLogs: async () => [] };
   assert.equal(await trade.hasRecentSell({ pool: POOL }, { rpc }), false);
 });
+
+test('hasRecentSell THROWS (inconclusive) when the whole-range call is refused — not false', async () => {
+  const rpc = { getBlockNumber: async () => 1000, getLogs: async () => { throw new Error('range refused'); } };
+  await assert.rejects(() => trade.hasRecentSell({ pool: POOL }, { rpc }));
+});

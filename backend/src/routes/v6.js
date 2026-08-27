@@ -156,28 +156,38 @@ async function feasibilityOf(run, deps = {}) {
   let positionWei = 0n;
   let sellsRevert = false;
   let pricingEstimated = false;
+  let sellUnverified = false;
   let sellError = null;
   if (tokensBought > 0n) {
     try {
       positionWei = await t.quoteSellOut({ token: run.token, pool: run.pool, tokensIn: tokensBought }, deps);
     } catch (err) {
       sellError = revertSelector(err);
-      const sellable = await t.hasRecentSell({ pool: run.pool }, deps).catch(() => false);
-      if (sellable) {
-        // Sells DO land on this pool — the quoter just can't price them. Estimate the
-        // position as roughly the ETH put in (tax/impact aside); the engine sizes each
-        // cycle from the ACTUAL balance anyway, so this only affects the preview figures.
+      try {
+        const sellable = await t.hasRecentSell({ pool: run.pool }, deps);
+        if (sellable) {
+          // Sells DO land on this pool — the quoter just can't price them. Estimate the
+          // position as roughly the ETH put in (tax/impact aside); the engine sizes each
+          // cycle from the ACTUAL balance anyway, so this only affects the preview figures.
+          pricingEstimated = true;
+          positionWei = run.bigBuyWei;
+        } else {
+          sellsRevert = true; // whole history read, NO sell has ever landed → buy-only honeypot
+          positionWei = 0n;
+        }
+      } catch {
+        // Could not verify sellability (the node refused the range or it timed out). Do NOT
+        // block a possibly-fine token on an inconclusive scan, and do NOT hang toward a 504 —
+        // allow with an estimate and a warning; the first real sell is the ground truth.
         pricingEstimated = true;
+        sellUnverified = true;
         positionWei = run.bigBuyWei;
-      } else {
-        sellsRevert = true; // buys but no sell has ever landed → buy-only honeypot
-        positionWei = 0n;
       }
     }
   }
 
-  if (!walletCount) return { feasible: false, perWalletWei: 0n, reason: 'no-wallets', positionWei, tokensBought, sellsRevert, pricingEstimated, sellError };
-  if (sellsRevert) return { feasible: false, perWalletWei: 0n, reason: 'sells-revert', positionWei: 0n, tokensBought, sellsRevert, pricingEstimated: false, sellError };
+  if (!walletCount) return { feasible: false, perWalletWei: 0n, reason: 'no-wallets', positionWei, tokensBought, sellsRevert, pricingEstimated, sellUnverified, sellError };
+  if (sellsRevert) return { feasible: false, perWalletWei: 0n, reason: 'sells-revert', positionWei: 0n, tokensBought, sellsRevert, pricingEstimated: false, sellUnverified: false, sellError };
 
   const fees = await getFeesFn(engine.FEE_BUMP_PCT);
   const gas = engine.gasFigures(fees);
@@ -189,7 +199,7 @@ async function feasibilityOf(run, deps = {}) {
     buffer: gas.buffer,
     relayFeePct: engine.RELAY_FEE_PCT,
   });
-  return { ...est, positionWei, tokensBought, sellsRevert: false, pricingEstimated, sellError };
+  return { ...est, positionWei, tokensBought, sellsRevert: false, pricingEstimated, sellUnverified, sellError };
 }
 
 /**
@@ -234,7 +244,14 @@ async function buildPlan(body, ks, deps = {}) {
         'own sell router, not a direct swap).'
     );
   } else {
-    if (feas.pricingEstimated) {
+    if (feas.sellUnverified) {
+      warnings.push(
+        `letscash's quoter could not price the sell${feas.sellError ? ` (custom error ${feas.sellError})` : ''} AND ` +
+          "the sell-history check could not complete (the RPC refused the range or timed out), so sellability " +
+          "was NOT verified. The position value here is a rough estimate. The run is allowed — most letscash " +
+          'tokens sell fine — but confirm you can sell this one; the first cycle sell is the real test.'
+      );
+    } else if (feas.pricingEstimated) {
       warnings.push(
         `letscash's quoter reverts on sells for this pool${feas.sellError ? ` (custom error ${feas.sellError})` : ''}, ` +
           'so the position value here is a ROUGH ESTIMATE (about the ETH put in). This does NOT mean the token ' +
@@ -292,6 +309,8 @@ async function buildPlan(body, ks, deps = {}) {
     // Soft: the quoter could not price the sell, but sells DO land on-chain — the token
     // is sellable and the position figures are estimated. Not a block.
     pricingEstimated: feas.pricingEstimated,
+    // Soft: sellability could not be verified (RPC refused/timed out). Allowed, warned.
+    sellUnverified: feas.sellUnverified,
     sellError: feas.sellError,
     targets: run.targets.map((x, i) => ({ index: i + 1, walletId: x.walletId, address: x.address })),
     position: {
