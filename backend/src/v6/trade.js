@@ -200,34 +200,60 @@ async function poolFee({ token, quote = 'eth', pool }, deps = {}) {
  * that moved ETH OUT to the swapper (amount0 > 0). A token with buys but never a single
  * sell is a real buy-only honeypot; one with sells is sellable. Reads only.
  */
-const _soldPools = new Set(); // poolIds known to have had a sell (once true, always true)
+// poolId -> { sold, at }. A sell is permanent (cache forever); a "no sell yet" is cached
+// only briefly, so a fresh token that has not sold is re-checked soon but a honeypot the
+// operator retries is not re-scanned from scratch each time.
+const _soldCache = new Map();
+const NO_SELL_TTL_MS = 60_000;
+
+function anySell(logs) {
+  return logs.some((log) => POOL_SWAP_IFACE.parseLog({ topics: [...log.topics], data: log.data }).args.amount0 > 0n);
+}
 
 async function hasRecentSell({ pool }, deps = {}) {
   const w = wire(deps);
   const rpc = w.rpc;
   const live = !deps.rpc && !deps.head;
-  if (live && _soldPools.has(pool.poolId)) return true; // a pool that has sold, always has
-  const address = getAddress(config.letscash.poolManager);
-  const topic = POOL_SWAP_IFACE.getEvent('Swap').topicHash;
-  const base = { address, topics: [topic, pool.poolId] };
+  if (live) {
+    const c = _soldCache.get(pool.poolId);
+    if (c && (c.sold || Date.now() - c.at < NO_SELL_TTL_MS)) return c.sold;
+  }
+
+  const base = { address: getAddress(config.letscash.poolManager), topics: [POOL_SWAP_IFACE.getEvent('Swap').topicHash, pool.poolId] };
   const head = deps.head ?? (await rpc.getBlockNumber());
-  const floor = Math.max(0, head - SELL_SCAN_MAX_BLOCKS);
-  for (let to = head; to >= floor; to -= SELL_SCAN_WINDOW) {
-    const from = Math.max(floor, to - SELL_SCAN_WINDOW + 1);
+  const found = await scanForSell(rpc, base, head, deps);
+  if (live) _soldCache.set(pool.poolId, { sold: found, at: Date.now() });
+  return found;
+}
+
+// Fast sellability scan: an actively-traded token has a sell in the RECENT window (one
+// quick call); a quiet/honeypot pool is then settled by ONE whole-range call (few logs to
+// return); only if the node refuses that range do we fall back to a bounded windowed walk.
+// This replaces the old always-windowed scan that took ~10s on a no-sell token.
+async function scanForSell(rpc, base, head, deps) {
+  const recentFrom = Math.max(0, head - SELL_SCAN_WINDOW + 1);
+  try {
+    if (anySell(await rpc.getLogs({ ...base, fromBlock: recentFrom, toBlock: head }))) return true;
+  } catch {
+    /* fall through */
+  }
+  const floor = deps.floor ?? config.letscash.factoryDeployBlock ?? 0;
+  try {
+    return anySell(await rpc.getLogs({ ...base, fromBlock: floor, toBlock: head }));
+  } catch {
+    /* whole range refused — windowed fallback below */
+  }
+  const wFloor = Math.max(0, head - SELL_SCAN_MAX_BLOCKS);
+  for (let to = head; to >= wFloor; to -= SELL_SCAN_WINDOW) {
+    const from = Math.max(wFloor, to - SELL_SCAN_WINDOW + 1);
     let logs;
     try {
       logs = await rpc.getLogs({ ...base, fromBlock: from, toBlock: to });
     } catch {
-      continue; // a refused window is not evidence either way — keep scanning
+      continue;
     }
-    for (const log of logs) {
-      const p = POOL_SWAP_IFACE.parseLog({ topics: [...log.topics], data: log.data });
-      if (p.args.amount0 > 0n) {
-        if (live) _soldPools.add(pool.poolId);
-        return true; // ETH left the pool to a seller
-      }
-    }
-    if (from === floor) break;
+    if (anySell(logs)) return true;
+    if (from === wFloor) break;
   }
   return false;
 }
