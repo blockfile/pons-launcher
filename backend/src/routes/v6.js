@@ -40,6 +40,39 @@ const seasoned = require('../v4/seasoned');
 
 const router = express.Router();
 
+// A hard ceiling on how long the pre-flight (resolve + feasibility) may run before a
+// chain route answers. A degraded / rate-limited RPC can make the pool read and the live
+// quotes retry for minutes — long past the 60s gateway — during which the operator sees
+// only "working…", then the modal gives up, WHILE the handler keeps running and eventually
+// starts the run anyway (the big buy fires minutes later, out of nowhere — the desync a
+// operator hit). Bounding it FAIL-CLOSED: if validation cannot finish in time the route
+// throws and NOTHING is started, so the operator gets a clear "try again" instead of a run
+// that begins long after they gave up. Env-overridable; kept under the 60s gateway.
+const PREFLIGHT_TIMEOUT_MS = Number(process.env.V6_PREFLIGHT_TIMEOUT_MS) || 45_000;
+
+/**
+ * Race a pre-flight promise against a deadline. On expiry it REJECTS (the caller throws and
+ * starts nothing); the losing promise keeps running to completion in the background but its
+ * result is discarded, so no run is ever scheduled off a timed-out validation.
+ */
+function withDeadline(promise, ms, label) {
+  let timer;
+  const cap = new Promise((_, reject) => {
+    timer = setTimeout(
+      () =>
+        reject(
+          new Error(
+            `${label} timed out after ${Math.round(ms / 1000)}s — the RPC is slow right now, so nothing was ` +
+              `started. Try again in a moment.`
+          )
+        ),
+      ms
+    );
+    if (timer.unref) timer.unref();
+  });
+  return Promise.race([promise, cap]).finally(() => clearTimeout(timer));
+}
+
 /** BigInts out of the response — local copy so this file stays detachable. */
 function jsonSafe(value) {
   if (typeof value === 'bigint') return value.toString();
@@ -511,7 +544,9 @@ router.get('/v6/chain', requireApiKey, (req, res, next) => {
 // sell and the current pool tax. Broadcasts nothing.
 router.post('/v6/chain/plan', requireApiKey, async (req, res, next) => {
   try {
-    res.json(jsonSafe(await buildPlan(req.body || {}, keystoreFor(req.user.id))));
+    res.json(
+      jsonSafe(await withDeadline(buildPlan(req.body || {}, keystoreFor(req.user.id)), PREFLIGHT_TIMEOUT_MS, 'the plan'))
+    );
   } catch (err) {
     next(err);
   }
@@ -525,8 +560,17 @@ router.post('/v6/chain/start', requireApiKey, async (req, res, next) => {
         'starting a v6 run sells and re-buys the whole position with no sell floor — requires { confirm: true }'
       );
     }
-    const run = await resolveRun(req.body || {}, keystoreFor(req.user.id));
-    const feas = await feasibilityOf(run);
+    // Both resolve + feasibility under ONE deadline, so a slow RPC fails cleanly here (before
+    // engine.start) instead of hanging past the gateway and starting the run minutes later.
+    const { run, feas } = await withDeadline(
+      (async () => {
+        const run = await resolveRun(req.body || {}, keystoreFor(req.user.id));
+        const feas = await feasibilityOf(run);
+        return { run, feas };
+      })(),
+      PREFLIGHT_TIMEOUT_MS,
+      'validating the run'
+    );
     // A HARD refusal — no force bypass. If the token's sells revert, the big buy would
     // land and then every sell (and the exit) would fail, stranding the ETH in tokens
     // that cannot be sold. This is the exit-side dusting guard.
