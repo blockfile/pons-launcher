@@ -599,13 +599,15 @@ function createEngine(deps = {}) {
       );
       if (out.status === 'reverted') throw new Error('the buy reverted');
 
-      record.buyWei = spend;
+      // Report what was ACTUALLY spent — trade.buy may trim the spend to fit a fee tick.
+      const actualSpend = out.spent ?? spend;
+      record.buyWei = actualSpend;
       record.buyHash = out.hash;
       record.tokensOut = out.tokensOut;
       record.buyDone = true;
       log(
         job.userId,
-        `[v3] cycle ${index}/${job.targets.length}: ${target.address} bought with ${formatEther(spend)} ETH`,
+        `[v3] cycle ${index}/${job.targets.length}: ${target.address} bought with ${formatEther(actualSpend)} ETH`,
         { jobId: job.id, walletId: target.walletId, hash: out.hash }
       );
     }

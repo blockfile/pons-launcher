@@ -133,6 +133,29 @@ test('a buy reports the tokens it actually received, as a balance delta', async 
   assert.equal(out.blockNumber, 4242);
 });
 
+test('a buy trims its value to fit gas when the balance is tight', async () => {
+  // The wallet can afford the gas plus 0.5 ETH of buy, but was ASKED to buy 1 ETH — a fee
+  // tick since the caller sized it. The buy must shrink to fit rather than fail to broadcast
+  // ("insufficient funds for intrinsic transaction cost").
+  const maxGas = BigInt(require('../config').buyGasLimit) * FEES.maxFeePerGas;
+  const balance = maxGas + parseEther('0.5');
+  const h = harness({ ethBalances: { [WALLET.address]: balance } });
+  await trade.buy({ wallet: WALLET, curveAddress: CURVE, amountWei: parseEther('1') }, h.deps);
+  const [tx] = h.sent;
+  assert.equal(tx.value, balance - maxGas, 'the buy value is trimmed to balance minus its own gas');
+  assert.ok(tx.value < parseEther('1'), 'it spent less than asked so value + gas fits the balance');
+});
+
+test('a buy that cannot even cover its own gas throws before broadcasting', async () => {
+  const maxGas = BigInt(require('../config').buyGasLimit) * FEES.maxFeePerGas;
+  const h = harness({ ethBalances: { [WALLET.address]: maxGas - 1n } });
+  await assert.rejects(
+    trade.buy({ wallet: WALLET, curveAddress: CURVE, amountWei: parseEther('1') }, h.deps),
+    /does not cover the buy's own gas/
+  );
+  assert.equal(h.sent.length, 0, 'nothing was broadcast');
+});
+
 test('a sell signs approve and sell at consecutive nonces from the same wallet', async () => {
   const h = harness();
   await trade.sell({ wallet: WALLET, curveAddress: CURVE, token: TOKEN, tokensIn: TOKENS(100) }, h.deps);

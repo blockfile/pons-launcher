@@ -37,7 +37,7 @@
  * same technique fireSell uses, arrived at for the same reason.
  */
 
-const { Contract, getAddress } = require('ethers');
+const { Contract, formatEther, getAddress } = require('ethers');
 const config = require('../config');
 const { provider } = require('../evm/provider');
 const { rpcMessage } = require('../evm/errors');
@@ -166,31 +166,49 @@ async function tokenBalance(token, owner, deps = {}) {
  */
 async function buy({ wallet, curveAddress, amountWei }, deps = {}) {
   const w = wire(deps);
-  const amount = BigInt(amountWei);
+  let amount = BigInt(amountWei);
   if (amount <= 0n) throw new Error('a buy needs a positive amount');
 
   const c = w.curve(curveAddress, w.rpc);
   const token = getAddress(deps.token || (await c.token()));
-  const tx = await c.buy.populateTransaction(amount, 0n, getAddress(wallet.address), {
-    value: amount,
-  });
+  const address = getAddress(wallet.address);
 
   if (w.dryRun) {
     return { simulated: true, hash: null, status: 'simulated', blockNumber: null, tokensOut: 0n };
   }
 
   const fees = await feesFor(w);
-  const before = await tokenBalance(token, wallet.address, deps);
-  const nonce = await w.rpc.getTransactionCount(getAddress(wallet.address), 'pending');
+  const gasLimit = BigInt(config.buyGasLimit);
+
+  // TRIM THE BUY TO FIT ITS OWN GAS. The caller sizes `amount` against a fee read a moment
+  // earlier (the engine's per-cycle gasFor); if the base fee ticked up since, amount + gas can
+  // exceed the wallet's live balance and the broadcast fails outright ("insufficient funds for
+  // intrinsic transaction cost"), stranding the cycle with the Relay-filled ETH sitting unused
+  // in the buyer. Re-check against the fee THIS tx will actually pay and the live balance, and
+  // spend a little less rather than fail. The big buy is well-funded (the route pre-checks main's
+  // balance), so this only ever trims a razor-thin bundle buy — it never shrinks the big buy.
+  const maxGasCost = gasLimit * BigInt(fees.maxFeePerGas ?? fees.gasPrice ?? 0n);
+  const ethBalance = BigInt(await w.rpc.getBalance(address));
+  if (ethBalance <= maxGasCost) {
+    throw new Error(
+      `buy from ${address} cannot proceed: ${formatEther(ethBalance)} ETH does not cover the buy's own gas ` +
+        `(${formatEther(maxGasCost)} ETH)`
+    );
+  }
+  if (amount + maxGasCost > ethBalance) {
+    amount = ethBalance - maxGasCost; // spend slightly less so value + gas always fits the balance
+  }
+
+  const tx = await c.buy.populateTransaction(amount, 0n, address, { value: amount });
+  const before = await tokenBalance(token, address, deps);
+  const nonce = await w.rpc.getTransactionCount(address, 'pending');
 
   let hash;
   try {
-    const sent = await w.ks
-      .signer(wallet.id, w.rpc)
-      .sendTransaction({ ...tx, nonce, gasLimit: BigInt(config.buyGasLimit), ...fees });
+    const sent = await w.ks.signer(wallet.id, w.rpc).sendTransaction({ ...tx, nonce, gasLimit, ...fees });
     hash = sent.hash;
   } catch (err) {
-    throw new Error(`buy from ${wallet.address} failed to broadcast: ${rpcMessage(err)}`);
+    throw new Error(`buy from ${address} failed to broadcast: ${rpcMessage(err)}`);
   }
 
   const receipt = await w.await(w.rpc, hash);
@@ -202,6 +220,7 @@ async function buy({ wallet, curveAddress, amountWei }, deps = {}) {
     status,
     blockNumber: receipt?.blockNumber ?? null,
     tokensOut: after > before ? after - before : 0n,
+    spent: amount, // what was actually spent, after any trim-to-fit — so callers report the truth
   };
 }
 
