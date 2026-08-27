@@ -76,6 +76,15 @@ const RELAY_DEPOSIT_GAS = 50_000n;
 // main wallet and comes out at the exit.
 const RELAY_FEE_PCT = 3;
 
+// How far below its quote a CYCLE sell may fill before it REVERTS instead of dust-filling
+// the slice. A dust fill — the curve moved between the quote and the sell, or a tax bit — is a
+// ~99% miss, while a normal cycle's price impact is a fraction of a percent, so this sits
+// safely in the gap and catches only catastrophic misfills. minQuoteOut = expected *
+// (100 - this)/100; a rejected fill reverts (nothing sold, resume-safe) rather than spending
+// the slice for nothing. The EXIT stays floor-free (it must always liquidate). Env-tunable;
+// set to 100 to disable (minQuoteOut 0 = the old always-fill behaviour).
+const CYCLE_SELL_MAX_SLIPPAGE_PCT = Number(process.env.V3_CYCLE_SELL_MAX_SLIPPAGE_PCT) || 50;
+
 // Same headroom trade.js uses, so the gas figures the sell is sized against are
 // the ones the transactions will actually quote.
 const FEE_BUMP_PCT = 25;
@@ -465,11 +474,30 @@ function createEngine(deps = {}) {
         }
       }
 
+      // The sell FLOOR (see trade.js): quote what the curve should pay for tokensIn and refuse
+      // a fill more than CYCLE_SELL_MAX_SLIPPAGE_PCT below it. A dust fill then REVERTS instead
+      // of spending the slice's tokens for nothing; a reverted sell sold nothing, so the cycle
+      // halts resume-safe (sellDone stays false) and retries once the price is stable.
+      const expectedWei = sizing.quoteSellOut({
+        tokensIn,
+        quoteReserve: curve.quoteReserve,
+        tokenReserve: curve.tokenReserve,
+        feeBps: curve.feeBps,
+        creatorTaxBps: curve.creatorTaxBps,
+      });
+      const minQuoteOut = (expectedWei * BigInt(100 - CYCLE_SELL_MAX_SLIPPAGE_PCT)) / 100n;
+
       const sold = await trade.sell(
-        { wallet: main, curveAddress: job.curve, token: curve.token, tokensIn },
+        { wallet: main, curveAddress: job.curve, token: curve.token, tokensIn, minQuoteOut },
         { ...tradeDeps, keystore: ks, rpc }
       );
-      if (sold.status === 'reverted') throw new Error('the sell reverted');
+      if (sold.status === 'reverted') {
+        throw new Error(
+          `the sell reverted — the curve would have paid more than ${CYCLE_SELL_MAX_SLIPPAGE_PCT}% below the quote ` +
+            `(it moved between the quote and the sell, or a tax bit), so the floor rejected it. NOTHING WAS SOLD, so ` +
+            `the position is intact — Resume retries when the price is stable, or run the Exit.`
+        );
+      }
 
       record.tokensSold = tokensIn;
       record.ethRaised = sold.ethReceived;

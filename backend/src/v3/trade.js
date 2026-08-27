@@ -13,10 +13,15 @@
  * a time, and can therefore read the chain between them, which is what lets a
  * sell's actual proceeds decide the size of the transfer that follows it.
  *
- * NO SLIPPAGE FLOOR ON EITHER SIDE. minTokensOut and minQuoteOut are both 0.
- * The engine's guarantee is that every wallet ends up having bought, and a
- * floor turns that into a maybe — the same decision, for the same reason, that
- * prepareSell's header records. What protects the run instead is that sizing.js
+ * BUYS TAKE NO FLOOR (minTokensOut 0): the engine's guarantee is that every
+ * wallet ends up having bought, and a buy floor turns that into a maybe — the
+ * same decision prepareSell's header records. The EXIT's sells also take no
+ * floor (it must always liquidate). But a CYCLE sell accepts an optional
+ * minQuoteOut (default 0): the engine passes one so a sell that would fill far
+ * below its quote — the curve having moved between the quote and the sell, or a
+ * tax biting — REVERTS instead of dust-filling the slice. A reverted sell sold
+ * nothing, so the cycle halts resume-safe (no double sell) and retries when the
+ * price is stable. What protects the run when the floor is 0 is that sizing.js
  * oversells slightly and the transfer is sized against the ETH that actually
  * arrived, not against the estimate.
  *
@@ -209,10 +214,11 @@ async function buy({ wallet, curveAddress, amountWei }, deps = {}) {
  *
  * @returns {Promise<{approveHash, sellHash, status, blockNumber, ethReceived}>}
  */
-async function sell({ wallet, curveAddress, token, tokensIn }, deps = {}) {
+async function sell({ wallet, curveAddress, token, tokensIn, minQuoteOut = 0n }, deps = {}) {
   const w = wire(deps);
   const amount = BigInt(tokensIn);
   if (amount <= 0n) throw new Error('a sell needs a positive token amount');
+  const floor = BigInt(minQuoteOut);
 
   const address = getAddress(wallet.address);
   const tokenAddress = getAddress(token);
@@ -232,7 +238,7 @@ async function sell({ wallet, curveAddress, token, tokensIn }, deps = {}) {
   const approveTx = await w
     .erc20(tokenAddress, w.rpc)
     .approve.populateTransaction(getAddress(curveAddress), amount);
-  const sellTx = await c.sell.populateTransaction(amount, 0n, address);
+  const sellTx = await c.sell.populateTransaction(amount, floor, address);
 
   if (w.dryRun) {
     return {

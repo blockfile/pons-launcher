@@ -65,6 +65,7 @@ function harness({
   graduatedAt = null, // cycle index at which the curve reports graduated
   readyToGradAt = null, // cycle index at which the curve reports readyToGraduate
   thinCurveAt = null, // cycle index at which the curve returns a dust quote reserve
+  sellRevertAt = null, // cycle index at which the sell reverts (the floor rejected the fill)
   clock = fakeClock(),
   cycleCostMs = 0, // how long each cycle's work takes on the fake clock
   readFailTimes = 0, // make the FIRST readCurve throw this many times, then succeed
@@ -145,6 +146,11 @@ function harness({
         const index = calls.filter((c) => c.step === 'sell').length + 1;
         note('sell', index, { tokensIn });
         if (fail?.step === 'sell' && fail.index === index) throw new Error('sell reverted');
+        // The floor rejected the fill: the curve reverts and NOTHING is sold (the position is
+        // not decremented), the exact resume-safe property the floor exists for.
+        if (sellRevertAt !== null && index >= sellRevertAt) {
+          return { approveHash: `0xap${index}`, sellHash: `0xse${index}`, status: 'reverted', blockNumber: 1, ethReceived: 0n, tokensIn };
+        }
         // The position shrinks by what was sold, so the next cycle's slice is
         // drawn against a genuinely smaller balance.
         position -= tokensIn;
@@ -554,6 +560,27 @@ test('a curve that becomes readyToGraduate mid-run halts before another sell', a
     ['buy0', 'sell1', 'transfer1', 'buy1'],
     'it halts at cycle 2 before selling into a graduating curve'
   );
+});
+
+test('a cycle sell rejected by the floor halts resume-safe — nothing sold, no double sell', async () => {
+  // At cycle 2 the sell reverts (the curve would have filled below the minQuoteOut floor). The
+  // engine must halt with the position INTACT (the reverted sell decremented nothing) and
+  // sellDone false, so Resume re-sizes and sells exactly once when the price is stable.
+  const h = harness({ targets: [W1, W2, W3], sellRevertAt: 2 });
+  await h.engine.start(USER, h.input);
+  const posBefore = h.position();
+  await h.clock.drain();
+
+  const job = h.engine.status(USER);
+  assert.equal(job.status, 'failed');
+  assert.match(job.failure.error, /reverted/i);
+  assert.equal(job.failure.step, 'selling', 'it halts in the sell step');
+  // cycle 1 sold and moved on; cycle 2's sell was attempted, reverted, and stopped the run.
+  assert.deepEqual(steps(h.calls), ['buy0', 'sell1', 'transfer1', 'buy1', 'sell2']);
+  // Cycle 1 reduced the position once; cycle 2's revert reduced it by nothing.
+  const sells = h.calls.filter((c) => c.step === 'sell');
+  assert.equal(sells.length, 2, 'sell2 was attempted');
+  assert.equal(h.position(), posBefore - sells[0].tokensIn, 'only cycle 1 sold — the reverted cycle 2 sold nothing');
 });
 
 test('a graduated curve that also reports empty reserves still gives the graduated message', async () => {
