@@ -24,11 +24,17 @@ function harness({
   tokenBalances = { [WALLET.address]: TOKENS(1000) },
   sellRevert = false,
   gasUsed = 100_000n,
+  staleAfterSell = 0,
 } = {}) {
   const sent = [];
   const receipts = new Map();
   const eth = { ...ethBalances };
   const tok = { ...tokenBalances };
+  // Model a load-balanced RPC where the first `staleAfterSell` balance reads AFTER a sell land
+  // on a node that has not yet applied the sell's block, returning the pre-sell balance.
+  let sellSent = false;
+  let preSellEth = 0n;
+  let postSellReads = 0;
 
   function receiptFor(hash, ok = true) {
     return { status: ok ? 1 : 0, blockNumber: 4242, gasUsed, effectiveGasPrice: 1_000_000_000n, hash };
@@ -36,7 +42,13 @@ function harness({
 
   const deps = {
     rpc: {
-      getBalance: async (a) => eth[a] ?? 0n,
+      getBalance: async (a) => {
+        if (a === WALLET.address && sellSent && postSellReads < staleAfterSell) {
+          postSellReads += 1;
+          return preSellEth; // a node lagging the sell's block
+        }
+        return eth[a] ?? 0n;
+      },
       getTransactionCount: async () => 11,
     },
     keystore: {
@@ -51,6 +63,8 @@ function harness({
             tok[WALLET.address] = (tok[WALLET.address] ?? 0n) + TOKENS(500);
             receipts.set(hash, receiptFor(hash));
           } else if (tx.__kind === 'sell') {
+            preSellEth = eth[WALLET.address];
+            sellSent = true;
             if (!sellRevert) {
               eth[WALLET.address] += parseEther('1');
               tok[WALLET.address] -= tx.__tokensIn;
@@ -172,6 +186,20 @@ test('the approval is for exactly the tokens being sold, never unlimited', async
   const [approve] = h.sent;
   assert.equal(approve.__args.amount, TOKENS(100));
   assert.equal(approve.__args.spender, CURVE);
+});
+
+test('a stale post-sell balance read is retried, not reported as dust', async () => {
+  // The first 2 balance reads after the sell land on a node lagging the sell's block (it
+  // returns the pre-sell balance). With a floor, the sell must re-read until the real proceeds
+  // appear rather than reporting a phantom dust amount that would falsely halt the cycle — the
+  // exact "sell filled at only 0.0000032 ETH" false halt.
+  const h = harness({ staleAfterSell: 2 });
+  const out = await trade.sell(
+    { wallet: WALLET, curveAddress: CURVE, token: TOKEN, tokensIn: TOKENS(100), minQuoteOut: parseEther('0.5') },
+    { ...h.deps, sleepFn: async () => {} }
+  );
+  assert.equal(out.status, 'confirmed');
+  assert.equal(out.ethReceived, parseEther('1'), 'the real proceeds are reported, not the stale-read dust');
 });
 
 test('a sell asks for no minimum out and pays itself', async () => {

@@ -69,6 +69,16 @@ const SELL_GAS = 600_000n;
 // sell queued behind it at the next nonce.
 const FEE_BUMP_PCT = 25;
 
+// After a CONFIRMED cycle sell (one that carried a minQuoteOut floor), the curve is guaranteed
+// to have paid at least that floor. If the post-sell balance read shows less, the node that
+// answered had not yet applied the sell's block — a STALE READ on a load-balanced RPC, which
+// otherwise mis-reports a perfectly healthy sell as "filled at dust" and halts the cycle on a
+// phantom shortfall. These bound a short re-read: each getBalance may land on a fresher node,
+// and the largest delta wins. Env-tunable.
+const STALE_READ_TRIES = Number(process.env.V3_STALE_READ_TRIES) || 6;
+const STALE_READ_MS = Number(process.env.V3_STALE_READ_MS) || 1000;
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+
 function curveContract(address, runner = provider) {
   return new Contract(getAddress(address), CURVE_V2_ABI, runner);
 }
@@ -99,6 +109,7 @@ function wire(deps = {}) {
     dryRun: deps.dryRun ?? config.dryRun,
     fees: deps.fees || null,
     getFeesFn: deps.getFeesFn || getFees,
+    sleepFn: deps.sleepFn || sleep,
   };
 }
 
@@ -303,9 +314,19 @@ async function sell({ wallet, curveAddress, token, tokensIn, minQuoteOut = 0n },
   // is simply poorer — never report that as income.
   let ethReceived = 0n;
   if (status === 'confirmed') {
-    const after = BigInt(await w.rpc.getBalance(address));
-    const delta = after - before + spentOn(approveReceipt) + spentOn(sellReceipt);
-    ethReceived = delta > 0n ? delta : 0n;
+    const gasBack = spentOn(approveReceipt) + spentOn(sellReceipt);
+    let best = BigInt(await w.rpc.getBalance(address)) - before + gasBack;
+    // A confirmed sell with a floor paid AT LEAST `floor` (the curve enforces minQuoteOut). A
+    // measured delta below that means the balance came from a node lagging the sell's block —
+    // re-read (each call may hit a fresher node) and keep the largest delta, so a healthy sell
+    // is never halted as a phantom "dust fill". With no floor (the exit) the loop is skipped
+    // and the single read stands.
+    for (let i = 0; i < STALE_READ_TRIES && best < floor; i++) {
+      await w.sleepFn(STALE_READ_MS);
+      const d = BigInt(await w.rpc.getBalance(address)) - before + gasBack;
+      if (d > best) best = d;
+    }
+    ethReceived = best > 0n ? best : 0n;
   }
 
   return {
