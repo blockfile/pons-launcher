@@ -11,12 +11,12 @@
  * WHERE THE DUSTING GUARD LIVES. v3 refuses a token the pons-v2 factory has no
  * record of, launched by a wallet the account never held — because a run signs token
  * approvals and an approval to a hostile ERC-20 is the dusting attack. V6's guard is
- * trade.readPool(), and it is the same PROVENANCE idea: it requires the token to have
- * a genuine TokenLaunched event on the letscash factory (factory.findLaunch), which
- * both rejects a decoy ERC-20 (no such event) AND yields the AUTHORITATIVE hook the
- * factory assigned it — a per-token vanity hook included. It then verifies the pool is
- * initialised and liquid under THAT hook before anything is signed. An operator-supplied
- * hook is never trusted; the only hook used is the one the factory itself emitted.
+ * trade.readPool(), and it mirrors v3's SPEED — one factory-authoritative read, no
+ * getLogs scan: (1) eth_getCode(token) must be an EIP-1167 clone of a factory tokenMaster
+ * (a decoy ERC-20 has its own bytecode and is rejected); (2) the pool must be initialised
+ * and liquid under one of the factory's legit hooks (the probe is restricted to them, so a
+ * look-alike pool under an unrelated hook can't be selected). findLaunch remains only as a
+ * time-bounded fallback for a future/vanity hook. An operator-supplied hook is never used.
  */
 
 const express = require('express');

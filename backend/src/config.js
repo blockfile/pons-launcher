@@ -213,6 +213,26 @@ const config = {
     // LETSCASH_FACTORY_DEPLOY_BLOCK once known to make it a single fast call.
     factoryDeployBlock: num(process.env.LETSCASH_FACTORY_DEPLOY_BLOCK, 0),
     hook: (process.env.LETSCASH_HOOK || '0x75A54357D9C78a2Db19004a5FDc76c50F9242AEC').toLowerCase(),
+    // v6's FAST dusting guard (replaces the getLogs launch scan on the hot path): a real
+    // letscash token is an EIP-1167 minimal-proxy CLONE of a factory `tokenMaster`, so
+    // eth_getCode(token) → its implementation must be one of these. Seeded with the live
+    // moduleSetId-0 tokenMaster; the factory's module sets are read on a TTL to absorb any
+    // new one. Comma-separated, env-overridable.
+    tokenMasters: (process.env.LETSCASH_TOKEN_MASTERS || '0xd6Da7f07eE822C8538C901217b37D1e7d86c76E5')
+      .split(',')
+      .map((s) => s.trim())
+      .filter(Boolean),
+    // The pool hooks the probe is restricted to (with config.hook). ALL are factory-gated:
+    // their beforeInitialize reverts NotFactory for a non-factory sender, so an outsider
+    // can't stand up a look-alike pool under any of them (verified). Seeding the known
+    // historical hooks (0xEfe6 CashCatHook / CRYINGCAT-era, 0xe5e7 V2MemeHook) besides the
+    // live 0x75A5 means genuine tokens under a retired config resolve on the FAST probe
+    // instead of falling through to the slow launch scan. Extended from the factory on a TTL.
+    legitHooks: (process.env.LETSCASH_LEGIT_HOOKS ||
+      '0xEfe669814e5Eec33406Bd50ffa8331618D076aEc,0xe5e702641ea86f4ae6cc3cdaed2b886f976be044')
+      .split(',')
+      .map((s) => s.trim())
+      .filter(Boolean),
     poolManager: (process.env.LETSCASH_POOL_MANAGER || '0x8366a39CC670B4001A1121B8F6A443A643e40951').toLowerCase(),
     universalRouter: (process.env.LETSCASH_UNIVERSAL_ROUTER || '0x8876789976deCBFcbbBe364623c63652DB8c0904').toLowerCase(),
     quoter: (process.env.LETSCASH_QUOTER || '0x8Dc178eFB8111BB0973Dd9d722ebeFF267c98F94').toLowerCase(),

@@ -105,9 +105,18 @@ class RetryJsonRpcProvider extends JsonRpcProvider {
   }
 }
 
+// Per-request timeout: ethers defaults FetchRequest.timeout to 300s, so a hung endpoint
+// would hold a socket (and any awaiting request) for five minutes — long past a 60s gateway.
+// A FetchRequest carrying a timeout, passed in place of the URL, caps each RPC call; the
+// registered keep-alive getUrl still applies. Callers that must not wait even this long wrap
+// their reads in their own shorter cap (see v6/trade.js readPool).
+const RPC_TIMEOUT_MS = Number(process.env.RPC_TIMEOUT_MS) || 20_000;
+const rpcRequest = new FetchRequest(config.rpcUrl);
+rpcRequest.timeout = RPC_TIMEOUT_MS;
+
 // Pinning the chain id skips the eth_chainId round-trip; batchMaxCount:1 sends
 // every call as its own request (some RH RPC nodes mishandle batch arrays).
-const provider = new RetryJsonRpcProvider(config.rpcUrl, config.chainId, {
+const provider = new RetryJsonRpcProvider(rpcRequest, config.chainId, {
   staticNetwork: true,
   batchMaxCount: 1,
 });

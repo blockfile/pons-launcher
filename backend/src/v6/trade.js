@@ -107,48 +107,104 @@ function deadlineFor(w) {
 /**
  * Resolve + VERIFY the pool for a token, ONCE (replaces v3's readCurve).
  *
- * THE DUSTING GUARD, and it is a PROVENANCE gate, not a "does a pool exist" check. v6
- * takes the token from untrusted operator input, and a run signs token approvals — an
- * approval to a hostile ERC-20 is the dusting attack. A decoy token can be paired with
- * an attacker's own hook to seed a real, initialised, liquid pool that would satisfy a
- * bare liveness check and then eat every buy (a honeypot). So the gate is:
- *   1. factory.findLaunch(token) — the token MUST have a genuine TokenLaunched event on
- *      the letscash factory. This rejects a decoy (no such event) AND yields the
- *      AUTHORITATIVE hook the factory assigned — including a per-token vanity hook.
- *   2. resolvePoolKey against THAT hook — confirm the pool is initialised and liquid.
- * Any operator-supplied `hook` is IGNORED: the only hook trusted is the one the factory
- * itself emitted. `hook` is accepted in the signature for call-site symmetry only.
+ * THE DUSTING GUARD, and it is a PROVENANCE gate, not a "does a pool exist" check. v6 takes
+ * the token from untrusted operator input, and a run signs token approvals — an approval to
+ * a hostile ERC-20 is the dusting attack. A decoy token can be paired with a look-alike pool
+ * that would satisfy a bare liveness check and then eat every buy (a honeypot).
+ *
+ * It mirrors V3's fast guard — one factory-authoritative READ, no getLogs (the old
+ * findLaunch scan 504'd on a range-capped RPC). Two gates, run in PARALLEL:
+ *   1. PROVENANCE — factory.verifyProvenanceByCode(token): eth_getCode(token) must be an
+ *      EIP-1167 clone of a factory `tokenMaster`. A decoy ERC-20 has its own bytecode and is
+ *      rejected before any pool is trusted or any approval signed.
+ *   2. LIVENESS — resolvePoolKey PROBING only the factory's legit hooks: the pool must be
+ *      initialised + liquid under a hook the factory's module sets name (not swap.js's loose
+ *      candidate list, so a look-alike pool under an unrelated hook can't be selected).
+ * findLaunch stays only as a strictly TIME-BOUNDED fallback, reached when provenance passes
+ * but no pool exists under a known-legit hook (a future/vanity hook) — never on today's
+ * chain. Any operator-supplied `hook` is IGNORED (accepted for call-site symmetry only).
  *
  * @returns {Promise<{token, quote, poolKey, poolId, hook, liquidity, creator}>}
  */
-// findLaunch is a log SCAN and dominates readPool's latency; a TokenLaunched event is
-// historical and never changes, so the launch (hook/poolId/creator) is cached per token.
-// The pool itself is still re-verified live on every call. The cache is skipped whenever a
-// caller injects its own factory/swap/rpc (the tests), so a fake never crosses into it.
-const _launchCache = new Map();
+// token -> { impl, creator, hook } once resolved, or { impl, noPoolAt } for a clone with no
+// live pool. The token's code is an immutable EIP-1167 proxy and its hook is per-token, so a
+// resolved entry is kept forever (the pool is still re-verified live under that hook every
+// call). Skipped whenever a caller injects factory/swap/rpc (the tests).
+const _poolCache = new Map();
+const FIND_LAUNCH_TIMEOUT_MS = 12_000; // cap on the (rare) launch-scan fallback
+const READ_TIMEOUT_MS = 12_000; // cap on EVERY readPool RPC read — a hung endpoint can never push readPool past the 60s gateway
+const NO_POOL_TTL_MS = 60_000; // how long "clone but no live pool" is remembered, so a forged proxy can't re-trigger the scan each request
 
 async function readPool({ token, quote = 'eth' }, deps = {}) {
   const w = wire(deps);
   const addr = getAddress(token);
-
   const live = !deps.factory && !deps.swap && !deps.rpc;
-  let launch = live ? _launchCache.get(addr) : undefined;
-  if (!launch) {
-    launch = await w.factory.findLaunch(addr, { provider: w.rpc });
-    if (!launch) {
-      throw new Error(
-        `${addr} is not a letscash launch — the factory has no TokenLaunched event for it, so v6 will not ` +
-          `approve or trade it. v6 only trades genuine letscash launchpad tokens (a decoy ERC-20 with a ` +
-          `look-alike pool is exactly the honeypot this refuses).`
-      );
-    }
-    if (live) _launchCache.set(addr, launch);
+  const rt = deps.readTimeoutMs ?? READ_TIMEOUT_MS;
+  const cap = deps.findLaunchTimeoutMs ?? FIND_LAUNCH_TIMEOUT_MS;
+
+  const cached = live ? _poolCache.get(addr) : undefined;
+  // Proven + resolved once: re-verify liveness under its KNOWN hook (one call) and never
+  // re-enter the probe/fallback — which also removes the fallback as a repeatable DoS.
+  if (cached && cached.hook) {
+    const r = await withTimeout(w.swap.resolvePoolKey({ token: addr, quote, hook: cached.hook }, { provider: w.rpc }), rt, 'pool');
+    return { token: addr, quote, poolKey: r.poolKey, poolId: r.poolId, hook: r.hook, liquidity: r.liquidity, creator: cached.creator };
+  }
+  // A clone with no live pool, seen recently: reject fast rather than rescan every request.
+  if (cached && cached.noPoolAt && Date.now() - cached.noPoolAt < NO_POOL_TTL_MS) {
+    throw new Error(`${addr} is a letscash clone but has no live pool for this quote — nothing to trade.`);
   }
 
-  // Verify the pool is live under the hook the FACTORY named (trusted), for the quote
-  // v6 trades. Throws if that pool is not initialised/liquid (e.g. the token launched
-  // against USDG and has no ETH pool).
-  const r = await w.swap.resolvePoolKey({ token: addr, quote, hook: launch.hook }, { provider: w.rpc });
+  // The legit hook set (never blocks — seeded from config, refreshed in the background).
+  const { hooks } = await w.factory.legitSets({ provider: w.rpc });
+
+  // Provenance (eth_getCode) and liveness (probe under legit hooks) IN PARALLEL, each capped
+  // so neither can hang readPool. With the live hook this is getCode + slot0 + liquidity.
+  const [prov, resolved] = await Promise.all([
+    cached ? { ok: true, impl: cached.impl } : withTimeout(w.factory.verifyProvenanceByCode(addr, { provider: w.rpc }), rt, 'provenance'),
+    withTimeout(w.swap.resolvePoolKey({ token: addr, quote }, { provider: w.rpc, candidateHooks: [...hooks] }), rt, 'pool probe').then(
+      (r) => ({ r }),
+      (err) => ({ err })
+    ),
+  ]);
+
+  // Provenance FIRST — a decoy is rejected before any pool is trusted, and must never reach
+  // the findLaunch fallback.
+  if (!prov.ok) {
+    throw new Error(
+      `${addr} is not a letscash launch — its code is not an EIP-1167 clone of a letscash tokenMaster ` +
+        `(${prov.reason}), so v6 will not approve or trade it. A decoy ERC-20 with a look-alike pool is ` +
+        `exactly the honeypot this refuses.`
+    );
+  }
+  let entry = cached;
+  if (live && !entry) {
+    entry = { impl: prov.impl, creator: null };
+    _poolCache.set(addr, entry);
+  }
+  let creator = entry ? entry.creator : null;
+
+  let r = resolved.r;
+  let hook = r ? r.hook : null;
+  if (!r) {
+    // Genuine clone, but no pool under any legit hook — a future/vanity hook, a USDG-only
+    // launch, or a forged proxy with no pool. Discover it authoritatively ONCE via findLaunch
+    // (outer-capped), then cache the outcome so it is never a repeatable scan.
+    const launch = await withTimeout(w.factory.findLaunch(addr, { provider: w.rpc }), cap, 'findLaunch');
+    if (!launch) {
+      if (entry) entry.noPoolAt = Date.now(); // remember "no pool" briefly — DoS defense
+      throw resolved.err || new Error(`${addr} has no letscash pool for this quote`);
+    }
+    r = await withTimeout(w.swap.resolvePoolKey({ token: addr, quote, hook: launch.hook }, { provider: w.rpc }), rt, 'pool (fallback)');
+    creator = launch.creator;
+    hook = r.hook;
+    if (w.factory.refreshLegitSets) w.factory.refreshLegitSets({ provider: w.rpc }); // a new hook appeared — refresh in bg
+  }
+  if (entry) {
+    entry.creator = creator;
+    entry.hook = hook; // resolved — future calls skip the probe/fallback
+    delete entry.noPoolAt;
+  }
+
   return {
     token: addr,
     quote,
@@ -156,7 +212,7 @@ async function readPool({ token, quote = 'eth' }, deps = {}) {
     poolId: r.poolId,
     hook: r.hook,
     liquidity: r.liquidity,
-    creator: launch.creator,
+    creator,
   };
 }
 

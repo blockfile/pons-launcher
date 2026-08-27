@@ -417,3 +417,51 @@ test('parseLaunchReceipt ignores an unrelated same-topic log', () => {
   const parsed = F.parseLaunchReceipt(r);
   assert.equal(parsed.token, getAddress(CRYINGCAT.token)); // still found the real one
 });
+
+// ── FAST provenance: proxyImplementation + verifyProvenanceByCode (getCode guard) ──
+
+const factoryMod = require('./factory');
+const config = require('../../config');
+
+test('proxyImplementation extracts the impl from a canonical EIP-1167 clone', () => {
+  const impl = '0xd6Da7f07eE822C8538C901217b37D1e7d86c76E5';
+  const code = '0x363d3d373d3d3d363d73' + impl.slice(2).toLowerCase() + '5af43d82803e903d91602b57fd5bf3';
+  assert.equal(factoryMod.proxyImplementation(code), getAddress(impl));
+});
+
+test('proxyImplementation returns null for non-proxy code, wrong length, and non-strings', () => {
+  assert.equal(factoryMod.proxyImplementation('0x60806040523480156100'), null);
+  assert.equal(factoryMod.proxyImplementation('0x'), null);
+  assert.equal(factoryMod.proxyImplementation('0x363d3d373d3d3d363d7300'), null); // too short
+  assert.equal(factoryMod.proxyImplementation(null), null);
+  assert.equal(factoryMod.proxyImplementation(undefined), null);
+});
+
+test('verifyProvenanceByCode ACCEPTS a clone of the config tokenMaster', async () => {
+  const impl = config.letscash.tokenMasters[0]; // the seeded, verified-live tokenMaster
+  const code = '0x363d3d373d3d3d363d73' + impl.replace(/^0x/, '').toLowerCase() + '5af43d82803e903d91602b57fd5bf3';
+  const out = await factoryMod.verifyProvenanceByCode('0x1111111111111111111111111111111111111111', {
+    provider: { getCode: async () => code },
+  });
+  assert.equal(out.ok, true);
+  assert.equal(out.impl, getAddress(impl));
+});
+
+test('verifyProvenanceByCode REJECTS a non-proxy decoy in one getCode', async () => {
+  const out = await factoryMod.verifyProvenanceByCode('0x1111111111111111111111111111111111111111', {
+    provider: { getCode: async () => '0x6080604052348015610010' }, // ordinary contract bytecode
+  });
+  assert.equal(out.ok, false);
+  assert.match(out.reason, /EIP-1167/);
+});
+
+test('verifyProvenanceByCode REJECTS a proxy to an UNKNOWN implementation (refresh cannot rescue it)', async () => {
+  const impl = '0x9999999999999999999999999999999999999999';
+  const code = '0x363d3d373d3d3d363d73' + impl.slice(2) + '5af43d82803e903d91602b57fd5bf3';
+  const out = await factoryMod.verifyProvenanceByCode('0x1111111111111111111111111111111111111111', {
+    // getCode returns the proxy; the module-set refresh has no working factory here and is swallowed.
+    provider: { getCode: async () => code, call: async () => { throw new Error('no factory in this test'); } },
+  });
+  assert.equal(out.ok, false);
+  assert.match(out.reason, /not a letscash tokenMaster/);
+});

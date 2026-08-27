@@ -693,10 +693,151 @@ async function findLaunch(token, deps = {}) {
   };
 }
 
+// ─────────────────────── FAST provenance (no getLogs) ────────────────────────
+//
+// v6's dusting guard used to prove a token via findLaunch — a getLogs scan that 504s on a
+// range-capped RPC. This proves it the way V3 does (one view/read), because a real letscash
+// token is an EIP-1167 minimal-proxy CLONE of a factory `tokenMaster`: eth_getCode(token)
+// yields the 45-byte proxy runtime carrying the implementation address, and that impl must
+// be one the factory's module sets name. One eth_getCode, no logs.
+
+// EIP-1167 runtime: 10-byte prefix, 20-byte implementation, 15-byte suffix = 45 bytes.
+const EIP1167_PREFIX = '363d3d373d3d3d363d73';
+const EIP1167_SUFFIX = '5af43d82803e903d91602b57fd5bf3';
+
+/** The implementation a minimal-proxy delegates to (checksummed), or null if not one. */
+function proxyImplementation(code) {
+  if (typeof code !== 'string') return null;
+  const hex = code.toLowerCase().replace(/^0x/, '');
+  if (hex.length !== 90 || !hex.startsWith(EIP1167_PREFIX) || !hex.endsWith(EIP1167_SUFFIX)) return null;
+  return getAddress('0x' + hex.slice(20, 60));
+}
+
+/**
+ * The tokenMasters and hooks the LIVE config menu references, read from the factory's
+ * module sets — so any module set letscash adds is picked up automatically. eth_calls only
+ * (no getLogs), parallelized. Returns lowercased address Sets.
+ */
+async function moduleSets(deps = {}) {
+  const f = factory(deps.runner || deps.provider || provider);
+  const [first, next] = (await Promise.all([f.firstConfigId(), f.nextConfigId()])).map(Number);
+  const span = Math.max(0, next - first);
+  const cfgs = await Promise.all(Array.from({ length: span }, (_, i) => f.getLaunchConfig(first + i)));
+  const setIds = [...new Set(cfgs.map((c) => Number(c.moduleSetId)))];
+  const sets = await Promise.all(setIds.map((id) => f.getModuleSet(id)));
+  const tokenMasters = new Set();
+  const hooks = new Set();
+  for (const s of sets) {
+    if (!s.exists) continue;
+    tokenMasters.add(getAddress(s.tokenMaster).toLowerCase());
+    hooks.add(getAddress(s.hook).toLowerCase());
+  }
+  return { tokenMasters, hooks };
+}
+
+// The allowlist, always at least the config seed so the first request never waits on the
+// factory read. Refreshed in the background on a TTL and on demand; the seed is verified
+// live, and the factory read only ADDS to it.
+let _legit = null;
+let _legitAt = 0;
+let _legitRefreshing = null;
+const LEGIT_TTL_MS = 10 * 60_000;
+
+// Normalise a list of addresses, SKIPPING any that are malformed — a mis-checksummed
+// operator env var must not throw and disable the whole guard.
+function normAddrs(list) {
+  const out = [];
+  for (const a of list || []) {
+    try {
+      out.push(getAddress(a).toLowerCase());
+    } catch {
+      /* skip a bad address rather than break v6 */
+    }
+  }
+  return out;
+}
+
+function seedLegit() {
+  return {
+    tokenMasters: new Set(normAddrs(config.letscash.tokenMasters)),
+    hooks: new Set(normAddrs([config.letscash.hook, ...(config.letscash.legitHooks || [])])),
+  };
+}
+
+function legitSetsSync() {
+  if (!_legit) _legit = seedLegit();
+  return _legit;
+}
+
+/** Force a refresh from the factory (inflight-deduped). Never rejects — keeps the seed. */
+function refreshLegitSets(deps = {}) {
+  if (_legitRefreshing) return _legitRefreshing;
+  _legitRefreshing = (async () => {
+    try {
+      const derived = await moduleSets(deps);
+      const seed = seedLegit();
+      _legit = {
+        tokenMasters: new Set([...seed.tokenMasters, ...derived.tokenMasters]),
+        hooks: new Set([...seed.hooks, ...derived.hooks]),
+      };
+      _legitAt = Date.now();
+    } catch {
+      /* keep whatever we have — the seed is always valid */
+    } finally {
+      _legitRefreshing = null;
+    }
+  })();
+  return _legitRefreshing;
+}
+
+/** The current allowlist (never blocks). Kicks off a background refresh when stale. */
+async function legitSets(deps = {}) {
+  const cur = legitSetsSync();
+  if (Date.now() - _legitAt > LEGIT_TTL_MS && !_legitRefreshing) refreshLegitSets(deps);
+  return cur;
+}
+
+/** Populate + refresh at boot so the first readPool is warm. Best-effort. */
+function warmLegitSets(deps = {}) {
+  legitSetsSync();
+  refreshLegitSets(deps);
+}
+
+/**
+ * PROVENANCE: is this token a genuine letscash launch? — one eth_getCode. It must be an
+ * EIP-1167 clone of a factory tokenMaster. A decoy ERC-20 (its own bytecode, or a proxy to
+ * some other impl) is rejected. A proxy to an UNKNOWN impl forces ONE factory refresh and
+ * re-checks (self-heals a brand-new tokenMaster) before rejecting.
+ *
+ * @returns {Promise<{ok:true,impl:string}|{ok:false,reason:string}>}
+ */
+async function verifyProvenanceByCode(token, deps = {}) {
+  const rpc = deps.provider || provider;
+  const code = await rpc.getCode(getAddress(token));
+  const impl = proxyImplementation(code);
+  if (!impl) return { ok: false, reason: 'not an EIP-1167 clone of a letscash tokenMaster' };
+  const implLc = impl.toLowerCase();
+  if (legitSetsSync().tokenMasters.has(implLc)) return { ok: true, impl };
+  // A well-formed proxy to an UNKNOWN impl — maybe a brand-new tokenMaster. Kick a
+  // TTL-guarded BACKGROUND refresh (never awaited: an unknown-impl proxy must not cost ~60
+  // awaited eth_calls per request — that is a DoS vector) and reject for now. A genuine new
+  // tokenMaster self-heals on the next request once the refresh lands.
+  if (Date.now() - _legitAt > LEGIT_TTL_MS && !_legitRefreshing) refreshLegitSets(deps);
+  return { ok: false, reason: `implementation ${impl} is not a letscash tokenMaster` };
+}
+
 module.exports = {
   // reads
   getConfigs,
   findLaunch,
+  // fast provenance (no getLogs)
+  proxyImplementation,
+  moduleSets,
+  legitSets,
+  legitSetsSync,
+  refreshLegitSets,
+  warmLegitSets,
+  verifyProvenanceByCode,
   approvedQuote,
   predictToken,
   mineSalt,

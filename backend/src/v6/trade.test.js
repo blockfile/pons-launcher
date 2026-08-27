@@ -9,57 +9,102 @@ const factory = require('../evm/v5/factory');
 const TOKEN = '0x1111111111111111111111111111111111111111';
 const CREATOR = '0x2222222222222222222222222222222222222222';
 const FEE_RECIP = '0x3333333333333333333333333333333333333333';
-// A per-token vanity hook — deliberately NOT one of swap.js's known candidateHooks,
-// to prove the guard accepts the hook the FACTORY assigned, not an allowlist member.
+const IMPL = '0x4444444444444444444444444444444444444444'; // a legit tokenMaster
+const LEGIT_HOOK = '0x0000000000000000000000000000000000000075';
+// A per-token vanity hook — deliberately NOT in the legit set, to exercise the fallback.
 const VANITY_HOOK = '0x000000000000000000000000000000000000cccc';
 const DECOY_HOOK = '0x000000000000000000000000000000000000dead';
 
-// ── readPool is a PROVENANCE guard: the token must be a genuine letscash launch ──
+// ── readPool is a FAST PROVENANCE guard: eth_getCode clone check + legit-hook probe ──
 
-test('readPool REFUSES a token the factory never launched (a decoy ERC-20)', async () => {
-  const fakeFactory = { findLaunch: async () => null };
-  const fakeSwap = {
-    resolvePoolKey: async () => {
-      throw new Error('resolvePoolKey must NOT be reached for a token with no launch');
-    },
+test('readPool REFUSES a decoy — its code is not an EIP-1167 clone of a tokenMaster', async () => {
+  const fakeFactory = {
+    legitSets: async () => ({ tokenMasters: new Set(), hooks: new Set([LEGIT_HOOK]) }),
+    verifyProvenanceByCode: async () => ({ ok: false, reason: 'not an EIP-1167 clone of a letscash tokenMaster' }),
   };
+  const fakeSwap = { resolvePoolKey: async () => ({ poolKey: {}, poolId: '0xp', hook: LEGIT_HOOK, liquidity: 1n }) };
   await assert.rejects(
     () => trade.readPool({ token: TOKEN }, { factory: fakeFactory, swap: fakeSwap, rpc: {} }),
     /not a letscash launch/
   );
 });
 
-test('readPool ACCEPTS a genuine launch and resolves under the FACTORY hook — a vanity hook works', async () => {
+test('readPool ACCEPTS a genuine clone and resolves by PROBING the legit hook set (no findLaunch)', async () => {
   let resolvedWith = null;
   const fakeFactory = {
-    findLaunch: async () => ({ token: TOKEN, creator: CREATOR, poolId: '0xpid', hook: VANITY_HOOK, configId: 3 }),
+    legitSets: async () => ({ tokenMasters: new Set([IMPL.toLowerCase()]), hooks: new Set([LEGIT_HOOK]) }),
+    verifyProvenanceByCode: async () => ({ ok: true, impl: IMPL }),
+    findLaunch: async () => {
+      throw new Error('findLaunch must NOT be reached when the legit-hook probe finds a pool');
+    },
   };
   const fakeSwap = {
-    resolvePoolKey: async (args) => {
-      resolvedWith = args;
-      return { poolKey: { x: 1 }, poolId: '0xpid', hook: args.hook, liquidity: 5n };
+    resolvePoolKey: async (args, resolveDeps) => {
+      resolvedWith = { args, deps: resolveDeps };
+      return { poolKey: { x: 1 }, poolId: '0xpid', hook: LEGIT_HOOK, liquidity: 5n };
     },
   };
   const pool = await trade.readPool({ token: TOKEN }, { factory: fakeFactory, swap: fakeSwap, rpc: {} });
-  assert.equal(resolvedWith.hook, VANITY_HOOK, 'the pool is resolved under the hook the FACTORY named, not an allowlist member');
-  assert.equal(pool.hook, VANITY_HOOK);
-  assert.equal(pool.creator, CREATOR);
+  assert.equal(pool.hook, LEGIT_HOOK);
+  assert.deepEqual(resolvedWith.deps.candidateHooks, [LEGIT_HOOK], 'the probe is restricted to the legit hook set');
+  assert.equal(resolvedWith.args.hook, undefined, 'no explicit hook — it PROBES the legit set');
 });
 
-test('readPool IGNORES any operator-supplied hook — only the factory hook is trusted', async () => {
+test('readPool IGNORES any operator-supplied hook — it only probes the legit set', async () => {
   let resolvedWith = null;
   const fakeFactory = {
-    findLaunch: async () => ({ token: TOKEN, creator: CREATOR, poolId: '0xp', hook: VANITY_HOOK, configId: 1 }),
+    legitSets: async () => ({ tokenMasters: new Set([IMPL.toLowerCase()]), hooks: new Set([LEGIT_HOOK]) }),
+    verifyProvenanceByCode: async () => ({ ok: true, impl: IMPL }),
   };
   const fakeSwap = {
     resolvePoolKey: async (args) => {
       resolvedWith = args;
-      return { poolKey: {}, poolId: '0xp', hook: args.hook, liquidity: 1n };
+      return { poolKey: {}, poolId: '0xp', hook: LEGIT_HOOK, liquidity: 1n };
     },
   };
-  // A bogus attacker hook passed in the (now-ignored) field must never reach resolvePoolKey.
   await trade.readPool({ token: TOKEN, hook: DECOY_HOOK }, { factory: fakeFactory, swap: fakeSwap, rpc: {} });
-  assert.equal(resolvedWith.hook, VANITY_HOOK, 'operator hook ignored; factory hook used');
+  assert.notEqual(resolvedWith.hook, DECOY_HOOK, 'operator hook never reaches resolvePoolKey');
+  assert.equal(resolvedWith.hook, undefined, 'the probe forwards no explicit hook');
+});
+
+test('readPool falls back to findLaunch when no pool exists under a legit hook (vanity hook)', async () => {
+  let launchHook = null;
+  const fakeFactory = {
+    legitSets: async () => ({ tokenMasters: new Set([IMPL.toLowerCase()]), hooks: new Set([LEGIT_HOOK]) }),
+    verifyProvenanceByCode: async () => ({ ok: true, impl: IMPL }),
+    findLaunch: async () => ({ token: TOKEN, creator: CREATOR, poolId: '0xvp', hook: VANITY_HOOK, configId: 2 }),
+    refreshLegitSets: () => {},
+  };
+  const fakeSwap = {
+    resolvePoolKey: async (args, resolveDeps) => {
+      if (resolveDeps && resolveDeps.candidateHooks) throw new Error('no pool under the legit hooks'); // probe fails
+      launchHook = args.hook; // the fallback passes the discovered vanity hook explicitly
+      return { poolKey: {}, poolId: '0xvp', hook: args.hook, liquidity: 3n };
+    },
+  };
+  const pool = await trade.readPool({ token: TOKEN }, { factory: fakeFactory, swap: fakeSwap, rpc: {} });
+  assert.equal(pool.hook, VANITY_HOOK);
+  assert.equal(pool.creator, CREATOR);
+  assert.equal(launchHook, VANITY_HOOK, 'the fallback resolves under the discovered vanity hook');
+});
+
+test('readPool does not hang — the findLaunch fallback is time-bounded', async () => {
+  const fakeFactory = {
+    legitSets: async () => ({ tokenMasters: new Set([IMPL.toLowerCase()]), hooks: new Set([LEGIT_HOOK]) }),
+    verifyProvenanceByCode: async () => ({ ok: true, impl: IMPL }),
+    findLaunch: () => new Promise(() => {}), // never resolves
+    refreshLegitSets: () => {},
+  };
+  const fakeSwap = {
+    resolvePoolKey: async (args, resolveDeps) => {
+      if (resolveDeps && resolveDeps.candidateHooks) throw new Error('no pool under the legit hooks');
+      return { poolKey: {}, poolId: '0x', hook: args.hook, liquidity: 1n };
+    },
+  };
+  await assert.rejects(
+    () => trade.readPool({ token: TOKEN }, { factory: fakeFactory, swap: fakeSwap, rpc: {}, findLaunchTimeoutMs: 40 }),
+    /timed out/
+  );
 });
 
 // ── findLaunch — the on-chain provenance lookup ─────────────────────────────────

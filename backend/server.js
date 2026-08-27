@@ -128,6 +128,15 @@ async function main() {
     console.error('[v4] could not resume campaigns:', err.message);
   }
 
+  // Warm v6's provenance allowlist (the letscash factory's tokenMasters/hooks) so the first
+  // v6 request does not wait on the factory read. Best-effort and non-blocking — readPool has
+  // a valid config seed regardless, and this only refreshes it from chain.
+  try {
+    require('./src/evm/v5/factory').warmLegitSets();
+  } catch (err) {
+    console.error('[v6] could not warm the letscash allowlist:', err.message);
+  }
+
   server = app.listen(config.port, config.host, () => {
     console.log(`[pons-launcher] listening on http://${config.host}:${config.port}`);
     console.log(`[pons-launcher] dryRun=${config.dryRun} chainId=${config.chainId}`);
