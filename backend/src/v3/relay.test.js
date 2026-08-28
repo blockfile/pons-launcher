@@ -121,6 +121,44 @@ test('it refuses when the sender cannot cover the deposit and its gas', async ()
   await assert.rejects(() => transfer(h), /has 0\.01 ETH/);
 });
 
+test('a transient RPC "missing response" on a transfer read is retried, not halted', async () => {
+  // The exact big-run halt: a flaky load-balanced node did not answer a balance/nonce read at the
+  // transfer step (before anything was sent). Retry it internally instead of failing the run.
+  const h = harness();
+  let calls = 0;
+  h.deps.rpc.getBalance = async () => {
+    calls += 1;
+    if (calls === 1) throw new Error('missing response');
+    return parseEther('10');
+  };
+  h.deps.sleepFn = async () => {};
+  const out = await transfer(h);
+  assert.equal(out.hash, HASH, 'the transfer completed after retrying the read');
+  assert.ok(calls >= 2, 'the balance read was retried');
+  assert.equal(h.sent.length, 1, 'the deposit was broadcast exactly once — never doubled');
+});
+
+test('a NON-transient read error is not retried — it surfaces at once', async () => {
+  const h = harness();
+  let calls = 0;
+  h.deps.rpc.getBalance = async () => {
+    calls += 1;
+    throw new Error('some fatal read error');
+  };
+  h.deps.sleepFn = async () => {};
+  await assert.rejects(() => transfer(h), /some fatal read error/);
+  assert.equal(calls, 1, 'a real error is not retried');
+});
+
+test('isTransientRpc flags flaky-node failures and only those', () => {
+  const { isTransientRpc } = relay._private;
+  assert.equal(isTransientRpc(new Error('missing response')), true);
+  assert.equal(isTransientRpc(new Error('request timed out')), true);
+  assert.equal(isTransientRpc(Object.assign(new Error('x'), { code: 'TIMEOUT' })), true);
+  assert.equal(isTransientRpc(new Error('insufficient funds for gas')), false);
+  assert.equal(isTransientRpc(new Error('execution reverted')), false);
+});
+
 test('it sends the REFRESHED fee ceiling, never the quoted one', async () => {
   // This is the whole reason the helper refreshes fees at send time. Relay
   // quotes a concrete maxFeePerGas; the base fee ticks between quote and

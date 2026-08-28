@@ -42,6 +42,32 @@ function wei(value) {
   return BigInt(value || 0);
 }
 
+const sleep = (ms) => (ms > 0 ? new Promise((r) => setTimeout(r, ms)) : Promise.resolve());
+
+// A TRANSIENT RPC failure — the load-balanced node timed out or answered with nothing ("missing
+// response"), the same flaky-node class the rest of V3 already re-reads through. A READ that hits
+// one should be retried, not halt the whole run for a manual resume.
+function isTransientRpc(err) {
+  const code = err && (err.code || (err.info && err.info.error && err.info.error.code));
+  if (code === 'TIMEOUT' || code === 'NETWORK_ERROR' || code === 'SERVER_ERROR') return true;
+  return /missing response|timeout|timed out|failed to fetch|network error|ETIMEDOUT|ECONNRESET|socket hang up/i.test(
+    String((err && (err.shortMessage || err.message)) || '')
+  );
+}
+
+// Retry an idempotent READ through a transient RPC failure. Safe ONLY for reads — never wrap the
+// deposit broadcast in this, since a re-broadcast of a deposit that already landed would double it.
+async function readWithRetry(fn, { tries = 3, gapMs = 400, sleepFn = sleep } = {}) {
+  for (let attempt = 0; ; attempt++) {
+    try {
+      return await fn();
+    } catch (err) {
+      if (attempt >= tries || !isTransientRpc(err)) throw err;
+      await sleepFn(gapMs * 2 ** attempt);
+    }
+  }
+}
+
 function relayUrl(path) {
   return `${config.relayApiUrl}${path.startsWith('/') ? path : `/${path}`}`;
 }
@@ -233,7 +259,7 @@ async function transfer({ fromWallet, toAddress, amountWei }, deps = {}) {
   // Checked before signing rather than after a revert, because the caller is a
   // running chain: a cycle that discovers this from a failed broadcast has
   // already sold the tokens that were meant to pay for it.
-  const balance = await rpc.getBalance(from);
+  const balance = await readWithRetry(() => rpc.getBalance(from), { sleepFn });
   if (balance < depositWei + maxGas) {
     throw new Error(
       `${from} has ${formatEther(balance)} ETH but this Relay transfer needs ` +
@@ -257,7 +283,10 @@ async function transfer({ fromWallet, toAddress, amountWei }, deps = {}) {
 
   if (dryRun) return { ...entry, hash: null, simulated: true };
 
-  const nonce = await rpc.getTransactionCount(from, 'pending');
+  // The deposit BROADCAST is never retried (a re-broadcast could double a deposit that already
+  // landed), but reading the nonce that sizes it is a safe idempotent read — retry it through a
+  // transient RPC hiccup so a flaky node does not halt the run right before the send.
+  const nonce = await readWithRetry(() => rpc.getTransactionCount(from, 'pending'), { sleepFn });
   try {
     const sent = await ks
       .signer(fromWallet.id, rpc)
@@ -277,8 +306,6 @@ async function status(requestId, deps = {}) {
     fetchImpl: deps.fetch,
   });
 }
-
-const sleep = (ms) => (ms > 0 ? new Promise((r) => setTimeout(r, ms)) : Promise.resolve());
 
 /**
  * Wait for a broadcast deposit to actually FILL, so an order that never settles
@@ -321,5 +348,5 @@ module.exports = {
   status,
   confirmFill,
   isRetryableQuoteError,
-  _private: { normaliseTx, gasLimitOf, publicFees, publicDetails },
+  _private: { normaliseTx, gasLimitOf, publicFees, publicDetails, isTransientRpc, readWithRetry },
 };
