@@ -406,6 +406,35 @@ test('route buy swaps ETH to the pair token, then buys the curve with what it re
   assert.equal(h.pair[WALLET.address], 0n, 'no pair token is left stranded after the buy');
 });
 
+test('route buy derives leg-2 nonces from the swap, surviving a stale/stuck nonce read', async () => {
+  // The harness's getTransactionCount always returns 11 — a lagging node that never advances past
+  // the swap. Re-reading it at leg 2 would reuse 11 and collide ("nonce has already been used", the
+  // real big-buy failure). Deriving from the swap's nonce uses 12/13 instead.
+  const h = routeHarness();
+  const curve = await routeCurve(h);
+  await trade.buy({ wallet: WALLET, curveAddress: CURVE, amountWei: parseEther('1'), curve }, h.deps);
+  const swap = h.sent.find((t) => t.data === '0xswapin');
+  const approve = h.sent.find((t) => t.data === '0xapprove');
+  const buy = h.sent.find((t) => t.__kind === 'buy');
+  assert.equal(swap.nonce, 11, 'the swap took nonce 11');
+  assert.equal(approve.nonce, 12, 'the curve approve derives swapNonce+1 — not the stale 11');
+  assert.equal(buy.nonce, 13, 'the curve buy follows at 13');
+});
+
+test('route sell derives leg-2 nonces from the curve sell, surviving a stale nonce read', async () => {
+  const h = routeHarness();
+  const curve = await routeCurve(h);
+  await trade.sell({ wallet: WALLET, curveAddress: CURVE, token: TOKEN, tokensIn: TOKENS(100), curve }, h.deps);
+  const tokenApprove = h.sent.find((t) => t.data === '0xapprove');
+  const curveSell = h.sent.find((t) => t.__kind === 'sell');
+  const routerApprove = h.sent.find((t) => t.data === '0xaprouter');
+  const swapOut = h.sent.find((t) => t.data === '0xswapout');
+  assert.equal(tokenApprove.nonce, 11);
+  assert.equal(curveSell.nonce, 12);
+  assert.equal(routerApprove.nonce, 13, 'the router approve derives sellNonce+1 — not a stale re-read');
+  assert.equal(swapOut.nonce, 14);
+});
+
 test('route buy refuses a swap that would over-impact the pool, broadcasting nothing', async () => {
   const h = routeHarness({ buyImpactBps: 2500 }); // 25% > the 10% cap
   const curve = await routeCurve(h);

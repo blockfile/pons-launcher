@@ -435,6 +435,7 @@ async function buyViaRoute(
   let pairReceived = await tokenBalance(pairToken, address, deps);
   let spent = 0n;
   let recover = false;
+  let swapNonce = null; // leg 1's nonce, so leg 2 derives from it instead of a stale re-read
   if (pairReceived > 0n) {
     const worth = (await w.swap.quotePairToEth({ pairToken, amountIn: pairReceived, usdgFee }, { provider: w.rpc })).amountOut;
     recover = worth >= SWAP_GAS * feePerGas; // worth more than a swap's gas ⇒ a real stranded amount
@@ -465,8 +466,8 @@ async function buyViaRoute(
 
     let swapHash;
     try {
-      const nonce = await w.rpc.getTransactionCount(address, 'pending');
-      swapHash = (await signer.sendTransaction({ to: swapTx.to, data: swapTx.data, value: swapTx.value, nonce, gasLimit: SWAP_GAS, ...fees })).hash;
+      swapNonce = await w.rpc.getTransactionCount(address, 'pending');
+      swapHash = (await signer.sendTransaction({ to: swapTx.to, data: swapTx.data, value: swapTx.value, nonce: swapNonce, gasLimit: SWAP_GAS, ...fees })).hash;
     } catch (err) {
       throw new Error(`route buy swap from ${address} failed to broadcast: ${rpcMessage(err)}`);
     }
@@ -495,7 +496,10 @@ async function buyViaRoute(
   const tokenBefore = await tokenBalance(curve.token, address, deps);
   let buyHash;
   try {
-    const nonce = await w.rpc.getTransactionCount(address, 'pending');
+    // Derive the nonce from the (confirmed) swap rather than re-reading it: a lagging RPC node can
+    // still report the pre-swap nonce here, and reusing it collides with the swap ("nonce has
+    // already been used"). On the recover path there was no swap, so read fresh.
+    const nonce = swapNonce !== null ? swapNonce + 1 : await w.rpc.getTransactionCount(address, 'pending');
     const ap = await w.erc20(pairToken, w.rpc).approve.populateTransaction(getAddress(curveAddress), pairReceived);
     await signer.sendTransaction({ ...ap, nonce, gasLimit: APPROVE_GAS, ...fees });
     const bt = await c.buy.populateTransaction(pairReceived, minTokensOut, address, { value: 0n });
@@ -593,12 +597,14 @@ async function sellViaRoute(
 
   // ── leg 1: approve token -> curve, then curve.sell(tokensIn) -> pairToken to the wallet ──
   let curveSellHash;
+  let sellNonce = null; // the curve.sell's nonce, so leg 2 derives from it (no stale re-read)
   try {
     const nonce = await w.rpc.getTransactionCount(address, 'pending');
     const ap = await w.erc20(curve.token, w.rpc).approve.populateTransaction(getAddress(curveAddress), amount);
     await signer.sendTransaction({ ...ap, nonce, gasLimit: APPROVE_GAS, ...fees });
     const st = await c.sell.populateTransaction(amount, minPairOut, address);
-    curveSellHash = (await signer.sendTransaction({ ...st, nonce: nonce + 1, gasLimit: SELL_GAS, ...fees })).hash;
+    sellNonce = nonce + 1;
+    curveSellHash = (await signer.sendTransaction({ ...st, nonce: sellNonce, gasLimit: SELL_GAS, ...fees })).hash;
   } catch (err) {
     throw new Error(`route curve-sell from ${address} failed to broadcast: ${rpcMessage(err)}`);
   }
@@ -625,7 +631,9 @@ async function sellViaRoute(
   const before = BigInt(await w.rpc.getBalance(address));
   let approveRouterHash, swapHash;
   try {
-    const nonce = await w.rpc.getTransactionCount(address, 'pending');
+    // Derive from the (confirmed) curve sell instead of re-reading — a lagging node can still report
+    // the pre-sell nonce here and collide ("nonce has already been used").
+    const nonce = sellNonce !== null ? sellNonce + 1 : await w.rpc.getTransactionCount(address, 'pending');
     approveRouterHash = (await signer.sendTransaction({ to: apRouter.to, data: apRouter.data, value: 0n, nonce, gasLimit: APPROVE_GAS, ...fees })).hash;
     swapHash = (await signer.sendTransaction({ to: swapTx.to, data: swapTx.data, value: 0n, nonce: nonce + 1, gasLimit: SWAP_GAS, ...fees })).hash;
   } catch (err) {
