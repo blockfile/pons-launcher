@@ -295,6 +295,28 @@ const config = {
     buyGas: num(process.env.FLAP_BUY_GAS, 550000),
     sellGas: num(process.env.FLAP_SELL_GAS, 650000),
   },
+
+  // ── v3 ERC-20-quoted routing (chain 4663) ──────────────────────────────────
+  // Lets the V3 relay chain trade a pons v2 curve quoted in a TOKEN (e.g. AMZN),
+  // not just native ETH, by routing ETH <-> pairToken through USDG on the VERIFIED
+  // Uniswap SwapRouter02 + QuoterV2 — the same DEX the launchpad's own dexConfig
+  // points at. There is no direct WETH/pairToken pool, so the path is 2-hop:
+  // WETH -(wethUsdgFee)- USDG -(discovered per pair)- pairToken. All addresses
+  // verified on-chain; env-overridable. The native-ETH path ignores this block.
+  v3Route: {
+    swapRouter: (process.env.V3_SWAP_ROUTER || '0xcaf681a66d020601342297493863E78C959E5cb2').toLowerCase(),
+    quoter: (process.env.V3_QUOTER || '0x5dEdB1F91F5F56177BB4D193aD281b33e4f13098').toLowerCase(),
+    weth: (process.env.V3_WETH || '0x0Bd7D308f8E1639FAb988df18A8011f41EAcAD73').toLowerCase(),
+    usdg: (process.env.V3_USDG || '0x5fc5360D0400a0Fd4f2af552ADD042D716F1d168').toLowerCase(),
+    // The WETH<->USDG fee tier (the deepest pool, 0.01%). The USDG<->pairToken tier is
+    // discovered per token from the quoter (thin pairs vary), so it is not fixed here.
+    wethUsdgFee: num(process.env.V3_WETH_USDG_FEE, 100),
+    // MAX PRICE IMPACT (bps) a single swap leg may have before the route REFUSES it. The quoter
+    // saturates instead of reverting on an oversized input, so a slippage floor cannot catch a
+    // pool-draining trade — this ceiling can. 1000 = 10%. A big buy that would impact the thin
+    // USDG/pair pool past this is refused rather than silently losing the ETH.
+    maxImpactBps: num(process.env.V3_ROUTE_MAX_IMPACT_BPS, 1000),
+  },
 };
 
 /**

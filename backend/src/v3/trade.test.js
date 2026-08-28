@@ -280,3 +280,242 @@ test('tokenBalance reads through the injected erc20', async () => {
   const h = harness();
   assert.equal(await trade.tokenBalance(TOKEN, WALLET.address, h.deps), TOKENS(1000));
 });
+
+// ── the TOKEN-quoted route (e.g. AMZN): buy = swap ETH->pair then curve.buy; sell = curve.sell
+//    then swap pair->ETH. A fake swaproute + a curve that reports isNativeQuote:false, pairToken. ──
+const AMZN = '0x4444444444444444444444444444444444444444';
+const SWAPROUTER = '0x5555555555555555555555555555555555555555';
+const isAmzn = (a) => String(a).toLowerCase() === AMZN.toLowerCase();
+
+function routeHarness({
+  ethBalances = { [WALLET.address]: parseEther('10') },
+  tokenBalances = { [WALLET.address]: TOKENS(1000) },
+  pairBalances = { [WALLET.address]: 0n },
+  buyImpactBps = 100,
+  sellImpactBps = 100,
+  curveBuyReverts = false,
+  sellSwapReverts = false,
+  gasUsed = 100_000n,
+} = {}) {
+  const sent = [];
+  const swapCalls = [];
+  const receipts = new Map();
+  const eth = { ...ethBalances };
+  const tok = { ...tokenBalances };
+  const pair = { ...pairBalances };
+
+  const PAIR_OUT = parseEther('2'); // AMZN a buy swap delivers
+  const CURVE_TOKENS = TOKENS(500); // tokens curve.buy delivers
+  const CURVE_PAIR_OUT = parseEther('1.9'); // AMZN curve.sell delivers
+  const ETH_OUT = parseEther('1'); // ETH a sell swap delivers
+  const W = WALLET.address;
+  const receiptFor = (hash, ok = true) => ({ status: ok ? 1 : 0, blockNumber: 4242, gasUsed, effectiveGasPrice: 1_000_000_000n, hash });
+
+  const deps = {
+    rpc: { getBalance: async (a) => eth[a] ?? 0n, getTransactionCount: async () => 11 },
+    keystore: {
+      signer: () => ({
+        sendTransaction: async (tx) => {
+          const hash = `0x${(sent.length + 1).toString(16).padStart(64, '0')}`;
+          sent.push({ ...tx, hash });
+          const gasFee = gasUsed * 1_000_000_000n;
+          if (tx.data === '0xswapin') {
+            // The swap txs carry only {to,data,value} — identified by data, not __kind.
+            eth[W] -= (tx.value ?? 0n) + gasFee;
+            pair[W] = (pair[W] ?? 0n) + PAIR_OUT;
+            receipts.set(hash, receiptFor(hash));
+          } else if (tx.data === '0xswapout') {
+            eth[W] -= gasFee;
+            if (!sellSwapReverts) {
+              pair[W] = 0n; // the swap moved the whole approved balance
+              eth[W] += ETH_OUT;
+            }
+            receipts.set(hash, receiptFor(hash, !sellSwapReverts));
+          } else if (tx.__kind === 'buy') {
+            eth[W] -= gasFee;
+            if (!curveBuyReverts) {
+              pair[W] -= tx.__pairIn;
+              tok[W] = (tok[W] ?? 0n) + CURVE_TOKENS;
+            }
+            receipts.set(hash, receiptFor(hash, !curveBuyReverts));
+          } else if (tx.__kind === 'sell') {
+            eth[W] -= gasFee;
+            tok[W] -= tx.__tokensIn;
+            pair[W] = (pair[W] ?? 0n) + CURVE_PAIR_OUT;
+            receipts.set(hash, receiptFor(hash));
+          } else {
+            eth[W] -= gasFee; // an approve
+            receipts.set(hash, receiptFor(hash));
+          }
+          return { hash };
+        },
+      }),
+    },
+    curve: () => ({
+      buy: { populateTransaction: async (pairIn, minOut, recipient, overrides) => ({ to: CURVE, data: '0xbuy', value: overrides.value, __kind: 'buy', __pairIn: pairIn, __args: { pairIn, minOut, recipient } }) },
+      sell: { populateTransaction: async (tokensIn, minOut, recipient) => ({ to: CURVE, data: '0xsell', __kind: 'sell', __tokensIn: tokensIn, __args: { tokensIn, minOut, recipient } }) },
+      token: async () => TOKEN,
+      isNativeQuote: async () => false,
+      pairToken: async () => AMZN,
+      getReserves: async () => [parseEther('40'), TOKENS(800_000_000)],
+      feeBps: async () => 100n,
+      creatorTaxBps: async () => 100n,
+      graduated: async () => false,
+      readyToGraduate: async () => false,
+      currentSnipeTaxBps: async () => 0n,
+      snipeTaxSeconds: async () => 0n,
+    }),
+    erc20: (addr) => ({
+      balanceOf: async (a) => (isAmzn(addr) ? pair[a] ?? 0n : tok[a] ?? 0n),
+      approve: { populateTransaction: async (spender, amount) => ({ to: addr, data: '0xapprove', __kind: 'approve', __args: { spender, amount } }) },
+    }),
+    swaproute: {
+      discoverPairFee: async () => 3000,
+      assessBuyImpact: async () => ({ impactBps: buyImpactBps, fullOut: PAIR_OUT, usdgFee: 3000 }),
+      assessSellImpact: async () => ({ impactBps: sellImpactBps, fullOut: ETH_OUT, usdgFee: 3000 }),
+      quoteEthToPair: async () => ({ amountOut: PAIR_OUT, usdgFee: 3000 }),
+      // Proportional to the input (rate: CURVE_PAIR_OUT -> ETH_OUT), so a dust input quotes ~0 —
+      // this is what the recover-vs-dust guard keys on.
+      quotePairToEth: async ({ amountIn }) => ({ amountOut: (BigInt(amountIn) * ETH_OUT) / CURVE_PAIR_OUT, usdgFee: 3000 }),
+      buildSwapEthToPair: ({ amountInWei }) => ({ to: SWAPROUTER, data: '0xswapin', value: amountInWei }),
+      buildSwapPairToEth: ({ amountIn }) => {
+        swapCalls.push({ dir: 'pairToEth', amountIn });
+        return { to: SWAPROUTER, data: '0xswapout', value: 0n };
+      },
+      buildApproveToRouter: ({ amount }) => ({ to: AMZN, data: '0xaprouter', value: 0n, __kind: 'approve', __args: { amount } }),
+    },
+    waitForReceiptFn: async (_rpc, hash) => receipts.get(hash) || null,
+    fees: FEES,
+    dryRun: false,
+    sleepFn: async () => {},
+  };
+  return { deps, sent, swapCalls, eth, tok, pair, PAIR_OUT, CURVE_TOKENS, CURVE_PAIR_OUT, ETH_OUT };
+}
+
+const routeCurve = (h) => trade.readCurve(CURVE, h.deps);
+
+test('route buy swaps ETH to the pair token, then buys the curve with what it received', async () => {
+  const h = routeHarness();
+  const curve = await routeCurve(h);
+  assert.equal(curve.isNativeQuote, false);
+  const out = await trade.buy({ wallet: WALLET, curveAddress: CURVE, amountWei: parseEther('1'), curve }, h.deps);
+  assert.equal(out.status, 'confirmed');
+  assert.equal(out.tokensOut, h.CURVE_TOKENS);
+  assert.ok(h.sent.some((t) => t.data === '0xswapin'), 'it swapped ETH to the pair token');
+  assert.ok(h.sent.some((t) => t.__kind === 'buy'), 'it bought the curve with the pair token');
+  assert.equal(h.pair[WALLET.address], 0n, 'no pair token is left stranded after the buy');
+});
+
+test('route buy refuses a swap that would over-impact the pool, broadcasting nothing', async () => {
+  const h = routeHarness({ buyImpactBps: 2500 }); // 25% > the 10% cap
+  const curve = await routeCurve(h);
+  await assert.rejects(
+    () => trade.buy({ wallet: WALLET, curveAddress: CURVE, amountWei: parseEther('1'), curve }, h.deps),
+    /would move the .* pool|too thin/
+  );
+  assert.equal(h.sent.length, 0, 'nothing was broadcast');
+});
+
+test('route buy recovers pair token a prior attempt stranded instead of swapping again', async () => {
+  const h = routeHarness({ pairBalances: { [WALLET.address]: parseEther('2') } });
+  const curve = await routeCurve(h);
+  const out = await trade.buy({ wallet: WALLET, curveAddress: CURVE, amountWei: parseEther('1'), curve }, h.deps);
+  assert.equal(out.status, 'confirmed');
+  assert.ok(!h.sent.some((t) => t.data === '0xswapin'), 'it did NOT swap again — the ETH was already spent');
+  assert.ok(h.sent.some((t) => t.__kind === 'buy'), 'it bought the curve with the stranded pair token');
+  assert.equal(out.spent, 0n, 'a recovery spends no new ETH');
+});
+
+test('route sell sells the curve, then swaps the whole pair proceeds to ETH', async () => {
+  const h = routeHarness();
+  const curve = await routeCurve(h);
+  const out = await trade.sell({ wallet: WALLET, curveAddress: CURVE, token: TOKEN, tokensIn: TOKENS(100), curve }, h.deps);
+  assert.equal(out.status, 'confirmed');
+  assert.equal(out.ethReceived, h.ETH_OUT);
+  assert.ok(h.sent.some((t) => t.__kind === 'sell'), 'it sold the curve for the pair token');
+  assert.ok(h.sent.some((t) => t.data === '0xswapout'), 'it swapped the pair token to ETH');
+});
+
+test('route sell folds a stranded pair balance into the swap (recover-first)', async () => {
+  const h = routeHarness({ pairBalances: { [WALLET.address]: parseEther('0.5') } });
+  const curve = await routeCurve(h);
+  const out = await trade.sell({ wallet: WALLET, curveAddress: CURVE, token: TOKEN, tokensIn: TOKENS(100), curve }, h.deps);
+  assert.equal(out.status, 'confirmed');
+  // The swap moved the stranded 0.5 plus the curve sell's 1.9 — a swap-leg failure never strands.
+  assert.equal(h.swapCalls[0].amountIn, parseEther('2.4'));
+  assert.equal(h.pair[WALLET.address], 0n);
+});
+
+test('route sell refuses an over-impact slice BEFORE selling — nothing sold, position intact', async () => {
+  const h = routeHarness({ sellImpactBps: 2500 });
+  const curve = await routeCurve(h);
+  await assert.rejects(
+    () => trade.sell({ wallet: WALLET, curveAddress: CURVE, token: TOKEN, tokensIn: TOKENS(100), curve }, h.deps),
+    /too thin|would move the .* pool/
+  );
+  assert.equal(h.sent.length, 0, 'nothing was broadcast — the cycle halts resume-safe with no fee bleed');
+  assert.equal(h.tok[WALLET.address], TOKENS(1000), 'no token was sold');
+});
+
+test('the exit (liquidate) sells and swaps even when the impact cap would refuse a cycle', async () => {
+  // The exit MUST always get out — it skips the impact cap and swaps at a wide floor.
+  const h = routeHarness({ sellImpactBps: 2500 });
+  const curve = await routeCurve(h);
+  const out = await trade.sell(
+    { wallet: WALLET, curveAddress: CURVE, token: TOKEN, tokensIn: TOKENS(100), curve, liquidate: true },
+    h.deps
+  );
+  assert.equal(out.status, 'confirmed');
+  assert.equal(out.ethReceived, h.ETH_OUT, 'it liquidated at the pool price rather than stranding');
+  assert.ok(h.sent.some((t) => t.__kind === 'sell') && h.sent.some((t) => t.data === '0xswapout'));
+});
+
+test('a route curve-buy revert leaves the pair token in the wallet for the next attempt to recover', async () => {
+  const h = routeHarness({ curveBuyReverts: true });
+  const curve = await routeCurve(h);
+  const out = await trade.buy({ wallet: WALLET, curveAddress: CURVE, amountWei: parseEther('1'), curve }, h.deps);
+  assert.equal(out.status, 'reverted');
+  assert.equal(out.tokensOut, 0n);
+  assert.equal(h.pair[WALLET.address], h.PAIR_OUT, 'the swapped pair token is held, not stranded — a resume buys with it');
+});
+
+test('route buy treats a DUST pair balance as fresh (swaps and folds it in), not a recovery', async () => {
+  // A stray 1-wei pair balance must NOT make the buyer skip its real swap and "buy with dust".
+  const h = routeHarness({ pairBalances: { [WALLET.address]: 1n } });
+  const curve = await routeCurve(h);
+  const out = await trade.buy({ wallet: WALLET, curveAddress: CURVE, amountWei: parseEther('1'), curve }, h.deps);
+  assert.equal(out.status, 'confirmed');
+  assert.ok(h.sent.some((t) => t.data === '0xswapin'), 'it did the intended swap, not a dust recovery');
+  assert.equal(out.spent, parseEther('1'), 'it spent the intended ETH');
+});
+
+test('recoverPair swaps a stranded pair balance to ETH, swap-only (no curve leg)', async () => {
+  const h = routeHarness({ pairBalances: { [WALLET.address]: parseEther('1.5') } });
+  const curve = await routeCurve(h);
+  const out = await trade.recoverPair({ wallet: WALLET, curve }, h.deps);
+  assert.equal(out.status, 'confirmed');
+  assert.equal(out.pairIn, parseEther('1.5'));
+  assert.ok(out.ethReceived > 0n);
+  assert.ok(!h.sent.some((t) => t.__kind === 'sell'), 'no curve sell — it is a pure swap recovery');
+  assert.ok(h.sent.some((t) => t.data === '0xswapout'), 'it swapped the pair token to ETH');
+});
+
+test('recoverPair skips a wallet holding no stranded pair', async () => {
+  const h = routeHarness({ pairBalances: { [WALLET.address]: 0n } });
+  const curve = await routeCurve(h);
+  const out = await trade.recoverPair({ wallet: WALLET, curve }, h.deps);
+  assert.equal(out.status, 'skipped');
+  assert.equal(h.sent.length, 0, 'nothing broadcast for an empty wallet');
+});
+
+test('a route sell whose swap leg reverts reports "held, not lost" — never "nothing sold"', async () => {
+  const h = routeHarness({ sellSwapReverts: true });
+  const curve = await routeCurve(h);
+  await assert.rejects(
+    () => trade.sell({ wallet: WALLET, curveAddress: CURVE, token: TOKEN, tokensIn: TOKENS(100), curve }, h.deps),
+    /HELD in|NOT lost/
+  );
+  // The curve leg DID sell; the pair token is held in the wallet, recoverable — not stranded/lost.
+  assert.ok(h.sent.some((t) => t.__kind === 'sell'), 'the curve leg ran');
+  assert.equal(h.pair[WALLET.address], h.CURVE_PAIR_OUT, 'the pair token is held for recovery');
+});

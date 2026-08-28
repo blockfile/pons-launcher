@@ -38,6 +38,7 @@ const { ethPriceUsd } = require('../ethPrice');
 const v3roles = require('../v3/roles');
 const trade = require('../v3/trade');
 const relay = require('../v3/relay');
+const swaproute = require('../evm/v3/swaproute');
 const sizing = require('../v3/sizing');
 const engine = require('../v3/engine');
 const exit = require('../v3/exit');
@@ -79,6 +80,7 @@ function parseAmount(value, what) {
 async function resolveRun(body = {}, ks, deps = {}) {
   const describe = deps.describeToken || ((t) => holdings.describeToken(t));
   const readCurve = (deps.trade || trade).readCurve;
+  const routeSwap = deps.swaproute || swaproute;
   const rpc = deps.rpc || provider;
   const getFeesFn = deps.getFeesFn || getFees;
 
@@ -110,6 +112,17 @@ async function resolveRun(body = {}, ks, deps = {}) {
     throw new Error(
       `${token} is ready to graduate — a run started now would strand the remaining position in ` +
         'a pool V3 cannot sell into'
+    );
+  }
+  // A TOKEN-quoted curve (e.g. AMZN) is traded via the ETH<->pairToken route (swaproute): the big
+  // buy swaps ETH to the pair token then buys the curve with it, each sell swaps the proceeds back
+  // to ETH so Relay can move them. It is allowed only if the curve exposes a pairToken AND a funded
+  // swap route exists AND the big buy won't over-impact the (usually thin) pool — the last two are
+  // checked below once the big buy is sized. A native curve skips all of this.
+  if (!curve.isNativeQuote && !curve.pairToken) {
+    throw new Error(
+      `${token} is token-quoted but its curve exposes no pairToken — V3 has nothing to route ETH ` +
+        `through, so it cannot trade this curve.`
     );
   }
 
@@ -148,6 +161,32 @@ async function resolveRun(body = {}, ks, deps = {}) {
       `the v3 main wallet has ${formatEther(balance)} ETH but the big buy needs ` +
         `${formatEther(bigBuyWei + bigBuyGas)} (buy + gas) — fund it first`
     );
+  }
+
+  // ── token-quoted curve: confirm the route exists and the big buy fits the pool ─────────────
+  // The QuoterV2 SATURATES (never reverts) on an oversized input, so this impact preflight is the
+  // ONLY thing that catches a big buy that would drain the thin USDG/pairToken pool for near
+  // nothing. assessBuyImpact discovers the fee tier (throwing "no route" if the pool is unfunded)
+  // and measures the price impact — refuse at START, matching the guard buyViaRoute enforces live.
+  if (!curve.isNativeQuote) {
+    let impact;
+    try {
+      impact = await routeSwap.assessBuyImpact(
+        { pairToken: curve.pairToken, amountInWei: bigBuyWei },
+        { provider: rpc }
+      );
+    } catch (err) {
+      throw new Error(
+        `${token} is quoted in ${curve.pairToken}, but V3 cannot route ETH to it: ${err.message}`
+      );
+    }
+    if (impact.impactBps > config.v3Route.maxImpactBps) {
+      throw new Error(
+        `this ${formatEther(bigBuyWei)} ETH big buy would move the ${curve.pairToken} pool ` +
+          `${(impact.impactBps / 100).toFixed(1)}% (max ${config.v3Route.maxImpactBps / 100}%) — the pool is too ` +
+          `thin for this size and most of the ETH would be lost to price impact. Use a smaller big buy.`
+      );
+    }
   }
 
   return {
@@ -190,7 +229,10 @@ function usd(wei, price) {
 async function feasibilityOf(run, deps = {}) {
   const s = deps.sizing || sizing;
   const getFeesFn = deps.getFeesFn || getFees;
+  const routeSwap = deps.swaproute || swaproute;
+  const rpc = deps.rpc || provider;
   const curve = run.curveState;
+  const isRoute = curve.isNativeQuote === false;
   const shape = {
     quoteReserve: curve.quoteReserve,
     tokenReserve: curve.tokenReserve,
@@ -199,16 +241,32 @@ async function feasibilityOf(run, deps = {}) {
   };
   const walletCount = run.targets.length;
   if (walletCount === 0) return { feasible: false, sustainedWallets: 0, reason: 'no-wallets', atCycle: 1 };
-  const tokensBought = s.quoteBuyOut({ quoteIn: run.bigBuyWei, ...shape });
   const fees = await getFeesFn(engine.FEE_BUMP_PCT);
-  const gas = engine.gasFigures(fees);
+  // Same route-aware basis the engine's gasFor uses, so the plan blesses exactly the runs the
+  // engine can sustain — a token curve's sell/buy carry extra swap+approve legs.
+  const gas = engine.gasFigures(fees, { route: isRoute });
+
+  // simulateChain replays the chain in the curve's QUOTE asset. For a native curve that is ETH and
+  // the gas figures are already ETH. For a token curve the curve is priced in the pair token, so
+  // the big buy AND the ETH gas floors it is checked against are converted to the pair token — via
+  // one spot reference quote (1 ETH -> pairToken), which keeps the whole sim in one currency
+  // without a tiny per-figure quote rounding to zero. (Price impact on the buy is caught separately
+  // by the start-time impact preflight; this sim is about slice depletion, not impact.)
+  let toQuote = (weiEth) => weiEth;
+  if (isRoute) {
+    const perEth = (
+      await routeSwap.quoteEthToPair({ pairToken: curve.pairToken, amountInWei: 10n ** 18n }, { provider: rpc })
+    ).amountOut;
+    toQuote = (weiEth) => (weiEth > 0n ? (BigInt(weiEth) * perEth) / 10n ** 18n : 0n);
+  }
+  const tokensBought = s.quoteBuyOut({ quoteIn: toQuote(run.bigBuyWei), ...shape });
   return s.simulateChain({
     tokensBought,
     ...shape,
     walletCount,
-    mainGas: gas.mainGas,
-    buyGas: gas.buyGas,
-    buffer: gas.buffer,
+    mainGas: toQuote(gas.mainGas),
+    buyGas: toQuote(gas.buyGas),
+    buffer: toQuote(gas.buffer),
     relayFeePct: engine.RELAY_FEE_PCT,
   });
 }
@@ -227,9 +285,22 @@ async function buildPlan(body, ks, deps = {}) {
     creatorTaxBps: curve.creatorTaxBps,
   };
 
-  // Round-trip the big buy through the curve to estimate the position.
-  const tokensBought = s.quoteBuyOut({ quoteIn: run.bigBuyWei, ...shape });
-  const positionWei = s.quoteSellOut({ tokensIn: tokensBought, ...shape });
+  // Round-trip the big buy through the curve to estimate the position, IN ETH. A token-quoted
+  // curve (e.g. AMZN) is priced in its pair token, not ETH, and the run crosses the swap pool on
+  // BOTH sides — ETH -> pairToken to buy, pairToken -> ETH on every sell — so the estimate must
+  // cross it too, or the headline position and bleed are in the wrong currency. A native curve
+  // skips both conversions (and never touches the swap module).
+  const rpc = deps.rpc || provider;
+  const routeSwap = deps.swaproute || swaproute;
+  const isRoute = curve.isNativeQuote === false;
+  const curveQuoteIn = isRoute
+    ? (await routeSwap.quoteEthToPair({ pairToken: curve.pairToken, amountInWei: run.bigBuyWei }, { provider: rpc })).amountOut
+    : run.bigBuyWei;
+  const tokensBought = s.quoteBuyOut({ quoteIn: curveQuoteIn, ...shape });
+  const positionQuote = s.quoteSellOut({ tokensIn: tokensBought, ...shape });
+  const positionWei = isRoute
+    ? (await routeSwap.quotePairToEth({ pairToken: curve.pairToken, amountIn: positionQuote }, { provider: rpc })).amountOut
+    : positionQuote;
   const walletCount = run.targets.length;
   const meanWei = walletCount > 0 ? positionWei / BigInt(walletCount) : 0n;
 
@@ -269,6 +340,14 @@ async function buildPlan(body, ks, deps = {}) {
     warnings.push(
       `that ${bleedPct.toFixed(1)}% is high, and it is price impact rather than fees: this big buy ` +
         'is large relative to the curve. A smaller big buy loses far less on the round trip.'
+    );
+  }
+  if (isRoute) {
+    warnings.push(
+      `this curve is quoted in ${curve.pairToken}, not ETH — every buy swaps ETH to that token and ` +
+        'every sell swaps back, through a pool that is usually thin. The position is capped at what the ' +
+        'pool can absorb (a big buy over the impact cap is refused at start), and each cycle pays two ' +
+        'extra swap legs of gas and fees on top of the curve. Keep the big buy small.'
     );
   }
   if (!feasibility.feasible) {

@@ -44,6 +44,10 @@ const { rpcMessage } = require('../evm/errors');
 const { getFees } = require('../evm/fees');
 const { waitForReceipt } = require('../evm/receipt');
 const { CURVE_V2_ABI } = require('../evm/v2/abi');
+// The 2-hop swap leg for a TOKEN-quoted curve (e.g. AMZN), and the curve math to floor the
+// curve leg. Only reached for a non-native curve; the native path never touches these.
+const swaproute = require('./../evm/v3/swaproute');
+const sizing = require('./sizing');
 
 // approve/allowance are not in evm/erc20.js — that module exposes only the read
 // and transfer surface the funding path needs. Approving is a sell concern, so
@@ -62,6 +66,20 @@ const APPROVE_GAS = 100_000n;
 // every time. A fixed limit is the only option, sized for a curve sell plus a
 // creator-fee transfer plus a native send to the recipient.
 const SELL_GAS = 600_000n;
+
+// Gas for a 2-hop Uniswap-V3 swap leg (ETH<->pairToken through USDG) on the route path.
+// Generous; unused gas is refunded.
+const SWAP_GAS = BigInt(config.v3RouteSwapGas || 450_000);
+// Default slippage floor for BOTH the swap legs and the curve leg on a token-quoted route. The
+// USDG/pairToken pools are thin, so this is wider than a native-curve buy; the engine may pass
+// its own. minOut on every one of the four floors (2 swaps, 2 curve legs) is sized from a live
+// quote — never 0 on the route, unlike the native sell-all exit.
+const DEFAULT_ROUTE_SLIPPAGE_BPS = Number(process.env.V3_ROUTE_SLIPPAGE_BPS) || 300; // 3%
+// The EXIT's pairToken->ETH swap floor. The exit must ALWAYS liquidate (its whole reason for
+// being), so it skips the impact cap and accepts the thin pool's price — but never a FLOORLESS
+// swap, which on a thin pool is a sandwich to zero. This wide floor lets a saturated fill through
+// while still refusing an outright drain. Env-tunable.
+const EXIT_ROUTE_SLIPPAGE_BPS = Number(process.env.V3_EXIT_ROUTE_SLIPPAGE_BPS) || 2000; // 20%
 
 // Same headroom the rest of the codebase uses on a fee ceiling. Quoting the
 // base fee exactly gets a transaction rejected the moment it ticks up between
@@ -110,6 +128,7 @@ function wire(deps = {}) {
     fees: deps.fees || null,
     getFeesFn: deps.getFeesFn || getFees,
     sleepFn: deps.sleepFn || sleep,
+    swap: deps.swaproute || swaproute,
   };
 }
 
@@ -132,10 +151,21 @@ async function readCurve(curveAddress, deps = {}) {
       c.readyToGraduate(),
     ]);
 
+  // The curve's quote asset. For a native-quote curve this is a native sentinel/WETH and is
+  // ignored; for a token-quote curve (e.g. AMZN) it is what the route swaps ETH to and from.
+  // Read defensively — a curve that predates the getter, or a test double without it, yields null.
+  let pairToken = null;
+  try {
+    pairToken = getAddress(await c.pairToken());
+  } catch (_e) {
+    pairToken = null;
+  }
+
   return {
     address: getAddress(curveAddress),
     token: getAddress(token),
     isNativeQuote: Boolean(isNativeQuote),
+    pairToken,
     quoteReserve: BigInt(reserves[0]),
     tokenReserve: BigInt(reserves[1]),
     feeBps: Number(feeBps),
@@ -175,7 +205,12 @@ async function tokenBalance(token, owner, deps = {}) {
  * @returns {Promise<{hash, status, blockNumber, tokensOut}>} tokensOut measured
  *   as a balance delta, because the curve returns it rather than logging it.
  */
-async function buy({ wallet, curveAddress, amountWei }, deps = {}) {
+async function buy({ wallet, curveAddress, amountWei, curve }, deps = {}) {
+  // A TOKEN-quoted curve (e.g. AMZN) cannot take ETH directly — route it: swap ETH->pairToken,
+  // then curve.buy(pairToken). The native path below is unchanged for native-ETH curves.
+  if (curve && curve.isNativeQuote === false) {
+    return buyViaRoute({ wallet, curveAddress, curve, amountWei }, deps);
+  }
   const w = wire(deps);
   let amount = BigInt(amountWei);
   if (amount <= 0n) throw new Error('a buy needs a positive amount');
@@ -244,7 +279,14 @@ async function buy({ wallet, curveAddress, amountWei }, deps = {}) {
  *
  * @returns {Promise<{approveHash, sellHash, status, blockNumber, ethReceived}>}
  */
-async function sell({ wallet, curveAddress, token, tokensIn, minQuoteOut = 0n }, deps = {}) {
+async function sell({ wallet, curveAddress, token, tokensIn, minQuoteOut = 0n, curve, liquidate = false }, deps = {}) {
+  // A TOKEN-quoted curve pays its sell proceeds in the pair token (e.g. AMZN), not ETH — route
+  // it: curve.sell()->pairToken, then swap pairToken->ETH. `liquidate` (the exit) makes the route
+  // skip the impact cap and use a wide swap floor — it must always get out. The native path below
+  // is unchanged.
+  if (curve && curve.isNativeQuote === false) {
+    return sellViaRoute({ wallet, curveAddress, curve, tokensIn, liquidate }, deps);
+  }
   const w = wire(deps);
   const amount = BigInt(tokensIn);
   if (amount <= 0n) throw new Error('a sell needs a positive token amount');
@@ -339,14 +381,345 @@ async function sell({ wallet, curveAddress, token, tokensIn, minQuoteOut = 0n },
   };
 }
 
+/**
+ * Read a token-balance delta guaranteed to be at least `floor` (a swap's amountOutMinimum, a
+ * curve's minOut), re-reading through a stale RPC balance the same way the native sell's ETH
+ * measurement does — so a healthy leg is never mis-measured as dust on a load-balanced node.
+ */
+async function readDeltaAtLeast(readBalance, before, floor, w) {
+  let best = (await readBalance()) - before;
+  for (let i = 0; i < STALE_READ_TRIES && best < floor; i++) {
+    await w.sleepFn(STALE_READ_MS);
+    const d = (await readBalance()) - before;
+    if (d > best) best = d;
+  }
+  return best;
+}
+
+/**
+ * BUY on a TOKEN-quoted curve (e.g. AMZN): swap ETH -> pairToken, then curve.buy(pairToken).
+ * THREE txs across TWO confirmations. Review-hardened:
+ *   - IMPACT GUARD: the quoter SATURATES (never reverts) on an oversized input, so a slippage
+ *     floor is blind to a pool-draining buy — refuse if the swap's price impact exceeds the cap.
+ *   - RESUME/RECOVER: pairToken already in the wallet is a prior attempt's swap output whose curve
+ *     buy did not complete — buy with it instead of swapping again (the ETH is already spent), so
+ *     a curve-leg failure never strands value and a resume never double-swaps.
+ *   - GAS for all THREE legs, so a tight bundle wallet doesn't die at leg 2 with pairToken stranded.
+ *   - STALE-READ guard on the pairToken and token deltas.
+ */
+async function buyViaRoute(
+  { wallet, curveAddress, curve, amountWei, slippageBps = DEFAULT_ROUTE_SLIPPAGE_BPS },
+  deps = {}
+) {
+  const w = wire(deps);
+  const address = getAddress(wallet.address);
+  const pairToken = curve.pairToken;
+  if (!pairToken) throw new Error(`${curveAddress} is token-quoted but exposes no pairToken — V3 cannot route it`);
+  let amount = BigInt(amountWei);
+  if (amount <= 0n) throw new Error('a buy needs a positive amount');
+
+  if (w.dryRun) {
+    return { simulated: true, hash: null, status: 'simulated', blockNumber: null, tokensOut: 0n, spent: 0n };
+  }
+
+  const fees = await feesFor(w);
+  const signer = w.ks.signer(wallet.id, w.rpc);
+  const c = w.curve(curveAddress, w.rpc);
+  const feePerGas = BigInt(fees.maxFeePerGas ?? fees.gasPrice ?? 0n);
+  const usdgFee = await w.swap.discoverPairFee(pairToken, { provider: w.rpc });
+
+  // RECOVER vs DUST. pairToken already held CAN be a prior attempt's swap output whose curve buy
+  // did not complete — buy with it, don't swap again. But a mere DUST balance (stray residue) is
+  // NOT a prior attempt: swap the intended ETH anyway and let curve.buy consume the dust + the new
+  // output together, so a stray dust never makes the buyer "buy with dust" and skip its real buy.
+  let pairReceived = await tokenBalance(pairToken, address, deps);
+  let spent = 0n;
+  let recover = false;
+  if (pairReceived > 0n) {
+    const worth = (await w.swap.quotePairToEth({ pairToken, amountIn: pairReceived, usdgFee }, { provider: w.rpc })).amountOut;
+    recover = worth >= SWAP_GAS * feePerGas; // worth more than a swap's gas ⇒ a real stranded amount
+  }
+
+  if (!recover) {
+    // ── leg 1: swap ETH -> pairToken ──
+    // Reserve gas for ALL three legs (swap + approve + curve.buy); only the swap sends value.
+    const reserve = (SWAP_GAS + APPROVE_GAS + BigInt(config.buyGasLimit)) * feePerGas;
+    const ethBalance = BigInt(await w.rpc.getBalance(address));
+    if (ethBalance <= reserve) {
+      throw new Error(`route buy from ${address}: ${formatEther(ethBalance)} ETH does not cover the route's three legs of gas (${formatEther(reserve)})`);
+    }
+    if (amount + reserve > ethBalance) amount = ethBalance - reserve;
+
+    // IMPACT GUARD — the floor cannot see a pool-draining buy; this refuses it.
+    const impact = await w.swap.assessBuyImpact({ pairToken, amountInWei: amount, usdgFee }, { provider: w.rpc });
+    if (impact.impactBps > config.v3Route.maxImpactBps) {
+      throw new Error(
+        `this ${formatEther(amount)} ETH buy would move the ${pairToken} pool ${(impact.impactBps / 100).toFixed(1)}% ` +
+          `(max ${config.v3Route.maxImpactBps / 100}%) — the pool is too thin for this size and most of the ETH would ` +
+          `be lost to price impact. Reduce the big buy.`
+      );
+    }
+    if (impact.fullOut <= 0n) throw new Error(`the route quote returned no ${pairToken} for ${formatEther(amount)} ETH`);
+    const swapMinOut = (impact.fullOut * BigInt(10_000 - slippageBps)) / 10_000n;
+    const swapTx = w.swap.buildSwapEthToPair({ pairToken, amountInWei: amount, minOut: swapMinOut, recipient: address, usdgFee });
+
+    let swapHash;
+    try {
+      const nonce = await w.rpc.getTransactionCount(address, 'pending');
+      swapHash = (await signer.sendTransaction({ to: swapTx.to, data: swapTx.data, value: swapTx.value, nonce, gasLimit: SWAP_GAS, ...fees })).hash;
+    } catch (err) {
+      throw new Error(`route buy swap from ${address} failed to broadcast: ${rpcMessage(err)}`);
+    }
+    const swapReceipt = await w.await(w.rpc, swapHash);
+    if (statusOf(swapReceipt) !== 'confirmed') throw new Error('the ETH->pairToken swap reverted (route buy)');
+    pairReceived = await readDeltaAtLeast(() => tokenBalance(pairToken, address, deps), 0n, swapMinOut, w);
+    if (pairReceived <= 0n) throw new Error('the swap confirmed but delivered no pair token');
+    spent = amount;
+  }
+
+  // ── leg 2: approve pairToken -> curve, then curve.buy(pairReceived) with NO value ──
+  let minTokensOut = 0n;
+  try {
+    const expTok = sizing.quoteBuyOut({
+      quoteIn: pairReceived,
+      quoteReserve: curve.quoteReserve,
+      tokenReserve: curve.tokenReserve,
+      feeBps: curve.feeBps,
+      creatorTaxBps: curve.creatorTaxBps,
+    });
+    minTokensOut = (BigInt(expTok) * BigInt(10_000 - slippageBps)) / 10_000n;
+  } catch (_e) {
+    minTokensOut = 0n;
+  }
+
+  const tokenBefore = await tokenBalance(curve.token, address, deps);
+  let buyHash;
+  try {
+    const nonce = await w.rpc.getTransactionCount(address, 'pending');
+    const ap = await w.erc20(pairToken, w.rpc).approve.populateTransaction(getAddress(curveAddress), pairReceived);
+    await signer.sendTransaction({ ...ap, nonce, gasLimit: APPROVE_GAS, ...fees });
+    const bt = await c.buy.populateTransaction(pairReceived, minTokensOut, address, { value: 0n });
+    buyHash = (await signer.sendTransaction({ ...bt, nonce: nonce + 1, gasLimit: BigInt(config.buyGasLimit), ...fees })).hash;
+  } catch (err) {
+    throw new Error(`route curve-buy from ${address} failed to broadcast: ${rpcMessage(err)}`);
+  }
+  const buyReceipt = await w.await(w.rpc, buyHash);
+  const status = statusOf(buyReceipt);
+  let tokensOut = 0n;
+  if (status === 'confirmed') {
+    tokensOut = await readDeltaAtLeast(() => tokenBalance(curve.token, address, deps), tokenBefore, minTokensOut, w);
+  }
+  return { hash: buyHash, status, blockNumber: buyReceipt?.blockNumber ?? null, tokensOut: tokensOut > 0n ? tokensOut : 0n, spent };
+}
+
+/**
+ * SELL on a TOKEN-quoted curve: curve.sell(token) -> pairToken, then swap ALL held pairToken ->
+ * ETH. FOUR txs across TWO confirmations. Review-hardened (round 2):
+ *   - RECOVER-FIRST + RESUME-SAFE: it swaps the wallet's WHOLE pairToken balance (this sell's
+ *     output plus anything a prior attempt's failed swap left stranded), so a swap-leg revert
+ *     never strands pairToken and a resume never re-sells the token that already became pairToken.
+ *   - PRE-SELL IMPACT GUARD (cycle): the impact is checked on the EXPECTED total the swap will move,
+ *     BEFORE curve.sell — so a slice too big for the thin pool HALTS with nothing sold (resume-safe,
+ *     no fee bleed, no pile) instead of selling into pairToken it then cannot swap. The quoter
+ *     saturates instead of reverting, so this is the only thing that sees a pool-draining sell.
+ *   - liquidate (the EXIT): skips the cap — it must always get out — and swaps at a WIDE floor,
+ *     accepting the thin pool's price. Still never a floorless swap (a sandwich to zero).
+ *   - STALE-READ guard on the pairToken and ETH deltas.
+ */
+async function sellViaRoute(
+  { wallet, curveAddress, curve, tokensIn, slippageBps = DEFAULT_ROUTE_SLIPPAGE_BPS, liquidate = false },
+  deps = {}
+) {
+  const w = wire(deps);
+  const address = getAddress(wallet.address);
+  const pairToken = curve.pairToken;
+  if (!pairToken) throw new Error(`${curveAddress} is token-quoted but exposes no pairToken — V3 cannot route it`);
+  const amount = BigInt(tokensIn);
+  if (amount <= 0n) throw new Error('a sell needs a positive token amount');
+
+  const held = await tokenBalance(curve.token, address, deps);
+  if (held < amount) throw new Error(`${address} holds ${held} of ${curve.token} but the cycle needs to sell ${amount}`);
+
+  if (w.dryRun) {
+    return { approveHash: null, sellHash: null, status: 'simulated', blockNumber: null, ethReceived: 0n, tokensIn: amount };
+  }
+
+  const fees = await feesFor(w);
+  const signer = w.ks.signer(wallet.id, w.rpc);
+  const c = w.curve(curveAddress, w.rpc);
+  const usdgFee = await w.swap.discoverPairFee(pairToken, { provider: w.rpc });
+
+  // Any pairToken already in the wallet is stranded from a prior attempt whose swap failed — the
+  // sell below adds to it and the swap moves the WHOLE balance, so it is recovered, not lost.
+  const pairBefore = await tokenBalance(pairToken, address, deps);
+
+  // The expected pair proceeds of this sell (a quote, not the floored min) — used both for the
+  // stale-read floor below and for the PRE-SELL impact check on the whole balance the swap moves.
+  let expPair = 0n;
+  try {
+    expPair = BigInt(
+      sizing.quoteSellOut({
+        tokensIn: amount,
+        quoteReserve: curve.quoteReserve,
+        tokenReserve: curve.tokenReserve,
+        feeBps: curve.feeBps,
+        creatorTaxBps: curve.creatorTaxBps,
+      })
+    );
+  } catch (_e) {
+    expPair = 0n;
+  }
+  // A cycle floors the curve leg at 3% (a curve that moved reverts atomically — nothing sold,
+  // resume-safe). The EXIT is floor-free on the curve leg, like the native exit: it must ALWAYS
+  // liquidate, so only its thin-pool swap leg keeps a (wide) floor, never the curve sell itself.
+  const minPairOut = liquidate ? 0n : (expPair * BigInt(10_000 - slippageBps)) / 10_000n;
+
+  // PRE-SELL IMPACT GUARD (cycle only) — refuse BEFORE selling if swapping the expected total
+  // (stranded + this sell's output) would over-impact the pool. Nothing is sold, so the cycle halts
+  // resume-safe with no fee bleed and no pair-token pile. The exit skips this: it MUST liquidate.
+  if (!liquidate) {
+    const expectTotal = pairBefore + expPair;
+    if (expectTotal > 0n) {
+      const pre = await w.swap.assessSellImpact({ pairToken, amountIn: expectTotal, usdgFee }, { provider: w.rpc });
+      if (pre.impactBps > config.v3Route.maxImpactBps) {
+        throw new Error(
+          `selling this slice would move the ${pairToken} pool ${(pre.impactBps / 100).toFixed(1)}% ` +
+            `(max ${config.v3Route.maxImpactBps / 100}%) — too thin for this size. NOTHING WAS SOLD; the position ` +
+            `is intact. Sell a smaller slice, or run the Exit (which liquidates in full at the pool's price).`
+        );
+      }
+    }
+  }
+
+  // ── leg 1: approve token -> curve, then curve.sell(tokensIn) -> pairToken to the wallet ──
+  let curveSellHash;
+  try {
+    const nonce = await w.rpc.getTransactionCount(address, 'pending');
+    const ap = await w.erc20(curve.token, w.rpc).approve.populateTransaction(getAddress(curveAddress), amount);
+    await signer.sendTransaction({ ...ap, nonce, gasLimit: APPROVE_GAS, ...fees });
+    const st = await c.sell.populateTransaction(amount, minPairOut, address);
+    curveSellHash = (await signer.sendTransaction({ ...st, nonce: nonce + 1, gasLimit: SELL_GAS, ...fees })).hash;
+  } catch (err) {
+    throw new Error(`route curve-sell from ${address} failed to broadcast: ${rpcMessage(err)}`);
+  }
+  const curveSellReceipt = await w.await(w.rpc, curveSellHash);
+  if (statusOf(curveSellReceipt) !== 'confirmed') throw new Error('the curve sell reverted (route sell)');
+
+  // The WHOLE pairToken balance now (this sell's output + anything a prior attempt stranded),
+  // floored at pairBefore + minPairOut so a stale read cannot under-measure it.
+  const pairTotal = await readDeltaAtLeast(() => tokenBalance(pairToken, address, deps), 0n, pairBefore + minPairOut, w);
+  if (pairTotal <= 0n) throw new Error('the curve sell confirmed but the wallet holds no pair token to swap');
+
+  // ── leg 2: approve pairToken -> router, then swap pairToken -> native ETH ──
+  // Floor: a tight 3% for a cycle (already pre-sell impact-checked); a WIDE floor for the exit,
+  // which accepts the thin pool's price to get out. Never floorless (a sandwich to zero).
+  const swapSlippageBps = liquidate ? EXIT_ROUTE_SLIPPAGE_BPS : slippageBps;
+  const q = await w.swap.quotePairToEth({ pairToken, amountIn: pairTotal, usdgFee }, { provider: w.rpc });
+  const swapMinOut = q.amountOut > 0n ? (q.amountOut * BigInt(10_000 - swapSlippageBps)) / 10_000n : 0n;
+  if (swapMinOut <= 0n) throw new Error('the pairToken->ETH quote returned nothing — refusing a floorless swap');
+  const swapTx = w.swap.buildSwapPairToEth({ pairToken, amountIn: pairTotal, minOut: swapMinOut, recipient: address, usdgFee });
+  const apRouter = w.swap.buildApproveToRouter({ pairToken, amount: pairTotal });
+
+  // Snapshot AFTER the curve sell (that leg moved no ETH but gas), so the delta is purely the
+  // swap's ETH out, gross of the swap legs' gas.
+  const before = BigInt(await w.rpc.getBalance(address));
+  let approveRouterHash, swapHash;
+  try {
+    const nonce = await w.rpc.getTransactionCount(address, 'pending');
+    approveRouterHash = (await signer.sendTransaction({ to: apRouter.to, data: apRouter.data, value: 0n, nonce, gasLimit: APPROVE_GAS, ...fees })).hash;
+    swapHash = (await signer.sendTransaction({ to: swapTx.to, data: swapTx.data, value: 0n, nonce: nonce + 1, gasLimit: SWAP_GAS, ...fees })).hash;
+  } catch (err) {
+    throw new Error(`route sell swap from ${address} failed to broadcast: ${rpcMessage(err)}`);
+  }
+  const swapReceipt = await w.await(w.rpc, swapHash);
+  if (statusOf(swapReceipt) !== 'confirmed') {
+    // The curve leg ALREADY sold the token to pairToken; only the swap reverted. Say so accurately
+    // (never "nothing was sold") — the pairToken is HELD in the wallet, not lost, and the next
+    // attempt swaps it (recover-first) or the Exit recovers it. Throwing halts resume-safe
+    // (sellDone stays false); the position is genuinely smaller now, so a resume re-sizes fresh.
+    throw new Error(
+      `the curve sold to ${pairToken}, but the ${pairToken}->ETH swap reverted — the ${pairToken} is HELD in ` +
+        `${address} (NOT lost). The next attempt swaps it (recover-first), or run the Exit. Those tokens are ` +
+        `already sold, so the position is smaller now.`
+    );
+  }
+  const approveRouterReceipt = await w.await(w.rpc, approveRouterHash).catch(() => null);
+  const gasBack = spentOn(swapReceipt) + spentOn(approveRouterReceipt);
+  // The swap enforced amountOutMinimum = swapMinOut, so a confirmed swap paid AT LEAST that. A
+  // measured delta below it means a stale balance read (a node lagging the swap's block) — the
+  // same re-read guard the native sell uses.
+  let best = BigInt(await w.rpc.getBalance(address)) - before + gasBack;
+  for (let i = 0; i < STALE_READ_TRIES && best < swapMinOut; i++) {
+    await w.sleepFn(STALE_READ_MS);
+    const d = BigInt(await w.rpc.getBalance(address)) - before + gasBack;
+    if (d > best) best = d;
+  }
+  const ethReceived = best > 0n ? best : 0n;
+  return { approveHash: approveRouterHash, sellHash: swapHash, status: 'confirmed', blockNumber: swapReceipt?.blockNumber ?? null, ethReceived, tokensIn: amount };
+}
+
+/**
+ * Swap a wallet's WHOLE pairToken balance to ETH — a SWAP-ONLY recovery, no curve leg. The EXIT
+ * runs this on a token curve so a wallet holding pairToken that a prior failed swap stranded — and
+ * which may hold NO launchpad token, so the normal sell skips it — is still emptied to ETH. Wide
+ * exit floor, no impact cap (the exit must get out), never floorless. Returns 'skipped' when the
+ * balance is below `minPairWei` (dust not worth a swap's gas).
+ */
+async function recoverPair({ wallet, curve, minPairWei = 0n }, deps = {}) {
+  const w = wire(deps);
+  const address = getAddress(wallet.address);
+  const pairToken = curve.pairToken;
+  if (!pairToken) return { status: 'skipped', ethReceived: 0n, pairIn: 0n };
+  const pairTotal = await tokenBalance(pairToken, address, deps);
+  if (pairTotal <= BigInt(minPairWei)) return { status: 'skipped', ethReceived: 0n, pairIn: pairTotal };
+
+  if (w.dryRun) return { status: 'simulated', swapHash: null, approveHash: null, ethReceived: 0n, pairIn: pairTotal };
+
+  const fees = await feesFor(w);
+  const signer = w.ks.signer(wallet.id, w.rpc);
+  const usdgFee = await w.swap.discoverPairFee(pairToken, { provider: w.rpc });
+  const q = await w.swap.quotePairToEth({ pairToken, amountIn: pairTotal, usdgFee }, { provider: w.rpc });
+  const swapMinOut = q.amountOut > 0n ? (q.amountOut * BigInt(10_000 - EXIT_ROUTE_SLIPPAGE_BPS)) / 10_000n : 0n;
+  if (swapMinOut <= 0n) throw new Error('the pairToken->ETH quote returned nothing — refusing a floorless recovery swap');
+  const swapTx = w.swap.buildSwapPairToEth({ pairToken, amountIn: pairTotal, minOut: swapMinOut, recipient: address, usdgFee });
+  const apRouter = w.swap.buildApproveToRouter({ pairToken, amount: pairTotal });
+
+  const before = BigInt(await w.rpc.getBalance(address));
+  let approveHash, swapHash;
+  try {
+    const nonce = await w.rpc.getTransactionCount(address, 'pending');
+    approveHash = (await signer.sendTransaction({ to: apRouter.to, data: apRouter.data, value: 0n, nonce, gasLimit: APPROVE_GAS, ...fees })).hash;
+    swapHash = (await signer.sendTransaction({ to: swapTx.to, data: swapTx.data, value: 0n, nonce: nonce + 1, gasLimit: SWAP_GAS, ...fees })).hash;
+  } catch (err) {
+    throw new Error(`pair recovery swap from ${address} failed to broadcast: ${rpcMessage(err)}`);
+  }
+  const swapReceipt = await w.await(w.rpc, swapHash);
+  const status = statusOf(swapReceipt);
+  let ethReceived = 0n;
+  if (status === 'confirmed') {
+    const apReceipt = await w.await(w.rpc, approveHash).catch(() => null);
+    const gasBack = spentOn(swapReceipt) + spentOn(apReceipt);
+    let best = BigInt(await w.rpc.getBalance(address)) - before + gasBack;
+    for (let i = 0; i < STALE_READ_TRIES && best < swapMinOut; i++) {
+      await w.sleepFn(STALE_READ_MS);
+      const d = BigInt(await w.rpc.getBalance(address)) - before + gasBack;
+      if (d > best) best = d;
+    }
+    ethReceived = best > 0n ? best : 0n;
+  }
+  return { status, swapHash, approveHash, ethReceived, pairIn: pairTotal };
+}
+
 module.exports = {
   APPROVE_GAS,
   SELL_GAS,
+  SWAP_GAS,
   FEE_BUMP_PCT,
   readCurve,
   snipeTax,
   tokenBalance,
   buy,
   sell,
-  _private: { spentOn, statusOf, curveContract, erc20Contract },
+  recoverPair,
+  _private: { spentOn, statusOf, curveContract, erc20Contract, buyViaRoute, sellViaRoute, readDeltaAtLeast },
 };

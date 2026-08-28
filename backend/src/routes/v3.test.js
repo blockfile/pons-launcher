@@ -101,6 +101,10 @@ function harness({
   deployer = TREASURY.address,
   graduated = false,
   readyToGraduate = false,
+  isNativeQuote = true,
+  pairToken = null,
+  routeImpactBps = 100, // the price impact the token-quote preflight sees (well under the cap)
+  routeError = null, // if set, the route lookup throws it — "no funded swap pool"
   mainEth = parseEther('50'),
   snipeBps = 0,
 } = {}) {
@@ -115,7 +119,8 @@ function harness({
       readCurve: async () => ({
         address: CURVE,
         token: TOKEN,
-        isNativeQuote: true,
+        isNativeQuote,
+        pairToken,
         quoteReserve: parseEther('40'),
         tokenReserve: TOKENS(800_000_000),
         feeBps: 100,
@@ -125,6 +130,14 @@ function harness({
       }),
       snipeTax: async () => ({ bps: snipeBps, windowSeconds: 600 }),
       tokenBalance: async () => TOKENS(1000),
+    },
+    // The ETH<->pairToken route preflight for a token-quoted curve. Default: a funded, low-impact
+    // route. Tests flip routeError (no pool) or routeImpactBps (thin pool) to exercise the refusals.
+    swaproute: {
+      assessBuyImpact: async () => {
+        if (routeError) throw new Error(routeError);
+        return { impactBps: routeImpactBps, fullOut: TOKENS(1), usdgFee: 3000 };
+      },
     },
     rpc: { getBalance: async () => mainEth },
     getFeesFn: async () => ({ type: 2, maxFeePerGas: 1_000_000_000n, maxPriorityFeePerGas: 1n }),
@@ -193,6 +206,32 @@ test('it refuses a curve that is ready to graduate', async () => {
   // pool this code cannot sell.
   const h = harness({ readyToGraduate: true });
   await assert.rejects(() => resolve(h), /ready to graduate/);
+});
+
+const AMZN = '0x000000000000000000000000000000000000a123';
+
+test('it refuses a token-quoted curve that exposes no pairToken to route through', async () => {
+  const h = harness({ isNativeQuote: false, pairToken: null });
+  await assert.rejects(() => resolve(h), /exposes no pairToken/);
+});
+
+test('it accepts a token-quoted curve when a funded, low-impact swap route exists', async () => {
+  // The AMZN case: the curve trades against a pair token, but V3 routes ETH<->pairToken around it.
+  const h = harness({ isNativeQuote: false, pairToken: AMZN, routeImpactBps: 100 });
+  const out = await assert.doesNotReject(() => resolve(h));
+  return out;
+});
+
+test('it refuses a token-quoted curve when no funded swap pool exists', async () => {
+  const h = harness({ isNativeQuote: false, pairToken: AMZN, routeError: 'no USDG<->pool with liquidity' });
+  await assert.rejects(() => resolve(h), /cannot route ETH to it/);
+});
+
+test('it refuses a token-quoted big buy that would over-impact the thin pool', async () => {
+  // The quoter saturates instead of reverting, so a slippage floor cannot see this — the impact
+  // preflight (25% here, over the 10% cap) is the only thing that catches it.
+  const h = harness({ isNativeQuote: false, pairToken: AMZN, routeImpactBps: 2500 });
+  await assert.rejects(() => resolve(h), /would move the .* pool|too thin/);
 });
 
 test('it refuses when there is no main wallet', async () => {

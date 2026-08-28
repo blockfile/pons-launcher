@@ -50,6 +50,7 @@ const v3roles = require('./roles');
 const defaultTrade = require('./trade');
 const defaultRelay = require('./relay');
 const defaultSizing = require('./sizing');
+const defaultSwaproute = require('../evm/v3/swaproute');
 
 const DEFAULT_INTERVAL_MS = 7_000;
 // Below this the Relay fill dominates the cycle and the interval stops
@@ -104,11 +105,21 @@ const READ_BACKOFF_MS = 800;
 // plan's feasibility check can size against the EXACT figures the engine's
 // gasFor() uses — a drift here would let the plan bless a run the engine then
 // halts (or refuse one it would have finished).
-function gasFigures(fees) {
+function gasFigures(fees, { route = false } = {}) {
+  const T = defaultTrade;
   return {
-    buyGas: gasCost(fees, BigInt(config.buyGasLimit)),
+    // A ROUTE buy is 3 txs (swap ETH->pair + approve + curve.buy); a native buy is 1.
+    buyGas: gasCost(fees, route ? T.SWAP_GAS + T.APPROVE_GAS + BigInt(config.buyGasLimit) : BigInt(config.buyGasLimit)),
     buffer: parseEther(String(config.gasBufferEth)),
-    mainGas: gasCost(fees, defaultTrade.APPROVE_GAS + defaultTrade.SELL_GAS + RELAY_DEPOSIT_GAS),
+    // A ROUTE sell is 4 txs (approve token + curve.sell + approve router + swap) before the Relay
+    // deposit; a native sell is approve + curve.sell. Under-reserving here would let the main wallet
+    // keep back too little and run dry mid-run, or fund a bundle wallet below what its 3-leg buy costs.
+    mainGas: gasCost(
+      fees,
+      route
+        ? T.APPROVE_GAS * 2n + T.SELL_GAS + T.SWAP_GAS + RELAY_DEPOSIT_GAS
+        : T.APPROVE_GAS + T.SELL_GAS + RELAY_DEPOSIT_GAS
+    ),
   };
 }
 
@@ -210,6 +221,7 @@ function createEngine(deps = {}) {
   const trade = deps.trade || defaultTrade;
   const relay = deps.relay || defaultRelay;
   const sizing = deps.sizing || defaultSizing;
+  const routeSwap = deps.swaproute || defaultSwaproute;
   const fillPollMs = deps.fillPollMs ?? FILL_POLL_MS;
   const fillTimeoutMs = deps.fillTimeoutMs ?? FILL_TIMEOUT_MS;
   // Injectable so trade/relay can be handed the same fakes the engine got.
@@ -217,6 +229,22 @@ function createEngine(deps = {}) {
 
   function log(userId, summary, detail = {}) {
     activityForFn(userId).record('v3', summary, detail);
+  }
+
+  // The curve values a position in its QUOTE asset. For a native curve that is ETH; for a
+  // token-quoted curve (e.g. AMZN) it is the pairToken, whose value must be converted to ETH via
+  // the swap quote before it can be compared to gas or funded through Relay — otherwise a slice
+  // measured in the pair token is compared to an ETH gas floor, and the mismatch lets a thin cycle
+  // pass the pre-sell viability check and sell before halting. Native curves pass straight through
+  // (no swap, no extra read).
+  async function quoteAssetToEth(curve, amountInQuote) {
+    if (curve.isNativeQuote !== false) return amountInQuote;
+    if (amountInQuote <= 0n) return 0n;
+    const q = await routeSwap.quotePairToEth(
+      { pairToken: curve.pairToken, amountIn: amountInQuote },
+      { ...tradeDeps, provider: rpc }
+    );
+    return q.amountOut;
   }
 
   function clear(job) {
@@ -283,12 +311,13 @@ function createEngine(deps = {}) {
    * test that substitutes the trading behaviour should not have to restate
    * them.
    */
-  async function gasFor() {
+  async function gasFor(route = false) {
     const fees = await getFeesFn(FEE_BUMP_PCT);
     // buyGas: what a bundle wallet needs to make its buy, plus prepareV2's buffer.
     // mainGas: what the main wallet keeps back out of each sale for its own next
     // approve, sell and deposit — or the run walks itself dry a few cycles in.
-    return { fees, ...gasFigures(fees) };
+    // `route` sizes both for a token curve's extra swap/approve legs.
+    return { fees, ...gasFigures(fees, { route }) };
   }
 
   /**
@@ -334,8 +363,12 @@ function createEngine(deps = {}) {
 
     const ks = keystoreForFn(job.userId);
     const main = v3roles.main(ks);
+    // Read the curve so trade.buy takes the native or the ETH<->pairToken route path as the curve
+    // requires (a token-quoted curve like AMZN routes; a native one is unaffected).
+    const curve = await retryRead(() => trade.readCurve(job.curve, { ...tradeDeps, rpc }));
+    job.isRoute = curve.isNativeQuote === false; // cache for the cycles' route-aware gas sizing
     const out = await trade.buy(
-      { wallet: main, curveAddress: job.curve, amountWei: job.bigBuyWei },
+      { wallet: main, curveAddress: job.curve, amountWei: job.bigBuyWei, curve },
       { ...tradeDeps, keystore: ks, rpc }
     );
     if (out.status === 'reverted') throw new Error('the big buy reverted');
@@ -357,7 +390,13 @@ function createEngine(deps = {}) {
     const wallet = v3roles.bundle(ks).find((w) => w.id === target.walletId);
     if (!wallet) throw new Error(`wallet ${target.walletId} is no longer a v3 bundle wallet`);
 
-    const { buyGas, buffer, mainGas } = await retryRead(gasFor);
+    // A curve's quote asset is fixed for a run, so read it once and cache it on the job. It sizes
+    // gas for the route's extra legs (a token curve's sell is 4 txs, its buy 3); native runs are
+    // unaffected. Re-read after a process restart resumes a job without the cached flag.
+    if (job.isRoute === undefined) {
+      job.isRoute = await retryRead(async () => (await trade.readCurve(job.curve, { ...tradeDeps, rpc })).isNativeQuote === false);
+    }
+    const { buyGas, buffer, mainGas } = await retryRead(() => gasFor(job.isRoute));
 
     // How many wallets, including this one, still have to be served. This is
     // the divisor the slice is drawn against, and recomputing it every cycle is
@@ -461,12 +500,17 @@ function createEngine(deps = {}) {
         // means NOTHING was sold — so a Resume re-sizes against a fresh read and sells this
         // slice exactly once. Healthy curve → this was a momentary thin read, Resume clears
         // it; genuinely too small → run the Exit.
-        const expectSpendable = sliceWei - mainGas;
+        // The slice value is in the curve's QUOTE asset (ETH for a native curve, the pair token
+        // for a token curve). Convert to ETH so the check compares like with like — gas, the Relay
+        // fee, and the next buy are all ETH.
+        const sliceEthWei = await quoteAssetToEth(curve, sliceWei);
+        const expectSpendable = sliceEthWei - mainGas;
         const expectTransfer = expectSpendable > 0n ? (expectSpendable * BigInt(100 - RELAY_FEE_PCT)) / 100n : 0n;
         if (expectSpendable <= 0n || expectTransfer <= buyGas + buffer) {
+          const valueEthWei = await quoteAssetToEth(curve, valueWei);
           throw new Error(
             `this cycle's quote came back too thin to continue — the curve valued the position at ` +
-              `${formatEther(valueWei)} ETH this read, so a slice would raise about ${formatEther(sliceWei)} ETH, ` +
+              `${formatEther(valueEthWei)} ETH this read, so a slice would raise about ${formatEther(sliceEthWei)} ETH, ` +
               `under the ${formatEther(mainGas + buyGas + buffer)} ETH of gas + buy the next step needs. ` +
               `NOTHING WAS SOLD. If the curve is healthy this was a momentary bad read — press Resume to retry; ` +
               `if the position is genuinely too small to divide further, run the Exit to recover it.`
@@ -488,7 +532,7 @@ function createEngine(deps = {}) {
       const minQuoteOut = (expectedWei * BigInt(100 - CYCLE_SELL_MAX_SLIPPAGE_PCT)) / 100n;
 
       const sold = await trade.sell(
-        { wallet: main, curveAddress: job.curve, token: curve.token, tokensIn, minQuoteOut },
+        { wallet: main, curveAddress: job.curve, token: curve.token, tokensIn, minQuoteOut, curve },
         { ...tradeDeps, keystore: ks, rpc }
       );
       if (sold.status === 'reverted') {
@@ -593,8 +637,11 @@ function createEngine(deps = {}) {
         );
       }
 
+      // Read the curve here too — this block runs on its own (and on Resume with the sell already
+      // done), so it cannot borrow the sell block's read. trade.buy needs it to pick native vs route.
+      const buyCurve = await retryRead(() => trade.readCurve(job.curve, { ...tradeDeps, rpc }));
       const out = await trade.buy(
-        { wallet, curveAddress: job.curve, amountWei: spend },
+        { wallet, curveAddress: job.curve, amountWei: spend, curve: buyCurve },
         { ...tradeDeps, keystore: ks, rpc }
       );
       if (out.status === 'reverted') throw new Error('the buy reverted');

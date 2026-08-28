@@ -40,9 +40,11 @@ const { activityFor } = require('../store/activity');
 const v3roles = require('./roles');
 const defaultTrade = require('./trade');
 
-// What a wallet must be able to pay before its approval is signed. Same two
-// transactions trade.sell builds.
+// What a wallet must be able to pay before its approval is signed. A NATIVE-quoted curve is the
+// two txs trade.sell builds; a TOKEN-quoted curve routes (approve token, curve.sell, approve
+// pairToken, swap) — four txs, two of them swap-sized — so it reserves more.
 const EXIT_GAS = defaultTrade.APPROVE_GAS + defaultTrade.SELL_GAS;
+const EXIT_GAS_ROUTE = defaultTrade.APPROVE_GAS * 2n + defaultTrade.SELL_GAS + defaultTrade.SWAP_GAS;
 const FEE_BUMP_PCT = defaultTrade.FEE_BUMP_PCT;
 
 function wire(deps = {}) {
@@ -127,7 +129,8 @@ async function run(userId, { token, curve, confirm }, deps = {}) {
   }
 
   const fees = await w.getFeesFn(FEE_BUMP_PCT);
-  const reserve = gasCost(fees, EXIT_GAS);
+  // A token-quoted curve sells via the ETH<->pairToken route (four txs) — reserve its gas.
+  const reserve = gasCost(fees, state.isNativeQuote === false ? EXIT_GAS_ROUTE : EXIT_GAS);
 
   const skipped = [];
   const sellable = [];
@@ -150,7 +153,37 @@ async function run(userId, { token, curve, confirm }, deps = {}) {
     sellable.push({ wallet, balance });
   }
 
-  if (!sellable.length) {
+  // TOKEN CURVE: a wallet can hold pairToken (e.g. AMZN) stranded by a prior run's failed swap and
+  // NONE of the launchpad token — the sell loop above skipped it. Recover those swap-only below, so
+  // the exit leaves nothing behind. (Wallets that DO hold the token get their stranded pairToken
+  // folded in by sellViaRoute's recover-first, so they are not double-counted here.)
+  const recoverable = [];
+  if (state.isNativeQuote === false && state.pairToken && typeof w.trade.recoverPair === 'function') {
+    const recGas = gasCost(fees, defaultTrade.APPROVE_GAS + defaultTrade.SWAP_GAS);
+    for (const { wallet, balance } of wallets) {
+      if (balance > 0n) continue;
+      const pairBal = BigInt(await w.trade.tokenBalance(state.pairToken, wallet.address, deps));
+      if (pairBal <= 0n) continue;
+      const native = BigInt(await w.rpc.getBalance(wallet.address));
+      if (native < recGas) {
+        skipped.push({
+          walletId: wallet.id,
+          address: wallet.address,
+          reason: `holds stranded ${state.pairToken} but ${formatEther(native)} ETH does not cover the recovery swap gas`,
+        });
+        continue;
+      }
+      recoverable.push({ wallet });
+    }
+    // A wallet we will recover was listed "holds none of this token" in the loop above; drop that
+    // line so it is not reported as both skipped and recovered.
+    const recIds = new Set(recoverable.map((r) => r.wallet.id));
+    for (let i = skipped.length - 1; i >= 0; i -= 1) {
+      if (recIds.has(skipped[i].walletId)) skipped.splice(i, 1);
+    }
+  }
+
+  if (!sellable.length && !recoverable.length) {
     throw new Error('no v3 wallet holds a sellable balance of this token — nothing to sell');
   }
 
@@ -158,7 +191,11 @@ async function run(userId, { token, curve, confirm }, deps = {}) {
   for (const { wallet, balance } of sellable) {
     try {
       const out = await w.trade.sell(
-        { wallet, curveAddress: curve, token, tokensIn: balance },
+        // Pass the curve state so a token-quoted curve routes token -> pairToken -> ETH (and
+        // recovers any pairToken a prior run's failed swap stranded in this wallet) instead of
+        // taking the native path, which would sell into the curve for pairToken and strand it.
+        // liquidate: the exit must always get out — skip the impact cap, swap at a wide floor.
+        { wallet, curveAddress: curve, token, tokensIn: balance, curve: state, liquidate: true },
         { ...deps, keystore: w.ks(userId), rpc: w.rpc, fees }
       );
       results.push({
@@ -179,6 +216,40 @@ async function run(userId, { token, curve, confirm }, deps = {}) {
         address: wallet.address,
         role: wallet.role,
         tokens: formatUnits(balance, w.decimals),
+        status: 'failed',
+        error: err?.shortMessage || err?.message || String(err),
+        ethReceived: '0.0',
+        ethReceivedRaw: '0',
+      });
+    }
+  }
+
+  // Swap-only recovery of stranded pairToken in wallets that hold no launchpad token (token curves).
+  for (const { wallet } of recoverable) {
+    try {
+      const rec = await w.trade.recoverPair(
+        { wallet, curve: state },
+        { ...deps, keystore: w.ks(userId), rpc: w.rpc, fees }
+      );
+      results.push({
+        walletId: wallet.id,
+        address: wallet.address,
+        role: wallet.role,
+        tokens: '0.0',
+        recovered: true,
+        status: rec.status,
+        approveHash: rec.approveHash,
+        sellHash: rec.swapHash,
+        ethReceived: formatEther(rec.ethReceived ?? 0n),
+        ethReceivedRaw: (rec.ethReceived ?? 0n).toString(),
+      });
+    } catch (err) {
+      results.push({
+        walletId: wallet.id,
+        address: wallet.address,
+        role: wallet.role,
+        tokens: '0.0',
+        recovered: true,
         status: 'failed',
         error: err?.shortMessage || err?.message || String(err),
         ethReceived: '0.0',
