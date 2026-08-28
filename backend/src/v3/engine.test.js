@@ -69,6 +69,7 @@ function harness({
   clock = fakeClock(),
   cycleCostMs = 0, // how long each cycle's work takes on the fake clock
   readFailTimes = 0, // make the FIRST readCurve throw this many times, then succeed
+  isNativeQuote = true, // false => a TOKEN-quoted (route) curve, so the engine sizes route gas
 } = {}) {
   let readFails = 0;
   const calls = [];
@@ -113,6 +114,10 @@ function harness({
       },
     },
     getFeesFn: async () => ({ type: 2, maxFeePerGas: 1_000_000_000n, maxPriorityFeePerGas: 1n }),
+    // Only reached on a token-quoted (route) run, to value a pair-token slice in ETH. 1:1 here.
+    swaproute: {
+      quotePairToEth: async ({ amountIn }) => ({ amountOut: BigInt(amountIn), usdgFee: 3000 }),
+    },
     trade: {
       readCurve: async () => {
         if (readFails < readFailTimes) {
@@ -124,7 +129,8 @@ function harness({
         return {
         address: CURVE,
         token: TOKEN,
-        isNativeQuote: true,
+        isNativeQuote,
+        pairToken: isNativeQuote ? null : '0x12f190a9F9d7D37a250758b26824B97CE941bF54',
         // A dust (but non-zero) quote reserve models a momentary drain / thin read: it is a
         // VALID read, so the empty-reserve retry does not fire — the pre-sell viability check
         // must catch it and halt BEFORE selling.
@@ -499,6 +505,28 @@ test('the final cycle keeps back only deposit gas, funding the last wallet more'
   assert.equal(transfers.length, 3);
   assert.ok(transfers[2] > transfers[0], 'the final wallet is funded more — no phantom next-sell reserve');
   assert.ok(transfers[2] > transfers[1]);
+});
+
+test('a token-quoted (route) run reserves route gas and a spike margin, and still completes', async () => {
+  // End-to-end on a route curve: the engine sizes 4-leg sell / 3-leg buy gas and adds the
+  // gas-spike margin, so each bundle wallet is funded with headroom above its buy gas. With the
+  // harness's healthy 1-ETH-per-cycle sells the whole run still completes.
+  const routed = harness({ isNativeQuote: false, targets: [W1, W2, W3] });
+  const native = harness({ targets: [W1, W2, W3] });
+  await routed.engine.start(USER, routed.input);
+  await routed.clock.drain();
+  await native.engine.start(USER, native.input);
+  await native.clock.drain();
+
+  assert.equal(routed.engine.status(USER).status, 'complete', 'the route run completes');
+  const rBuys = routed.calls.filter((c) => c.step === 'buy' && c.index > 0);
+  assert.equal(rBuys.length, 3, 'every bundle wallet bought');
+
+  // A route wallet is funded with LESS than a native wallet from the same 1-ETH sell: more is held
+  // back for the extra sell/buy legs plus the spike margin. That headroom is the whole point.
+  const rT = routed.calls.filter((c) => c.step === 'transfer').map((c) => c.amountWei);
+  const nT = native.calls.filter((c) => c.step === 'transfer').map((c) => c.amountWei);
+  assert.ok(rT[0] < nT[0], 'a route cycle keeps back more (route gas + spike margin) than a native one');
 });
 
 test('every cycle sells a positive slice, none is starved', async () => {

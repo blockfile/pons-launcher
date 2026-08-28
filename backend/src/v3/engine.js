@@ -77,6 +77,13 @@ const RELAY_DEPOSIT_GAS = 50_000n;
 // main wallet and comes out at the exit.
 const RELAY_FEE_PCT = 3;
 
+// Extra gas headroom a bundle wallet is funded with, as a % of its buy gas, so a gas-price SPIKE
+// between the transfer and the (later, after the Relay fill) buy cannot leave it short. A ROUTE buy
+// is 3 legs, so a spike hurts ~3x as much as a native buy — the margin is applied to route runs
+// only, leaving the long-settled native funding untouched. Unused headroom is simply spent on a
+// slightly larger buy (or swept), never lost. Env-tunable.
+const GAS_SPIKE_MARGIN_PCT = Number(process.env.V3_GAS_SPIKE_MARGIN_PCT) || 50;
+
 // How far below its quote a CYCLE sell may fill before it REVERTS instead of dust-filling
 // the slice. A dust fill — the curve moved between the quote and the sell, or a tax bit — is a
 // ~99% miss, while a normal cycle's price impact is a fraction of a percent, so this sits
@@ -398,6 +405,13 @@ function createEngine(deps = {}) {
     }
     const { fees, buyGas, buffer, mainGas } = await retryRead(() => gasFor(job.isRoute));
 
+    // What a bundle wallet must be funded with before its buy is viable: the buy gas, the buffer,
+    // and (route runs only) a spike margin so a gas rise between the transfer and the later buy
+    // cannot strand it. Both the pre-sell viability check and the transfer guard gate on this, so a
+    // cycle that could not fund a robust buy halts BEFORE selling / before Relaying — never after.
+    const spikeMargin = job.isRoute ? (buyGas * BigInt(GAS_SPIKE_MARGIN_PCT)) / 100n : 0n;
+    const buyFloor = buyGas + buffer + spikeMargin;
+
     // How many wallets, including this one, still have to be served. This is
     // the divisor the slice is drawn against, and recomputing it every cycle is
     // what makes the position land on zero exactly when the wallets run out.
@@ -506,12 +520,12 @@ function createEngine(deps = {}) {
         const sliceEthWei = await quoteAssetToEth(curve, sliceWei);
         const expectSpendable = sliceEthWei - mainGas;
         const expectTransfer = expectSpendable > 0n ? (expectSpendable * BigInt(100 - RELAY_FEE_PCT)) / 100n : 0n;
-        if (expectSpendable <= 0n || expectTransfer <= buyGas + buffer) {
+        if (expectSpendable <= 0n || expectTransfer <= buyFloor) {
           const valueEthWei = await quoteAssetToEth(curve, valueWei);
           throw new Error(
             `this cycle's quote came back too thin to continue — the curve valued the position at ` +
               `${formatEther(valueEthWei)} ETH this read, so a slice would raise about ${formatEther(sliceEthWei)} ETH, ` +
-              `under the ${formatEther(mainGas + buyGas + buffer)} ETH of gas + buy the next step needs. ` +
+              `under the ${formatEther(mainGas + buyFloor)} ETH of gas + buy the next step needs. ` +
               `NOTHING WAS SOLD. If the curve is healthy this was a momentary bad read — press Resume to retry; ` +
               `if the position is genuinely too small to divide further, run the Exit to recover it.`
           );
@@ -593,10 +607,11 @@ function createEngine(deps = {}) {
       }
 
       const transferWei = (spendable * BigInt(100 - RELAY_FEE_PCT)) / 100n;
-      if (transferWei <= buyGas + buffer) {
+      if (transferWei <= buyFloor) {
         throw new Error(
           `this cycle would fund ${target.address} with ${formatEther(transferWei)} ETH, which is ` +
-            'not enough to pay for a buy — the position is too small to divide further'
+            `not enough to pay for a buy with a gas-spike margin (${formatEther(buyFloor)} ETH) — the position ` +
+            'is too small to divide further'
         );
       }
 
