@@ -396,7 +396,7 @@ function createEngine(deps = {}) {
     if (job.isRoute === undefined) {
       job.isRoute = await retryRead(async () => (await trade.readCurve(job.curve, { ...tradeDeps, rpc })).isNativeQuote === false);
     }
-    const { buyGas, buffer, mainGas } = await retryRead(() => gasFor(job.isRoute));
+    const { fees, buyGas, buffer, mainGas } = await retryRead(() => gasFor(job.isRoute));
 
     // How many wallets, including this one, still have to be served. This is
     // the divisor the slice is drawn against, and recomputing it every cycle is
@@ -572,7 +572,13 @@ function createEngine(deps = {}) {
       record.step = 'transferring';
       record.state = 'transferring';
 
-      const spendable = record.ethRaised - mainGas;
+      // The main keeps back its own NEXT round of gas out of what this sell raised — EXCEPT on the
+      // final cycle, where there is no next sell, so it only needs THIS transfer's own deposit gas
+      // and can send the rest to the last wallet. On a token curve this is decisive: the full route
+      // mainGas is a 4-leg sell, and over-reserving it on the last, thinnest slice is exactly what
+      // left the final wallet unable to cover its own 3-leg route buy gas (it stranded there).
+      const keepGas = record.finalSlice ? gasCost(fees, RELAY_DEPOSIT_GAS) : mainGas;
+      const spendable = record.ethRaised - keepGas;
       if (spendable <= 0n) {
         // The pre-sell viability check above normally stops a thin cycle BEFORE selling. If
         // it still gets here, the sell fired against a healthy quote but FILLED far below it
@@ -580,7 +586,7 @@ function createEngine(deps = {}) {
         // tokens are already sold, so Resume would re-hit this same step; the honest path is
         // the Exit, which sells the remaining position at market and recovers it.
         throw new Error(
-          `this cycle's sell filled at only ${formatEther(record.ethRaised)} ETH — below the ${formatEther(mainGas)} ` +
+          `this cycle's sell filled at only ${formatEther(record.ethRaised)} ETH — below the ${formatEther(keepGas)} ` +
             `ETH of gas the next step needs. The curve moved between the quote and the sell, so those tokens are ` +
             `already spent and Resume would stop here again. Run the Exit to sell the remaining position and recover it.`
         );

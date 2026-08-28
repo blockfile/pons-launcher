@@ -487,6 +487,20 @@ test('the last cycle is flagged as the one taking the remainder', async () => {
   );
 });
 
+test('the final cycle keeps back only deposit gas, funding the last wallet more', async () => {
+  // Every cycle raises the same 1 ETH in this harness, so the ONLY thing that changes the transfer
+  // is how much gas the main keeps back: a full next-sell for the middle cycles, just THIS
+  // transfer's deposit for the final one (there is no next sell). Over-reserving on the last,
+  // thinnest slice is what left a route run's final wallet unable to cover its own buy gas.
+  const h = harness({ targets: [W1, W2, W3] });
+  await h.engine.start(USER, h.input);
+  await h.clock.drain();
+  const transfers = h.calls.filter((c) => c.step === 'transfer').map((c) => c.amountWei);
+  assert.equal(transfers.length, 3);
+  assert.ok(transfers[2] > transfers[0], 'the final wallet is funded more — no phantom next-sell reserve');
+  assert.ok(transfers[2] > transfers[1]);
+});
+
 test('every cycle sells a positive slice, none is starved', async () => {
   const h = harness({ targets: [W1, W2, W3] });
   await h.engine.start(USER, h.input);
