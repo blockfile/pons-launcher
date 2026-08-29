@@ -9,6 +9,7 @@ import V3MainPanel from './V3MainPanel.jsx';
 import V3ChainPanel from './V3ChainPanel.jsx';
 import V3ExitPanel from './V3ExitPanel.jsx';
 import V3SweepPanel from './V3SweepPanel.jsx';
+import V3ReturnPanel from './V3ReturnPanel.jsx';
 
 /**
  * The V3 tab, whole.
@@ -252,10 +253,29 @@ export default function V3Console({ health, credential, report, output, reported
       />
 
       <V3SweepPanel
-        step={{ ...step('sweep'), last: true }}
+        step={step('sweep')}
         explorer={explorer}
         reload={loadWallets}
         report={report}
+        locked={Boolean(job?.running)}
+      />
+
+      {/* Unnumbered utilities after the flow, on the same spine as the readout:
+          consolidate one token into main, or sell main's own balance of a token.
+          Not one of the six steps — reached only once a run is done. */}
+      <V3ReturnPanel
+        step={{
+          id: 'v3-utilities',
+          title: 'Return or sell a token',
+          n: null,
+          label: 'Extras',
+          state: 'readout',
+          last: true,
+        }}
+        token={token}
+        setToken={setToken}
+        report={report}
+        reload={loadWallets}
         locked={Boolean(job?.running)}
       />
     </div>

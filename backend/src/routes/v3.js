@@ -42,6 +42,7 @@ const swaproute = require('../evm/v3/swaproute');
 const sizing = require('../v3/sizing');
 const engine = require('../v3/engine');
 const exit = require('../v3/exit');
+const gather = require('../v3/gather');
 const sweep = require('../v3/sweep');
 const { storeFor } = require('../v4/store');
 const seasoned = require('../v4/seasoned');
@@ -738,6 +739,39 @@ router.post('/v3/exit', requireApiKey, async (req, res, next) => {
         await exit.run(req.user.id, {
           token: record.token,
           curve: record.curve,
+          confirm: req.body?.confirm,
+        })
+      )
+    );
+  } catch (err) {
+    next(err);
+  }
+});
+
+// ── gathering a token back to main ────────────────────────────────────────────
+// Two end-of-run utilities that sit beside the exit. Both read the chain and
+// move the exact balance they find — see v3/gather.js.
+
+// A DIRECT ERC-20 transfer of one token from every bundle wallet into main. This
+// links those wallets to main on-chain by design (the panel warns about it); a
+// plain transfer grants no allowance, so there is no ownership gate to enforce.
+router.post('/v3/tokens/return-to-main', requireApiKey, async (req, res, next) => {
+  try {
+    res.json(jsonSafe(await gather.returnToMain(req.user.id, { token: req.body?.token })));
+  } catch (err) {
+    next(err);
+  }
+});
+
+// Sell the main wallet's whole balance of a token back to ETH. Floor-free
+// (confirm required) and behind the exit's ownership gate — gather.sellMain
+// enforces both, so the handler only passes the body through.
+router.post('/v3/tokens/sell-main', requireApiKey, async (req, res, next) => {
+  try {
+    res.json(
+      jsonSafe(
+        await gather.sellMain(req.user.id, {
+          token: req.body?.token,
           confirm: req.body?.confirm,
         })
       )
