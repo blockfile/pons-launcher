@@ -713,6 +713,20 @@ export default function V4SeedPanel({ step, wallets, masters, facts, explorer, r
                   exportIds={tickedHere.map((w) => w.id)}
                   label={`Export ${tickedHere.length} selected`}
                 />
+                {/* ONE PRESS: export the keys, THEN withdraw the same set from
+                    seasoning. afterExport runs only after the file has downloaded
+                    (V4BackupControls keeps it inside the successful path), so a wallet
+                    is never set aside before its key is saved — which is exactly what
+                    "withdrawn" (keys exported, held out of the pool) means. */}
+                <V4BackupControls
+                  masters={masters}
+                  seeds={wallets}
+                  report={report}
+                  reload={reload}
+                  exportIds={tickedHere.map((w) => w.id)}
+                  label={`Export & withdraw ${tickedHere.length} selected`}
+                  afterExport={() => withdrawTicked(tickedHere)}
+                />
                 {/* Set aside, not thrown away — the same ticked set as the
                     delete, but nothing is archived and the wallets stay in the
                     table. Ghost, without the danger tint: this is reversible and

@@ -50,6 +50,12 @@ export default function V4BackupControls({
   // the ETH with no seed phrase behind them, so backing up just that tier (offline,
   // on its own) is its own need. No age filter, no seed selection, no checkbox.
   fundersOnly = false,
+  // Optional follow-on run ONLY after a SUCCESSFUL export (after the file downloads
+  // and the reload lands). This is what makes the combined "Export & Withdraw" button:
+  // withdraw is defined as "keys exported, held out of the pool", so it is safe to set
+  // a wallet aside precisely once its key is in a file — never before. A failed export
+  // throws first, so afterExport never runs on a wallet whose key was not saved.
+  afterExport = null,
 }) {
   const [busy, setBusy] = useState(false);
   const [open, setOpen] = useState(false);
@@ -100,6 +106,9 @@ export default function V4BackupControls({
       // is drawing is stale the moment it succeeds — and the operator's next
       // move is the Start button that reads it.
       if (reload) await reload();
+      // Only now, with the keys in a file, run any follow-on (the combined
+      // Export & Withdraw). Kept inside the try so a failed export never withdraws.
+      if (afterExport) await afterExport();
     } catch (err) {
       report(`ERROR: ${err.message}`);
     } finally {
