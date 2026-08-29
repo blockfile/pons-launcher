@@ -442,3 +442,94 @@ test('POST /v3/wallets/claim-seasoned answers cleanly when nothing is available 
 
   assert.equal(keystoreFor(userId).walletsWithRole('v3bundle').length, 0);
 });
+
+// ── POST /v3/wallets/backup (walletIds / role filter) ──────────────────────
+// Same harness as the claim-seasoned tests: the handler is pulled off the
+// router and called with a fake req/res against a real temp-dir keystore.
+// exportAll()/decrypt() run for real, so these exercise the whole path.
+
+function seedV3Wallets(userId) {
+  const ks = keystoreFor(userId);
+  const [treasury] = ks.generate(1, { role: 'v3dev', label: 'v3 treasury' });
+  const [main] = ks.generate(1, { role: 'v3main', label: 'v3 main' });
+  const bundle = ks.generate(3, { role: 'v3bundle', label: 'v3 bundle' });
+  return { ks, treasury, main, bundle };
+}
+
+async function callBackup(userId, body) {
+  const handler = findRouteHandler('post', '/v3/wallets/backup');
+  const req = { user: { id: userId }, body };
+  const res = fakeRes();
+  let caught = null;
+  await handler(req, res, (err) => {
+    caught = err;
+  });
+  return { res, caught };
+}
+
+test('POST /v3/wallets/backup with no filter exports every v3 wallet, unchanged', async () => {
+  const userId = 'v3-backup-all';
+  seedV3Wallets(userId);
+  const { res, caught } = await callBackup(userId, { confirm: true });
+  assert.equal(caught, null);
+  assert.equal(res.body.count, 5);
+  assert.equal(res.body.wallets.length, 5);
+  assert.ok(res.body.wallets.every((w) => ['v3dev', 'v3main', 'v3bundle'].includes(w.role)));
+  // Real keys came out — this is the export that hands them over.
+  assert.ok(res.body.wallets.every((w) => typeof w.privateKey === 'string' && w.privateKey.startsWith('0x')));
+  // The full-backup response shape is byte-for-byte what it was: no note field.
+  assert.ok(!('note' in res.body));
+});
+
+test('POST /v3/wallets/backup with a role exports only that panel\'s wallets', async () => {
+  const userId = 'v3-backup-role';
+  seedV3Wallets(userId);
+  const { res, caught } = await callBackup(userId, { confirm: true, role: 'v3bundle' });
+  assert.equal(caught, null);
+  assert.equal(res.body.count, 3);
+  assert.ok(res.body.wallets.every((w) => w.role === 'v3bundle'));
+  assert.match(res.body.note, /per-panel/i);
+});
+
+test('POST /v3/wallets/backup with walletIds exports only those wallets', async () => {
+  const userId = 'v3-backup-ids';
+  const { bundle } = seedV3Wallets(userId);
+  const ids = [bundle[0].id, bundle[2].id];
+  const { res, caught } = await callBackup(userId, { confirm: true, walletIds: ids });
+  assert.equal(caught, null);
+  assert.equal(res.body.count, 2);
+  assert.deepEqual(
+    res.body.wallets.map((w) => w.id).sort(),
+    ids.slice().sort()
+  );
+  assert.match(res.body.note, /selected/i);
+});
+
+test('POST /v3/wallets/backup never exports a non-v3 wallet, even when its id is named', async () => {
+  // The one guard that matters: walletIds can only ever NARROW the v3-only floor,
+  // so naming a v1 wallet's id gets it dropped rather than exported.
+  const userId = 'v3-backup-guard';
+  const { bundle } = seedV3Wallets(userId);
+  const [v1] = keystoreFor(userId).generate(1, { role: 'dev', label: 'v1 dev' });
+  const { res, caught } = await callBackup(userId, { confirm: true, walletIds: [bundle[0].id, v1.id] });
+  assert.equal(caught, null);
+  assert.equal(res.body.count, 1);
+  assert.equal(res.body.wallets[0].id, bundle[0].id);
+  assert.ok(res.body.wallets.every((w) => w.role !== 'dev'));
+});
+
+test('POST /v3/wallets/backup refuses a role that is not one of v3\'s', async () => {
+  const userId = 'v3-backup-badrole';
+  seedV3Wallets(userId);
+  const { caught } = await callBackup(userId, { confirm: true, role: 'dev' });
+  assert.ok(caught, 'expected the route to reject a non-v3 role');
+  assert.match(caught.message, /role must be one of/);
+});
+
+test('POST /v3/wallets/backup still requires confirm:true with a filter present', async () => {
+  const userId = 'v3-backup-noconfirm';
+  seedV3Wallets(userId);
+  const { caught } = await callBackup(userId, { role: 'v3bundle' });
+  assert.ok(caught);
+  assert.match(caught.message, /confirm: true/);
+});

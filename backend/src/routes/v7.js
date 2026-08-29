@@ -104,6 +104,27 @@ function revertSelector(err) {
   return typeof data === 'string' && data.length >= 10 ? data.slice(0, 10) : null;
 }
 
+/**
+ * Narrow a full V7-wallet list to what a backup request asked for.
+ *
+ * Absent or empty filter → the whole list unchanged, so the plain "Download
+ * backup" and every older caller stay byte-identical. Optionally NARROWED so a
+ * single panel can back up only its own wallets (role) or the operator can
+ * export a hand-picked selection (walletIds); the two may combine (role AND
+ * ids). The list handed in is already gated to V7's own roles, so no filter can
+ * ever widen it to another tab's keys — an unknown role or an id V7 does not own
+ * simply matches nothing rather than reaching for it.
+ */
+function selectBackupWallets(wallets, body = {}) {
+  const ids =
+    Array.isArray(body.walletIds) && body.walletIds.length ? new Set(body.walletIds.map(String)) : null;
+  const role = typeof body.role === 'string' && v7roles.isV7Role(body.role) ? body.role : null;
+  let out = wallets;
+  if (role) out = out.filter((w) => w.role === role);
+  if (ids) out = out.filter((w) => ids.has(String(w.id)));
+  return out;
+}
+
 /** The big-buy graduation cap: maxHeadroomFrac of the tokens left before graduation. */
 function graduationCap(pool) {
   const headroom = pool.headroomTokens ?? 0n;
@@ -485,12 +506,21 @@ router.post('/v7/fund', requireApiKey, async (req, res, next) => {
   }
 });
 
-// POST /api/v7/wallets/backup — every V7 key at once, for an offline backup.
+// POST /api/v7/wallets/backup — V7 keys for an offline backup.
+//
+// Whole-tab by default (no filter in the body) — byte-identical to before.
+// Optionally narrowed by an OPTIONAL `role` (one panel's own wallets) and/or an
+// OPTIONAL `walletIds` array (a hand-picked selection); see selectBackupWallets.
+// Either way it is V7's wallets only — isV7Role gates the set BEFORE any filter,
+// never another tab's keys. Same two locks as the whole-keystore export: an API
+// key, and a configured credential so a keyless deployment fails closed rather
+// than serving keys.
 router.post('/v7/wallets/backup', requireApiKey, requireAuthConfigured, (req, res, next) => {
   try {
     if ((req.body || {}).confirm !== true) throw new Error('backup requires { confirm: true }');
     const ks = keystoreFor(req.user.id);
-    const wallets = ks.exportAll().filter((w) => v7roles.isV7Role(w.role));
+    const all = ks.exportAll().filter((w) => v7roles.isV7Role(w.role));
+    const wallets = selectBackupWallets(all, req.body || {});
     console.warn(`[pons-launcher] V7 KEYSTORE BACKUP EXPORTED — ${wallets.length} private keys`);
     activityFor(req.user.id).record('export', `[v7] downloaded a backup of ${wallets.length} v7 private key(s)`, {
       count: wallets.length,
@@ -685,4 +715,4 @@ router.post('/v7/sweep', requireApiKey, async (req, res, next) => {
 });
 
 module.exports = router;
-module.exports._private = { jsonSafe, parseAmount, resolveRun, buildPlan, feasibilityOf };
+module.exports._private = { jsonSafe, parseAmount, resolveRun, buildPlan, feasibilityOf, selectBackupWallets };

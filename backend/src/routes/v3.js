@@ -538,16 +538,39 @@ router.post('/v3/fund', requireApiKey, async (req, res, next) => {
   }
 });
 
-// POST /api/v3/wallets/backup — every V3 key at once, for an offline backup.
-// V3's wallets only (v3dev/v3main/v3bundle), never another tab's — the same
-// scoping V4's backup uses. Same two locks as the whole-keystore export: an API
-// key, and a configured credential so a keyless deployment fails closed rather
-// than serving keys.
+// POST /api/v3/wallets/backup — V3 keys for an offline backup. V3's wallets only
+// (v3dev/v3main/v3bundle), never another tab's — the same scoping V4's backup
+// uses. Same two locks as the whole-keystore export: an API key, and a configured
+// credential so a keyless deployment fails closed rather than serving keys.
+//
+// TWO OPTIONAL NARROWINGS, mirroring V4's /v4/wallets/backup shape. With NEITHER
+// present the response is exactly what it was before they existed — every V3
+// wallet — so the "Download backup" button is unchanged:
+//   walletIds — an explicit set of ids (the bundle table's "export selected"). An
+//               id naming a wallet that is not one of ours is simply absent from
+//               the v3-only floor below, so a stray or hostile id can only ever
+//               export FEWER wallets, never a wallet this tab does not own.
+//   role      — one of V3's own three roles (a per-panel export). walletIds wins.
 router.post('/v3/wallets/backup', requireApiKey, requireAuthConfigured, (req, res, next) => {
   try {
-    if ((req.body || {}).confirm !== true) throw new Error('backup requires { confirm: true }');
+    const body = req.body || {};
+    if (body.confirm !== true) throw new Error('backup requires { confirm: true }');
     const ks = keystoreFor(req.user.id);
-    const wallets = ks.exportAll().filter((w) => v3roles.isV3Role(w.role));
+    // Every V3 wallet is the floor this never exports past — the filters below
+    // only ever NARROW it, never widen it to another tab's keys.
+    const all = ks.exportAll().filter((w) => v3roles.isV3Role(w.role));
+
+    const requestedIds = Array.isArray(body.walletIds) ? new Set(body.walletIds.map(String)) : null;
+    const role = typeof body.role === 'string' && body.role ? body.role : null;
+    if (role && !v3roles.isV3Role(role)) {
+      throw new Error(`role must be one of ${Object.values(v3roles.ROLES).join(', ')}`);
+    }
+    const wallets = requestedIds
+      ? all.filter((w) => requestedIds.has(w.id))
+      : role
+        ? all.filter((w) => w.role === role)
+        : all;
+
     console.warn(`[pons-launcher] V3 KEYSTORE BACKUP EXPORTED — ${wallets.length} private keys`);
     activityFor(req.user.id).record('export', `[v3] downloaded a backup of ${wallets.length} v3 private key(s)`, {
       count: wallets.length,
@@ -556,6 +579,17 @@ router.post('/v3/wallets/backup', requireApiKey, requireAuthConfigured, (req, re
       exportedAt: new Date().toISOString(),
       chainId: config.chainId,
       count: wallets.length,
+      // Only on a filtered export, so the full-backup file is byte-for-byte what
+      // it was, and a subset file still says what it is when it is opened months
+      // later by someone who no longer remembers which button produced it.
+      ...(requestedIds || role
+        ? {
+            note: requestedIds
+              ? `Selected export — ${wallets.length} of ${all.length} V3 wallet(s), the ones chosen on the tab. ` +
+                'The rest are NOT in this file.'
+              : `Per-panel export — the ${wallets.length} ${role} wallet(s) only. Other V3 wallets are NOT in this file.`,
+          }
+        : {}),
       warning:
         'These private keys control real funds. Anyone holding this file can spend every wallet in it. ' +
         'Store it offline. There are no mnemonics: the keystore holds private keys only.',

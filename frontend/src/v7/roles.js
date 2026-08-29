@@ -28,3 +28,10 @@ export const eth = (v) => Number(v || 0).toFixed(6);
 
 /** A compact count with its noun, so panels stop writing this inline. */
 export const plural = (n, one, many = `${one}s`) => `${n} ${n === 1 ? one : many}`;
+
+/** Whole days since an ISO timestamp (a wallet's createdAt), or null when absent. */
+export const ageDays = (iso) => {
+  if (!iso) return null;
+  const ms = Date.now() - new Date(iso).getTime();
+  return Number.isFinite(ms) ? Math.max(0, Math.floor(ms / 86400000)) : null;
+};

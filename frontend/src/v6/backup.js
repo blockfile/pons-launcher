@@ -6,12 +6,24 @@ import { getApiKey } from '../api.js';
  * Deliberately not api.js's downloadBackup, which exports the WHOLE keystore.
  * A V6 operator backing up their treasury, main and bundle wallets should get
  * exactly those, and not another tab's keys in the same file.
+ *
+ * Optionally NARROWED, so a single panel can back up only its own wallets
+ * (role) or the operator can export a hand-picked selection (walletIds). With
+ * neither, this is the full V6 backup and is byte-identical to what it always
+ * was. The filter also goes in the FILENAME, not only inside the file, so two
+ * downloads a day apart are never mistaken for one another — the one that
+ * matters is usually the one holding fewer keys.
  */
-export async function downloadV6Backup() {
+export async function downloadV6Backup({ role = null, roleLabel = '', walletIds = null } = {}) {
+  const ids = Array.isArray(walletIds) && walletIds.length ? walletIds : null;
+  const body = { confirm: true };
+  if (role) body.role = role;
+  if (ids) body.walletIds = ids;
+
   const res = await fetch('/api/v6/wallets/backup', {
     method: 'POST',
     headers: { 'content-type': 'application/json', 'x-api-key': getApiKey() },
-    body: JSON.stringify({ confirm: true }),
+    body: JSON.stringify(body),
   });
   const json = await res.json();
   if (!res.ok) throw new Error(json.error || 'backup failed');
@@ -20,8 +32,11 @@ export async function downloadV6Backup() {
   const url = URL.createObjectURL(blob);
   const a = document.createElement('a');
   a.href = url;
-  a.download = `pons-v6-wallets-${new Date().toISOString().slice(0, 10)}.json`;
+  const tag = ids ? '-selected' : roleLabel ? `-${roleLabel}` : '';
+  a.download = `pons-v6-wallets${tag}-${new Date().toISOString().slice(0, 10)}.json`;
   a.click();
   URL.revokeObjectURL(url);
+  if (ids) return `Backed up ${json.wallets.length} selected V6 wallet key(s). Keep this file offline.`;
+  if (roleLabel) return `Backed up ${json.wallets.length} V6 ${roleLabel} wallet key(s). Keep this file offline.`;
   return `Backed up ${json.wallets.length} V6 wallet key(s). Keep this file offline.`;
 }

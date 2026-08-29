@@ -1,11 +1,27 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import { api } from '../api.js';
 import Step from '../components/Step.jsx';
 import { Busy } from '../components/Section.jsx';
 import Modal, { Fact } from '../components/Modal.jsx';
 import Address from '../components/Address.jsx';
 import V6BackupControls from './V6BackupControls.jsx';
-import { ROLES, eth, plural } from './roles.js';
+import { ROLES, eth, plural, ageDays } from './roles.js';
+
+/**
+ * The bundle wallets in the operator's chosen order. 'default' is insertion
+ * order left untouched, so the plain view is exactly what it always was. The
+ * rest sort by createdAt — "age" is that same key read the other way round, so
+ * newest-created and youngest are one ordering and oldest-created and greatest-age
+ * are the other. A copy is sorted so the prop array is never mutated in place.
+ */
+function sortWallets(wallets, sort) {
+  if (sort === 'default') return wallets;
+  const at = (w) => new Date(w.createdAt || 0).getTime();
+  const copy = [...wallets];
+  if (sort === 'created-desc' || sort === 'age-asc') return copy.sort((a, b) => at(b) - at(a));
+  if (sort === 'created-asc' || sort === 'age-desc') return copy.sort((a, b) => at(a) - at(b));
+  return wallets;
+}
 
 /**
  * Step 2 — the bundle wallets.
@@ -45,6 +61,8 @@ export default function V6BundlePanel({ step, wallets, explorer, reload, report,
   // V4's seasoned seed wallets ready to hand off into this bundle.
   const [seasoned, setSeasoned] = useState({ count: 0 });
   const [seasonedCount, setSeasonedCount] = useState(20);
+  // Display order only — never sent, never mutating the prop. See sortWallets.
+  const [sort, setSort] = useState('default');
 
   async function act(what, fn) {
     setBusy(what);
@@ -99,6 +117,9 @@ export default function V6BundlePanel({ step, wallets, explorer, reload, report,
   // since it was ticked cannot be carried in on a stale id.
   const tickedHere = wallets.filter((w) => ticked.includes(w.id));
   const allTicked = wallets.length > 0 && tickedHere.length === wallets.length;
+  // The rows as drawn — sorted for display only. Selection tracks ids, so a
+  // re-sort never disturbs what is ticked.
+  const rows = useMemo(() => sortWallets(wallets, sort), [wallets, sort]);
 
   /**
    * Delete the ticked wallets, one request each, carrying on past failures.
@@ -182,10 +203,26 @@ export default function V6BundlePanel({ step, wallets, explorer, reload, report,
         </Busy>
         <span className="hint">{seasoned.count} seasoned ready</span>
         <V6BackupControls count={backupCount} report={report} />
+        <V6BackupControls
+          count={wallets.length}
+          report={report}
+          role={ROLES.bundle}
+          roleLabel="bundle"
+          label="Export bundle"
+        />
         {tickedHere.length > 0 && (
-          <Busy busy={busy === 'delete'} className="ghost danger" onClick={() => setBulk(tickedHere)}>
-            Delete {tickedHere.length} selected
-          </Busy>
+          <>
+            <span className="hint">{tickedHere.length} selected</span>
+            <V6BackupControls
+              count={tickedHere.length}
+              report={report}
+              walletIds={tickedHere.map((w) => w.id)}
+              label={`Export ${tickedHere.length} selected`}
+            />
+            <Busy busy={busy === 'delete'} className="ghost danger" onClick={() => setBulk(tickedHere)}>
+              Delete {tickedHere.length} selected
+            </Busy>
+          </>
         )}
         <span className="spacer" />
         {progress ? (
@@ -201,6 +238,18 @@ export default function V6BundlePanel({ step, wallets, explorer, reload, report,
 
       {wallets.length > 0 && (
         <div className="table-card">
+          <div className="row" style={{ marginBottom: 8 }}>
+            <label className="hint" style={{ display: 'inline-flex', gap: 6, alignItems: 'center' }}>
+              Sort
+              <select value={sort} onChange={(e) => setSort(e.target.value)}>
+                <option value="default">order added</option>
+                <option value="created-desc">date created — newest</option>
+                <option value="created-asc">date created — oldest</option>
+                <option value="age-desc">age — oldest first</option>
+                <option value="age-asc">age — youngest first</option>
+              </select>
+            </label>
+          </div>
           <table>
             <thead>
               <tr>
@@ -216,12 +265,13 @@ export default function V6BundlePanel({ step, wallets, explorer, reload, report,
                 </th>
                 <th>#</th>
                 <th>Address</th>
+                <th className="num">Age</th>
                 <th className="num">Balance</th>
                 <th />
               </tr>
             </thead>
             <tbody>
-              {wallets.map((w, i) => (
+              {rows.map((w, i) => (
                 <tr key={w.id}>
                   <td>
                     <input
@@ -241,6 +291,9 @@ export default function V6BundlePanel({ step, wallets, explorer, reload, report,
                       value={w.address}
                       href={explorer ? `${explorer}/address/${w.address}` : ''}
                     />
+                  </td>
+                  <td className="num" title={w.createdAt ? new Date(w.createdAt).toLocaleString() : ''}>
+                    {ageDays(w.createdAt) == null ? '—' : plural(ageDays(w.createdAt), 'day')}
                   </td>
                   <td className="num">{eth(w.balanceEth)}</td>
                   <td>

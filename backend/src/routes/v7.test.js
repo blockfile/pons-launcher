@@ -503,6 +503,55 @@ test('parseAmount refuses what is not a number', () => {
   assert.equal(v7.parseAmount('1.5', 'buy'), parseEther('1.5'));
 });
 
+// ── _private.selectBackupWallets — the OPTIONAL role / walletIds backup filter ──
+// The list handed in is already gated to V7's own roles; these check that a
+// filter only ever NARROWS it, and that an absent filter is a no-op (the plain
+// "Download backup" must stay byte-identical).
+const V7_WALLETS = [
+  { id: 'a', role: 'v7dev', address: '0xdev' },
+  { id: 'b', role: 'v7main', address: '0xmain' },
+  { id: 'c', role: 'v7bundle', address: '0xb1' },
+  { id: 'd', role: 'v7bundle', address: '0xb2' },
+];
+
+test('selectBackupWallets with no filter returns the whole list unchanged', () => {
+  assert.deepEqual(v7.selectBackupWallets(V7_WALLETS, {}), V7_WALLETS);
+  assert.deepEqual(v7.selectBackupWallets(V7_WALLETS, { walletIds: [] }), V7_WALLETS, 'an empty id array is not a filter');
+});
+
+test('selectBackupWallets walletIds keeps exactly the named wallets', () => {
+  assert.deepEqual(
+    v7.selectBackupWallets(V7_WALLETS, { walletIds: ['c', 'd'] }).map((w) => w.id),
+    ['c', 'd']
+  );
+});
+
+test('selectBackupWallets walletIds coerces ids to strings and ignores ids V7 does not own', () => {
+  assert.deepEqual(
+    v7.selectBackupWallets([{ id: '5', role: 'v7bundle' }], { walletIds: [5] }).map((w) => w.id),
+    ['5'],
+    'a numeric id matches its string id'
+  );
+  assert.deepEqual(v7.selectBackupWallets(V7_WALLETS, { walletIds: ['zzz'] }), [], 'an unknown id matches nothing');
+});
+
+test('selectBackupWallets role keeps only that V7 role', () => {
+  assert.deepEqual(v7.selectBackupWallets(V7_WALLETS, { role: 'v7bundle' }).map((w) => w.id), ['c', 'd']);
+  assert.deepEqual(v7.selectBackupWallets(V7_WALLETS, { role: 'v7dev' }).map((w) => w.id), ['a']);
+});
+
+test('selectBackupWallets role and walletIds combine as an intersection', () => {
+  assert.deepEqual(
+    v7.selectBackupWallets(V7_WALLETS, { role: 'v7bundle', walletIds: ['c'] }).map((w) => w.id),
+    ['c']
+  );
+});
+
+test('selectBackupWallets ignores an unknown or foreign role (never widens the set)', () => {
+  assert.deepEqual(v7.selectBackupWallets(V7_WALLETS, { role: 'nope' }), V7_WALLETS, 'an unknown role is not a filter');
+  assert.deepEqual(v7.selectBackupWallets(V7_WALLETS, { role: 'v6bundle' }), V7_WALLETS, "another tab's role is not V7's");
+});
+
 // Keep the linter from flagging the imported formatEther if a future edit drops
 // its only use; it documents the wei→eth intent of the ETH assertions above.
 void formatEther;

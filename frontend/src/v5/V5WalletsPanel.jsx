@@ -4,7 +4,7 @@ import Step from '../components/Step.jsx';
 import { Busy } from '../components/Section.jsx';
 import Modal, { Fact } from '../components/Modal.jsx';
 import Address from '../components/Address.jsx';
-import BackupControls from '../components/BackupControls.jsx';
+import V5BackupControls from './V5BackupControls.jsx';
 import { LuTrash2 } from 'react-icons/lu';
 import IconButton from '../v4/IconButton.jsx';
 import { MAX_GENERATE, ROLES, eth, plural } from './roles.js';
@@ -21,12 +21,15 @@ import { MAX_GENERATE, ROLES, eth, plural } from './roles.js';
  * each wallet's Fund and Buy amounts (the shared `rows`), which step 3 (Fund) and
  * step 4 (Launch + bundle) read.
  *
- * DELETE AND BACKUP ARE THE GENERIC CONTROLS, not v5's own. v5 exposes no
- * delete or backup route of its own — a wallet is deleted through
+ * DELETE IS THE GENERIC CONTROL; BACKUP IS V5'S OWN. A wallet is deleted through
  * `DELETE /api/wallets/:id` (keyed on walletId, the field GET /v5/wallets
- * returns) and the whole keystore is exported through the shared BackupControls,
- * the same file every other console reaches for. The backup is the thing that
- * makes a delete survivable, so it is drawn right beside the deletes.
+ * returns) — the shared route, because deleting is scoped by id. But the backup
+ * is v5-scoped now: V5BackupControls posts to `POST /v5/wallets/backup`, which
+ * exports V5's keys ONLY (v5dev + v5bundle), the same as v3 and v4 — never the
+ * whole keystore the shared BackupControls used to hand over. It also exports a
+ * SELECTED subset: tick rows in the table and "Export selected" writes only those.
+ * The backup is the thing that makes a delete survivable, so it is drawn right
+ * beside the deletes.
  *
  * WALLET SETUP ONLY. The launcher's value-OUT path — withdraw and the stuck-tx
  * rescue — used to live here, jammed in below the launcher's own address/
@@ -51,6 +54,19 @@ export default function V5WalletsPanel({ step, dev, bundle, explorer, reload, re
   // than an id so the dialog can state its balance — the fact that decides
   // whether deleting it is a tidy-up or a mistake.
   const [deleting, setDeleting] = useState(null);
+
+  // SELECTION — the walletIds ticked in the table, for "Export selected". A Set so
+  // toggling one row is O(1); it may name wallets a later delete removed, so the
+  // live selection is always intersected with the current bundle (selectedBundleIds
+  // below) before it is used or counted — a stale id never reaches the backend.
+  const [selected, setSelected] = useState(() => new Set());
+
+  // SORT — which column the table is ordered by, and its direction. 'index' is the
+  // generation order the backend returns (the default). 'created'/'age' both order
+  // by createdAt; they are offered as two columns because that is how an operator
+  // thinks about it ("newest first" vs "oldest first"). DISPLAY ONLY — the `bundle`
+  // prop the run is sized from is never reordered, only the rows drawn from it.
+  const [sort, setSort] = useState({ key: 'index', dir: 'asc' });
 
   // IMPORT — existing BUNDLE wallets by private key (the launcher is imported in
   // step 1's panel). Keys never linger in state past a submit — the field clears
@@ -200,10 +216,67 @@ export default function V5WalletsPanel({ step, dev, bundle, explorer, reload, re
   // Clamped where it is typed, not where it is sent: the field must never offer a
   // number the server has already decided to refuse.
   const wanted = Math.min(MAX_GENERATE, Math.max(1, Math.round(Number(count) || 0)));
-  // Both roles, for the shared backup's count and disabled state — the file it
-  // writes is the whole keystore regardless, but the button should light up as
-  // soon as v5 has a wallet in it.
+  // Both roles, for the backup's count and disabled state — V5BackupControls now
+  // exports V5's OWN keys (v5dev + v5bundle), so the button should light up as soon
+  // as v5 has a wallet in it and the count names both roles.
   const allWallets = [dev, ...bundle].filter(Boolean);
+
+  // Days a wallet has existed, from its createdAt (an ISO string; may be absent on
+  // very old records). null when unknown, so the sort and the cell both say so.
+  const ageDays = (w) => {
+    const t = Date.parse(w?.createdAt || '');
+    return Number.isFinite(t) ? Math.floor((Date.now() - t) / 86_400_000) : null;
+  };
+
+  // The rows AS DRAWN — the bundle re-ordered for display only, never the `bundle`
+  // prop the run is sized from. 'created' and 'age' both order on createdAt; an
+  // unknown date sorts to the end in either direction, so a missing timestamp is
+  // never read as the oldest or the newest wallet.
+  const displayBundle =
+    sort.key === 'index'
+      ? bundle
+      : [...bundle].sort((a, b) => {
+          const ta = Date.parse(a?.createdAt || '');
+          const tb = Date.parse(b?.createdAt || '');
+          const va = Number.isFinite(ta) ? ta : null;
+          const vb = Number.isFinite(tb) ? tb : null;
+          if (va === null && vb === null) return 0;
+          if (va === null) return 1;
+          if (vb === null) return -1;
+          return (va - vb) * (sort.dir === 'asc' ? 1 : -1);
+        });
+
+  // The ticked rows that STILL EXIST — the selection intersected with the live
+  // bundle, so a wallet deleted after it was ticked drops out rather than being
+  // exported. This, not the raw Set, is what the export and the counts read.
+  const selectedBundleIds = bundle.filter((w) => selected.has(w.walletId)).map((w) => w.walletId);
+  const allSelected = bundle.length > 0 && selectedBundleIds.length === bundle.length;
+
+  function toggleOne(walletId) {
+    setSelected((prev) => {
+      const next = new Set(prev);
+      if (next.has(walletId)) next.delete(walletId);
+      else next.add(walletId);
+      return next;
+    });
+  }
+
+  function toggleAll() {
+    setSelected(() => (allSelected ? new Set() : new Set(bundle.map((w) => w.walletId))));
+  }
+
+  // Click a sortable header: first click sorts by it, each next click flips the
+  // direction. 'created' opens newest-first, 'age' oldest-first — the reading each
+  // column's name implies.
+  function sortBy(key) {
+    setSort((prev) =>
+      prev.key === key
+        ? { key, dir: prev.dir === 'asc' ? 'desc' : 'asc' }
+        : { key, dir: key === 'created' ? 'desc' : 'asc' }
+    );
+  }
+
+  const sortArrow = (key) => (sort.key === key ? (sort.dir === 'asc' ? ' ▲' : ' ▼') : '');
 
   // The run at a glance, for the summary tiles. `fundedBundle` counts wallets that
   // actually hold ETH (so "generated" and "funded" don't read as the same thing);
@@ -285,9 +358,10 @@ export default function V5WalletsPanel({ step, dev, bundle, explorer, reload, re
         >
           Generate wallets
         </Busy>
-        {/* The shared backup, beside the deletes it makes survivable. Every other
-            console reaches for this same control; v5 has no reason to differ. */}
-        <BackupControls wallets={allWallets} report={report} />
+        {/* V5's OWN backup, beside the deletes it makes survivable — v5 keys only
+            (v5dev + v5bundle), never the whole keystore. "Export selected" writes
+            just the rows ticked in the table below. */}
+        <V5BackupControls count={allWallets.length} selectedIds={selectedBundleIds} report={report} />
         <span className="spacer" />
         {bundle.length > 0 && (
           <span className="hint">{plural(bundle.length, 'bundle wallet')}</span>
@@ -399,13 +473,50 @@ export default function V5WalletsPanel({ step, dev, bundle, explorer, reload, re
           </p>
         </div>
       ) : (
+        <>
+        {/* Selection summary — how many rows are ticked, and one click to clear
+            them, so "Export selected" is never a mystery about what it will write. */}
+        <div className="row" style={{ margin: '0 0 8px' }}>
+          <span className="hint">
+            {selectedBundleIds.length > 0
+              ? `${plural(selectedBundleIds.length, 'wallet')} selected of ${bundle.length}`
+              : `none selected · tick rows to export a subset`}
+          </span>
+          {selectedBundleIds.length > 0 && (
+            <button className="link" onClick={() => setSelected(new Set())}>
+              clear selection
+            </button>
+          )}
+        </div>
         <div className="table-scroll" style={{ maxHeight: 460, overflowY: 'auto' }}>
           <table className="wallet-list">
             <thead>
               <tr>
+                <th className="num">
+                  {/* Select-all: checked when every row is ticked, indeterminate
+                      when only some are. */}
+                  <input
+                    type="checkbox"
+                    checked={allSelected}
+                    ref={(el) => {
+                      if (el) el.indeterminate = selectedBundleIds.length > 0 && !allSelected;
+                    }}
+                    onChange={toggleAll}
+                    aria-label="Select all bundle wallets"
+                  />
+                </th>
                 <th className="num">No.</th>
                 <th>Address</th>
                 <th className="num">Balance</th>
+                {/* Sortable — click to order by creation date or by age. Both order
+                    on the same timestamp; they are two columns because "newest" and
+                    "oldest" are how the choice is actually made. */}
+                <th className="num sortable" onClick={() => sortBy('created')} style={{ cursor: 'pointer' }}>
+                  Created{sortArrow('created')}
+                </th>
+                <th className="num sortable" onClick={() => sortBy('age')} style={{ cursor: 'pointer' }}>
+                  Age{sortArrow('age')}
+                </th>
                 <th className="num">Fund (ETH)</th>
                 <th>Buy mode</th>
                 <th className="num">Buy (ETH)</th>
@@ -413,10 +524,19 @@ export default function V5WalletsPanel({ step, dev, bundle, explorer, reload, re
               </tr>
             </thead>
             <tbody>
-              {bundle.map((w, i) => {
+              {displayBundle.map((w, i) => {
                 const row = rows[w.walletId] || {};
+                const days = ageDays(w);
                 return (
                 <tr key={w.walletId}>
+                  <td className="num">
+                    <input
+                      type="checkbox"
+                      checked={selected.has(w.walletId)}
+                      onChange={() => toggleOne(w.walletId)}
+                      aria-label={`Select bundle wallet ${w.address}`}
+                    />
+                  </td>
                   <td className="num hint">{i + 1}</td>
                   <td>
                     <Address value={w.address} plain href={explorerFor(w.address)} />
@@ -424,6 +544,10 @@ export default function V5WalletsPanel({ step, dev, bundle, explorer, reload, re
                   <td className="num">
                     {w.balanceEth == null ? <span className="hint">unreadable</span> : eth(w.balanceEth)}
                   </td>
+                  <td className="num hint">
+                    {w.createdAt ? new Date(w.createdAt).toISOString().slice(0, 10) : '—'}
+                  </td>
+                  <td className="num hint">{days == null ? '—' : plural(days, 'day')}</td>
                   {/* Fund is what step 3 Relay-sends this wallet; Buy is what it
                       spends buying in step 4 (Launch + bundle). Both are owned by
                       the console's shared `rows`, so the Fund and Launch steps read
@@ -471,6 +595,7 @@ export default function V5WalletsPanel({ step, dev, bundle, explorer, reload, re
             </tbody>
           </table>
         </div>
+        </>
       )}
 
       {/* The key is archived, not destroyed — said plainly, because a dialog that

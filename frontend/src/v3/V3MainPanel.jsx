@@ -61,6 +61,7 @@ export default function V3MainPanel({ step, wallet, treasury, explorer, reload, 
               <span className="spacer" />
               <b>{eth(wallet.balanceEth)} ETH</b>
               <V3BackupControls count={backupCount} report={report} />
+              <V3BackupControls count={1} role={ROLES.main} label="Export main" report={report} />
               <button className="ghost danger" onClick={() => setDeleting(true)} disabled={locked}>
                 delete
               </button>

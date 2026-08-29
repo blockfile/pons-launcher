@@ -9,6 +9,28 @@ import IconButton from './IconButton.jsx';
 import V4BackupControls from './V4BackupControls.jsx';
 import { MAX_GENERATE, ROLES, clock, eth } from './roles.js';
 
+// A column header that also acts as a sort control. Styled to read as the plain
+// header text it replaces — no button chrome — so the table gains sorting without
+// gaining a row of obtrusive buttons. Inline rather than a stylesheet class so the
+// change stays inside this V4 file. `inherit` for font and colour keeps it matching
+// whatever the surrounding <th> is given; the flex row aligns the direction arrow
+// beside the label (and the right-aligned `.num` header still pushes both to the
+// right, since an inline-flex box obeys the cell's text-align).
+const sortHeaderStyle = {
+  background: 'none',
+  border: 0,
+  padding: 0,
+  margin: 0,
+  font: 'inherit',
+  color: 'inherit',
+  letterSpacing: 'inherit',
+  textTransform: 'inherit',
+  cursor: 'pointer',
+  display: 'inline-flex',
+  alignItems: 'center',
+  gap: 4,
+};
+
 /**
  * Step 2 — the seed wallets, and the backup that has to exist before any of
  * them is worth funding.
@@ -44,6 +66,17 @@ export default function V4SeedPanel({ step, wallets, masters, facts, explorer, r
   const [ticked, setTicked] = useState([]);
   const [bulk, setBulk] = useState(null);
   const [progress, setProgress] = useState('');
+  // Free-text filter over the visible seed table. When set, every section shows
+  // ONLY the wallets whose address contains this (case-insensitive, prefix or
+  // substring) — pasting a CA narrows a thousand-row table to the one wallet.
+  // It filters what is DRAWN only: the stat line above still counts the whole
+  // pool, and `ticked` keeps a selection made before a search was typed.
+  const [search, setSearch] = useState('');
+  // How the rows WITHIN each section are ordered. null = the natural order the
+  // backend returned, so an untouched table is byte-for-byte what it was before
+  // this control existed. Otherwise { key: 'funded' | 'age', dir: 'asc' | 'desc' }
+  // — a clickable column header cycles asc → desc → off.
+  const [sort, setSort] = useState(null);
   // How many seed wallets are aged past the gate right now, which of them have
   // already been handed off to V1/V3, and which the operator has pulled back out
   // of the claimable pool by hand — read-only, drawn beside the generate row so
@@ -152,15 +185,58 @@ export default function V4SeedPanel({ step, wallets, masters, facts, explorer, r
   const inNewBatch = (w) =>
     !w.campaignId ||
     (newBatchCutoff != null && w.campaignCreatedAt && Date.parse(w.campaignCreatedAt) >= newBatchCutoff);
+  // Case-insensitive substring match on the address — a pasted CA, or the first
+  // few characters of one, narrows the table to the wallet(s) it names. An empty
+  // search matches everything, so the default is the full list restored.
+  const q = search.trim().toLowerCase();
+  const matchesSearch = (w) => !q || w.address.toLowerCase().includes(q);
+
+  // Order one section's rows by the chosen column. Sorting is PER SECTION (the
+  // "No." is a within-section ordinal), and a wallet with no value for the key —
+  // an unfunded seed has neither a funded date nor an age — always sorts to the
+  // end regardless of direction, so the rows carrying the data being sorted on
+  // are never buried under the ones that don't.
+  function sortSeeds(list) {
+    if (!sort) return list;
+    const dir = sort.dir === 'asc' ? 1 : -1;
+    const val = (w) => (sort.key === 'age' ? w.daysSinceFunded : w.fundedAt ? Date.parse(w.fundedAt) : null);
+    return [...list].sort((a, b) => {
+      const va = val(a);
+      const vb = val(b);
+      if (va == null && vb == null) return 0;
+      if (va == null) return 1;
+      if (vb == null) return -1;
+      return (va - vb) * dir;
+    });
+  }
+
+  // Filter then sort — the transform every section list goes through before it
+  // is drawn. With no search and no sort this is the identity, so the existing
+  // grouping, counts and order are untouched until a control is used.
+  const arrange = (list) => sortSeeds(list.filter(matchesSearch));
+
+  // Cycle a sortable column: unsorted → ascending → descending → unsorted. The
+  // return to unsorted is the way back to the backend's natural order without a
+  // separate control on every header.
+  function cycleSort(key) {
+    setSort((cur) => {
+      if (!cur || cur.key !== key) return { key, dir: 'asc' };
+      if (cur.dir === 'asc') return { key, dir: 'desc' };
+      return null;
+    });
+  }
+  const sortArrow = (key) => (sort?.key !== key ? '↕' : sort.dir === 'asc' ? '↑' : '↓');
+
   // Withdrawn seeds — keys exported to spend elsewhere, held out of the V1/V3
   // claim pool — get their OWN section so they don't clutter the two active
   // groups (and can't be swept into a bulk delete meant for live ones). A wallet
   // is in exactly one of the three: withdrawn first, then split the rest by
-  // campaign. `withdrawnIds` is derived above from /v4/seasoned.
-  const withdrawnList = wallets.filter((w) => withdrawnIds.has(w.id));
+  // campaign. `withdrawnIds` is derived above from /v4/seasoned. `arrange` applies
+  // the search filter and sort — the identity until either is used.
+  const withdrawnList = arrange(wallets.filter((w) => withdrawnIds.has(w.id)));
   const active = wallets.filter((w) => !withdrawnIds.has(w.id));
-  const newBatch = active.filter(inNewBatch);
-  const seasonedPool = active.filter((w) => !inNewBatch(w));
+  const newBatch = arrange(active.filter(inNewBatch));
+  const seasonedPool = arrange(active.filter((w) => !inNewBatch(w)));
 
   // Per-group figures for the section headers — the same derivations as the
   // overall stat line, scoped to one group.
@@ -447,8 +523,25 @@ export default function V4SeedPanel({ step, wallets, masters, facts, explorer, r
                 <th>Address</th>
                 <th className="num">Funded</th>
                 <th>Campaign</th>
-                <th>Funded at</th>
-                <th className="num">Age</th>
+                {/* Sortable: click cycles asc → desc → off. Funded-at sorts on the
+                    transfer time, Age on daysSinceFunded — the two orderings an
+                    operator reaches for when a section runs to hundreds of rows. */}
+                <th>
+                  <button type="button" style={sortHeaderStyle} onClick={() => cycleSort('funded')}>
+                    Funded at{' '}
+                    <span className="hint" aria-hidden="true" style={{ fontSize: '0.85em' }}>
+                      {sortArrow('funded')}
+                    </span>
+                  </button>
+                </th>
+                <th className="num">
+                  <button type="button" style={sortHeaderStyle} onClick={() => cycleSort('age')}>
+                    Age{' '}
+                    <span className="hint" aria-hidden="true" style={{ fontSize: '0.85em' }}>
+                      {sortArrow('age')}
+                    </span>
+                  </button>
+                </th>
                 <th>Key</th>
                 <th />
               </tr>
@@ -604,6 +697,22 @@ export default function V4SeedPanel({ step, wallets, masters, facts, explorer, r
           ) : (
             tickedHere.length > 0 && (
               <>
+                {/* Export exactly the ticked set — the same per-section backup
+                    component the group headers use, so it carries the typed-EXPORT
+                    confirm and the "add the funders?" box unchanged, and sends
+                    { walletIds: [...selected] } to /v4/wallets/backup. `seeds` is
+                    the full list only for the "of N" figure; `exportIds` is what
+                    actually goes in the file. A withdrawn seed can be in the set
+                    (it is a normal wallet to export), unlike the pool exports that
+                    deliberately never re-export one. */}
+                <V4BackupControls
+                  masters={masters}
+                  seeds={wallets}
+                  report={report}
+                  reload={reload}
+                  exportIds={tickedHere.map((w) => w.id)}
+                  label={`Export ${tickedHere.length} selected`}
+                />
                 {/* Set aside, not thrown away — the same ticked set as the
                     delete, but nothing is archived and the wallets stay in the
                     table. Ghost, without the danger tint: this is reversible and
@@ -678,6 +787,48 @@ export default function V4SeedPanel({ step, wallets, masters, facts, explorer, r
         // has no older pool, so only the "current campaign" section shows until a
         // second campaign gives the first somewhere to go.
         <>
+          {/* Filter the whole table down to a pasted address (or a prefix of
+              one). It narrows what is DRAWN across all three sections — the stat
+              line above still counts the full pool, and a selection already
+              ticked survives a search. Clear restores the full list. The sort is
+              driven from the column headers; a "Clear sort" appears here only once
+              a header has been clicked, as the plain-language way back to the
+              natural order. */}
+          <div className="row" style={{ marginBottom: 12 }}>
+            <input
+              type="search"
+              value={search}
+              onChange={(e) => setSearch(e.target.value)}
+              placeholder="Filter by address — paste a wallet address"
+              aria-label="Filter seed wallets by address"
+              autoComplete="off"
+              spellCheck="false"
+              style={{ flex: '1 1 320px', maxWidth: 460 }}
+            />
+            {search && (
+              <button type="button" className="quiet" onClick={() => setSearch('')}>
+                Clear filter
+              </button>
+            )}
+            {sort && (
+              <button type="button" className="quiet" onClick={() => setSort(null)}>
+                Clear sort ({sort.key === 'age' ? 'age' : 'funded'} {sort.dir === 'asc' ? '↑' : '↓'})
+              </button>
+            )}
+          </div>
+
+          {/* Every section filtered to nothing — say so, rather than leave the
+              tables to vanish with no explanation. */}
+          {q && withdrawnList.length + newBatch.length + seasonedPool.length === 0 && (
+            <div className="notice">
+              <h3>No wallet matches “{search.trim()}”</h3>
+              <p>
+                Nothing in the seed table has an address containing that. Clear the filter to see
+                every wallet again.
+              </p>
+            </div>
+          )}
+
           {seedSection('Seasoned pool — earlier campaigns', poolHint, seasonedPool, {
             accent: 'jade',
             showUsable: true,

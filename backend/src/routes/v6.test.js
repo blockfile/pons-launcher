@@ -4,7 +4,7 @@ const test = require('node:test');
 const assert = require('node:assert');
 const routes = require('./v6');
 
-const { feasibilityOf } = routes._private;
+const { feasibilityOf, selectBackupWallets } = routes._private;
 
 const RUN = {
   token: '0x1111111111111111111111111111111111111111',
@@ -86,4 +86,53 @@ test('sell quote reverts and the sellability scan is INCONCLUSIVE (throws) → a
   assert.equal(feas.sellsRevert, false, 'an inconclusive scan never blocks');
   assert.equal(feas.sellUnverified, true);
   assert.equal(feas.pricingEstimated, true);
+});
+
+// ── _private.selectBackupWallets — the OPTIONAL role / walletIds backup filter ──
+// The list handed in is already gated to V6's own roles; these check that a
+// filter only ever NARROWS it, and that an absent filter is a no-op (the plain
+// "Download backup" must stay byte-identical).
+const V6_WALLETS = [
+  { id: 'a', role: 'v6dev', address: '0xdev' },
+  { id: 'b', role: 'v6main', address: '0xmain' },
+  { id: 'c', role: 'v6bundle', address: '0xb1' },
+  { id: 'd', role: 'v6bundle', address: '0xb2' },
+];
+
+test('selectBackupWallets with no filter returns the whole list unchanged', () => {
+  assert.deepEqual(selectBackupWallets(V6_WALLETS, {}), V6_WALLETS);
+  assert.deepEqual(selectBackupWallets(V6_WALLETS, { walletIds: [] }), V6_WALLETS, 'an empty id array is not a filter');
+});
+
+test('selectBackupWallets walletIds keeps exactly the named wallets', () => {
+  assert.deepEqual(
+    selectBackupWallets(V6_WALLETS, { walletIds: ['c', 'd'] }).map((w) => w.id),
+    ['c', 'd']
+  );
+});
+
+test('selectBackupWallets walletIds coerces ids to strings and ignores ids V6 does not own', () => {
+  assert.deepEqual(
+    selectBackupWallets([{ id: '5', role: 'v6bundle' }], { walletIds: [5] }).map((w) => w.id),
+    ['5'],
+    'a numeric id matches its string id'
+  );
+  assert.deepEqual(selectBackupWallets(V6_WALLETS, { walletIds: ['zzz'] }), [], 'an unknown id matches nothing');
+});
+
+test('selectBackupWallets role keeps only that V6 role', () => {
+  assert.deepEqual(selectBackupWallets(V6_WALLETS, { role: 'v6bundle' }).map((w) => w.id), ['c', 'd']);
+  assert.deepEqual(selectBackupWallets(V6_WALLETS, { role: 'v6dev' }).map((w) => w.id), ['a']);
+});
+
+test('selectBackupWallets role and walletIds combine as an intersection', () => {
+  assert.deepEqual(
+    selectBackupWallets(V6_WALLETS, { role: 'v6bundle', walletIds: ['c'] }).map((w) => w.id),
+    ['c']
+  );
+});
+
+test('selectBackupWallets ignores an unknown or foreign role (never widens the set)', () => {
+  assert.deepEqual(selectBackupWallets(V6_WALLETS, { role: 'nope' }), V6_WALLETS, 'an unknown role is not a filter');
+  assert.deepEqual(selectBackupWallets(V6_WALLETS, { role: 'v7bundle' }), V6_WALLETS, "another tab's role is not V6's");
 });

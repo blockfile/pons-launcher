@@ -45,6 +45,10 @@ export default function V3BundlePanel({ step, wallets, explorer, reload, report,
   // V4's seasoned seed wallets ready to hand off into this bundle.
   const [seasoned, setSeasoned] = useState({ count: 0 });
   const [seasonedCount, setSeasonedCount] = useState(20);
+  // How the table is ordered. 'created' sorts by when a wallet was made, 'age'
+  // by how old it is — the same axis shown two ways (a date and a day-count), so
+  // whichever an operator reaches for is a clickable header. Newest first to start.
+  const [sort, setSort] = useState({ key: 'created', dir: 'desc' });
 
   async function act(what, fn) {
     setBusy(what);
@@ -124,6 +128,22 @@ export default function V3BundlePanel({ step, wallets, explorer, reload, report,
     return `Deleted ${done} bundle wallet(s).${refused}`;
   }
 
+  // Whole days since a wallet was created. createdAt is an ISO string on every
+  // wallet the keystore returns; a missing one reads as zero days rather than NaN.
+  const ageDays = (w) => Math.floor((Date.now() - (Date.parse(w.createdAt) || Date.now())) / 86_400_000);
+  // The value the current sort orders by. 'created' is the raw timestamp; 'age'
+  // is its complement, so the two headers read as opposite directions of one axis.
+  const sortVal = (w) => {
+    const t = Date.parse(w.createdAt) || 0;
+    return sort.key === 'age' ? Date.now() - t : t;
+  };
+  // A display-only copy — the run order is decided server-side and never reads
+  // this. Selection is by id, so re-sorting never disturbs what is ticked.
+  const sorted = [...wallets].sort((a, b) => (sortVal(a) - sortVal(b)) * (sort.dir === 'asc' ? 1 : -1));
+  const toggleSort = (key) =>
+    setSort((s) => (s.key === key ? { key, dir: s.dir === 'asc' ? 'desc' : 'asc' } : { key, dir: 'desc' }));
+  const arrow = (key) => (sort.key === key ? (sort.dir === 'asc' ? ' ▲' : ' ▼') : '');
+
   return (
     <Step {...step}>
       <p className="lede">
@@ -182,10 +202,25 @@ export default function V3BundlePanel({ step, wallets, explorer, reload, report,
         </Busy>
         <span className="hint">{seasoned.count} seasoned ready</span>
         <V3BackupControls count={backupCount} report={report} />
+        <V3BackupControls
+          count={wallets.length}
+          role={ROLES.bundle}
+          label="Export bundle"
+          report={report}
+        />
         {tickedHere.length > 0 && (
-          <Busy busy={busy === 'delete'} className="ghost danger" onClick={() => setBulk(tickedHere)}>
-            Delete {tickedHere.length} selected
-          </Busy>
+          <>
+            <span className="hint">{tickedHere.length} selected</span>
+            <V3BackupControls
+              count={tickedHere.length}
+              walletIds={tickedHere.map((w) => w.id)}
+              label={`Export ${tickedHere.length} selected`}
+              report={report}
+            />
+            <Busy busy={busy === 'delete'} className="ghost danger" onClick={() => setBulk(tickedHere)}>
+              Delete {tickedHere.length} selected
+            </Busy>
+          </>
         )}
         <span className="spacer" />
         {progress ? (
@@ -216,12 +251,27 @@ export default function V3BundlePanel({ step, wallets, explorer, reload, report,
                 </th>
                 <th>#</th>
                 <th>Address</th>
+                <th
+                  onClick={() => toggleSort('created')}
+                  style={{ cursor: 'pointer', userSelect: 'none' }}
+                  title="Sort by when the wallet was created"
+                >
+                  Created{arrow('created')}
+                </th>
+                <th
+                  className="num"
+                  onClick={() => toggleSort('age')}
+                  style={{ cursor: 'pointer', userSelect: 'none' }}
+                  title="Sort by how old the wallet is, in days"
+                >
+                  Age{arrow('age')}
+                </th>
                 <th className="num">Balance</th>
                 <th />
               </tr>
             </thead>
             <tbody>
-              {wallets.map((w, i) => (
+              {sorted.map((w, i) => (
                 <tr key={w.id}>
                   <td>
                     <input
@@ -242,6 +292,10 @@ export default function V3BundlePanel({ step, wallets, explorer, reload, report,
                       href={explorer ? `${explorer}/address/${w.address}` : ''}
                     />
                   </td>
+                  <td title={w.createdAt || ''} style={{ whiteSpace: 'nowrap' }}>
+                    {w.createdAt ? w.createdAt.slice(0, 10) : '—'}
+                  </td>
+                  <td className="num">{ageDays(w)}d</td>
                   <td className="num">{eth(w.balanceEth)}</td>
                   <td>
                     <button className="link danger" onClick={() => setDeleting(w)} disabled={locked}>

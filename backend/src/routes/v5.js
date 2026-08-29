@@ -18,7 +18,7 @@ const { formatEther, getAddress } = require('ethers');
 const config = require('../config');
 const { keystoreFor } = require('../wallets/keystore');
 const { activityFor } = require('../store/activity');
-const { requireApiKey } = require('../middleware/auth');
+const { requireApiKey, requireAuthConfigured } = require('../middleware/auth');
 const { provider } = require('../evm/provider');
 const v5roles = require('../v5/roles');
 const factoryModule = require('../evm/v5/factory');
@@ -442,6 +442,10 @@ router.get('/v5/wallets', requireApiKey, async (req, res, next) => {
             address: w.address,
             role: w.role,
             label: w.label,
+            // Carried through for the wallet list's date/age sort — the backup
+            // selection UI orders by how long a wallet has existed. Read-only:
+            // set once at creation (see publicView in wallets/keystore.js).
+            createdAt: w.createdAt,
             balanceEth: formatEther(await provider.getBalance(w.address)),
           }
         : null;
@@ -528,6 +532,52 @@ router.post('/v5/wallets/claim-seasoned', requireApiKey, (req, res, next) => {
       count: out.claimed.length,
     });
     res.json(jsonSafe({ claimed: out.claimed, available: pool.length, shortfall: Math.max(0, want - take.length) }));
+  } catch (err) {
+    next(err);
+  }
+});
+
+// POST /api/v5/wallets/backup — every V5 key at once, for an offline backup.
+// V5's wallets only (v5dev/v5bundle), never another tab's — the same scoping V3's
+// and V4's backups use. Same two locks as the whole-keystore export: an API key,
+// and a configured credential (requireAuthConfigured) so a keyless deployment
+// fails closed rather than serving keys.
+//
+// OPTIONAL walletIds: an explicit subset — the "export selected" path the console's
+// checkbox column drives, the same per-section export V4 offers. When present, only
+// v5 wallets whose id is in the set are written. Filtering to v5 roles happens
+// FIRST, so an id that is not a v5 wallet is simply never matched: this route cannot
+// reach another tab's key even when an id for one is passed. Omitted = every v5 key.
+router.post('/v5/wallets/backup', requireApiKey, requireAuthConfigured, (req, res, next) => {
+  try {
+    if ((req.body || {}).confirm !== true) throw new Error('backup requires { confirm: true }');
+    const ks = keystoreFor(req.user.id);
+    const all = ks.exportAll().filter((w) => v5roles.isV5Role(w.role));
+    // Named subset, or the whole of v5. `all` is already scoped to v5 roles, so the
+    // intersection can only ever be v5 wallets — a stray non-v5 id matches nothing.
+    const requestedIds = Array.isArray((req.body || {}).walletIds)
+      ? new Set((req.body).walletIds.map(String))
+      : null;
+    const wallets = requestedIds ? all.filter((w) => requestedIds.has(w.id)) : all;
+    console.warn(`[pons-launcher] V5 KEYSTORE BACKUP EXPORTED — ${wallets.length} private keys`);
+    activityFor(req.user.id).record('export', `[v5] downloaded a backup of ${wallets.length} v5 private key(s)`, {
+      count: wallets.length,
+    });
+    res.json({
+      exportedAt: new Date().toISOString(),
+      chainId: config.chainId,
+      count: wallets.length,
+      // Non-null only for a selected export, so a file read back later says whether
+      // it was "all of v5" or a hand-picked subset — and how many were picked.
+      selected: requestedIds ? wallets.length : null,
+      note: requestedIds
+        ? `Selected: ${wallets.length} v5 wallet(s) chosen from the wallet list. ${all.length - wallets.length} v5 wallet(s) were left out and are NOT in this file.`
+        : 'Every V5 wallet — the launcher (v5dev) and every bundle wallet.',
+      warning:
+        'These private keys control real funds. Anyone holding this file can spend every wallet in it. ' +
+        'Store it offline. There are no mnemonics: the keystore holds private keys only.',
+      wallets,
+    });
   } catch (err) {
     next(err);
   }
