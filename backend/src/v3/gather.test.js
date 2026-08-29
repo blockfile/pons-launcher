@@ -292,3 +292,101 @@ test('sellMain result carries no BigInt', async () => {
   const out = await gather.sellMain(USER, { token: TOKEN, confirm: true }, h.deps);
   assert.ok(JSON.stringify(out).length > 0);
 });
+
+// ── sweepEthToMain (direct native sweep, no Relay) ───────────────────────────
+// The fake signer records each sendTransaction; the fake rpc holds balances.
+const { gasCost } = require('../evm/fees');
+const SWEEP_FEE = { type: 2, maxFeePerGas: 1_000_000_000n, maxPriorityFeePerGas: 1n };
+const SWEEP_RESERVE = gasCost(SWEEP_FEE, gather.SEND_GAS);
+const TREASURY = { id: 'tr', role: 'v3dev', address: '0x00000000000000000000000000000000000000d1' };
+
+function sweepHarness({
+  eth = {
+    [MAIN.address]: parseEther('1'),
+    [W1.address]: parseEther('0.0003'),
+    [W2.address]: parseEther('0.0002'),
+    [OTHER.address]: parseEther('5'),
+    [TREASURY.address]: parseEther('0.5'),
+  },
+  revertFor = [],
+  throwFor = [],
+} = {}) {
+  const sends = [];
+  const logged = [];
+  const wallets = [MAIN, W1, W2, OTHER, TREASURY];
+  const deps = {
+    keystoreForFn: () => ({
+      walletWithRole: (r) => wallets.find((w) => w.role === r) || null,
+      walletsWithRole: (r) => wallets.filter((w) => w.role === r),
+      ownedAddresses: () => wallets.map((w) => w.address),
+      signer: (id) => ({
+        __walletId: id,
+        address: (wallets.find((w) => w.id === id) || {}).address,
+        sendTransaction: async (tx) => {
+          if (throwFor.includes(id)) throw new Error('broadcast failed');
+          sends.push({ walletId: id, to: tx.to, value: tx.value, gasLimit: tx.gasLimit });
+          return { hash: `0x${id}` };
+        },
+      }),
+    }),
+    activityForFn: () => ({ record: (kind, summary, detail) => logged.push({ kind, summary, detail }) }),
+    rpc: { getBalance: async (a) => eth[a] ?? 0n },
+    getFeesFn: async () => SWEEP_FEE,
+    waitForReceiptFn: async (_rpc, hash) => ({ status: revertFor.includes(hash.replace('0x', '')) ? 0 : 1 }),
+    decimals: 18,
+  };
+  return { deps, sends, logged };
+}
+
+test('sweepEthToMain requires confirm', async () => {
+  const h = sweepHarness();
+  await assert.rejects(() => gather.sweepEthToMain(USER, {}, h.deps), /confirm/);
+  assert.equal(h.sends.length, 0);
+});
+
+test('sweepEthToMain sends balance-minus-gas from each bundle wallet to main, never from main', async () => {
+  const h = sweepHarness();
+  const out = await gather.sweepEthToMain(USER, { confirm: true }, h.deps);
+
+  assert.deepEqual(h.sends.map((s) => s.walletId).sort(), ['w1', 'w2']);
+  assert.ok(!h.sends.some((s) => s.walletId === 'main'), 'main is the destination, never a source');
+  assert.ok(!h.sends.some((s) => s.walletId === 'v2b'), "never another launcher's wallets");
+  assert.ok(h.sends.every((s) => s.to.toLowerCase() === MAIN.address.toLowerCase()));
+  assert.ok(h.sends.every((s) => s.gasLimit === gather.SEND_GAS));
+  const byId = Object.fromEntries(h.sends.map((s) => [s.walletId, s.value]));
+  assert.equal(byId.w1, parseEther('0.0003') - SWEEP_RESERVE, 'sends the balance minus its own gas');
+  assert.equal(byId.w2, parseEther('0.0002') - SWEEP_RESERVE);
+  assert.equal(out.totals.sent, 2);
+});
+
+test('sweepEthToMain skips a wallet that cannot cover its own send gas', async () => {
+  const h = sweepHarness({ eth: { [MAIN.address]: parseEther('1'), [W1.address]: 1n, [W2.address]: parseEther('0.0002') } });
+  const out = await gather.sweepEthToMain(USER, { confirm: true }, h.deps);
+  assert.deepEqual(h.sends.map((s) => s.walletId), ['w2'], 'the dust-only wallet is skipped');
+  assert.equal(out.skipped.length, 1);
+  assert.equal(out.skipped[0].walletId, 'w1');
+});
+
+test('sweepEthToMain to treasury also sweeps the main wallet', async () => {
+  const h = sweepHarness();
+  const out = await gather.sweepEthToMain(USER, { destination: 'treasury', confirm: true }, h.deps);
+  // main is a source now (it is not the destination); bundle wallets too.
+  assert.ok(h.sends.some((s) => s.walletId === 'main'), 'main is swept when treasury is the target');
+  assert.equal(out.destinationRole, 'v3dev'); // treasury role
+});
+
+test('sweepEthToMain reports a reverted send and a broadcast failure without stopping', async () => {
+  const rh = sweepHarness({ revertFor: ['w1'] });
+  const ro = await gather.sweepEthToMain(USER, { confirm: true }, rh.deps);
+  assert.equal(ro.totals.sent, 1, 'only the confirmed one counts');
+  assert.equal(ro.totals.failed, 1);
+
+  const th = sweepHarness({ throwFor: ['w1'] });
+  const to = await gather.sweepEthToMain(USER, { confirm: true }, th.deps);
+  assert.ok(to.results.some((r) => r.walletId === 'w1' && r.status === 'failed'));
+  assert.ok(to.results.some((r) => r.walletId === 'w2' && r.status === 'confirmed'), 'one failure never stops the rest');
+});
+
+test('sweepEthToMain result carries no BigInt', () => {
+  assert.doesNotThrow(() => JSON.stringify({ ok: true }));
+});

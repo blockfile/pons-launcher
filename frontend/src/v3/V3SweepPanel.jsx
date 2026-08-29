@@ -32,6 +32,10 @@ export default function V3SweepPanel({ step, explorer, reload, report, locked })
   const [minSweep, setMinSweep] = useState('');
   const [preview, setPreview] = useState(null);
   const [arming, setArming] = useState(false);
+  // The direct (no-Relay) sweep — for dust the relayed sweep skips. It links the
+  // wallets on-chain, so it takes its own typed confirm, kept apart from the sweep above.
+  const [armingDirect, setArmingDirect] = useState(false);
+  const [typed, setTyped] = useState('');
 
   const load = useCallback(async () => {
     try {
@@ -159,6 +163,65 @@ export default function V3SweepPanel({ step, explorer, reload, report, locked })
           the floor is there.
         </p>
       )}
+
+      {/* DIRECT sweep — the escape hatch for dust the relayed sweep skips. It bypasses
+          Relay entirely (only pays 21k gas), so it moves the ~$1 balances the floor
+          leaves behind. A direct send LINKS the wallets to the destination on-chain, so
+          it is kept visually distinct (danger) and takes its own typed confirm. Always
+          shown, because the whole point is the balances the relayed preview above hides. */}
+      <div className="table-card" style={{ marginTop: 12 }}>
+        <p className="hint" style={{ marginTop: 0 }}>
+          <b>Direct sweep</b> — sends each wallet's ETH straight to the{' '}
+          {destination === 'main' ? 'main wallet' : 'treasury'} with no Relay, so it moves even the
+          dust the sweep above leaves behind (it only pays gas). It <b>links these wallets on-chain</b>
+          , so use it for end-of-run cleanup, not the stealth path.
+        </p>
+        <Busy
+          busy={busy === 'direct'}
+          className="ghost danger"
+          disabled={locked}
+          onClick={() => {
+            setTyped('');
+            setArmingDirect(true);
+          }}
+        >
+          Direct sweep to the {destination === 'main' ? 'main wallet' : 'treasury'}
+        </Busy>
+        {locked && <span className="hint"> A run is in progress — stop it first.</span>}
+      </div>
+
+      <Modal
+        open={armingDirect}
+        danger
+        title="Direct sweep links your wallets on-chain"
+        onCancel={() => setArmingDirect(false)}
+        confirmLabel="Direct sweep"
+        confirmDisabled={typed !== 'LINK'}
+        onConfirm={async () => {
+          setArmingDirect(false);
+          await act('direct', () =>
+            api('/v3/tokens/sweep-direct', 'POST', { destination, confirm: true })
+          );
+        }}
+      >
+        <p>
+          This sends every wallet's ETH DIRECTLY to the{' '}
+          {destination === 'main' ? 'main wallet' : 'treasury'} — no Relay. It moves the dust the
+          relayed sweep can't, but every wallet sending to one address is a permanent on-chain link
+          between them, the exact link the relayed sweep exists to avoid. Each wallet keeps back only
+          its 21k gas.
+        </p>
+        <label className="modal-type">
+          Type LINK to continue.
+          <input
+            data-autofocus
+            value={typed}
+            autoComplete="off"
+            spellCheck="false"
+            onChange={(e) => setTyped(e.target.value)}
+          />
+        </label>
+      </Modal>
 
       <Modal
         open={arming}

@@ -58,6 +58,11 @@ const defaultTrade = require('./trade');
 // transfer is sent with, so a wallet that passed the skip check can always pay.
 const TRANSFER_GAS = 120_000n;
 
+// A plain native ETH send to an EOA is exactly 21,000 gas. This is the reserve
+// held back for the send's own gas AND the gasLimit it is sent with, so the value
+// swept is balance minus its own gas — the same discipline the token transfer uses.
+const SEND_GAS = 21_000n;
+
 // Same headroom the rest of V3 puts on a fee ceiling — see trade.js. A base fee
 // that ticks up between the read and the broadcast must not strand the transfer.
 const FEE_BUMP_PCT = defaultTrade.FEE_BUMP_PCT;
@@ -198,6 +203,117 @@ async function returnToMain(userId, { token }, deps = {}) {
 }
 
 /**
+ * DIRECT ETH sweep: send each V3 bundle wallet's native ETH straight to the
+ * destination (v3main by default, or treasury), as a plain transfer — NO Relay.
+ *
+ * This exists for the DUST the Relay sweep cannot move. The relayed sweep skips a
+ * ~$1 balance because Relay's fee plus its minimum order size eat it; a direct
+ * send only pays 21k gas and recovers nearly all of it. Like returnToMain it is a
+ * DIRECT move and so LINKS the wallets on-chain — the deliberate exception to the
+ * relayed sweep's unlinked hop, for end-of-run cleanup, not the stealth path. The
+ * UI warns about the linkage and takes a confirm.
+ *
+ * Never sends FROM the destination. Reads each balance, sends balance-minus-gas,
+ * skips a wallet that cannot cover its own send, isolates per-wallet failures.
+ *
+ * @param {string} [input.destination] 'main' (default) or 'treasury'.
+ * @param {boolean} input.confirm required — it moves every wallet's ETH.
+ * @returns {Promise<{action, destination, destinationRole, moved, results, skipped, totals}>}
+ */
+async function sweepEthToMain(userId, { destination = 'main', confirm } = {}, deps = {}) {
+  const w = wire(deps);
+
+  if (confirm !== true) {
+    throw new Error("a direct sweep moves every v3 wallet's ETH and links them on-chain — requires { confirm: true }");
+  }
+
+  const ks = w.ks(userId);
+  const to = destination === 'treasury' ? v3roles.treasury(ks) : v3roles.main(ks);
+  const toAddr = getAddress(to.address);
+  const sources = [...v3roles.bundle(ks)];
+  // When the destination is treasury, the main wallet is a source too — the same
+  // rule the relayed sweep follows (main is swept only when it is not the target).
+  if (destination === 'treasury') {
+    const main = ks.walletWithRole(v3roles.ROLES.main);
+    if (main) sources.push(main);
+  }
+
+  const fees = await w.getFeesFn(FEE_BUMP_PCT);
+  const reserve = gasCost(fees, SEND_GAS);
+
+  const results = [];
+  const skipped = [];
+
+  for (const wallet of sources) {
+    if (getAddress(wallet.address) === toAddr) continue; // never send a wallet to itself
+
+    const balance = BigInt(await w.rpc.getBalance(wallet.address));
+    const value = balance - reserve; // send everything except this send's own gas
+    if (value <= 0n) {
+      skipped.push({
+        walletId: wallet.id,
+        address: wallet.address,
+        role: wallet.role,
+        balanceEth: formatEther(balance),
+        reason: `${formatEther(balance)} ETH does not cover the send's own gas (${formatEther(reserve)} ETH)`,
+      });
+      continue;
+    }
+
+    const entry = {
+      walletId: wallet.id,
+      address: wallet.address,
+      role: wallet.role,
+      balanceEth: formatEther(balance),
+      sendEth: formatEther(value),
+      sendWeiRaw: value.toString(),
+    };
+    try {
+      const signer = ks.signer(wallet.id, w.rpc);
+      const sent = await signer.sendTransaction({ to: toAddr, value, gasLimit: SEND_GAS, ...fees });
+      const receipt = await w.await(w.rpc, sent.hash);
+      results.push({ ...entry, status: statusOf(receipt), hash: sent.hash });
+    } catch (err) {
+      results.push({
+        ...entry,
+        status: 'failed',
+        hash: null,
+        error: err?.shortMessage || err?.message || String(err),
+      });
+    }
+  }
+
+  const confirmed = results.filter((r) => r.status === 'confirmed');
+  const movedRaw = confirmed.reduce((sum, r) => sum + BigInt(r.sendWeiRaw), 0n);
+  const totals = {
+    wallets: results.length,
+    sent: confirmed.length,
+    failed: results.length - confirmed.length,
+    eth: formatEther(movedRaw),
+    ethRaw: movedRaw.toString(),
+  };
+
+  w.activity(userId).record(
+    'v3',
+    `[v3] direct-swept ETH to ${to.role === v3roles.ROLES.main ? 'main' : 'treasury'} from ${confirmed.length}/${results.length} wallet(s)` +
+      (totals.failed ? `, ${totals.failed} failed` : '') +
+      (movedRaw > 0n ? ` — ${formatEther(movedRaw)} ETH` : '') +
+      ' — direct send, links these wallets on-chain',
+    { destination: toAddr, route: 'direct', totals, wallets: results, skipped }
+  );
+
+  return {
+    action: 'v3-direct-sweep',
+    destination: toAddr,
+    destinationRole: to.role,
+    moved: formatEther(movedRaw),
+    results,
+    skipped,
+    totals,
+  };
+}
+
+/**
  * Sell the V3 MAIN wallet's whole balance of a token back into its curve.
  *
  * @param {string} input.token the token to sell.
@@ -295,4 +411,4 @@ async function sellMain(userId, { token, curve, confirm }, deps = {}) {
   return summary;
 }
 
-module.exports = { returnToMain, sellMain, TRANSFER_GAS, _private: { statusOf, wire } };
+module.exports = { returnToMain, sweepEthToMain, sellMain, TRANSFER_GAS, SEND_GAS, _private: { statusOf, wire } };

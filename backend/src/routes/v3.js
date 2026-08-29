@@ -781,6 +781,23 @@ router.post('/v3/tokens/sell-main', requireApiKey, async (req, res, next) => {
   }
 });
 
+// A DIRECT native-ETH sweep to main (or treasury) — no Relay. For dust the relayed
+// sweep below cannot move: Relay's fee + minimum eat a ~$1 balance, a direct send
+// only pays 21k gas. Links the wallets on-chain (the panel warns); confirm required.
+router.post('/v3/tokens/sweep-direct', requireApiKey, (req, res, next) => {
+  try {
+    if (engine.isRunning(req.user.id)) {
+      throw new Error('a v3 run is in progress — sweeping now would take the ETH a pending cycle is about to use');
+    }
+  } catch (err) {
+    return next(err);
+  }
+  gather
+    .sweepEthToMain(req.user.id, { destination: req.body?.destination, confirm: req.body?.confirm })
+    .then((out) => res.json(jsonSafe(out)))
+    .catch(next);
+});
+
 // ── the sweep ───────────────────────────────────────────────────────────────
 // Collecting the ETH back out once the exit has sold everything. Always through
 // Relay — see the header of v3/sweep.js for why a direct sweep would undo the
