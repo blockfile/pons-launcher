@@ -77,6 +77,18 @@ export default function V4SeedPanel({ step, wallets, masters, facts, explorer, r
   // this control existed. Otherwise { key: 'funded' | 'age', dir: 'asc' | 'desc' }
   // — a clickable column header cycles asc → desc → off.
   const [sort, setSort] = useState(null);
+  // The hand-off record's own filter and sort, kept apart from the seed table's
+  // two above. They are separate states rather than a shared one because the two
+  // tables answer different questions off different data — the seed sort's keys
+  // ('funded' | 'age') do not exist on a hand-off row at all — and because an
+  // operator narrowing the audit record must not have the live pool vanish out
+  // from under them at the same time. See the derivations further down for why
+  // the SEARCH is separate too.
+  const [handoffSearch, setHandoffSearch] = useState('');
+  // null = the order the backend returned, which is newest first. Otherwise
+  // { key: 'at' | 'tab', dir: 'asc' | 'desc' } — the same asc → desc → off cycle
+  // the seed headers use.
+  const [handoffSort, setHandoffSort] = useState(null);
   // How many seed wallets are aged past the gate right now, which of them have
   // already been handed off to V1/V3, and which the operator has pulled back out
   // of the claimable pool by hand — read-only, drawn beside the generate row so
@@ -577,6 +589,139 @@ export default function V4SeedPanel({ step, wallets, masters, facts, explorer, r
     (newStats.fresh ? ` · ${newStats.fresh} not yet in a campaign` : '');
   const withdrawnHint = `${withdrawnList.length} wallet${withdrawnList.length === 1 ? '' : 's'} · keys exported, held out of the claim pool · Restore on any row to return it`;
 
+  /* ── THE HAND-OFF RECORD ───────────────────────────────────────────────────
+     Wallets V1 or V3 claimed out of the seasoned pool. A claim RE-ROLES the
+     wallet (v4seed → v3bundle) and it leaves the seed table in the same breath,
+     so /v4/seasoned's `graduated` is the only surviving statement of where it
+     went — which makes this an audit record, and an audit record that shows the
+     first twenty of thirty-nine rows is not one. Everything below is a view over
+     data already in state: no request, no handler, nothing spent.
+
+     Defaulted, like `withdrawn` above, so a backend that has not started
+     returning the field draws an empty section rather than throwing on .length. */
+  const graduated = seasoned.graduated || [];
+
+  /* ITS OWN SEARCH BOX, not a share of the seed filter above, and the reasons
+     are about the ANSWER being wrong rather than the convenience:
+
+     — A handed-off wallet is not a seed. The seed filter's "No wallet matches"
+       notice would be telling an operator an address is nowhere in this tab at
+       the very moment this record holds the row saying where it went.
+     — The seed filter only exists inside the `wallets.length > 0` branch. Hand
+       every seed away and the box disappears along with the pool, taking the
+       only way to search the record of where they all went with it.
+     — It matches the DESTINATION TAB as well as the address, which is the
+       operator's actual question. Typing `v3` answers "I used 35 wallets on V3,
+       where did they go?" in one action: the rows, and the count on the button
+       beside them. An address is hex and can never contain a `v`, so the two
+       kinds of match cannot collide. */
+  const gq = handoffSearch.trim().toLowerCase();
+  const handoffMatches = (g) =>
+    !gq ||
+    String(g.address || '').toLowerCase().includes(gq) ||
+    String(g.toTab || '').toLowerCase().includes(gq);
+
+  // A hand-off time that will not parse sorts to the end the way an unfunded
+  // seed does in sortSeeds — the rows carrying the data being sorted on are
+  // never buried under the ones that don't.
+  const handoffAt = (g) => {
+    const t = Date.parse(g.at || '');
+    return Number.isFinite(t) ? t : null;
+  };
+
+  // Order the record. Sorting by tab leans on Array.sort being stable: rows
+  // sharing a tab keep the order they arrived in (newest first), so grouping by
+  // destination never scrambles the chronology inside a group.
+  function sortHandoffs(list) {
+    if (!handoffSort) return list;
+    const dir = handoffSort.dir === 'asc' ? 1 : -1;
+    return [...list].sort((a, b) => {
+      if (handoffSort.key === 'tab') {
+        return String(a.toTab || '').localeCompare(String(b.toTab || '')) * dir;
+      }
+      const va = handoffAt(a);
+      const vb = handoffAt(b);
+      if (va == null && vb == null) return 0;
+      if (va == null) return 1;
+      if (vb == null) return -1;
+      return (va - vb) * dir;
+    });
+  }
+  const handoffRows = sortHandoffs(graduated.filter(handoffMatches));
+
+  function cycleHandoffSort(key) {
+    setHandoffSort((cur) => {
+      if (!cur || cur.key !== key) return { key, dir: 'asc' };
+      if (cur.dir === 'asc') return { key, dir: 'desc' };
+      return null;
+    });
+  }
+  const handoffArrow = (key) =>
+    handoffSort?.key !== key ? '↕' : handoffSort.dir === 'asc' ? '↑' : '↓';
+
+  /* "39 handed off — 35 to v3, 4 to v1". Counted off the WHOLE record and never
+     the filtered view: this is the figure a run is reconciled against, and a
+     total that moved every time a filter was typed would be worthless for
+     exactly that. Biggest destination first, so the tab that took the most is
+     the one read first. */
+  const handoffByTab = new Map();
+  for (const g of graduated) {
+    const tab = g.toTab || 'unknown';
+    handoffByTab.set(tab, (handoffByTab.get(tab) || 0) + 1);
+  }
+  const handoffTally = [...handoffByTab.entries()]
+    .sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]))
+    .map(([tab, n]) => `${n} to ${tab}`)
+    .join(', ');
+
+  /**
+   * Download the hand-off record.
+   *
+   * PLAIN PUBLIC DATA: an address, the tab that took it, and when. No key, no
+   * secret, nothing the chain does not already publish — which is why this
+   * carries NONE of the typed-EXPORT confirmation the key backups do. That
+   * confirmation exists so a mis-click cannot hand over private keys, and
+   * spending it on a list of public addresses is how an operator learns to type
+   * EXPORT without reading the dialog.
+   *
+   * Built here from `graduated`, already in state: no request, and nothing on
+   * the server is asked for a second copy of what the browser is holding.
+   *
+   * It writes WHAT IS ON SCREEN — the filtered, sorted rows — so a file and the
+   * view it came from always agree. The row count is on the button and the
+   * filter is recorded in the FILENAME, the same way v4/backup.js tags its key
+   * files: a partial export that looks complete a month later is the one way
+   * this record could mislead the audit it exists for.
+   */
+  function exportHandoffs(rows) {
+    // RFC4180 quoting. The three fields are hex, a short tab name and an ISO
+    // timestamp, so nothing should ever need it — which is precisely why it is
+    // here rather than trusted to stay true.
+    const cell = (v) => {
+      const s = String(v ?? '');
+      return /[",\n\r]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s;
+    };
+    // `toTab || 'unknown'` mirrors what the table and the tally already draw for a
+    // row missing its destination, so the file and the view cannot disagree on the
+    // same row — which is the whole promise this export makes.
+    const body = ['address,tab,handed_off_at']
+      .concat(rows.map((g) => [g.address, g.toTab || 'unknown', g.at].map(cell).join(',')))
+      .join('\n');
+    // The QUERY goes in the name, not a generic "-filtered": exporting v3 and then
+    // v1 would otherwise write the same filename twice, the browser would silently
+    // rename the second, and a month later the two partials are indistinguishable
+    // without opening them — exactly the mislead the tag exists to prevent.
+    const tag = gq ? `-${gq.replace(/[^a-z0-9]/gi, '').slice(0, 12).toLowerCase()}` : '';
+    const name = `pons-v4-handoffs${tag}-${new Date().toISOString().slice(0, 10)}.csv`;
+    const url = URL.createObjectURL(new Blob([body], { type: 'text/csv' }));
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = name;
+    a.click();
+    URL.revokeObjectURL(url);
+    report(`Wrote ${rows.length} hand-off row(s) to ${name} — addresses, tabs and times only, no keys.`);
+  }
+
   return (
     <Step {...step}>
       <p className="lede">
@@ -626,25 +771,6 @@ export default function V4SeedPanel({ step, wallets, masters, facts, explorer, r
             (its key already exported) is never swept into a pool's file. */}
         <V4BackupControls masters={masters} seeds={wallets} report={report} reload={reload} />
       </div>
-
-      {/* Read-only. Once a seed is claimed by V1 or V3 it re-roles out of this
-          table entirely — see routes/v4.js's /v4/seasoned response — so this is
-          the only place left in the V4 console that still shows where it went. */}
-      {seasoned.graduated.length > 0 && (
-        <div className="row" style={{ marginBottom: 12, flexDirection: 'column', alignItems: 'flex-start' }}>
-          <span className="hint">
-            <b>{seasoned.graduated.length}</b> handed off to another tab
-          </span>
-          <ul className="hint" style={{ margin: '4px 0 0', paddingLeft: 18 }}>
-            {seasoned.graduated.slice(0, 20).map((g) => (
-              <li key={g.id}>
-                {g.address} · {g.toTab} · {clock(g.at)}
-              </li>
-            ))}
-            {seasoned.graduated.length > 20 && <li>…and {seasoned.graduated.length - 20} more.</li>}
-          </ul>
-        </div>
-      )}
 
       {/* THE FOUR NUMBERS THAT DECIDE THE NEXT ACTION, and the reason they are
           up here rather than left to be counted off the table: how many exist
@@ -870,6 +996,178 @@ export default function V4SeedPanel({ step, wallets, masters, facts, explorer, r
             wallets stay four days younger than the first day's, permanently.
           </p>
         </>
+      )}
+
+      {/* ── HANDED OFF ─────────────────────────────────────────────────────
+          The audit record, and it is drawn LAST on purpose. These wallets are
+          not in the pool above — the claiming tab (V1, V3, V5, V6 or V7 — they all
+          call seasoned.claim into this same record) re-roled every one of them out
+          of it — so this is history, not a working surface, and history does not
+          belong above the four numbers that decide the next action. Below the
+          tables it is still one scroll away from the operator who needs it and
+          out of the way of the one who doesn't.
+
+          Outside the wallets.length ternary as well: hand every seed away and
+          the pool goes empty while this record is at its most interesting. It
+          renders whenever there is something to show, and nothing when there
+          isn't — the same as the list it replaces.
+
+          Grey throughout: no amber (the panel's one spend is Generate wallets,
+          and nothing here spends), no vermilion (nothing here is irreversible —
+          it is a record OF something irreversible, which is not the same claim).
+          The header takes .seed-group-head with no --group-accent set, so it
+          falls back to the plain rule-strong bar and stays visibly quieter than
+          the three tinted seed groups above it. */}
+      {graduated.length > 0 && (
+        <div style={{ marginTop: 18 }}>
+          <div className="seed-group-head">
+            <b>Handed off to another tab</b>
+            {/* The reconciliation line: the total, then the split per destination.
+                "39 handed off — 35 to v3, 4 to v1" is the whole answer to "I used
+                35 wallets on V3, where did they go?" without counting a row. */}
+            <span className="hint">
+              {graduated.length} wallet{graduated.length === 1 ? '' : 's'}
+              {handoffTally ? ` — ${handoffTally}` : ''}
+            </span>
+            <span style={{ marginLeft: 'auto', display: 'inline-flex', gap: 8 }}>
+              {/* .quiet, the reads-or-retreats tier: this downloads a list of
+                  public addresses and moves nothing. The count is in the label so
+                  the button always states exactly how many rows it will write —
+                  which, with a filter typed, is fewer than the record holds. */}
+              {/* Disabled on an empty match: a header-only CSV is the one artefact
+                  an audit record should never emit, and the 0 in the label reads as
+                  the reason the control is off. */}
+              <button
+                type="button"
+                className="quiet"
+                disabled={handoffRows.length === 0}
+                onClick={() => exportHandoffs(handoffRows)}
+              >
+                Download {handoffRows.length} as CSV
+              </button>
+            </span>
+          </div>
+
+          {/* Same shape as the seed filter row above: the box, then a quiet way
+              back from each control that has been used. */}
+          <div className="row" style={{ marginTop: 8 }}>
+            <input
+              type="search"
+              value={handoffSearch}
+              onChange={(e) => setHandoffSearch(e.target.value)}
+              placeholder="Filter by address, or type a tab like v3"
+              aria-label="Filter handed-off wallets by address or destination tab"
+              autoComplete="off"
+              spellCheck="false"
+              style={{ flex: '1 1 320px', maxWidth: 460 }}
+            />
+            {handoffSearch && (
+              <button type="button" className="quiet" onClick={() => setHandoffSearch('')}>
+                Clear filter
+              </button>
+            )}
+            {handoffSort && (
+              <button type="button" className="quiet" onClick={() => setHandoffSort(null)}>
+                Clear sort ({handoffSort.key === 'tab' ? 'tab' : 'date'}{' '}
+                {handoffSort.dir === 'asc' ? '↑' : '↓'})
+              </button>
+            )}
+          </div>
+
+          {handoffRows.length === 0 ? (
+            // Filtered to nothing. Said plainly, and said carefully: this record
+            // covers hand-offs out of THIS pool, so "not here" is not the same
+            // claim as "this address was never used".
+            <p className="hint" style={{ marginTop: 8 }}>
+              No hand-off matches “{handoffSearch.trim()}”. Nothing claimed out of this seed pool
+              has an address or a destination tab containing that — clear the filter to see the
+              whole record.
+            </p>
+          ) : (
+            /* EVERY row, in a capped scroller — no slice, no "…and N more".
+               .table-card rather than the seed tables' .table-scroll because it
+               is the wrapper that also pins the header row while a long record
+               scrolls under it, and its 300px cap keeps a record of any length
+               shorter on the page than the live pool above. */
+            <div className="table-card" style={{ maxHeight: 300 }}>
+              <table>
+                <thead>
+                  <tr>
+                    <th className="num">No.</th>
+                    <th>Address</th>
+                    {/* Sortable, same cycle as the seed headers: asc → desc → off. */}
+                    <th>
+                      <button
+                        type="button"
+                        style={sortHeaderStyle}
+                        onClick={() => cycleHandoffSort('tab')}
+                      >
+                        Tab{' '}
+                        <span className="hint" aria-hidden="true" style={{ fontSize: '0.85em' }}>
+                          {handoffArrow('tab')}
+                        </span>
+                      </button>
+                    </th>
+                    <th>
+                      <button
+                        type="button"
+                        style={sortHeaderStyle}
+                        onClick={() => cycleHandoffSort('at')}
+                      >
+                        Handed off{' '}
+                        <span className="hint" aria-hidden="true" style={{ fontSize: '0.85em' }}>
+                          {handoffArrow('at')}
+                        </span>
+                      </button>
+                    </th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {handoffRows.map((g, i) => (
+                    // Keyed on the id AND the time: an id is unique in practice
+                    // (a re-roled wallet cannot be claimed out of this pool a
+                    // second time), and the pair costs nothing to be sure of it.
+                    <tr key={`${g.id}-${g.at}`}>
+                      {/* A position in the list as drawn, like the seed tables'
+                          ordinal — so "35 to v3" can be counted down the column
+                          after filtering to v3. */}
+                      <td className="num hint">{i + 1}</td>
+                      <td>
+                        {/* The same Address the seed table uses: shortened text,
+                            plain link to the explorer, and the copy button that
+                            puts the FULL address on the clipboard — which is what
+                            makes this a record you can act on rather than read. */}
+                        <Address
+                          value={g.address}
+                          plain
+                          href={explorer ? `${explorer}/address/${g.address}` : ''}
+                        />
+                      </td>
+                      <td>
+                        {/* A neutral grey pill, the same one the withdrawn rows
+                            wear. Which tab took it is a fact, not a state to be
+                            worried about. */}
+                        <span className="fund-state">{g.toTab || 'unknown'}</span>
+                      </td>
+                      {/* clock() drops the date for anything handed off today, so
+                          the exact instant rides in the title for the audit. */}
+                      <td title={g.at || ''}>{clock(g.at) || '—'}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          )}
+
+          {/* Said once, under the table, because it is the thing this record is
+              most likely to be misread as offering. */}
+          <p className="hint" style={{ marginTop: 8 }}>
+            A handed-off wallet is no longer a seed — the tab that claimed it (V1, V3, V5, V6 or V7)
+            re-roled it, and it is spent from there now, so there is no Restore for one and this pool
+            cannot take it back. Withdraw, on the rows above, is the reversible one. The CSV holds
+            addresses, tabs and times only — no keys.
+          </p>
+        </div>
       )}
 
       {/* A seed wallet is worth something only for having sat untouched since
