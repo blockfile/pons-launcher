@@ -83,7 +83,7 @@ export default function V4GatherPanel({ step, masters = [], explorer, reload, re
 
       <div className="row" style={{ gap: 16, flexWrap: 'wrap' }}>
         {CATS.map((c) => (
-          <label key={c.key} style={{ display: 'inline-flex', gap: 6, alignItems: 'center' }}>
+          <label key={c.key} style={{ display: 'inline-flex', gap: 8, alignItems: 'center' }}>
             <input
               type="checkbox"
               checked={Boolean(cats[c.key])}
@@ -91,7 +91,6 @@ export default function V4GatherPanel({ step, masters = [], explorer, reload, re
                 setCats((p) => ({ ...p, [c.key]: e.target.checked }));
                 setPreview(null);
               }}
-              style={{ width: 'auto' }}
             />
             <span>
               {c.label} <span className="hint">· {c.hint}</span>

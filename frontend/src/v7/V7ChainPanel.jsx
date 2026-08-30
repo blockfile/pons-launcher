@@ -262,29 +262,20 @@ export default function V7ChainPanel({
                     <span className="spacer" />
                     <span className="hint">{plan.graduation.headroomTokens} tokens of headroom</span>
                   </div>
+                  {/* A count is drawn as discrete lit cells, not as a smooth
+                      bar: .meter is one rule in styles.css driven by --n and
+                      --k, so this is a class and a style attribute rather than
+                      the inline-styled bar (and the last literal border-radius
+                      in the console) that used to sit here. Same role, same
+                      aria-value trio, same figure. */}
                   <div
+                    className="meter"
                     role="progressbar"
                     aria-valuemin={0}
                     aria-valuemax={100}
                     aria-valuenow={Math.round(gradPct)}
-                    style={{
-                      height: 8,
-                      borderRadius: 4,
-                      background: 'var(--rule-soft)',
-                      border: '1px solid var(--rule)',
-                      overflow: 'hidden',
-                      margin: '6px 0',
-                    }}
-                  >
-                    <div
-                      style={{
-                        height: '100%',
-                        width: `${gradPct}%`,
-                        background: 'var(--amber)',
-                        transition: 'width .2s ease',
-                      }}
-                    />
-                  </div>
+                    style={{ '--n': 20, '--k': Math.max(0, Math.min(20, Math.round(gradPct / 5))) }}
+                  />
                   <p className="hint">
                     As each cycle re-buys less than it sells (fees), circulating supply drifts <b>DOWN</b> —
                     away from graduation, not toward it.

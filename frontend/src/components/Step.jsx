@@ -36,9 +36,18 @@ export function Node({ n, state, small = false }) {
   // Fires on the transition INTO done and at no other time. Not on mount: an
   // animation that replays every page load is decoration, and this one is meant
   // to be the acknowledgement of something that just landed.
+  //
+  // ONE INVERSE FLASH, not a bounce. It was `scale: [1, 1.18, 1]` over 0.4s on
+  // easeOut — a flat, square, radius-0 node springing 18% larger, which is an
+  // app gesture rather than an instrument's, and the most visible motion in the
+  // console. A terminal acknowledges by inverting a cell for a frame. The values
+  // are --dur-fast and the linear ramp of the motion budget in styles.css.
   useEffect(() => {
     if (was.current !== state && state === 'done') {
-      controls.start({ scale: [1, 1.18, 1], transition: { duration: 0.4, ease: 'easeOut' } });
+      controls.start({
+        opacity: [1, 0.2, 1],
+        transition: { duration: 0.16, ease: 'linear', times: [0, 0.5, 1] },
+      });
     }
     was.current = state;
   }, [state, controls]);
@@ -83,11 +92,15 @@ export default function Step({
             the progress reads as travel down the page. */}
         {!last && (
           <span className="stage-rail">
+            {/* --dur-slow and the console's one ease. It ran 0.45s on an
+                overshooting expo-out, which is a curve that arrives, passes its
+                target and comes back — the spine is a machine drawing a line,
+                and a machine draws it once, in one direction. */}
             <m.span
               className="stage-rail-fill"
               initial={false}
               animate={{ scaleY: filled ? 1 : 0 }}
-              transition={{ duration: 0.45, ease: [0.16, 1, 0.3, 1] }}
+              transition={{ duration: 0.22, ease: [0.2, 0, 0, 1] }}
             />
           </span>
         )}

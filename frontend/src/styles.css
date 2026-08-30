@@ -1,111 +1,457 @@
 /*
- * pons-launcher console.
+ * pons-launcher console — CELL & CARET.
  *
- * Treated as an arming panel, not a dashboard: one operator, alone, about to do
- * something irreversible inside a ~32 second window. So the visual language is
- * instrument silkscreen — mono panel labels with hairline rules, tabular
- * numerals, and colour that MEANS something rather than decorates:
+ * An arming panel, not a dashboard: one operator, alone, about to do something
+ * irreversible inside a ~32 second window. So this reads as the machine's own
+ * readout rather than an app about a machine. The character cell is the unit —
+ * horizontal metrics in `ch`, vertical on a 20px line with a 4px sub-grid,
+ * radius 0, no gradient, no shadow, one hairline system with two weights. Every
+ * pixel of chrome is time stolen from data.
  *
- *   amber     armed / ready / the primary action / the step you are on
- *   vermilion live, irreversible, or over a cap — never used for anything else
+ * ── THE MONEY LAW, AND IT NOW HAS TWO HALVES ─────────────────────────────────
+ *
+ * Colour still MEANS something rather than decorating, and the four roles stay
+ * mutually exclusive:
+ *
+ *   amber     the ONE spending action of the step you are standing on — exactly
+ *             one per panel; a panel with none is the bug the rule was written
+ *             after
+ *   vermilion live, irreversible, or over a cap — and NOTHING else
  *   jade      already true, past tense only
+ *   indigo    the neutral forward action that moves no money — nav, links,
+ *             focus, Preview / Generate / Create. Blue costs nothing, and that
+ *             is a fourth rule rather than a fifth semantic
+ *   grey      everything that is neither ready, dangerous, nor confirmed
  *
- * Nothing else gets a colour. If a thing is neither ready, dangerous, nor
- * confirmed, it is grey.
+ * The structural change is that each money hue is now TWO tokens, because a
+ * hue used as a label and the same hue used as a filled block are different
+ * problems:
  *
- * Buttons apply that law at two amplitudes, because "how loud is this?" was
- * never the question the operator actually has — "what happens if I am wrong?"
- * is. The line that matters is WHETHER ANYTHING ASKS TWICE: every delete and
- * every key export here opens a dialog, and the dialog is where the vermilion
- * gets spent, so those triggers stay grey. Two controls ask nothing at all.
+ *   --amber / --vermilion / --jade / --sky / --indigo   are INK. They flip with
+ *             the theme, because text has to fight its own ground, and every one
+ *             of them clears 4.5:1 on --panel, --panel-2, --panel-hi and --void
+ *             in BOTH themes.
+ *   --amber-fill / --vermilion-fill / --jade-fill / --indigo-fill  are LAMPS.
+ *             They do NOT flip, because a signal lamp is a signal lamp on any
+ *             ground: a filled block means the same thing on white as on black,
+ *             and an operator who has learned "the light one is the spend" must
+ *             not have to relearn it when a colleague hands over a laptop in the
+ *             other theme.
  *
- *   solid amber      the forward action of the step you are on — one per panel
- *   solid vermilion  armed, live, irreversible — behind the Arm switch
- *   tinted vermilion an ASIDE that spends on chain; nothing will ask first
- *   ghost grey       it changes something, but a dialog asks, or no ETH moves
- *   quiet grey       it reads, or it backs out; nothing changes anywhere
+ * And the lamps carry a deliberate POLARITY BREAK, which is the one piece of
+ * the law that survives total colour blindness AND a greyscale screenshot:
  *
- * Amber outranks the tint, and the order matters because the two overlap: step
- * 4's Send button spends the largest sum in the console with no dialog behind
- * it, and it is still amber, because it is the whole point of the step it sits
- * in. So the tint is not "this spends" — every step spends — it is "this spends
- * and is NOT what you came here to do": the optional disperser deploy, the
- * sweep back. A step's own action never wears it, or the tint would mark five
- * of six panels and mean nothing. One amber per panel is the invariant; a panel
- * with none is the bug this rule was written after, where the step the operator
- * was standing on offered two identical grey buttons and no way to tell which
- * was the way forward.
+ *   the SPEND block   is light,  and its label is near-black  (--on-fill)
+ *   the LIVE block    is dark,   and its label is white       (--on-fill-hot)
  *
- * That is one hue split by amplitude and one grey split by weight. No new
- * colour enters the palette, and the loudest control on any page is still the
- * one that ends the run.
+ * So "am I about to spend, or am I about to do the irreversible thing?" is
+ * answered by which way round the block is before hue is processed at all.
  *
- * The console is also a PROCEDURE — six steps, in one order — so the page is
- * drawn as one: a hairline down the left edge threading a numbered node per
- * step, filled jade behind you and marked amber where you are standing. There
- * is no display typeface; the step numerals are the display type, which is the
- * right kind of emphasis for a thing whose whole subject is sequence.
+ * ── THE FIVE AMPLITUDES ARE A SHAPE LADDER ───────────────────────────────────
+ *
+ * "How loud is this?" was never the question the operator has — "what happens
+ * if I am wrong?" is. A terminal has no shadow, gradient or radius; its only
+ * emphasis primitives are fill, outline and bare text, and the five tiers map
+ * onto them without arbitrariness, so consequence is a SHAPE before it is a
+ * colour:
+ *
+ *   amber block, dark label      the step's own spend — one per panel
+ *   vermilion block, WHITE label armed and live, behind the Arm switch
+ *   vermilion outline + tint     spends on chain with NO dialog behind it; the
+ *                                label stays --ink, never --vermilion, because
+ *                                vermilion on its own tint is under the floor
+ *   grey outline                 it changes something, but a dialog asks
+ *   bare text                    it reads, or it backs out
+ *
+ * Amber outranks the tint where they collide: step 4's Send spends the largest
+ * sum in the console with no dialog behind it and is still amber, because it is
+ * the whole point of the step it sits in. The tint is not "this spends" — every
+ * step spends — it is "this spends and is NOT what you came here to do".
+ *
+ * ── THE RULER ────────────────────────────────────────────────────────────────
+ *
+ * The plates were always good; the registration was off. Fourteen literal font
+ * sizes, twelve letter-spacings, eleven radii and one spacing token are now:
+ *
+ *   SIX type steps  --t-micro / --t-small / --t-base / --t-mid / --t-fig /
+ *                   --t-hero, all on the 20px line. Used as
+ *                   `font: var(--t-base) var(--mono)` — the shorthand carries
+ *                   weight/size/line-height and the caller adds the family, so
+ *                   the family stays a semantic choice rather than a side
+ *                   effect. Weights collapse to 400 / 500 / 700.
+ *   THREE trackings --ls-caps (.12em, micro caps) / --ls-wide (.04em, small) /
+ *                   --ls-body (.01em, everything else). Figures take NO negative
+ *                   tracking: the body face is monospaced and the cell grid is a
+ *                   computed fact, so tightening a figure would break the one
+ *                   claim this design can actually prove.
+ *   ONE 4px scale   --s1 … --s10, with --lh 20px as the baseline, --pad the pane
+ *                   body inset, --band the pane title bar, --row the table row.
+ *   RADIUS 0        --radius and --radius-lg are both 0. The only round thing
+ *                   left in the console is the status lamp (--radius-dot) and
+ *                   the native checkbox. A terminal does not round its corners.
+ *
+ * THE ONE-FIGURE RULE mirrors one-amber-per-panel: --t-fig may appear at most
+ * once per pane, and it is always the number that pane's amber button will act
+ * on. --t-hero is rarer still — the arm bar's total, the live cycle counter.
+ *
+ * ── TYPEFACE IS ITSELF A RULE ────────────────────────────────────────────────
+ *
+ * JetBrains Mono for anything a machine produced; Inter for anything a human
+ * wrote. Mono is therefore the body voice, and --display resolves to var(--mono)
+ * — the token stays so no rule breaks, but there is no third face. The step
+ * numerals are still the display type; they simply no longer need a separate
+ * family to say so. Inter (--sans) survives for prose and for the sentence in a
+ * confirm dialog that states the irreversible act — a misread there costs money,
+ * so that one keeps the human voice.
+ *
+ * ── HAIRLINES, BECAUSE THE PANE IS NOW ONLY ITS RULE ─────────────────────────
+ *
+ * With every gradient and shadow retired, a pane IS its border, so the border
+ * has to be visible to a low-vision operator on a glare-washed laptop — the pane
+ * boundary is what SCOPES "one amber per panel". Two weights, and the strong one
+ * genuinely clears the 3:1 non-text floor rather than gesturing at it:
+ *
+ *   --rule-strong  pane, table and modal boundaries.  dark 3.69:1 on --panel
+ *                  (3.38:1 on --panel-hi, its worst ground); light 4.00:1 on
+ *                  --panel (3.25:1 on --panel-hi).
+ *   --rule         subordinate separators inside a pane — table row rules,
+ *                  dividers. ~2:1, deliberately quieter, never a boundary.
+ *
+ * The old --rule measured 1.33:1 and the pane leaned on a gradient and a drop
+ * shadow to be seen. Both are gone; the hairline had to earn it.
+ *
+ * ── THEMING ──────────────────────────────────────────────────────────────────
+ *
+ * Every colour is a :root custom property redefined ONLY inside
+ * :root[data-theme='light'] — including color-scheme, --shadow-card and
+ * --scrim. Nothing else may gate colour. The exceptions are deliberate and
+ * listed: the four *-fill lamps, their two label inks, --fill-edge, and the
+ * --danger / --focus aliases, which resolve through tokens that do flip.
+ *
+ * The ground moved off the old blued near-black to a near-neutral graphite for
+ * one reason: blue fights amber, and amber is the money colour.
  */
 
 :root {
-  /* Layered dark, dashboard-grade. A deep blued base with cards that read as
-     raised surfaces the way a modern ops console does — lifted a shade and
-     turned a touch bluer than the old instrument black so the panels feel like
-     a workspace rather than a readout. */
-  --void: #0a0e16;
-  --panel: #121a2b;
-  --panel-2: #0d1420;
-  --panel-hi: #1b2436;
-  --rule: #263147;
-  --rule-soft: #1a2331;
-  --ink: #eef2fb;
-  --dim: #97a4bb;
-  --dimmer: #64748b;
+  /* ── SURFACES ──────────────────────────────────────────────────────────────
+     A near-neutral graphite ramp, not a blued near-black. Blue fights amber and
+     amber is the money colour, so the ground gives up its hue and hands the
+     saturation budget to the four signals. Five steps, each one a readable step
+     from its neighbour: --void is the frame, --panel the pane face, --panel-2
+     the recessed surface a table sits in, --panel-hi the raised one a title band
+     or a hovered row sits on. */
+  --void: #0b0b0d;
+  --panel: #131318;
+  --panel-2: #0e0e12;
+  --panel-hi: #1c1c23;
 
-  /* TWO PRIMARIES, AND THE SPLIT IS THE POINT. Indigo is the NEUTRAL primary —
-     navigation, links, focus, and any forward action that does NOT move money
-     (Preview, Create wallet, the sidebar's active tab). Amber is reserved now
-     for the one action per step that actually spends. That resolves the old
-     tension where amber meant both "primary" and "armed" at once: a screen can
-     have an indigo primary and still keep amber for the single control that
-     matters when funds are at stake. vermilion = live/irreversible, jade =
-     done, sky = a neutral figure/info accent. */
-  --indigo: #6366f1;
-  --indigo-bright: #818cf8;
-  --indigo-dim: #312e81;
-  --tint-indigo: rgba(99, 102, 241, 0.14);
-  --amber: #f6b23e;
-  --amber-dim: #8a6318;
-  --vermilion: #ff5648;
-  --vermilion-dim: #7d2b23;
-  --jade: #46e0a1;
-  --jade-dim: #17493a;
-  --sky: #5aa9ff;
+  /* ── HAIRLINES, TWO WEIGHTS ────────────────────────────────────────────────
+     With the gradient and the drop shadow gone, a pane IS its border, so the
+     structural weight has to clear the 3:1 non-text floor on every ground it
+     can land on — not just the easy one. Measured (WCAG 1.4.11):
+       --rule-strong  3.92:1 on --void · 3.69:1 on --panel · 3.84:1 on
+                      --panel-2 · 3.38:1 on --panel-hi
+     --rule is the subordinate separator — row rules, dividers, anything INSIDE
+     a pane — held at ~2:1 so it reads as quieter than the boundary rather than
+     competing with it. --rule-soft is the near-invisible tick for grouping
+     inside dense tables and never carries structure. */
+  --rule-strong: #6e6e7c;
+  --rule: #45454f;
+  --rule-soft: #26262d;
 
-  /* Soft-tint fills for pill badges and stat tiles, so a state reads as a
-     coloured chip the way the reference's INCOME / ACTIVE badges do. */
-  --tint-amber: rgba(246, 178, 62, 0.14);
-  --tint-jade: rgba(70, 224, 161, 0.14);
-  --tint-vermilion: rgba(255, 86, 72, 0.14);
-  --tint-sky: rgba(90, 169, 255, 0.13);
-  --tint-grey: rgba(150, 164, 186, 0.12);
+  /* ── THE TITLE BAND'S OWN GROUND ───────────────────────────────────────────
+     The band is the direction's central compositional move, and it cannot be
+     painted in --panel-hi: that token is also the table row-hover fill, the
+     .ghost fill and the .icon-btn fill, all of which are bordered and want to
+     stay quiet, so raising it globally would repaint half the console. The band
+     gets its own step instead.
+
+     How far that step can go is decided by the dimmest thing standing ON the
+     band — the step's own state chip, which is --dimmer over --tint-grey — so
+     the fill is deliberately modest (1.24:1 on --panel dark, 1.23:1 light) and
+     the strip is DEFINED by its bottom rule rather than by its fill: --panel-hi
+     measured 1.09:1 with a --rule underline at 1.95:1, which is why the band
+     did not read at all in the default theme. It is bounded now by the pane's
+     own --rule-strong border above and a --rule-strong rule below (3.69:1 dark
+     / 4.00:1 light), which is a boundary weight rather than a suggestion.
+
+     --band-bg-later is the same band one step quieter, for a step still ahead.
+     It used to be --panel-2, which in dark is DARKER than the pane (1.04:1) —
+     a band that reads as a hole rather than as a title bar. */
+  --band-bg: #26262f;
+  --band-bg-later: #1f1f27;
+
+  /* ── INKS ──────────────────────────────────────────────────────────────────
+     Three weights, and the dimmest one now actually passes: --dimmer colours
+     every th, .side-label, .chip and input::placeholder in the console, all of
+     them 10px mono caps, and at #64748b it failed AA on every single ground
+     (3.26:1 at worst). Measured now: 5.94 / 5.60 / 5.82 / 5.12:1 on --void /
+     --panel / --panel-2 / --panel-hi. Nothing in this console is allowed to be
+     a colour an operator has to lean in for. */
+  --ink: #ececf2;
+  --dim: #a2a2b0;
+  --dimmer: #8c8c9c;
+
+  /* ── MONEY, HALF ONE: THE INKS ─────────────────────────────────────────────
+     These flip with the theme, because text fights its own ground. Every value
+     here clears 4.5:1 on --void, --panel, --panel-2 AND --panel-hi — the old
+     palette only ever checked one of the four. Worst ground shown:
+       --amber          9.26:1     --vermilion      6.01:1
+       --jade           9.55:1     --sky            7.87:1
+       --indigo         5.68:1     --indigo-bright  7.48:1
+       --ink-danger     9.88:1
+     Indigo keeps its role exactly: nav, links, focus, and forward actions that
+     move no money. It is the one hue no money state uses, so "blue costs
+     nothing" reads as a rule rather than another semantic. */
+  --amber: #ffb020;
+  --vermilion: #ff6a55;
+  --jade: #3ddc91;
+  --sky: #6bb6ff;
+  --indigo: #7b8cff;
+  --indigo-bright: #9aa6ff;
 
   /* A softer danger ink than full vermilion, for body text inside a danger
      card (the h3 keeps the full red). Tokenised so it flips in light mode —
      light pink on white is invisible. */
-  --ink-danger: #f0b3ad;
+  --ink-danger: #ffb3a6;
 
-  /* Space Grotesk carries the display voice (brand, step titles, big figures);
-     Inter is the workhorse body/UI face; JetBrains Mono is the data face, with
-     the tabular figures every number in this app is compared against. */
-  --display: 'Space Grotesk Variable', system-ui, sans-serif;
+  /* ── MONEY, HALF TWO: THE LAMPS ────────────────────────────────────────────
+     THEME-INDEPENDENT ON PURPOSE — these four are NOT redefined in the light
+     block. A filled block is a signal lamp, and a lamp is the same lamp on any
+     ground; an operator who has learned "the light block is the spend" must not
+     relearn it when the theme flips.
+
+     THE POLARITY BREAK is the whole point. The spend and the done-state carry a
+     near-black label; the live/irreversible block carries a WHITE one. That
+     makes "spend" and "irreversible" separable by polarity — in greyscale, at a
+     distance, and to an operator with no colour vision at all — before hue is
+     processed. Label contrast, measured:
+       --amber-fill      + --on-fill        9.70:1
+       --jade-fill       + --on-fill        6.28:1
+       --vermilion-fill  + --on-fill-hot    4.78:1
+       --indigo-fill     + --on-fill-cool   5.88:1
+     …and their hover twins, which move AWAY from the label rather than toward
+     it, so a hover can never erode a label that was legible at rest:
+       --amber-fill-hi     + --on-fill      12.24:1
+       --jade-fill-hi      + --on-fill        8.30:1
+       --vermilion-fill-hi + --on-fill-hot    6.46:1
+       --indigo-fill-hi    + --on-fill-cool   7.58:1
+     --on-fill replaces the four stray literals (#16120a, #1a0603 ×3, #1b1509)
+     that never flipped and put a near-black tile on a white page.
+
+     --fill-edge is the 1px border a filled block wears so its BOUNDARY survives
+     light mode: --amber-fill on white is only 2.03:1 as an edge, and a control
+     needs a perceivable outline, not just a legible label. Composited, the edge
+     measures 3.69:1 on white and 3.52:1 on --panel-hi. On a dark ground it
+     simply disappears into a block that is already 9:1 against its pane. */
+  --amber-fill: #f5a623;
+  --amber-fill-hi: #ffc24d;
+  --jade-fill: #17a66b;
+  --jade-fill-hi: #2abf80;
+  --vermilion-fill: #d8321a;
+  /* Darker than its resting twin, which is the one hover in the set that moves
+     TOWARD the ground rather than away from it — it has to, because white on
+     --vermilion-fill is already only 4.78:1 and any lighter value drops the
+     label under AA. What that costs is the block's own outline: --fill-edge is
+     a near-black at 50% and composites to 1.03:1 on a dark pane, so at hover
+     the armed block measured 2.86:1 on --panel, 2.98:1 on --panel-2 and 2.59:1
+     on the .arm.is-live tint — all under the 3:1 non-text floor, on the one
+     control in the console that spends irreversibly. The fix is not a different
+     fill, it is a real edge: button.danger wears --vermilion as its border in
+     both states (6.57:1 on --panel, 6.83:1 on --panel-2, 5.93:1 on the armed
+     tint; 5.85 / 4.75 / 4.66:1 light), so the block keeps a perceivable
+     boundary whatever the fill does. */
+  --vermilion-fill-hi: #b62410;
+  --indigo-fill: #4a52e0;
+  --indigo-fill-hi: #383fce;
+  --on-fill: #0b0b0d;
+  --on-fill-hot: #ffffff;
+  --on-fill-cool: #ffffff;
+  --fill-edge: rgba(11, 11, 13, 0.5);
+
+  /* ── HUE HAIRLINES ─────────────────────────────────────────────────────────
+     The *-dim tokens are the BORDER weight of each hue — the edge of a tinted
+     notice, the outline of a selected filter chip, the hover fill under .spend.
+     Every one of them now clears 3:1 on --panel (3.75 / 3.12 / 3.56 / 3.03),
+     which the old set did not; and --ink on the --vermilion-dim hover fill
+     measures 5.04:1, so the one tier that spends with no dialog keeps a legible
+     label through its whole interaction. */
+  --amber-dim: #8f6a20;
+  --vermilion-dim: #aa4234;
+  --jade-dim: #2c7a5a;
+  --indigo-dim: #5157bc;
+
+  /* ── TINTS ─────────────────────────────────────────────────────────────────
+     12% dark / 10% light, and they are for LABELS — a square tag, a selected
+     filter, a notice ground. A tint is never a boundary and never a button
+     fill on its own; that is what the lamps are for. Checked at 12% over
+     --panel: --amber on --tint-amber 8.13:1, --jade on --tint-jade 8.38:1,
+     --dimmer on --tint-grey 4.66:1, and --ink on --tint-vermilion 13.56:1 —
+     which is why .spend's label is --ink and not --vermilion. */
+  --tint-amber: rgba(255, 176, 32, 0.12);
+  --tint-jade: rgba(61, 220, 145, 0.12);
+  --tint-vermilion: rgba(255, 106, 85, 0.12);
+  --tint-sky: rgba(107, 182, 255, 0.12);
+  --tint-indigo: rgba(123, 140, 255, 0.12);
+  --tint-grey: rgba(162, 162, 176, 0.12);
+
+  /* ── ALIASES ───────────────────────────────────────────────────────────────
+     --danger was referenced three times by .modal-warn and defined NOWHERE, so
+     the launch dialog's only warning rendered in a literal #d9482b that belonged
+     to neither theme and never flipped. It is vermilion, because a warning
+     inside a confirm dialog is the definition of irreversible.
+     --focus is indigo, because focus moves no money. Both resolve through
+     tokens that flip, so neither needs a light-mode entry. */
+  --danger: var(--vermilion);
+  --focus: var(--indigo);
+
+  /* The scrim behind a dialog and under a toast. Replaces the hardcoded
+     rgba(6,9,13,0.72) that stayed a dark-mode black on a white page. */
+  --scrim: rgba(6, 6, 8, 0.82);
+
+  /* ── TYPEFACES ─────────────────────────────────────────────────────────────
+     Two faces, and the split is a rule the operator can read: JetBrains Mono is
+     anything a machine produced — which is nearly everything here, so it is the
+     body voice — and Inter is anything a human wrote. --display resolves to the
+     mono stack so no rule referencing it breaks; there is no third voice. */
   --mono: 'JetBrains Mono', ui-monospace, 'SF Mono', Menlo, Consolas, monospace;
   --sans: 'Inter', system-ui, -apple-system, 'Segoe UI', sans-serif;
+  --display: var(--mono);
 
-  --pad: 18px;
-  --radius: 8px;
-  --radius-lg: 13px;
-  --shadow-card: 0 1px 0 rgba(255, 255, 255, 0.03) inset, 0 10px 30px -18px rgba(0, 0, 0, 0.75);
+  /* ── TYPE SCALE ────────────────────────────────────────────────────────────
+     Six steps replacing fourteen literals, all on the 20px line. Each token is
+     a `font` shorthand MINUS the family, so the caller writes
+     `font: var(--t-base) var(--mono)` and the family stays a semantic decision
+     rather than something the scale imposes. Weights are 400 / 500 / 700 only.
+
+       --t-micro  th, tags, chips, eyebrows, statusbar — with --ls-caps and
+                  text-transform: uppercase. Also the new floor: nothing in this
+                  console is smaller than 10px, which retires the 9.5px
+                  .share .reverts label.
+       --t-small  hints, station detail, .stage-wait — with --ls-wide
+       --t-base   body, buttons, inputs, td, labels — the default
+       --t-mid    .stage-t, .modal-title, .stat b
+       --t-fig    THE figure a pane's amber button will act on. At most once per
+                  pane — the typographic twin of one-amber-per-panel.
+       --t-hero   rarer still: the arm bar's total, the live cycle counter.
+
+     The bare sizes are exposed too, for the handful of rules that set a size
+     without owning the weight. */
+  --t-micro: 700 10px/16px;
+  --t-small: 400 11px/16px;
+  --t-base: 400 13px/20px;
+  --t-mid: 500 15px/20px;
+  --t-fig: 700 20px/24px;
+  --t-hero: 700 28px/32px;
+  --fs-micro: 10px;
+  --fs-small: 11px;
+  --fs-base: 13px;
+  --fs-mid: 15px;
+  --fs-fig: 20px;
+  --fs-hero: 28px;
+
+  /* Three trackings replacing twelve. Figures deliberately get NO negative
+     tracking: the body face is monospaced, the cell grid is the one claim this
+     design can actually prove, and tightening a figure would break it. */
+  --ls-caps: 0.12em;
+  --ls-wide: 0.04em;
+  --ls-body: 0.01em;
+
+  /* ── SPACE ─────────────────────────────────────────────────────────────────
+     One 4px scale. --lh is the 20px baseline every type step lands on; the
+     named tokens below it are the four measurements the layout is actually
+     built from, so a pane's inset, its title band and its table row stop being
+     magic numbers scattered across two files. */
+  --s1: 4px;
+  --s2: 8px;
+  --s3: 12px;
+  --s4: 16px;
+  --s5: 20px;
+  --s6: 24px;
+  --s8: 32px;
+  --s10: 40px;
+  --lh: 20px;
+
+  --pad: 16px;
+  --band: 30px;
+  --row: 28px;
+
+  /* ONE CONTROL BOX, STATED ONCE. Every input, select and button in a .row has
+     to land on the same top and bottom edge, and until now that height existed
+     only as an arithmetic coincidence noted in a comment: 6px padding + a 20px
+     line + 1px of border each side. A <select> never reached it — Chrome forces
+     `line-height: normal` on the control and gives it a 19px content box, so
+     every dropdown in the console shipped 1px short of the input beside it and
+     landed its hairline on half-pixels. The height is a token now, and the
+     controls that cannot compute their way to it are held at it.
+     --control-h-dense is the same invariant inside a table cell, where the
+     padding drops to 2px. */
+  --control-h: 34px;
+  --control-h-dense: 26px;
+
+  /* One tick box, one size, everywhere in the console. */
+  --box: 16px;
+
+  /* The spine's coupled geometry, expressed once so it cannot drift. The rail
+     must cross the gap and land on the next pane's edge, which is the invariant
+     the old stylesheet documented in prose and then hardcoded as -41px against
+     a 40px gap: gap + 1, computed. */
+  --seq-gap: 24px;
+  --rail-bottom: calc((var(--seq-gap) + 1px) * -1);
+  --gutter: 44px;
+
+  /* Shell metrics. Density reclaims chrome and hands it to the wallet tables. */
+  --sidebar-w: 200px;
+  --topbar-h: 40px;
+  --statusbar-h: 24px;
+  --measure: 1180px;
+
+  /* ── SHAPE ─────────────────────────────────────────────────────────────────
+     Radius 0, everywhere. A terminal does not round its corners, and once the
+     radius is gone the only thing distinguishing a tag from a pill is the thing
+     that should have been distinguishing them all along — what it says. The one
+     round thing left in the console is the status lamp; native checkboxes are
+     the browser's business. */
+  --radius: 0;
+  --radius-lg: 0;
+  --radius-dot: 50%;
+
+  /* Kept as a token because ~40 rules reference it, and set to none because the
+     pane is now defined by --rule-strong. A shadow here would be an app's idea
+     of depth on an instrument that has no depth. */
+  --shadow-card: none;
+
+  /* ── MOTION ────────────────────────────────────────────────────────────────
+     A machine cursor jumps decisively and does not overshoot, so the easing is
+     one-directional and the durations are short. --caret-blink is the VT100's
+     real rate. All of it still sits inside the two prefers-reduced-motion
+     blocks; nothing here authorises motion outside that envelope.
+
+     These are the source, not a description of one. Every animation in the app
+     is now on them: --dur-fast is the node's done-flash (Step.jsx) and the
+     button ladder's hover; --dur is the caret's travel between stations
+     (Sequence.jsx, tween — the old spring at 420/38 overshot, which is an app
+     gesture rather than an instrument's) and the icon controls' hover;
+     --dur-slow is the rail filling in (Step.jsx) and the node's state change.
+     They were declared, documented and referenced nowhere while the three real
+     animations ran retired values, including an 18% bouncy scale on a flat,
+     square, radius-0 node. */
+  --ease: cubic-bezier(0.2, 0, 0, 1);
+  --dur-fast: 0.16s;
+  --dur: 0.18s;
+  --dur-slow: 0.22s;
+  --caret-blink: 530ms;
+
+  /* THE CARET'S OWN CELL. One block, one character wide, one line tall. It
+     lived on .app-shell and so could only be drawn by the frame; it is a :root
+     token now because the caret has to be the SAME MARK in both places it
+     appears — pinned in front of the active console in the sidebar, and parked
+     on the station you are standing at in the plan strip. Drawn two different
+     ways it stops being a caret and becomes two pieces of decoration. */
+  --caret-w: 0.6em;
+  --caret-h: 1.2em;
+  --caret-x: 7px;
+
   /* Tells the browser to draw native controls (scrollbars, date pickers, the
      checkbox tick) in the matching scheme. Flipped in the light block below. */
   color-scheme: dark;
@@ -116,51 +462,97 @@
    toggle in the sidebar; the whole app is token-driven, so this one block
    recolours every tab without touching a single component.
 
-   THE MONEY SEMANTICS SURVIVE THE FLIP, which is the only hard part. amber,
-   vermilion and jade are tuned for text-on-dark; on white they would wash out,
-   so each drops to a deeper, more saturated value that still reads as the same
-   signal — armed, live, done — and still works as a button fill with light or
-   dark text. Indigo needs no change; it was already a mid-tone that holds on
-   either ground. The live-frame red stays unmistakable. */
+   This is where the direction is most likely to fail, and it is worth naming
+   why: with every gradient and shadow deleted, a pane is a single hairline on
+   near-white. So the light --rule-strong is not a courtesy value — it is the
+   only thing separating one pane from the next, and it measures 4.00:1 on
+   --panel. If a boundary is left on --rule (1.86:1) the light theme collapses
+   into undifferentiated white and the layout reads by spacing alone.
+
+   Two other things the old light block got wrong and this one fixes. --panel
+   and --panel-2 were BOTH #ffffff, so the recessed surface a table sits in and
+   the pane face it sits on were the same colour and every pane separation went
+   with them; --panel-2 is now a real step down. And --dimmer failed AA on white
+   (3.06:1) while colouring every table header in the app.
+
+   THE MONEY INKS SURVIVE THE FLIP, which is the only hard part. On white they
+   would wash out, so each drops to a deeper, more saturated value that still
+   reads as the same signal — armed, live, done. They stay deliberately deeper
+   than their dark counterparts because a pill label sits on a 10% tint of its
+   own hue, and a mid-tone there goes chalky.
+
+   THE LAMPS DO NOT FLIP AND ARE NOT LISTED HERE. --amber-fill, --jade-fill,
+   --vermilion-fill, --indigo-fill, their hover twins, --on-fill,
+   --on-fill-hot, --on-fill-cool and --fill-edge are theme-independent by
+   design: a filled block means the same thing on white as on black, and the
+   polarity break (light block = spend, dark block = live) is what carries the
+   money law through greyscale and through colour blindness. Overriding any of
+   them here would silently break that. */
 :root[data-theme='light'] {
   color-scheme: light;
 
-  --void: #f5f6fa;
+  --void: #ececf0;
   --panel: #ffffff;
-  --panel-2: #ffffff;
-  --panel-hi: #eef1f7;
-  --rule: #e2e6ef;
-  --rule-soft: #eef1f6;
-  --ink: #0f172a;
-  --dim: #586274;
-  --dimmer: #8a94a6;
+  --panel-2: #f6f6fa;
+  --panel-hi: #e7e7ee;
 
-  --indigo: #5b5ef0;
-  --indigo-bright: #4f46e5;
-  --indigo-dim: #c7d2fe;
-  --tint-indigo: rgba(99, 102, 241, 0.1);
+  /* Measured against the light grounds — --rule-strong: 3.40:1 on --void,
+     4.00:1 on --panel, 3.71:1 on --panel-2, 3.25:1 on --panel-hi. Every one
+     clears the 3:1 non-text floor, including the worst case. --rule stays the
+     quieter inside-the-pane separator at ~1.9:1. */
+  --rule-strong: #7e7e8b;
+  --rule: #bdbdcb;
+  --rule-soft: #e6e6ee;
 
-  /* Deeper still, so they read as SMALL TEXT on white — a status pill's label
-     sits on a 12%-opacity tint of its own colour, and a mid-tone accent there
-     goes chalky. These deepen to roughly a 4:1 text contrast while still
-     filling a button as recognisably amber, red, green. */
-  --amber: #a5620a;
-  --amber-dim: #f0d3a0;
-  --vermilion: #dc2626;
-  --vermilion-dim: #f7c4c0;
-  --jade: #0a7d52;
-  --jade-dim: #b6e9d2;
-  --sky: #1d63d8;
-  --ink-danger: #b42318;
+  /* The band already read on white (1.23:1 plus its rule); it keeps its value
+     and gains the same --rule-strong underline the dark one needed. The "later"
+     band is the step between the pane face and the active band, so a step still
+     ahead is quieter than the step you are on in this theme too. */
+  --band-bg: #e7e7ee;
+  --band-bg-later: #f2f2f7;
 
-  --tint-amber: rgba(198, 124, 17, 0.12);
-  --tint-jade: rgba(15, 157, 107, 0.12);
-  --tint-vermilion: rgba(220, 38, 38, 0.1);
-  --tint-sky: rgba(37, 99, 235, 0.1);
-  --tint-grey: rgba(88, 98, 116, 0.09);
+  /* --dimmer measured: 5.09 / 6.00 / 5.57 / 4.88:1 on --void / --panel /
+     --panel-2 / --panel-hi. It was 3.06:1 on white. */
+  --ink: #101014;
+  --dim: #4e4e5c;
+  --dimmer: #61617a;
 
-  /* Soft, cool card shadow instead of the dark-mode glow. */
-  --shadow-card: 0 1px 2px rgba(16, 24, 40, 0.06), 0 8px 24px -14px rgba(16, 24, 40, 0.16);
+  /* Worst-ground contrast for each, all four grounds checked:
+       --amber 5.24:1 · --vermilion 4.75:1 · --jade 4.86:1 · --sky 4.75:1
+       --indigo 5.17:1 · --indigo-bright 7.00:1 · --ink-danger 6.13:1
+     The old light set aimed at "roughly 4:1" and landed at 4.27:1 on
+     --panel-hi for amber and vermilion — under AA on the surface a chip
+     actually sits on. */
+  --amber: #8a5100;
+  --vermilion: #bf2c19;
+  --jade: #06724a;
+  --sky: #1a5fd0;
+  --indigo: #3f4fd6;
+  --indigo-bright: #2f3bb8;
+  --ink-danger: #a32115;
+
+  /* The hue hairlines invert direction on white — they are now MID-tones, not
+     pale washes. All four clear 3:1 on --panel (3.83 / 3.88 / 3.96 / 3.43),
+     where the old values sat between 1.3 and 1.8:1 and a tinted notice had no
+     visible edge at all. --ink on the --vermilion-dim hover fill: 4.89:1. */
+  --amber-dim: #a87a2c;
+  --vermilion-dim: #be6a5c;
+  --jade-dim: #3e8e6e;
+  --indigo-dim: #7a84d8;
+
+  --tint-amber: rgba(138, 81, 0, 0.1);
+  --tint-jade: rgba(6, 114, 74, 0.1);
+  --tint-vermilion: rgba(191, 44, 25, 0.1);
+  --tint-sky: rgba(26, 95, 208, 0.1);
+  --tint-indigo: rgba(63, 79, 214, 0.1);
+  --tint-grey: rgba(78, 78, 92, 0.1);
+
+  /* A lighter scrim, because a dialog on a white page does not need to punch a
+     hole in it — it needs to hold the page still. */
+  --scrim: rgba(20, 20, 28, 0.55);
+
+  /* No shadow in either theme. The pane is its rule. */
+  --shadow-card: none;
 }
 
 * {
@@ -173,16 +565,18 @@ html {
   scroll-behavior: smooth;
 }
 
+/* The base cell. Flat --void: a terminal ground has no gradient, and the amber
+   radial that used to sit here was painted over by the shell's own 100vh frame
+   anyway. Mono at --t-base is the body voice — nearly everything on this page
+   was produced by a machine, so Inter is the exception a rule has to ask for,
+   not the default. The 20px line in --t-base is the grid every other type step
+   lands on. */
 body {
   margin: 0;
-  /* Depth: a faint warm glow up top (the amber signature, barely there) over the
-     blued base, so the page has a light source instead of being flat black. */
-  background:
-    radial-gradient(1200px 500px at 50% -8%, rgba(246, 178, 62, 0.05), transparent 60%),
-    var(--void);
-  background-attachment: fixed;
+  background: var(--void);
   color: var(--ink);
-  font: 14px/1.55 var(--sans);
+  font: var(--t-base) var(--mono);
+  letter-spacing: var(--ls-body);
   -webkit-font-smoothing: antialiased;
 }
 
@@ -194,7 +588,11 @@ select {
   font-variant-numeric: tabular-nums;
 }
 
-/* ── instrument strip ────────────────────────────────────────────────────── */
+/* ── instrument strip ─────────────────────────────────────────────────────
+   Pre-shell chrome. Nothing renders these any more — the sidebar/topbar frame
+   in shell.css replaced them — but the names are kept and tokenised rather
+   than deleted, because a class dropped from this file fails silently: no JS
+   reads any of them, so nothing errors if a panel somewhere still asks. */
 
 .strip {
   position: sticky;
@@ -202,11 +600,11 @@ select {
   z-index: 20;
   display: flex;
   align-items: center;
-  gap: 18px;
+  gap: var(--s4);
   padding: 0 var(--pad);
   height: 52px;
   background: var(--panel-2);
-  border-bottom: 1px solid var(--rule);
+  border-bottom: 1px solid var(--rule-strong);
 }
 .strip.is-live {
   border-bottom-color: var(--vermilion);
@@ -214,8 +612,8 @@ select {
 }
 
 .mark {
-  font: 700 17px/1 var(--display);
-  letter-spacing: 0.01em;
+  font: var(--t-mid) var(--display);
+  letter-spacing: var(--ls-body);
   margin: 0;
   white-space: nowrap;
 }
@@ -226,10 +624,10 @@ select {
 
 .readout {
   display: flex;
-  gap: 16px;
-  font: 11px/1 var(--mono);
+  gap: var(--s4);
+  font: var(--t-small) var(--mono);
   color: var(--dimmer);
-  letter-spacing: 0.04em;
+  letter-spacing: var(--ls-wide);
   overflow: hidden;
 }
 .readout span {
@@ -242,23 +640,23 @@ select {
 
 .mode {
   margin-left: auto;
-  font: 700 11px/1 var(--mono);
-  letter-spacing: 0.16em;
+  font: var(--t-micro) var(--mono);
+  letter-spacing: var(--ls-caps);
   text-transform: uppercase;
-  padding: 6px 10px;
-  border-radius: 3px;
+  padding: var(--s1) var(--s2);
+  border-radius: var(--radius);
   border: 1px solid var(--rule);
   color: var(--dim);
   white-space: nowrap;
 }
 .mode.dry {
   color: var(--jade);
-  border-color: #1d4433;
+  border-color: var(--jade-dim);
 }
 .mode.live {
-  color: var(--void);
-  background: var(--vermilion);
-  border-color: var(--vermilion);
+  color: var(--on-fill-hot);
+  background: var(--vermilion-fill);
+  border-color: var(--vermilion-fill);
 }
 
 .strip input {
@@ -268,16 +666,15 @@ select {
 /* ── layout ──────────────────────────────────────────────────────────────── */
 
 main {
-  /* Tight enough that a prose step is not marooned in a card twice the width of
-     its text. It is NOT wide enough to be what fits the wallet table, and it
-     never was: this caps a panel's interior at 996px, and nine columns with a
+  /* A reading measure, not the width of the wallet table: nine columns with a
      full 42-character address in one of them want ~1170px however wide the
-     window is. What makes the table fit is the shortened address column; this
-     number is a reading measure, and .table-scroll is what catches any table
-     that outgrows it. */
-  max-width: 1120px;
+     window is, and what makes the table fit is the shortened address column
+     plus .table-scroll / .table-card catching anything that outgrows the
+     measure. shell.css's `.content > main` is more specific and sets the real
+     cap; this stays as the fallback for a main rendered outside the shell. */
+  max-width: var(--measure);
   margin: 0 auto;
-  padding: 22px var(--pad) 80px;
+  padding: var(--s5) var(--pad) var(--s10);
   display: grid;
   /* minmax(0, 1fr), not the implicit auto: a grid column sized to its content
      is sized to the WIDEST thing in it, and the wallet table is nine columns
@@ -285,10 +682,12 @@ main {
      narrow screen and every panel scrolls sideways with it, instead of the
      table alone scrolling inside its own box. */
   grid-template-columns: minmax(0, 1fr);
-  /* Generous room — but read `.sequence` below before touching this number.
-     What this gap actually spaces is the sequence wrapper, the divider and the
-     two record panels, NOT the steps: the steps are one level deeper. */
-  gap: 40px;
+  /* Read `.sequence` below before touching this. What this gap actually spaces
+     is the sequence wrapper, the divider and the two record panels, NOT the
+     steps: the steps are one level deeper. Both gaps are --seq-gap, and
+     --rail-bottom is computed from it, so the spine cannot drift out of the
+     gap it has to cross. */
+  gap: var(--seq-gap);
 }
 
 /* The step cards are NOT children of the grid above. App.jsx nests Sequence,
@@ -298,7 +697,7 @@ main {
    For as long as that wrapper was a plain block the steps sat flush at 0px, and
    every widening of the gap above went somewhere nobody was looking. Repeating
    the grid here is what actually separates the steps; the two gaps are the same
-   number on purpose, so the run down the page has one rhythm.
+   token on purpose, so the run down the page has one rhythm.
 
    `:not([hidden])` is load-bearing, not tidiness. A `display` declaration here
    outranks the UA sheet's `[hidden] { display: none }`, so without the guard the
@@ -310,104 +709,110 @@ main {
 .sequence:not([hidden]) {
   display: grid;
   grid-template-columns: minmax(0, 1fr);
-  gap: 40px;
+  gap: var(--seq-gap);
 }
 
-/* The launcher switch. Sits above the sequence rather than inside a card,
-   because it selects which console you are looking at — it is not part of any
-   one of them. */
+/* Pre-shell launcher switch. Superseded by the sidebar; kept for the same
+   reason as .strip above. */
 .tabs {
   display: flex;
   align-items: center;
-  gap: 8px;
+  gap: var(--s2);
   flex-wrap: wrap;
 }
 .tabs .hint {
-  margin-left: 4px;
+  margin-left: var(--s1);
 }
 
-/* Whether a wallet's funding has landed. Three states and no fourth, matching
-   the palette's law: jade for what is already true, amber for a shortfall that
-   is not yet dangerous, grey for something that simply has not happened. The
-   glyph carries the state as well as the colour — a funding screen read in a
-   hurry should not depend on hue alone. */
-.fund-state {
-  display: inline-flex;
-  align-items: center;
-  gap: 6px;
-  font: 600 11px/1.5 var(--mono);
-  letter-spacing: 0.06em;
-  text-transform: uppercase;
-  padding: 3px 9px;
-  border-radius: 999px;
-  background: var(--tint-grey);
-  color: var(--dim);
-  white-space: nowrap;
-}
-.fund-state svg {
-  width: 12px;
-  height: 12px;
-  flex: none;
-}
-.fund-state.is-in {
-  color: var(--jade);
-  background: var(--tint-jade);
-}
-.fund-state.is-part {
-  color: var(--amber);
-  background: var(--tint-amber);
-}
+/* ── the pane, as a TUI window ────────────────────────────────────────────
+   Square, one --rule-strong hairline, no gradient and no shadow. With the
+   gradient and the drop shadow retired the pane IS its border, which is why
+   the boundary takes the strong hairline and never --rule: the pane edge is
+   what SCOPES "one amber per panel", and an operator who cannot see where a
+   pane ends cannot tell which amber button belongs to which step.
 
-/* The amount a wallet is still owed. Vermilion because a wallet that is short
-   is not late — it is one preflight will drop from the run. */
-.bal.short {
-  color: var(--vermilion);
-  font-weight: 600;
-}
-
-/* Each panel is a raised card: a soft top-to-bottom gradient, a hairline border
-   caught by a light source, and a drop shadow that lifts it off the page. */
+   The body inset is --pad on three sides and 0 on top, because the title band
+   below bleeds to the pane edges and provides the top edge itself. */
 section {
-  background: linear-gradient(180deg, var(--panel), var(--panel-2));
-  border: 1px solid var(--rule);
-  border-radius: var(--radius-lg);
-  padding: 24px 24px 26px;
+  background: var(--panel);
+  border: 1px solid var(--rule-strong);
+  border-radius: var(--radius);
+  padding: 0 var(--pad) var(--s4);
   box-shadow: var(--shadow-card);
 }
 
-/* Panel label: a mono eyebrow, then a hairline running to the edge. Kept as the
-   silkscreen tag it was, just a touch brighter so the card has a clear title. */
+/* The base heading. Kept as an element rule so a heading rendered outside a
+   pane (the dialog's own .modal-title) still starts from the silkscreen tag
+   this console has always used, rather than from the UA's 1.5em serif. */
 h2 {
-  display: flex;
-  align-items: center;
-  gap: 10px;
-  margin: 0 0 4px;
-  font: 700 11px/1 var(--mono);
-  letter-spacing: 0.16em;
+  margin: 0;
+  font: var(--t-micro) var(--mono);
+  letter-spacing: var(--ls-caps);
   text-transform: uppercase;
   color: var(--dim);
 }
+
+/* THE TITLE BAND. A 30px strip bled to the pane's edges with a negative margin,
+   so Section.jsx's bare h2 and Step.jsx's stage heading stop reading as two
+   different products. Strict `section > h2`: a heading nested deeper is not a
+   window title and must not bleed.
+
+   IT IS DEFINED BY ITS RULE, NOT BY ITS FILL. Painted in --panel-hi with a
+   --rule underline the band measured 1.09:1 against the pane and its edge
+   1.95:1, so in the default theme the direction's central compositional move
+   was invisible — the thing the whole "pane is a TUI window" reading rests on
+   simply did not render. How far the fill can go is capped by the dimmest thing
+   standing on the band (the state chip), so the fill takes its own modest token
+   and the STRIP is bounded instead: the pane's own --rule-strong border above,
+   a --rule-strong rule below, 3.69:1 dark and 4.00:1 light. A boundary weight,
+   which is what a window title bar's edge is.
+
+   The gradient hairline that used to run off the end of the label is retired —
+   the band's own bottom border does that job now. Its `flex: 1` went with it,
+   so the two things that used to be parked at the far end (the step's state
+   readout, the guide's show/hide) take `margin-left: auto` instead. */
+section > h2 {
+  display: flex;
+  align-items: center;
+  gap: var(--s2);
+  min-height: var(--band);
+  margin: 0 calc(var(--pad) * -1) var(--s4);
+  /* OPTICALLY CENTRED, NOT ARITHMETICALLY. `align-items: center` centres the
+     16px LINE BOX in the 30px strip, and a line box is not what the eye reads —
+     the caps are. All-caps 10px type puts its cap box high inside its line, so
+     the label rode 1.5px above the band's centre with 9.5px of air over the caps
+     and 12.5px under the baseline, on every pane in the console. The odd 1px is
+     a cap-height compensation, not a rhythm value: it is the amount that has to
+     come off the bottom for the caps to sit on the middle of the strip. */
+  padding: var(--s1) var(--pad) 1px;
+  background: var(--band-bg);
+  border-bottom: 1px solid var(--rule-strong);
+}
 h2::after {
-  content: '';
-  flex: 1;
-  height: 1px;
-  background: linear-gradient(90deg, var(--rule), transparent);
+  content: none;
+}
+section > h2 > .chip,
+section > h2 > button.link {
+  margin-left: auto;
 }
 
 .lede {
+  /* A sentence a human wrote, so it takes the human voice. */
+  font: var(--t-base) var(--sans);
+  letter-spacing: 0;
   color: var(--dim);
-  margin: 0 0 20px;
+  margin: 0 0 var(--s5);
   max-width: 68ch;
 }
 
 .row {
   display: flex;
-  gap: 10px;
+  gap: var(--s2);
   align-items: center;
   flex-wrap: wrap;
 }
 .row + .row {
-  margin-top: 14px;
+  margin-top: var(--s3);
 }
 /* A separator between a group of controls and a trailing one — but a BOUNDED
    one. Left to grow freely (flex: 1) on a wide card it strands the trailing
@@ -421,16 +826,16 @@ h2::after {
   max-width: 120px;
 }
 
-/* A neutral eyebrow that names a cluster of controls sharing a .row — the mono
-   tag the console uses everywhere for a label (h2, .stat, .distribute-title),
-   without .distribute-title's amber, since amber here means a spend and these
-   groups (create, utility) do not. Fixed width so the clusters stacked below
-   one another start their controls at the same left edge. */
+/* A neutral eyebrow that names a cluster of controls sharing a .row — the same
+   silkscreen the console uses for every label (h2, .stat span, th), without
+   .distribute-title's amber, since amber here means a spend and these groups
+   (create, utility) do not. Fixed width so the clusters stacked below one
+   another start their controls at the same left edge. */
 .ctl-label {
   flex: none;
   width: 74px;
-  font: 600 10px/1 var(--mono);
-  letter-spacing: 0.1em;
+  font: var(--t-micro) var(--mono);
+  letter-spacing: var(--ls-caps);
   text-transform: uppercase;
   color: var(--dimmer);
 }
@@ -438,7 +843,7 @@ h2::after {
 .grid {
   display: grid;
   grid-template-columns: repeat(4, 1fr);
-  gap: 12px;
+  gap: var(--s3);
 }
 .grid .wide {
   grid-column: 1 / -1;
@@ -452,48 +857,127 @@ h2::after {
   min-width: 0;
 }
 
+/* A field label is an eyebrow, not a sentence: same silkscreen as th, .stat's
+   caption and .ctl-label, so the console has ONE label voice. */
 label {
   display: flex;
   flex-direction: column;
-  gap: 5px;
-  font: 500 11px/1.2 var(--mono);
-  letter-spacing: 0.08em;
+  gap: var(--s1);
+  font: var(--t-micro) var(--mono);
+  letter-spacing: var(--ls-caps);
   text-transform: uppercase;
   color: var(--dim);
 }
 
+/* A LABEL THAT OWNS A TICK BOX IS A ROW, NOT A STACK.
+   The rule above is written for a field — a caption over its input — and its
+   `flex-direction: column` was inherited by every checkbox label in the console
+   as well, because no class that ships on those labels (.row, .hint, .switch)
+   declares a direction of its own and so none of them could undo it. The box
+   ended up stacked ABOVE its own sentence and stretched to the sentence's
+   width: a 310px-wide checkbox floating over the middle of the words it
+   qualifies, on six shipping panels (V5 Bundle/Buy/Sell/Launcher/Launch,
+   V4 Gather). It is the single most visible mis-set thing in the console.
+
+   :where() keeps the whole selector at 0,0,1 — the same weight as `label`
+   itself, won on source order only. So every class that DOES state its own
+   intent still wins: .modal-check keeps flex-start so a two-line sentence hangs
+   off its first line, .row keeps its own align-items and gap, and any inline
+   style in a panel is untouched. */
+label:where(:has(> input[type='checkbox'], > input[type='radio'])) {
+  flex-direction: row;
+  align-items: center;
+  gap: var(--s2);
+}
+
+/* Anything explicitly marked as machine output. Named in V4PlanPanel and
+   styled nowhere until now. */
+.mono {
+  font-family: var(--mono);
+  font-variant-numeric: tabular-nums;
+}
+
 /* ── controls ────────────────────────────────────────────────────────────── */
 
-input,
-select,
-textarea,
+/* A FIELD BOUNDARY IS NOT A ROW RULE. --rule measured 1.96:1 dark / 1.86:1 on
+   --panel, and the fill gives no help at all: --panel-2 against --panel is
+   1.04:1 dark / 1.08:1 light, and inside a .table-card — whose own ground IS
+   --panel-2 — it is exactly 1.00:1. So the per-wallet Fund and Buy amount
+   fields in the nine-column table were identified by a sub-2:1 hairline and
+   nothing else, and only became visible boxes once the pointer was already on
+   them, which is no use for finding them or for reading off which cells are
+   editable before a launch. The resting border takes the boundary weight
+   (3.69:1 dark / 4.00:1 light) and --dimmer stays the hover lift. */
 input,
 select,
 textarea {
   background: var(--panel-2);
   color: var(--ink);
-  border: 1px solid var(--rule);
+  border: 1px solid var(--rule-strong);
   border-radius: var(--radius);
-  padding: 8px 10px;
+  /* 6px + a 20px line + 1px of border each side = a 34px control, the same box
+     every button in the console draws, so a row of mixed controls sits on one
+     line rather than on three heights. */
+  padding: 6px var(--s2);
+  font: var(--t-base) var(--mono);
+  letter-spacing: var(--ls-body);
+}
+/* The one control that cannot arrive at --control-h by arithmetic. Chrome hands
+   <select> a 19px content box and ignores line-height on it, so the padding
+   above builds 33px instead of 34 — every dropdown in the console sat 1px short
+   of the input and the button beside it, with both its edges half a pixel
+   inside theirs and its hairline rendered as a smear. A floor, not a height, so
+   a select that ever needs to grow still can. */
+select {
+  min-height: var(--control-h);
+}
+
+/* ── ONE TICK BOX ─────────────────────────────────────────────────────────
+   The console shipped the same control at four rendered sizes: 16px where a
+   table happened to carry .wallet-list or .sell-list, and the browser's 13px
+   everywhere else — the v3/v4/v6/v7 wallet tables, every inline label row, the
+   logo consent, the export dialog. A 23% size change for the identical control
+   between two tabs is not a style, it is an omission, and it was an omission
+   because the size was only ever declared per context.
+
+   `margin: 0` is the other half. Chrome's UA sheet gives a checkbox
+   `margin: 3px 3px 3px 4px` and a radio `margin: 3px 3px 0 5px`, which is why
+   radio groups started one pixel to the right of checkbox groups, why radios
+   sat 1.5px below the text they labelled while the checkboxes beside them were
+   exact, and why the gap between a box and its label rendered 3px wider than
+   whatever gap its container declared. Zeroed, the declared gap is the gap.
+
+   `vertical-align: middle` is what a box in a table cell needs: at the UA's
+   `baseline` a 16px box both lifted itself ~1.5px above the row's text and
+   pushed the line box taller, so a row WITH a checkbox stood 3.5px taller than
+   one without and a select-all header band stood 8px deeper than a plain one.
+
+   The per-context rules below are left exactly as they are. They now restate
+   this size rather than establish it, and they still carry the accent colours,
+   which are the thing that must stay scoped. */
+input[type='checkbox'],
+input[type='radio'] {
+  width: var(--box);
+  height: var(--box);
+  margin: 0;
+  padding: 0;
+  vertical-align: middle;
 }
 input:hover:not(:disabled),
 select:hover:not(:disabled),
 textarea:hover:not(:disabled) {
   border-color: var(--dimmer);
 }
-button {
-  font: 13px/1.4 var(--sans);
-  background: var(--panel-2);
-  color: var(--ink);
-  border: 1px solid var(--rule);
-  border-radius: var(--radius);
-  padding: 9px 13px;
-}
+/* Focus is indigo, everywhere, because focus moves no money — and because an
+   amber ring on a control that is not the step's spend was the single largest
+   leak of the money colour in the old sheet. */
 input:focus-visible,
 select:focus-visible,
 textarea:focus-visible,
-button:focus-visible {
-  outline: 2px solid var(--amber);
+button:focus-visible,
+a:focus-visible,
+summary:focus-visible {
+  outline: 2px solid var(--focus);
   outline-offset: 1px;
 }
 input::placeholder,
@@ -504,71 +988,277 @@ input[type='number'] {
   max-width: 150px;
 }
 textarea {
-  font-family: var(--mono);
-  font-size: 12px;
+  font: var(--t-base) var(--mono);
   resize: vertical;
   width: 100%;
 }
 
-/* Buttons are the instruments. Five tiers, and they encode CONSEQUENCE rather
-   than importance — the table at the top of this file is the whole rule:
-   PRIMARY (amber, filled, a faint glow) is the step's own forward action;
-   DANGER (vermilion, filled) is armed and live; SPEND (vermilion, tinted)
-   moves ETH the instant it is clicked with no dialog behind it; GHOST changes
-   something a dialog will ask about, or moves no ETH at all; QUIET only reads
-   or retreats. Every one gives real feedback — lift on hover, press on click —
-   so a control never feels dead. */
+/* ── THE AMPLITUDE LADDER ─────────────────────────────────────────────────
+   A terminal has no shadow, gradient or radius. Its only emphasis primitives
+   are FILL, OUTLINE and BARE TEXT, and the five tiers map onto them without
+   arbitrariness, so "what happens if I am wrong?" is answered by the SHAPE of
+   a control before its hue is processed at all:
+
+     amber block, near-black label   the step's own spend — one per pane
+     vermilion block, WHITE label    armed and live, behind the Arm switch
+     2px vermilion frame + tint      spends on chain with NO dialog behind it
+     1px grey outline on a raised
+       panel fill                    it changes something, but a dialog asks
+     bare text on the card           it reads, or it backs out
+
+   THE POLARITY BREAK carries the law through greyscale and through total
+   colour blindness: the SPEND block is light with a near-black label, the LIVE
+   block is dark with a white one. Which way round the block is answers "am I
+   about to spend, or about to do the irreversible thing?" before hue.
+
+   AND THE FILL RUNG IS RESERVED TO THE TWO TIERS THAT MOVE MONEY. There are
+   only three primitives and both money tiers have claimed the filled one, so
+   nothing that spends nothing may be a filled block — not .btn-primary (an
+   indigo frame, shell.css), not .protocol button.on, not a modal's top rule.
+   The moment a no-money control is drawn as a filled block with a knocked-out
+   label it becomes the armed block's twin in greyscale, which is the one
+   confusion this ladder exists to make impossible.
+
+   THE THIRD RUNG IS NOT THE QUIET ONE. .spend moves ETH the instant it is
+   clicked with nothing behind it to catch a mis-click, while .ghost is the
+   tier a dialog protects — so .spend is drawn HOTTER and HEAVIER than .ghost,
+   not quieter: a full-strength vermilion frame at double weight over a
+   vermilion tint, against .ghost's single grey hairline. Its label stays --ink
+   (13.56:1 on the tint, 5.04:1 on the hover fill) because --vermilion on its
+   own tint measures 4.17:1, under the floor.
+
+   Amber outranks the frame where they collide: step 4's Send spends the
+   largest sum in the console with no dialog behind it and is still amber,
+   because it is the whole point of the step it sits in. The frame is not "this
+   spends" — every step spends — it is "this spends and is NOT what you came
+   here to do". */
 button {
   cursor: pointer;
+  /* A button label is a sentence a human wrote ("return everything to the dev
+     wallet"), so it keeps the human voice — and mono at this size is ~8% wider
+     per character, which is width these labels do not have to give. */
+  font: var(--t-base) var(--sans);
   font-weight: 600;
-  letter-spacing: 0.01em;
-  background: var(--amber);
-  color: #16120a;
-  border-color: var(--amber);
-  box-shadow: 0 0 0 0 transparent;
+  letter-spacing: var(--ls-body);
+  padding: 6px var(--s3);
+  border-radius: var(--radius);
+  background: var(--amber-fill);
+  color: var(--on-fill);
+  border: 1px solid var(--fill-edge);
   transition:
-    filter 0.12s ease,
-    box-shadow 0.12s ease,
-    transform 0.06s ease,
-    border-color 0.12s ease;
+    background-color var(--dur-fast) var(--ease),
+    color var(--dur-fast) var(--ease),
+    border-color var(--dur-fast) var(--ease),
+    transform 0.06s ease;
 }
-button:hover:not(:disabled) {
-  filter: brightness(1.08);
-  box-shadow: 0 0 14px -2px var(--amber-dim);
+/* Hover moves the fill AWAY from the label rather than toward it, so a hover
+   can never erode a label that was legible at rest: --amber-fill-hi + --on-fill
+   is 12.24:1 against the resting 9.70:1. No glow — a terminal has no light.
+
+   `:where()` and not `:not()`: :where() contributes NOTHING to specificity, so
+   this base hover scores (0,1,1) and every tier below — plus the shell's own
+   .side-item and .theme-toggle, which are buttons too — outranks it with its
+   own hover. Written as `:not()` this rule scored (0,2,1) and painted the
+   sidebar, the theme toggle and every icon control amber on hover: the money
+   colour leaking onto controls that spend nothing, which is the one thing the
+   law cannot survive. */
+button:hover:where(:not(:disabled)) {
+  background: var(--amber-fill-hi);
 }
-button:active:not(:disabled) {
+/* Press feedback, and nothing else — a nudge is tier-agnostic, so it cannot
+   repaint a control whose colour means something. */
+button:active:where(:not(:disabled)) {
   transform: translateY(1px);
-  filter: brightness(0.97);
 }
-/* Secondary buttons sit on a distinctly lighter surface than the card, so they
-   read as raised controls rather than blending into the panel behind them. A
-   subtle border defines the edge; hover warms toward amber. */
+
+/* ARMED AND LIVE. The dark block with the white label — the other half of the
+   polarity break.
+
+   IT KEEPS ITS OWN EDGE, and it is the one tier that cannot use --fill-edge to
+   do it. --fill-edge is a near-black at 50%: on a WHITE page it composites to a
+   perceivable outline, which is the job it was written for, but on a dark pane
+   it composites to 1.03:1 and is simply not there. That is survivable for a
+   light amber block sitting at 9:1 against its pane; it is not survivable here,
+   because the vermilion fill has to go DARKER on hover (white on the resting
+   fill is already only 4.78:1, so any lighter hover drops the label under AA)
+   and the block was therefore falling to 2.86:1 on --panel, 2.98:1 on --panel-2
+   and 2.59:1 on the .arm.is-live tint — under the 3:1 non-text floor, at the
+   pointer, on the only control in the console that spends irreversibly.
+   --vermilion as the border holds 6.57 / 6.83 / 5.93:1 in dark and 5.85 / 4.75
+   / 4.66:1 in light, in BOTH states, so the block's boundary no longer depends
+   on what its fill is doing. */
+button.danger {
+  background: var(--vermilion-fill);
+  border-color: var(--vermilion);
+  color: var(--on-fill-hot);
+}
+button.danger:hover:not(:disabled) {
+  background: var(--vermilion-fill-hi);
+  border-color: var(--vermilion);
+}
+
+/* AN ON-CHAIN SPEND WITH NOTHING BEHIND IT TO CATCH A MIS-CLICK. The most
+   dangerous shape in the console that is not already armed, and it is drawn
+   that way: a 2px vermilion frame over the vermilion tint. The padding drops
+   1px to absorb the extra border, so this keeps the same 34px box as every
+   other tier and a row of mixed controls stays on one line. */
+button.spend {
+  background: var(--tint-vermilion);
+  color: var(--ink);
+  border: 2px solid var(--vermilion);
+  padding: 5px 11px;
+  font-weight: 700;
+}
+button.spend:hover:not(:disabled) {
+  background: var(--vermilion-dim);
+  border-color: var(--vermilion);
+  color: var(--ink);
+}
+
+/* IT CHANGES SOMETHING, BUT A DIALOG ASKS. A raised grey surface with a single
+   hairline — distinctly cooler and lighter than the frame above it. The white
+   inset bevel that used to sit here is gone: it was invisible on a dark card
+   and a smear on a white one. */
 button.ghost {
   background: var(--panel-hi);
   color: var(--ink);
-  border-color: var(--rule);
+  border: 1px solid var(--rule-strong);
   font-weight: 600;
-  box-shadow: 0 1px 0 rgba(255, 255, 255, 0.03) inset;
 }
-/* The auto-fill tool above the wallet table. Given a bordered box with an accent
-   stripe so it is found without being hunted for — but the stripe is the only
-   amber here; the button inside is ghost, because this writes fields, it does
+button.ghost:hover:not(:disabled) {
+  background: var(--panel-hi);
+  border-color: var(--indigo);
+  color: var(--indigo-bright);
+}
+/* A ghost whose outcome is destructive — a dialog still asks, so it must not
+   reach .spend's weight, but it must not read as routine either. One hairline,
+   in vermilion, with the vermilion label. */
+button.ghost.danger {
+  background: var(--panel-hi);
+  color: var(--vermilion);
+  border: 1px solid var(--vermilion-dim);
+  font-weight: 600;
+}
+button.ghost.danger:hover:not(:disabled) {
+  background: var(--tint-vermilion);
+  border-color: var(--vermilion);
+  color: var(--vermilion);
+}
+
+/* READS, OR RETREATS. Flat on the card rather than raised, and a step dimmer in
+   the label — the separation from .ghost is form and weight, not hue, so this
+   tier costs the palette nothing. Having it is what lets .ghost stop meaning
+   "everything that is not amber" and start meaning "this changes something". */
+button.quiet {
+  background: transparent;
+  color: var(--dim);
+  border: 1px solid var(--rule);
+  font-weight: 500;
+}
+button.quiet:hover:not(:disabled) {
+  background: var(--panel-hi);
+  border-color: var(--dimmer);
+  color: var(--ink);
+}
+/* The selected chip in a quiet group. Amber, because the law says amber is
+   where you are standing — but as text on a tint, not as a solid block. A
+   read-only log filter must never out-shout the step it sits under. */
+button.quiet.is-on {
+  background: var(--tint-amber);
+  border-color: var(--amber-dim);
+  color: var(--amber);
+  font-weight: 700;
+}
+button.quiet.is-on:hover:not(:disabled) {
+  background: var(--tint-amber);
+  border-color: var(--amber);
+  color: var(--amber);
+}
+
+/* BARE TEXT. The bottom rung: no box at all. */
+button.link {
+  background: none;
+  border: none;
+  color: var(--dim);
+  padding: 0;
+  font-weight: 500;
+  text-decoration: underline;
+  text-underline-offset: 3px;
+}
+button.link:hover:not(:disabled) {
+  background: none;
+  color: var(--ink);
+}
+/* Bare text that destroys something — the per-row × in the v3/v6/v7 tables.
+   It keeps the tier's shape (a dialog asks) and takes the hue that says what
+   the answer costs. */
+button.link.danger {
+  background: none;
+  border: none;
+  color: var(--vermilion);
+}
+button.link.danger:hover:not(:disabled) {
+  background: none;
+  color: var(--vermilion);
+  text-decoration-thickness: 2px;
+}
+
+/* NOT YET ARMED IS NOT A DIMMED LAMP — IT IS NO LAMP.
+   The old rule faded the tier's own colour to 38% and desaturated it, which on
+   a vermilion block landed a hair off the panel's own darkness: "armed" and
+   "not armed" were separated by little more than saturation, on the one control
+   in the console where that distinction is the whole safety story. A disabled
+   control now drops out of the ladder entirely and reads as inert grey, so the
+   only thing wearing a money colour is a control that can actually be pressed.
+
+   The doubled `:disabled` is deliberate: shell.css loads after this file and
+   its `button.btn-primary` (0,1,1) would otherwise keep painting a disabled
+   indigo primary as though it were live. */
+button[disabled]:disabled {
+  background: var(--panel-hi);
+  color: var(--dimmer);
+  border: 1px solid var(--rule);
+  cursor: not-allowed;
+  filter: none;
+  box-shadow: none;
+}
+button.link[disabled]:disabled {
+  background: none;
+  border: none;
+  color: var(--dimmer);
+}
+/* .spend's own comment states the invariant it then broke: "the padding drops
+   1px to absorb the extra border, so this keeps the same 34px box as every other
+   tier". The disabled rule above replaces its 2px border with the inert 1px one
+   and the compensating 5px padding stays, so a spend button LOST 2px of height
+   and re-centred itself the moment it went inert — and inert is where a spend
+   button spends most of its life, since it arms only once its preconditions are
+   met. The row it sits in moved on every state change. Give the padding back
+   instead of the border: the inert grey hairline is identical to every other
+   disabled tier's, which is the point of that rule, and the box is 34px again. */
+button.spend[disabled]:disabled {
+  padding: 6px var(--s3);
+}
+
+/* The auto-fill tool above the wallet table. A bordered box with an accent
+   stripe so it is found without being hunted for — the stripe is the only amber
+   in it, and the button inside is a ghost, because this writes fields, it does
    not spend. */
 .distribute {
   display: flex;
   flex-wrap: wrap;
   align-items: center;
-  gap: 10px;
-  margin: 0 0 12px;
-  padding: 10px 12px;
+  gap: var(--s2);
+  margin: 0 0 var(--s3);
+  padding: var(--s2) var(--s3);
   border: 1px solid var(--rule);
   border-left: 3px solid var(--amber);
-  border-radius: 4px;
+  border-radius: var(--radius);
   background: var(--panel-2);
 }
 .distribute-title {
-  font: 600 11px/1 var(--mono);
-  letter-spacing: 0.1em;
+  font: var(--t-micro) var(--mono);
+  letter-spacing: var(--ls-caps);
   text-transform: uppercase;
   color: var(--amber);
 }
@@ -579,113 +1269,26 @@ button.ghost {
    headline number the operator tops the dev wallet up to. */
 .distribute-fund {
   flex-basis: 100%;
-  margin-top: 2px;
-  font-size: 13px;
+  margin-top: var(--s1);
+  font-size: var(--fs-base);
 }
 .distribute-fund b {
   color: var(--amber);
-}
-button.ghost:hover:not(:disabled) {
-  border-color: var(--amber);
-  color: var(--amber);
-  filter: none;
-  box-shadow: none;
-}
-button.danger {
-  background: var(--vermilion);
-  border-color: var(--vermilion);
-  color: #1a0603;
-}
-button.danger:hover:not(:disabled) {
-  box-shadow: 0 0 16px -2px var(--vermilion-dim);
-}
-
-/* An on-chain spend with nothing behind it to catch a mis-click. Same meaning
-   as .danger at a lower amplitude, which is why it is tinted and outlined and
-   never filled: a panel cannot have two loudest buttons, and in FundPanel this
-   sits in the same row as the amber "Send X ETH to N wallets" that IS step 4.
-   The colour lives in the fill and the border — the label stays --ink because
-   --vermilion text on this tint measures 4.17:1 over the lighter card surface,
-   under the floor. Only for controls that spend and do NOT open a dialog: the
-   moment something asks twice, the vermilion belongs in the dialog instead. */
-button.spend {
-  background: var(--tint-vermilion);
-  color: var(--ink);
-  border-color: var(--vermilion);
-  font-weight: 600;
-  box-shadow: none;
-}
-button.spend:hover:not(:disabled) {
-  background: var(--vermilion-dim);
-  border-color: var(--vermilion);
-  color: var(--ink);
-  filter: none;
-  box-shadow: 0 0 14px -4px var(--vermilion-dim);
-}
-
-/* Reads, or retreats. Flat on the card rather than raised like .ghost, and a
-   step dimmer in the label — the separation is form and weight, not hue, so
-   this tier costs the palette nothing. Having it is what lets .ghost stop
-   meaning "everything that is not amber" and start meaning "this changes
-   something". Text labels only: the border is near-invisible against the card
-   by design, so an icon-only control must not use it. */
-button.quiet {
-  background: transparent;
-  color: var(--dim);
-  border-color: var(--rule);
-  font-weight: 500;
-  box-shadow: none;
-}
-button.quiet:hover:not(:disabled) {
-  background: var(--panel-hi);
-  border-color: var(--dimmer);
-  color: var(--ink);
-  filter: none;
-  box-shadow: none;
-}
-/* The selected chip in a quiet group. Amber, because the law says amber is
-   where you are standing — but as text on a tint, not as a solid fill. A
-   read-only log filter should not out-shout the step it is sitting under. */
-button.quiet.is-on {
-  background: var(--tint-amber);
-  border-color: var(--amber-dim);
-  color: var(--amber);
-  font-weight: 600;
-}
-button.quiet.is-on:hover:not(:disabled) {
-  background: var(--tint-amber);
-  border-color: var(--amber);
-  color: var(--amber);
-}
-
-button.link {
-  background: none;
-  border: none;
-  color: var(--dim);
-  padding: 0;
-  font-weight: 500;
-  text-decoration: underline;
-  text-underline-offset: 3px;
-}
-button:disabled {
-  opacity: 0.38;
-  cursor: not-allowed;
-  filter: grayscale(0.4);
-  box-shadow: none;
 }
 
 /* ── notice rail ─────────────────────────────────────────────────────────────
    Instrument tickets that slide in when an action is refused or completed, so a
    block is never a silent failure into a panel elsewhere. Fixed to the corner,
-   above everything, but never over the primary controls. */
+   above everything — including the dialog backdrop at z-index 100, which used
+   to be drawn OVER any ticket raised while a dialog was open. */
 .toaster {
   position: fixed;
-  right: 16px;
-  bottom: 16px;
-  z-index: 60;
+  right: var(--s4);
+  bottom: var(--s4);
+  z-index: 110;
   display: flex;
   flex-direction: column;
-  gap: 8px;
+  gap: var(--s2);
   max-width: min(420px, calc(100vw - 32px));
   pointer-events: none;
 }
@@ -693,26 +1296,25 @@ button:disabled {
   pointer-events: auto;
   display: flex;
   align-items: flex-start;
-  gap: 10px;
-  padding: 12px 13px;
-  background: linear-gradient(180deg, var(--panel-hi), var(--panel));
-  border: 1px solid var(--rule);
+  gap: var(--s2);
+  padding: var(--s2) var(--s3);
+  background: var(--panel-hi);
+  border: 1px solid var(--rule-strong);
   border-left-width: 3px;
   border-radius: var(--radius);
-  box-shadow: 0 14px 34px -14px rgba(0, 0, 0, 0.85);
   animation: toast-in 0.16s ease-out;
 }
 .toast-icon {
   flex: none;
-  width: 17px;
-  height: 17px;
-  margin-top: 1px;
+  width: 16px;
+  height: 16px;
+  margin-top: 2px;
 }
 .toast-body {
   flex: 1;
   display: flex;
   flex-direction: column;
-  gap: 2px;
+  gap: var(--s1);
 }
 .toast-error .toast-icon {
   color: var(--vermilion);
@@ -745,8 +1347,8 @@ button:disabled {
 }
 .toast-tag {
   flex: none;
-  font: 700 10px/1.6 var(--mono);
-  letter-spacing: 0.12em;
+  font: var(--t-micro) var(--mono);
+  letter-spacing: var(--ls-caps);
   text-transform: uppercase;
 }
 .toast-error .toast-tag {
@@ -759,8 +1361,7 @@ button:disabled {
   color: var(--amber);
 }
 .toast-msg {
-  font-size: 12.5px;
-  line-height: 1.45;
+  font: var(--t-base) var(--mono);
   color: var(--ink);
   /* A copy confirmation restates the whole 42-character address, which is one
      unbreakable token wider than this rail. Let it break rather than let it
@@ -775,22 +1376,20 @@ button:disabled {
   display: inline-flex;
   align-items: center;
   padding: 0 2px;
-  box-shadow: none;
 }
 .toast-x svg {
   width: 15px;
   height: 15px;
 }
 .toast-x:hover:not(:disabled) {
+  background: none;
   color: var(--ink);
-  filter: none;
-  box-shadow: none;
 }
 
 .hint {
-  font: 11px/1.4 var(--mono);
+  font: var(--t-small) var(--mono);
   color: var(--dimmer);
-  letter-spacing: 0.02em;
+  letter-spacing: var(--ls-wide);
   text-transform: none;
 }
 
@@ -804,13 +1403,14 @@ button:disabled {
 .hint .forever {
   color: var(--vermilion);
   font-weight: 700;
-  letter-spacing: 0.08em;
+  letter-spacing: var(--ls-caps);
   text-transform: uppercase;
 }
 
 /* Explorer links, wherever they turn up. The browser's own link blue is the one
    colour in this console that means nothing — and a visited-purple address is
-   worse, because it reads as a state the address does not have. */
+   worse, because it reads as a state the address does not have. Indigo on
+   hover, not amber: a link moves no money, and amber is the spend. */
 .hint a,
 .disperser-list a {
   color: var(--dim);
@@ -819,57 +1419,165 @@ button:disabled {
 }
 .hint a:hover,
 .disperser-list a:hover {
-  color: var(--amber);
+  color: var(--indigo-bright);
   text-decoration: underline;
+}
+
+/* ── ONE TAG GEOMETRY, SIX NAMES ──────────────────────────────────────────
+   The console grew six badge vocabularies for one job: a 999px .chip, a 999px
+   .role with a dot, a 999px .fund-state, a 3px outlined .tag, and two bare
+   coloured figures. They are one shape now — a square 20px mono-caps cell, the
+   height of one line of the grid — and they differ only in the thing that
+   should have been distinguishing them all along: what they SAY, and which
+   semantic colour says it.
+
+   `section > h2 .chip` is scoped rather than bare because shell.css loads
+   second and defines its own `.chip` for the topbar balance pill at equal
+   specificity — a 34px sans pill whose height, radius and font silently leaked
+   into every step header. The descendant selector re-asserts the step chip
+   without touching the other file. */
+.fund-state,
+.role,
+.activity-list .tag,
+section > h2 .chip {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--s1);
+  flex: none;
+  height: var(--s5);
+  padding: 0 var(--s2);
+  border: 1px solid transparent;
+  border-radius: var(--radius);
+  background: var(--tint-grey);
+  color: var(--dimmer);
+  font: var(--t-micro) var(--mono);
+  letter-spacing: var(--ls-caps);
+  text-transform: uppercase;
+  white-space: nowrap;
+  font-variant-numeric: tabular-nums;
+}
+.fund-state svg,
+.role svg,
+section > h2 .chip svg {
+  width: 12px;
+  height: 12px;
+  flex: none;
+}
+
+/* Whether a wallet's funding has landed. Three states and no fourth, matching
+   the palette's law: jade for what is already true, amber for a shortfall that
+   is not yet dangerous, grey for something that simply has not happened. The
+   glyph carries the state as well as the colour — a funding screen read in a
+   hurry should not depend on hue alone. */
+.fund-state.is-in {
+  color: var(--jade);
+  background: var(--tint-jade);
+}
+.fund-state.is-part {
+  color: var(--amber);
+  background: var(--tint-amber);
+}
+/* Named in the Fund and ExternalFund panels and styled nowhere until now, so it
+   fell through to the grey base and said nothing the base did not. Waiting is
+   an absence, so it is drawn as one: the outline of a tag with no fill. */
+.fund-state.is-wait {
+  background: transparent;
+  border-color: var(--rule);
+  color: var(--dimmer);
+}
+
+/* Role. The dot stays round because it is a lamp, and lamps are the one thing
+   in this console that keep their radius. */
+.role {
+  color: var(--dim);
+}
+.role::before {
+  content: '';
+  width: 6px;
+  height: 6px;
+  border-radius: var(--radius-dot);
+  background: currentColor;
+  flex: none;
+}
+.role.dev {
+  color: var(--amber);
+  background: var(--tint-amber);
+}
+.role.ptdev {
+  color: var(--jade);
+  background: var(--tint-jade);
+}
+.role.ptbundle {
+  color: var(--sky);
+  background: var(--tint-sky);
 }
 
 /* ── the sequence ─────────────────────────────────────────────────────────
    Six steps, one order. Three states and no fourth: jade for what is behind
-   you, amber for where you are standing, grey for what is still ahead. Grey is
-   a statement about ORDER and not about permission — nothing it marks is
-   disabled — so it is drawn quiet rather than struck out. */
+   you, THE CARET for where you are standing, grey for what is still ahead.
+   Grey is a statement about ORDER and not about permission — nothing it marks
+   is disabled — so it is drawn quiet rather than struck out.
 
-/* The numbered node. Same object in the strip at the top and in the gutter
-   beside each panel, so the figure the operator picks out of the plan is
-   literally the one they scroll to. */
+   WHERE YOU ARE IS NOT A MONEY STATE. The now-node used to be amber, which put
+   a second amber object inside every pane that also holds the step's amber
+   spend button — and "exactly one amber per panel" is the invariant the whole
+   money law is scoped by. So position moved off the money palette entirely and
+   onto the terminal's own primitive for it: a solid foreground CARET pinned
+   against the cell, in --ink, which no money state can ever use. Amber inside a
+   pane now means one thing and marks one object. */
 .node {
   display: inline-grid;
   place-items: center;
   flex: none;
   width: 30px;
   height: 30px;
-  border-radius: 3px;
+  border-radius: var(--radius);
   border: 1px solid var(--rule);
   background: var(--panel-2);
   color: var(--dimmer);
-  font: 600 14px/1 var(--mono);
+  font: 500 var(--fs-base) / 1 var(--mono);
   font-variant-numeric: tabular-nums;
+  /* The motion budget's own tokens, not a literal: a machine cursor jumps
+     decisively and does not overshoot, so every duration in the console comes
+     off the same three-value scale and every curve is the same one-directional
+     ease. */
   transition:
-    color 0.25s ease,
-    background-color 0.25s ease,
-    border-color 0.25s ease;
+    color var(--dur-slow) var(--ease),
+    background-color var(--dur-slow) var(--ease),
+    border-color var(--dur-slow) var(--ease);
 }
 .node.is-small {
   width: 24px;
   height: 24px;
-  font-size: 12px;
+  font-size: var(--fs-small);
 }
+/* Where you are, and NOT in a money hue — the now-node used to be amber, which
+   put a second amber object inside every pane that also holds the step's amber
+   spend button. It carried a 3px --ink inset bar down its leading edge as well,
+   and that has gone: a 3px coloured left edge is this stylesheet's single most
+   reused decorative device (.notice, .plan-notice, .distribute, .seed-group-head,
+   .toast, .arm.is-live, .table-scroll[data-elsewhere]), so drawn that way the
+   caret was indistinguishable from ordinary category decoration and the mark
+   appeared in three different shapes across the app. The caret is now exactly
+   one shape and lives in exactly two places — the sidebar and the plan station.
+   The node says "now" the way a cell does: raised fill, boundary-weight edge,
+   full-ink numeral, against a later step's recessed fill and dimmed one. */
 .node.is-now {
-  color: var(--amber);
-  border-color: var(--amber);
-  background: #1b1509;
+  color: var(--ink);
+  background: var(--panel-hi);
+  border-color: var(--rule-strong);
 }
 .node.is-done {
-  color: var(--void);
-  background: var(--jade);
-  border-color: var(--jade);
+  color: var(--on-fill);
+  background: var(--jade-fill);
+  border-color: var(--jade-fill);
 }
 /* The readout is threaded onto the same spine but is not one of the six, so it
    gets a mark instead of a number and never takes a state colour. */
 .node-dot {
   width: 5px;
   height: 5px;
-  border-radius: 1px;
+  border-radius: var(--radius);
   background: var(--dimmer);
 }
 
@@ -881,13 +1589,15 @@ button:disabled {
      six 168px columns is a 1000px minimum, which a phone does not have and
      which would otherwise push the whole page sideways. */
   grid-template-columns: repeat(auto-fit, minmax(min(168px, 100%), 1fr));
+  /* The 1px gap over a ruled ground IS the hairline between stations, so it
+     survives any reflow the auto-fit produces. */
   gap: 1px;
   margin: 0;
   padding: 0;
   list-style: none;
-  background: var(--rule-soft);
-  border: 1px solid var(--rule);
-  border-radius: 6px;
+  background: var(--rule);
+  border: 1px solid var(--rule-strong);
+  border-radius: var(--radius);
   overflow: hidden;
 }
 
@@ -895,18 +1605,29 @@ button:disabled {
   position: relative;
   display: flex;
   align-items: flex-start;
-  gap: 10px;
+  gap: var(--s2);
   height: 100%;
-  padding: 12px 13px;
+  /* The left inset is the caret's gutter, exactly as it is on a sidebar row:
+     the block lives in it, so nothing shifts when the marker moves and the
+     caret only ever lights a cell that was already reserved. */
+  padding: var(--s3) var(--s3) var(--s3) var(--s5);
   background: var(--panel);
   text-decoration: none;
   color: inherit;
+}
+/* The region cue, separate from the caret. Indigo because this is navigation
+   and navigation moves no money — the same --tint-indigo the active sidebar row
+   carries, so "the console you are in" and "the step you are on" are told the
+   same way. Placed before :hover so pointing at the current station still gives
+   feedback. */
+.station.is-now {
+  background: var(--tint-indigo);
 }
 .station:hover {
   background: var(--panel-hi);
 }
 .station:focus-visible {
-  outline: 2px solid var(--amber);
+  outline: 2px solid var(--focus);
   outline-offset: -2px;
 }
 .station-text {
@@ -914,7 +1635,7 @@ button:disabled {
 }
 .station-text strong {
   display: block;
-  font: 600 12px/1.35 var(--sans);
+  font: 500 var(--fs-base) / var(--lh) var(--sans);
   color: var(--dim);
 }
 .station.is-done .station-text strong,
@@ -926,70 +1647,127 @@ button:disabled {
    rather than found. The node and the title carry done-versus-later. */
 .station-text span {
   display: block;
-  margin-top: 2px;
-  font: 11px/1.4 var(--mono);
+  margin-top: var(--s1);
+  font: var(--t-small) var(--mono);
+  letter-spacing: var(--ls-wide);
   color: var(--dim);
   overflow-wrap: anywhere;
 }
 
-/* "You are here", drawn once and moved between stations rather than drawn six
-   times and hidden five. A marker that jumps reads as a different marker. */
+/* "YOU ARE HERE", drawn once and moved between stations rather than drawn six
+   times and hidden five — a marker that jumps reads as a different marker.
+
+   IT IS THE CARET, and it is drawn as one. A 1px outline with a 3px --ink left
+   edge is a selected-cell box, not a cursor, and it wore the same left-edge
+   device eight other rules in this file use for ordinary category decoration —
+   so the app's headline signature read as a caret in exactly one of the places
+   it appeared. This is the same block the sidebar draws, from the same three
+   :root tokens: one solid foreground cell, 0.6em by 1.2em, parked in the
+   station's own left gutter. Never a money hue — position is not a money state,
+   which is exactly what lets the mark be reused wherever "here" has to be said.
+
+   It does not blink, and the sidebar's does. That is deliberate: the sidebar
+   caret is pinned and blinking is what makes a still mark read as a cursor,
+   while this one TRAVELS on layoutId="pons-here" — and a block that both moves
+   and blinks is two motions spent on one mark. */
 .station-here {
   position: absolute;
   inset: 0;
-  border: 1px solid var(--amber-dim);
-  border-left: 2px solid var(--amber);
   pointer-events: none;
+}
+.station-here::before {
+  content: '';
+  position: absolute;
+  left: var(--caret-x);
+  /* Aligned to the station's first line — the node and the title — rather than
+     to the middle of a card whose detail line makes it two. */
+  top: calc(var(--s3) + (var(--s6) - var(--caret-h)) / 2);
+  width: var(--caret-w);
+  height: var(--caret-h);
+  background: var(--ink);
 }
 
 .plan-notice {
-  margin: 10px 0 0;
-  padding-left: 11px;
+  margin: var(--s2) 0 0;
+  padding-left: var(--s3);
   border-left: 3px solid var(--amber);
-  font: 12px/1.5 var(--mono);
+  font: var(--t-base) var(--mono);
   color: var(--amber);
 }
 
-/* ── a step, and the spine running through it ────────────────────────────── */
+/* ── a step, and the spine running through it ─────────────────────────────
+   The spine is a chain of coupled numbers, so it is expressed as three local
+   custom properties and derived from them. Change --gutter, --node-size or
+   --mark-left and the mark, the node and the rail all follow; nothing here is
+   a magic number that can drift out of step with its neighbours.
 
+   The rail's own two ends are the invariant that has broken before: it starts
+   at the pane's own bottom edge and stops exactly on the next pane's top edge —
+   the gap, and nothing but the gap. --rail-bottom is computed from --seq-gap
+   (gap + 1, the 1 being the pane's own border, since the mark ends at the
+   padding box), so widening the sequence gap can no longer paint the spine down
+   through the next pane's face and across its node. */
 .stage {
   position: relative;
-  padding-left: 62px;
-  /* Cleared for the sticky instrument strip, so a station link does not land
-     its own heading underneath it. */
-  scroll-margin-top: 70px;
+  --node-size: 28px;
+  --mark-left: 8px;
+  padding-left: var(--gutter);
+  /* Cleared for the sticky top bar, so a station link does not land its own
+     heading underneath it. */
+  scroll-margin-top: calc(var(--topbar-h) + var(--s3));
+}
+/* The band bleeds past the gutter as well as past the body inset, so the pane's
+   title strip spans the full width of the window it titles. */
+.stage > h2 {
+  margin-left: calc(var(--gutter) * -1);
+  padding-left: var(--gutter);
 }
 
 .stage-mark {
   position: absolute;
-  left: 16px;
-  top: var(--pad);
+  left: var(--mark-left);
+  top: 0;
   bottom: 0;
-  width: 30px;
+  width: var(--node-size);
+  /* Centres the node in the 30px title band. */
+  padding-top: calc((var(--band) - var(--node-size)) / 2);
+}
+.stage-mark .node {
+  width: var(--node-size);
+  height: var(--node-size);
+  font-size: var(--fs-base);
 }
 
-/* The hairline down to the next station. It runs past the panel's own edge and
-   across the gap, so the six panels read as one continuous procedure rather
-   than as six cards that happen to be stacked. */
+/* The hairline down to the next station: it leaves this pane at its bottom edge
+   and lands on the next pane's top edge, so the six panes read as one
+   continuous procedure rather than as six windows that happen to be stacked.
+
+   IT EXISTS ONLY IN THE GAP. Started at the underside of the title band it ran
+   the whole interior height of the pane — a second 2px --rule-strong vertical
+   line 21px inside the pane's own --rule-strong border and parallel to it,
+   which on a 700px wallet panel is 700px of grey down the inside of the card
+   and in light mode reads unmistakably as a mis-drawn double border. The node
+   sitting in the title band is what carries the spine INSIDE the pane; the rail
+   only has to cross the gap, which is the one place it is legible and the only
+   place it says anything the node does not.
+
+   `top: 100%` is the bottom of .stage-mark, which is the pane's inner bottom
+   edge; --rail-bottom is --seq-gap + 1 (the 1 being the pane's own border,
+   since the mark ends at the padding box), so the run is exactly border + gap
+   and stops dead on the next pane's top edge. Widening --seq-gap cannot paint
+   the spine down through the next pane's face. */
 .stage-rail {
   position: absolute;
-  left: 15px;
-  top: 38px;
-  /* Reaches across the 40px gap in `.sequence` and stops exactly on the next
-     card's top edge. 41 and not 40 because this is offset from `.stage-mark`,
-     which ends at the card's PADDING box — one border inside the edge the gap
-     is measured from. Anything larger draws the spine down through the next
-     card's face and across its node, which is the overlap this was reported as.
-     If the gap in `.sequence` changes, this changes with it: gap + 1. */
-  bottom: -41px;
-  width: 1px;
-  background: var(--rule);
+  left: calc(var(--node-size) / 2 - 1px);
+  top: 100%;
+  bottom: var(--rail-bottom);
+  width: 2px;
+  background: var(--rule-strong);
 }
 .stage-rail-fill {
   position: absolute;
   inset: 0;
   background: var(--jade);
-  opacity: 0.55;
   transform-origin: top center;
   /* Empty is the baseline, in CSS rather than in the animation, so a frame
      rendered before the animation library is live shows a step that is not yet
@@ -998,68 +1776,73 @@ button:disabled {
   transform: scaleY(0);
 }
 
-.stage h2 {
-  margin-bottom: 16px;
-  min-height: 30px;
-}
 .stage-n {
   color: var(--dimmer);
   white-space: nowrap;
+  /* "STEP 3" and the step's title share a line and have to share a baseline.
+     The band centres its items, and centring a 16px line box against a 20px one
+     leaves the smaller type's baseline 2px high — two alignments on one line.
+     A centred flex item's margin moves its border box by half, so 4px of top
+     margin is the 2px the eyebrow has to come down. */
+  margin-top: var(--s1);
 }
-/* The step title reads as a heading now — display face, sentence case, larger —
-   rather than another line of silkscreen caps. The "STEP N" eyebrow beside it
-   stays small and mono, so the two do not compete. */
+/* The step title reads as a heading — sentence case, a size up — rather than as
+   another line of silkscreen caps. The "STEP N" eyebrow beside it stays micro,
+   so the two do not compete. */
 .stage-t {
   color: var(--ink);
-  font: 600 15px/1.2 var(--display);
+  font: var(--t-mid) var(--display);
   letter-spacing: 0;
   text-transform: none;
 }
 .stage.is-later .stage-t {
   color: var(--dim);
 }
-/* A step still ahead sits back a little. No colour spent on it: it is neither
-   ready, dangerous, nor confirmed, and the palette has nothing for "not yet". */
-.stage.is-later {
-  border-color: var(--rule-soft);
+/* A step still ahead sits back a little — in its BAND, not in its boundary.
+   The pane's --rule-strong edge is what scopes "one amber per panel", so it can
+   never be dimmed: a later step is quieter, not less enclosed. No colour spent
+   on it either; it is neither ready, dangerous, nor confirmed, and the palette
+   has nothing for "not yet".
+
+   --band-bg-later and not --panel-2: in the dark theme --panel-2 is DARKER than
+   the pane it sits on (1.04:1, and inverted), so a later step's band read as a
+   hole rather than as a quieter title bar. This is the same band one step down,
+   in both themes, and it keeps the --rule-strong underline that makes the strip
+   a strip. */
+.stage.is-later > h2 {
+  background: var(--band-bg-later);
 }
 
-/* The state, at the far end of the label's rule — the place an instrument puts
-   its readout. `order` puts it after the hairline, which as a pseudo-element
-   would otherwise always come last. */
-.chip {
+/* The state, at the far end of the band — the place an instrument puts its
+   readout. `order: 1` keeps it last in the band; `margin-left: auto` is what
+   parks it at the right end now that the heading's gradient hairline (and its
+   flex: 1) has been retired in favour of the band's own border. */
+section > h2 .chip {
   order: 1;
-  display: inline-flex;
-  align-items: center;
-  gap: 5px;
-  flex: none;
-  padding: 3px 9px 3px 8px;
-  border-radius: 999px;
-  font: 700 10px/1.4 var(--mono);
-  letter-spacing: 0.1em;
-  text-transform: uppercase;
-  color: var(--dimmer);
-  background: var(--tint-grey);
+  /* --dim rather than the tag base's --dimmer, because this tag is the one that
+     sits on the lifted title band: --dimmer over --tint-grey over --band-bg
+     measures 3.66:1, under AA, where --dim measures 4.82:1. The tag's geometry
+     and its ground are untouched — only the ink it needs on the ground it
+     actually lands on. */
+  color: var(--dim);
 }
-.chip.is-now {
-  color: var(--amber);
-  background: var(--tint-amber);
+section > h2 .chip.is-now {
+  color: var(--ink);
+  background: var(--panel);
+  border-color: var(--rule-strong);
 }
-.chip.is-done {
+section > h2 .chip.is-done {
   color: var(--jade);
   background: var(--tint-jade);
-}
-.chip svg {
-  width: 12px;
-  height: 12px;
 }
 
 /* What a step is waiting for, in place. It says "waits on", never "locked":
    every control inside stays live, and an operator who knows better than the
    sequence is not going to be stopped by a caption. */
 .stage-wait {
-  margin: -6px 0 12px;
-  font: 11px/1.45 var(--mono);
+  margin: 0 0 var(--s3);
+  font: var(--t-small) var(--mono);
+  letter-spacing: var(--ls-wide);
   color: var(--dimmer);
 }
 
@@ -1067,10 +1850,16 @@ button:disabled {
 .divider {
   display: flex;
   align-items: center;
-  gap: 12px;
-  margin: 14px 0 -2px;
-  font: 600 10px/1 var(--mono);
-  letter-spacing: 0.18em;
+  gap: var(--s3);
+  /* The grid that stacks the panes already supplies 24px above and below, which
+     is the rhythm every other gap in `main` keeps. This rule added +12px to the
+     top and −4px to the bottom on top of it, so the one horizontal divider on
+     the page sat 36px under the sequence and 20px over the records — not
+     centred between the two things it separates, and neither number on the
+     scale. */
+  margin: 0;
+  font: var(--t-micro) var(--mono);
+  letter-spacing: var(--ls-caps);
   text-transform: uppercase;
   color: var(--dimmer);
 }
@@ -1091,19 +1880,24 @@ button:disabled {
 /* ── guide ───────────────────────────────────────────────────────────────── */
 
 .guide dl {
-  margin: 14px 0 0;
+  margin: var(--s3) 0 0;
   display: grid;
-  gap: 12px;
+  gap: var(--s3);
 }
+/* The term, in plain ink rather than amber. A pane of prose was carrying eight
+   amber objects and not one of them was a control, let alone the step's spend;
+   weight and the silkscreen carry the hierarchy on their own. */
 .guide dt {
-  font: 600 11px/1 var(--mono);
-  letter-spacing: 0.1em;
+  font: var(--t-micro) var(--mono);
+  letter-spacing: var(--ls-caps);
   text-transform: uppercase;
-  color: var(--amber);
-  margin-bottom: 3px;
+  color: var(--ink);
+  margin-bottom: var(--s1);
 }
 .guide dd {
   margin: 0;
+  font: var(--t-base) var(--sans);
+  letter-spacing: 0;
   color: var(--dim);
   max-width: 78ch;
 }
@@ -1114,11 +1908,11 @@ button:disabled {
 .guide code,
 .modal code,
 .notice code {
-  font: 12px var(--mono);
+  font: var(--t-small) var(--mono);
   color: var(--ink);
   background: var(--panel-2);
   border: 1px solid var(--rule);
-  border-radius: 3px;
+  border-radius: var(--radius);
   padding: 1px 5px;
 }
 
@@ -1127,34 +1921,54 @@ button:disabled {
 table {
   width: 100%;
   border-collapse: collapse;
-  margin-top: 14px;
+  margin-top: var(--s3);
 }
 
-/* Every table in the console is wrapped in one of these, and it is not
-   decoration — it is the only thing standing between a wide table and the card
-   it is drawn inside. A table box can never be squeezed below its min-content
-   width, so the `width: 100%` above is a FLOOR, not a cap: the wallet table's
-   nine columns used to want ~1170px against a 996px panel interior, a
-   42-character address being 326px of it with no place to break, and the
-   surplus was simply painted outside the card — the delete column landed on the
-   page background past the border, and below ~1380px the whole document
-   scrolled sideways with every other panel dragged along.
+/* ── THE TABLE CARD, WHICH HAD NO RULE AT ALL ─────────────────────────────
+   `.table-card` is written into fourteen wrappers across v3, v4, v6 and v7 and
+   was styled in exactly none of them, so thirteen of the densest tables in the
+   console had no card surface, no height cap and no scroller: a 100-row bundle
+   table ran the full length of the page and painted past its pane's right edge,
+   while the same data in v4/v5 sat in a capped, scrolling box.
 
-   Shortening the address column (see .addr-cell) takes the wallet table to
-   ~960px, so at desktop widths it now fits and this box never scrolls. The
-   wrapper stays regardless: it is what holds every table inside its card on a
-   laptop, a split screen or a phone, and it is a safety net rather than a
-   layout — the scroll boundary belongs around the one element that can be too
-   wide, so the card is never escaped at any width.
+   One declaration block hands all fourteen the surface, the cap, the contained
+   scroller and the sticky header — without editing a single component and
+   without merging one tab-isolated module into another.
 
-   A wrapper and not `display: block` on the table itself: a blockified table
-   loses its rows and columns in the accessibility tree — nine columns of
-   financial inputs stop being associated with their headers — and its inner
-   anonymous table box shrink-wraps to min-content, so columns collapse even on
-   screens where they would have fitted. And not `overflow` on the section: that
-   would scroll the lede and the stat tiles along with the table, and it would
-   clip .stage-rail, which paints deliberately outside the card to thread the
-   panels into one spine. */
+   It is the SCROLLER as well as the card because these wrappers hold the table
+   directly. The table itself is never blockified: `display: block` on a <table>
+   strips its rows and columns out of the accessibility tree, which for nine
+   columns of financial inputs is not a trade worth making. */
+.table-card {
+  border: 1px solid var(--rule-strong);
+  background: var(--panel-2);
+  border-radius: var(--radius);
+  max-height: 60vh;
+  overflow: auto;
+  overscroll-behavior: contain;
+  margin-top: var(--s3);
+}
+.table-card > table {
+  margin-top: 0;
+}
+/* Two of the fourteen wrappers hold prose and a control rather than a table
+   (v3/v6 SweepPanel's direct-sweep block), and a table brings its own cell
+   padding while a paragraph does not. Padding the CARD when it has no table
+   keeps one inset for the whole block instead of one per child. If :has() is
+   unsupported the rule is dropped whole and those two cards simply sit flush —
+   a fallback, not a break. */
+.table-card:not(:has(> table)) {
+  padding: var(--s3);
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--s2);
+}
+.table-card:not(:has(> table)) > p {
+  flex-basis: 100%;
+  margin: 0;
+}
+
 /* The header bar over each seed group (seasoned pool / new campaign / withdrawn).
    Highlighted with a group accent so the three are told apart at a glance: a
    left rule in the accent colour over a faint tint of it. The colour comes in
@@ -1164,23 +1978,39 @@ table {
   display: flex;
   flex-wrap: wrap;
   align-items: center;
-  gap: 10px;
+  gap: var(--s2);
   margin: 0;
-  padding: 8px 12px;
-  border-radius: 7px;
-  border-left: 3px solid var(--group-accent, var(--rule));
+  padding: var(--s2) var(--s3);
+  border-radius: var(--radius);
+  border-left: 3px solid var(--group-accent, var(--rule-strong));
   background: var(--group-tint, transparent);
 }
 .seed-group-head > b {
   color: var(--ink);
-  letter-spacing: 0.2px;
+  letter-spacing: var(--ls-body);
 }
 /* The header owns the gap to its own table, so the wrapper's default top margin
    would double it. */
-.seed-group-head + .table-scroll {
-  margin-top: 8px;
+.seed-group-head + .table-scroll,
+.seed-group-head + .table-card {
+  margin-top: var(--s2);
 }
 
+/* Every table in the console is wrapped in one of these or in a .table-card,
+   and it is not decoration — it is the only thing standing between a wide table
+   and the pane it is drawn inside. A table box can never be squeezed below its
+   min-content width, so the `width: 100%` above is a FLOOR, not a cap: the
+   wallet table's nine columns used to want ~1170px against a 996px pane
+   interior, a 42-character address being 326px of it with no place to break,
+   and the surplus was simply painted outside the pane.
+
+   A wrapper and not `display: block` on the table itself: a blockified table
+   loses its rows and columns in the accessibility tree, and its inner anonymous
+   table box shrink-wraps to min-content, so columns collapse even on screens
+   where they would have fitted. And not `overflow` on the section: that would
+   scroll the lede and the stat tiles along with the table, and it would clip
+   .stage-rail, which paints deliberately outside the pane to thread the panes
+   into one spine. */
 .table-scroll {
   overflow-x: auto;
   overscroll-behavior-x: contain;
@@ -1189,33 +2019,13 @@ table {
      overflow makes this a block formatting context, and a margin sealed inside
      one cannot collapse out of it — left on the table, the spacing would
      silently double wherever a table follows prose. */
-  margin-top: 14px;
-  scrollbar-width: thin;
-  scrollbar-color: var(--rule) transparent;
+  margin-top: var(--s3);
 }
 .table-scroll > table {
   margin-top: 0;
 }
-/* A stock OS scrollbar appearing on a dark card reads as damage rather than as
-   an affordance. Drawn instead as the hairline it sits under: the same --rule
-   the tables are ruled with, no track of its own, and lifted to --dimmer only
-   once the pointer is already on it. Present exactly when there is something to
-   scroll to, which is the whole message. */
-.table-scroll::-webkit-scrollbar {
-  height: 8px;
-}
-.table-scroll::-webkit-scrollbar-track {
-  background: transparent;
-}
-.table-scroll::-webkit-scrollbar-thumb {
-  background: var(--rule);
-  border-radius: 999px;
-}
-.table-scroll::-webkit-scrollbar-thumb:hover {
-  background: var(--dimmer);
-}
 
-/* There was a scroll-driven edge fade here — a mask on this box that softened
+/* There was a scroll-driven edge fade over this box — a mask that softened
    whichever edge had more table beyond it. It is gone, and it must not come
    back in any form that reduces the alpha of content.
 
@@ -1223,63 +2033,172 @@ table {
    and scroll offset, never by what those pixels say, and what it landed on at
    ordinary laptop widths was the over-cap REVERTS badge in the last column —
    the only per-row statement that a buy does not clamp but reverts and burns
-   its gas. Vermilion on the panel is 5.5:1 at full alpha and falls under the
-   4.5:1 floor within the first few pixels of a 44px ramp, so the warning was
-   drawn unreadable at rest, not merely dimmed. It faded live controls too: a
-   mask changes painting, not hit-testing, so the per-row × and the bulk-delete
-   checkboxes stayed clickable at an alpha nobody would click deliberately, and
-   focus rings went with them.
+   its gas. Vermilion falls under the 4.5:1 floor within the first few pixels of
+   a 44px ramp, so the warning was drawn unreadable at rest, not merely dimmed.
+   It faded live controls too: a mask changes painting, not hit-testing, so the
+   per-row × and the bulk-delete checkboxes stayed clickable at an alpha nobody
+   would click deliberately, and focus rings went with them.
 
    The semantics were the wrong way round as well. A hard cut with a scrollbar
    under it says "there is more to the right"; a fade says "the content ends
    here", so a half-faded warning reads as chrome and is not pursued. The
-   scrollbar below is the affordance, and it costs nothing.
+   scrollbar is the affordance, and it costs nothing. */
 
-   The wallet table no longer overflows at desktop widths anyway — see the
-   address column, which is shortened now. */
+/* Scrollbars inside the console's own scrolling regions. The platform default
+   is a light-grey slab that reads as a piece of the operating system dropped
+   onto a panel; this is the same hairline vocabulary the rules and borders use.
+   Firefox takes the two-value shorthand, WebKit needs its pseudo-elements, so
+   both are declared and each browser ignores the other's. */
+.table-scroll,
+.table-card,
+.scroll-y,
+pre {
+  scrollbar-width: thin;
+  scrollbar-color: var(--rule-strong) transparent;
+}
+.table-scroll::-webkit-scrollbar,
+.table-card::-webkit-scrollbar,
+.scroll-y::-webkit-scrollbar,
+pre::-webkit-scrollbar {
+  width: 10px;
+  height: 10px;
+}
+.table-scroll::-webkit-scrollbar-track,
+.table-card::-webkit-scrollbar-track,
+.scroll-y::-webkit-scrollbar-track,
+pre::-webkit-scrollbar-track {
+  background: transparent;
+}
+.table-scroll::-webkit-scrollbar-thumb,
+.table-card::-webkit-scrollbar-thumb,
+.scroll-y::-webkit-scrollbar-thumb,
+pre::-webkit-scrollbar-thumb {
+  background: var(--rule-strong);
+  border-radius: var(--radius);
+  /* Inset by a transparent border so the thumb reads as a slim bar with air
+     around it rather than filling the gutter edge to edge. */
+  border: 3px solid transparent;
+  background-clip: padding-box;
+}
+.table-scroll:hover::-webkit-scrollbar-thumb,
+.table-card:hover::-webkit-scrollbar-thumb,
+.scroll-y:hover::-webkit-scrollbar-thumb,
+pre:hover::-webkit-scrollbar-thumb {
+  background: var(--dimmer);
+  background-clip: padding-box;
+}
+.table-scroll::-webkit-scrollbar-corner,
+.table-card::-webkit-scrollbar-corner,
+.scroll-y::-webkit-scrollbar-corner {
+  background: transparent;
+}
+
+/* The silkscreen header. It carries an opaque ground of its own because it goes
+   sticky inside a capped card, and a transparent header scrolled over its own
+   rows is unreadable. */
 th {
   text-align: left;
-  font: 700 10px/1 var(--mono);
-  letter-spacing: 0.1em;
+  font: var(--t-micro) var(--mono);
+  letter-spacing: var(--ls-caps);
   text-transform: uppercase;
   color: var(--dimmer);
-  padding: 0 12px 10px;
-  border-bottom: 1px solid var(--rule);
+  padding: var(--s2) var(--s3);
+  background: var(--panel);
+  border-bottom: 1px solid var(--rule-strong);
   white-space: nowrap;
 }
+/* STICKY HEADERS, FROM THE CAP THAT MAKES THEM MEAN SOMETHING. Only where the
+   scroller has a height — inside .table-card and .scroll-y — because a sticky
+   header in an uncapped .table-scroll is inert.
+
+   The underline is drawn as an inset box-shadow, not the th's own border:
+   `border-collapse: collapse` hands every border to the TABLE, so a border on a
+   sticky cell is left behind at the top of the table the moment it scrolls. */
+.table-card thead th,
+.scroll-y thead th {
+  position: sticky;
+  top: 0;
+  z-index: 1;
+  border-bottom: 0;
+  box-shadow: inset 0 -1px 0 var(--rule-strong);
+}
+/* Sort affordance — named on the v5 headers and styled nowhere until now. */
+th.sortable {
+  cursor: pointer;
+  user-select: none;
+}
+th.sortable:hover {
+  color: var(--ink);
+}
+/* The row grid, at rest. --rule-soft measured 1.23–1.28:1 dark and 1.15–1.24:1
+   light against the two grounds a row sits on, which across 31 rows and nine
+   columns is not a grid — it is the memory of one. --rule is the subordinate
+   separator this file already defines for exactly this job (1.96:1 dark /
+   1.86:1 light) and is still a step under the boundary weight the card and the
+   header wear, so the table reads as ruled without reading as boxed. */
 td {
-  padding: 10px 12px;
-  border-bottom: 1px solid var(--rule-soft);
+  padding: var(--s1) var(--s3);
+  border-bottom: 1px solid var(--rule);
   vertical-align: middle;
 }
-/* Rows lift on hover, so the eye can track one wallet across nine columns. */
+/* A NUMBER COLUMN IS READ DOWN ITS RIGHT EDGE. .num is applied to 116 th/td
+   across v3–v7 as the marker for "this cell holds a figure", and the sheet spent
+   it on tabular-nums alone — which lines the digits up with each other and does
+   nothing about where the string starts. So a Balance column ran 903,441 and
+   4,182,004 to right edges 63px apart, in the table an operator sells from, and
+   the only columns that happened to line up were the fixed-decimal ones whose
+   strings are all the same length. Header and cells carry the class in matched
+   pairs everywhere it is used, so the heading travels with its figures. */
+th.num,
+td.num {
+  text-align: right;
+}
+/* ROW TRACKING IS A POSITION CUE, NOT A WASH. A hovered row has to be findable
+   across nine columns, in a table where each row carries its own Fund amount,
+   buy mode and buy amount and where those are read across to a supply-share
+   figure — landing on the row you did not think you were on is a wrong-wallet
+   funding error, not a cosmetic one. A fill cannot do that work here: --panel-hi
+   is 1.09:1 on --panel and 1.14:1 inside a .table-card, and every darker or
+   lighter step available drops the row's own --dimmer figures under AA, so the
+   fill stays where it is and the cue is a MARK — 2px of --indigo down the
+   leading edge of every cell in the row, which reads at any horizontal scroll
+   offset rather than only when the first column happens to be on screen.
+   Indigo because position is not a money state; it is the same hue the nav and
+   the caret's own region cue already use. */
 tbody tr {
-  transition: background 0.1s ease;
+  transition: background var(--dur-fast) var(--ease);
 }
 tbody tr:hover td {
-  background: rgba(255, 255, 255, 0.018);
+  background: var(--panel-hi);
+  box-shadow: inset 2px 0 0 var(--indigo);
 }
 tr:last-child td {
   border-bottom: none;
 }
 td.addr {
-  font: 12px var(--mono);
+  font: var(--t-base) var(--mono);
   color: var(--dim);
 }
 td.empty {
   color: var(--dimmer);
-  padding: 26px 10px;
+  padding: var(--s6) var(--s3);
   text-align: center;
 }
 td input,
 td select {
-  padding: 5px 7px;
-  font-size: 12px;
+  padding: 2px var(--s2);
+}
+/* The same 1px shortfall as the full-size control, inside a cell: the buy-mode
+   dropdown measured 25px between two 26px amount fields, so the row's control
+   rail was out at the top and at the bottom. */
+td select,
+th select {
+  min-height: var(--control-h-dense);
 }
 /* A cap, not a width — the fields sit at it. 96px holds ten characters of a
-   six-decimal ETH amount ("123.456789") without clipping, and the 44px it gives
+   six-decimal ETH amount ("123.456789") without clipping, and what it gives
    back across the Fund and Buy columns is what buys the address column two more
-   hex characters while still leaving the wallet table inside the card. */
+   hex characters while still leaving the wallet table inside the pane. */
 td input[type='number'] {
   max-width: 96px;
 }
@@ -1287,7 +2206,7 @@ td input[type='number'] {
 /* ── an address in a scanning table ───────────────────────────────────────
    A shortened address and the button that copies the whole one. Both halves
    are needed together: the truncation is what fits nine columns inside the
-   card, and the copy is what stops the truncation being a dead end, because
+   pane, and the copy is what stops the truncation being a dead end, because
    the shortened text cannot be retyped into anything.
 
    Full addresses stay wherever an operator is committing — every confirmation
@@ -1295,164 +2214,24 @@ td input[type='number'] {
 .addr-cell {
   display: inline-flex;
   align-items: center;
-  gap: 6px;
+  gap: var(--s1);
 }
-/* nowrap is load-bearing, not cosmetic: the ellipsis is a break opportunity, so
-   without it every shortened address wraps to two lines and the row grows taller
-   instead of the table growing narrower. */
+/* One typographic treatment for one component. The same Address used to render
+   three ways depending on the cell it landed in — 12px mono --dim in td.addr,
+   13px Inter --ink in a bare td, 11px --dimmer inside a .hint. */
 .addr-text {
+  /* nowrap is load-bearing, not cosmetic: the ellipsis is a break opportunity,
+     so without it every shortened address wraps to two lines and the row grows
+     taller instead of the table growing narrower. */
   white-space: nowrap;
+  font-family: var(--mono);
+  font-variant-numeric: tabular-nums;
 }
 /* A link that does not announce itself. In a table of a hundred addresses the
    blue-and-underlined treatment is noise — every row shouting the same thing —
    but the href is still worth having, so this keeps the navigation and drops
    the decoration. It reveals itself on hover, which is where a reader looks
    when they want to know whether something is clickable. */
-/* ── icon controls ────────────────────────────────────────────────────────
-   Replacing the text-link buttons that used to sit in rows and toolbars. A
-   button styled as prose reads as prose; these read as controls, which is what
-   they are.
-
-   FILLED, NOT TRANSPARENT. They match button.ghost's treatment — a raised panel
-   fill with a hairline border — so a control is visible as a control before the
-   pointer finds it, rather than appearing on hover. That is a deliberate
-   departure from the one-amber-per-panel rule this stylesheet opens with, which
-   kept secondary controls flat so the step's forward action was the only thing
-   with weight. The trade is legibility for that signal; the amber solid is
-   still the loudest thing on any panel, which is what the rule was protecting.
-
-   Destructive controls carry their vermilion ALWAYS rather than on hover, so a
-   delete is identifiable without probing it. */
-.icon-btn {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  width: 28px;
-  height: 28px;
-  padding: 0;
-  color: var(--dim);
-  background: var(--panel-hi);
-  border: 1px solid var(--rule);
-  border-radius: 6px;
-  box-shadow: 0 1px 0 rgba(255, 255, 255, 0.03) inset;
-  cursor: pointer;
-  transition: color 0.12s, border-color 0.12s, background 0.12s;
-}
-.icon-btn:hover:not(:disabled),
-.icon-btn:focus-visible {
-  color: var(--ink);
-  border-color: var(--amber);
-  background: var(--panel-hi);
-}
-.icon-btn.is-danger {
-  color: var(--vermilion);
-  background: var(--tint-vermilion);
-  border-color: var(--vermilion-dim);
-}
-.icon-btn.is-danger:hover:not(:disabled),
-.icon-btn.is-danger:focus-visible {
-  color: #1a0603;
-  background: var(--vermilion);
-  border-color: var(--vermilion);
-}
-.icon-btn:disabled {
-  opacity: 0.3;
-  cursor: default;
-}
-
-.icon-action {
-  display: inline-flex;
-  align-items: center;
-  gap: 7px;
-  padding: 7px 12px;
-  font: inherit;
-  font-size: 0.86rem;
-  font-weight: 600;
-  color: var(--ink);
-  background: var(--panel-hi);
-  border: 1px solid var(--rule);
-  border-radius: var(--radius);
-  box-shadow: 0 1px 0 rgba(255, 255, 255, 0.03) inset;
-  cursor: pointer;
-  transition: color 0.12s, border-color 0.12s, background 0.12s;
-}
-.icon-action:hover:not(:disabled),
-.icon-action:focus-visible {
-  color: var(--amber);
-  border-color: var(--amber);
-}
-.icon-action.is-danger {
-  color: var(--vermilion);
-  background: var(--tint-vermilion);
-  border-color: var(--vermilion-dim);
-}
-.icon-action.is-danger:hover:not(:disabled),
-.icon-action.is-danger:focus-visible {
-  color: #1a0603;
-  background: var(--vermilion);
-  border-color: var(--vermilion);
-}
-.icon-action:disabled {
-  opacity: 0.4;
-  cursor: default;
-}
-
-/* The two facts inside a sentence that an operator is actually reading for.
-   Sky for the ordinary one — a time, a figure, the thing you came to check —
-   and vermilion for the one that needs a hand. Applied to the WORDS, not the
-   paragraph: a whole line in colour is a line nobody reads twice, and the point
-   is that "next due 15:12" and "overdue since 09:04" should not look alike at a
-   glance across twenty cards. */
-.is-next {
-  color: var(--sky);
-  font-weight: 600;
-}
-.is-bad {
-  color: var(--vermilion);
-  font-weight: 600;
-}
-
-/* Scrollbars inside the console's own scrolling regions — the wallet tables and
-   the campaign list. The platform default is a light-grey slab that reads as a
-   piece of the operating system dropped onto a dark panel; this is the same
-   hairline vocabulary the rules and borders use, and it stays out of the way
-   until the pointer is over the thing it belongs to.
-
-   Firefox takes the two-value shorthand; WebKit needs its pseudo-elements, so
-   both are declared and each browser ignores the other's. */
-.table-scroll,
-.scroll-y {
-  scrollbar-width: thin;
-  scrollbar-color: var(--rule) transparent;
-}
-.table-scroll::-webkit-scrollbar,
-.scroll-y::-webkit-scrollbar {
-  width: 10px;
-  height: 10px;
-}
-.table-scroll::-webkit-scrollbar-track,
-.scroll-y::-webkit-scrollbar-track {
-  background: transparent;
-}
-.table-scroll::-webkit-scrollbar-thumb,
-.scroll-y::-webkit-scrollbar-thumb {
-  background: var(--rule);
-  border-radius: 99px;
-  /* Inset by a transparent border so the thumb reads as a slim bar with air
-     around it rather than filling the gutter edge to edge. */
-  border: 3px solid transparent;
-  background-clip: padding-box;
-}
-.table-scroll:hover::-webkit-scrollbar-thumb,
-.scroll-y:hover::-webkit-scrollbar-thumb {
-  background: var(--panel-hi);
-  background-clip: padding-box;
-}
-.table-scroll::-webkit-scrollbar-corner,
-.scroll-y::-webkit-scrollbar-corner {
-  background: transparent;
-}
-
 a.addr-text.is-plain {
   color: inherit;
   text-decoration: none;
@@ -1474,20 +2253,17 @@ a.addr-text.is-plain:focus-visible {
   width: 22px;
   height: 22px;
   padding: 0;
-  font-size: 12px;
+  font-size: var(--fs-small);
   background: none;
   border: 1px solid transparent;
-  border-radius: 4px;
+  border-radius: var(--radius);
   color: var(--dimmer);
   cursor: pointer;
-  box-shadow: none;
 }
 .addr-copy:hover:not(:disabled) {
-  color: var(--amber);
+  color: var(--indigo-bright);
   border-color: var(--rule);
   background: var(--panel-hi);
-  filter: none;
-  box-shadow: none;
 }
 /* The tick after a confirmed write. Jade because it says the same thing the
    toast beside it does — done, nothing spent. It is a swapped glyph and a
@@ -1500,46 +2276,145 @@ a.addr-text.is-plain:focus-visible {
   background: none;
 }
 
-/* Role as a tinted pill with a status dot — the reference's badge language. */
-.role {
+/* ── icon controls ────────────────────────────────────────────────────────
+   Replacing the text-link buttons that used to sit in rows and toolbars. A
+   button styled as prose reads as prose; these read as controls, which is what
+   they are. They take .ghost's amplitude — a raised panel fill with a single
+   hairline — so a control is visible as a control before the pointer finds it.
+
+   Destructive ones carry their vermilion ALWAYS rather than on hover, so a
+   delete is identifiable without probing it — but they are the .ghost.danger
+   rung and they are drawn as it, because a dialog stands behind every one of
+   them. They used to rest on .spend's frame-over-tint (differing only by 1px of
+   border width, and identical to it in greyscale) and hover into the filled
+   dark block with the white label — the signature styles.css reserves for
+   "armed and live, behind the Arm switch". So merely pointing at a row's delete
+   produced the console's armed lamp, and the rung meant to say "this spends
+   with no dialog" was being worn by a control a dialog does protect. They rest
+   on a --vermilion-dim hairline with the vermilion label and get LOUDER on
+   hover — full vermilion edge over the vermilion tint — and never become a
+   filled block at all. */
+.icon-btn {
   display: inline-flex;
   align-items: center;
-  gap: 6px;
-  font: 700 10px/1.5 var(--mono);
-  letter-spacing: 0.08em;
-  text-transform: uppercase;
-  padding: 3px 9px;
-  border-radius: 999px;
-  border: 1px solid transparent;
+  justify-content: center;
+  width: 28px;
+  height: 28px;
+  padding: 0;
   color: var(--dim);
-  background: var(--tint-grey);
+  background: var(--panel-hi);
+  border: 1px solid var(--rule-strong);
+  border-radius: var(--radius);
+  cursor: pointer;
+  transition:
+    color var(--dur) var(--ease),
+    border-color var(--dur) var(--ease),
+    background-color var(--dur) var(--ease);
 }
-.role::before {
-  content: '';
-  width: 6px;
-  height: 6px;
-  border-radius: 999px;
-  background: currentColor;
-  flex: none;
+/* .icon-btn and .icon-action are two members of one rung, exported from one
+   component file, and they drew their glyphs at 15px and 14px — a difference
+   with nothing in the layout to justify it, visible wherever a row's delete
+   sits near a toolbar action. CSS outranks the width/height attributes
+   IconButton writes, so the rung lands on one size without a prop change. */
+.icon-btn svg {
+  width: 14px;
+  height: 14px;
 }
-.role.dev {
-  color: var(--amber);
-  background: var(--tint-amber);
+.icon-btn:hover:not(:disabled),
+.icon-btn:focus-visible {
+  color: var(--ink);
+  border-color: var(--indigo);
+  background: var(--panel-hi);
 }
-.role.ptdev {
-  color: var(--jade);
-  background: var(--tint-jade);
+.icon-btn.is-danger {
+  color: var(--vermilion);
+  background: var(--panel-hi);
+  border-color: var(--vermilion-dim);
 }
-.role.ptbundle {
-  color: var(--sky);
-  background: var(--tint-sky);
+.icon-btn.is-danger:hover:not(:disabled),
+.icon-btn.is-danger:focus-visible {
+  color: var(--vermilion);
+  background: var(--tint-vermilion);
+  border-color: var(--vermilion);
+}
+.icon-btn:disabled {
+  cursor: not-allowed;
 }
 
+.icon-action {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--s1);
+  padding: 6px var(--s3);
+  font: var(--t-base) var(--sans);
+  font-weight: 600;
+  color: var(--ink);
+  background: var(--panel-hi);
+  border: 1px solid var(--rule-strong);
+  border-radius: var(--radius);
+  cursor: pointer;
+  transition:
+    color var(--dur) var(--ease),
+    border-color var(--dur) var(--ease),
+    background-color var(--dur) var(--ease);
+}
+.icon-action:hover:not(:disabled),
+.icon-action:focus-visible {
+  background: var(--panel-hi);
+  color: var(--indigo-bright);
+  border-color: var(--indigo);
+}
+/* Same rung, same drawing — see .icon-btn.is-danger above. This one carries a
+   word as well as a glyph, so the label's own floor is checked too: --vermilion
+   rests at 4.75:1 on --panel-hi in light and 6.01:1 at worst in dark, and on
+   the hover tint it holds 5.10:1 dark / 4.09:1 light, which is the same pair
+   button.ghost.danger already stands on. */
+.icon-action.is-danger {
+  color: var(--vermilion);
+  background: var(--panel-hi);
+  border-color: var(--vermilion-dim);
+}
+.icon-action.is-danger:hover:not(:disabled),
+.icon-action.is-danger:focus-visible {
+  color: var(--vermilion);
+  background: var(--tint-vermilion);
+  border-color: var(--vermilion);
+}
+.icon-action:disabled {
+  cursor: not-allowed;
+}
+
+/* The two facts inside a sentence that an operator is actually reading for.
+   Sky for the ordinary one — a time, a figure, the thing you came to check —
+   and vermilion for the one that needs a hand. Applied to the WORDS, not the
+   paragraph: a whole line in colour is a line nobody reads twice, and the point
+   is that "next due 15:12" and "overdue since 09:04" should not look alike at a
+   glance across twenty cards. */
+.is-next {
+  color: var(--sky);
+  font-weight: 700;
+}
+.is-bad {
+  color: var(--vermilion);
+  font-weight: 700;
+}
+
+/* ── figures in a row ─────────────────────────────────────────────────────
+   These are not badges and are deliberately not given the tag geometry: they
+   are numbers, read against the numbers above and below them, so they take the
+   type scale and the tabular figures and nothing else. */
 .bal {
-  font: 12px var(--mono);
+  font: var(--t-base) var(--mono);
+  font-variant-numeric: tabular-nums;
 }
 .bal.zero {
   color: var(--dimmer);
+}
+/* The amount a wallet is still owed. Vermilion because a wallet that is short
+   is not late — it is one preflight will drop from the run. */
+.bal.short {
+  color: var(--vermilion);
+  font-weight: 700;
 }
 
 /* What a typed amount buys, drawn beside the amount. Grey: it is a figure, not
@@ -1547,24 +2422,26 @@ a.addr-text.is-plain:focus-visible {
    reserved for the one case that is not a number but an outcome — a buy over
    the launch-window cap does not clamp, it reverts. */
 .share {
-  font: 12px var(--mono);
+  font: var(--t-base) var(--mono);
   color: var(--dim);
   font-variant-numeric: tabular-nums;
 }
 .share.over {
   color: var(--vermilion);
-  font-weight: 600;
+  font-weight: 700;
 }
 /* What being over the cap actually costs, under the figure that is over it. The
    colour said "wrong" and could not say which wrong: the buy is not trimmed to
    the cap, it does not happen, and it pays for the attempt. No colour of its
    own — it inherits the vermilion from the figure above it — so this adds a
-   fact to a row that was already flagged rather than flagging a second thing. */
+   fact to a row that was already flagged rather than flagging a second thing.
+   At --t-micro rather than the old 9.5px, which was the smallest type in the
+   console and carried the loudest warning in it. */
 .share .reverts {
   display: block;
-  margin-top: 3px;
-  font: 700 9.5px/1 var(--mono);
-  letter-spacing: 0.1em;
+  margin-top: var(--s1);
+  font: var(--t-micro) var(--mono);
+  letter-spacing: var(--ls-caps);
   text-transform: uppercase;
 }
 
@@ -1597,10 +2474,10 @@ a.addr-text.is-plain:focus-visible {
   flex: 1;
   /* min(300px, 100%) rather than a bare 300px: the row it sits in wraps, but a
      flex item cannot wrap below its own min-width, so on a phone the field kept
-     its 300px and pushed itself straight through the card's right edge. The
-     300px intent survives on every card wide enough to honour it. */
+     its 300px and pushed itself straight through the pane's right edge. The
+     300px intent survives on every pane wide enough to honour it. */
   min-width: min(300px, 100%);
-  font: 12px var(--mono);
+  font: var(--t-base) var(--mono);
 }
 
 /* The archive of deleted wallets had a panel here — a link, a count and a table
@@ -1615,17 +2492,17 @@ a.addr-text.is-plain:focus-visible {
   border: 1px solid var(--rule);
   border-left: 3px solid var(--dimmer);
   background: var(--panel-2);
-  padding: 12px 15px;
+  padding: var(--s3);
   border-radius: var(--radius);
-  margin-top: 12px;
+  margin-top: var(--s3);
 }
 .notice h3 {
   display: flex;
   align-items: center;
-  gap: 7px;
-  margin: 0 0 6px;
-  font: 600 11px/1 var(--mono);
-  letter-spacing: 0.12em;
+  gap: var(--s2);
+  margin: 0 0 var(--s2);
+  font: var(--t-micro) var(--mono);
+  letter-spacing: var(--ls-caps);
   text-transform: uppercase;
   color: var(--dim);
 }
@@ -1635,14 +2512,14 @@ a.addr-text.is-plain:focus-visible {
   margin-left: auto;
   display: inline-flex;
   align-items: baseline;
-  gap: 7px;
+  gap: var(--s1);
 }
 .mc-headline .hint {
   text-transform: none;
-  letter-spacing: 0;
+  letter-spacing: var(--ls-wide);
 }
 .mc-price {
-  margin: 0 0 8px;
+  margin: 0 0 var(--s2);
 }
 .mc-price input {
   font: inherit;
@@ -1650,8 +2527,8 @@ a.addr-text.is-plain:focus-visible {
 /* Per-row predicted cap, under the supply share in the same cell. Quiet — the
    share is the primary figure, this is the cap it implies. */
 .mc-row {
-  margin-top: 2px;
-  font-size: 11px;
+  margin-top: var(--s1);
+  font-size: var(--fs-small);
   white-space: nowrap;
 }
 /* The one warning an operator is meant to read at the moment of pressing, not
@@ -1664,16 +2541,19 @@ a.addr-text.is-plain:focus-visible {
 }
 .notice ul {
   margin: 0;
-  padding-left: 18px;
+  padding-left: var(--s4);
   display: grid;
-  gap: 5px;
+  gap: var(--s1);
 }
 .notice li {
-  font: 12px/1.5 var(--mono);
+  /* Mono, not the prose face: these lists name wallets and transaction hashes
+     as often as they explain anything, and a machine string set in Inter is the
+     one thing the type rule in this file exists to prevent. */
+  font: var(--t-base) var(--mono);
   color: var(--dim);
-  /* These lists name wallets — a 42-character address is one unbreakable token
-     302px wide, and a notice is not a table, so there is no scroller to catch
-     it. Let it break rather than let it leave the card. */
+  /* A 42-character address is one unbreakable token 302px wide, and a notice is
+     not a table, so there is no scroller to catch it. Let it break rather than
+     let it leave the pane. */
   overflow-wrap: anywhere;
 }
 .notice.warn {
@@ -1711,17 +2591,16 @@ a.addr-text.is-plain:focus-visible {
   font-weight: 700;
 }
 
-/* A figure the operator sizes a decision against, rather than one of the
-   several a panel happens to report. Size and weight only — every colour in
-   this console names a state, and "this is the number that decides it" is not a
+/* THE ONE-FIGURE RULE, the typographic twin of one-amber-per-panel: --t-fig
+   appears at most once in a pane, and it is always the number that pane's amber
+   button is about to act on. Size and weight only — every colour in this
+   console names a state, and "this is the number that decides it" is not a
    state, so it takes the plain ink the rest of the console reads in. Where the
-   heading around it is already vermilion, it keeps that instead of overriding
-   a warning with emphasis. */
+   heading around it is already vermilion it keeps that instead, rather than
+   overriding a warning with emphasis. */
 .tally {
-  font-size: 17px;
-  font-weight: 700;
-  line-height: 1.15;
-  letter-spacing: 0.01em;
+  font: var(--t-fig) var(--mono);
+  letter-spacing: var(--ls-body);
   color: var(--ink);
   font-variant-numeric: tabular-nums;
   text-transform: none;
@@ -1735,22 +2614,32 @@ a.addr-text.is-plain:focus-visible {
 .arm {
   display: flex;
   align-items: center;
-  gap: 16px;
-  margin-top: 16px;
-  padding: 14px;
-  border: 1px solid var(--rule);
-  border-radius: 6px;
+  flex-wrap: wrap;
+  gap: var(--s3) var(--s4);
+  margin-top: var(--s4);
+  padding: var(--s3);
+  border: 1px solid var(--rule-strong);
+  border-radius: var(--radius);
   background: var(--panel-2);
 }
+/* Armed is the most consequential state change in the console, so it is not a
+   border tint: the whole bar takes the vermilion ground and a 3px vermilion
+   edge, and the button inside it becomes the filled dark block with the white
+   label. Static — the frame states a fact, it does not pulse at the operator. */
 .arm.is-live {
-  border-color: var(--vermilion-dim);
+  border-color: var(--vermilion);
+  background: var(--tint-vermilion);
+  /* The 3px edge is drawn INSIDE the border rather than widened onto it, so
+     arming does not shift the bar's contents sideways by 2px at the exact
+     moment the operator is reading them. */
+  box-shadow: inset 3px 0 0 var(--vermilion);
 }
 .arm .switch {
   display: flex;
   align-items: center;
-  gap: 8px;
-  font: 600 11px/1 var(--mono);
-  letter-spacing: 0.1em;
+  gap: var(--s2);
+  font: var(--t-micro) var(--mono);
+  letter-spacing: var(--ls-caps);
   text-transform: uppercase;
   color: var(--dim);
   cursor: pointer;
@@ -1768,62 +2657,111 @@ a.addr-text.is-plain:focus-visible {
 .cost {
   margin-left: auto;
   text-align: right;
-  font: 11px/1.5 var(--mono);
+  font: var(--t-small) var(--mono);
+  letter-spacing: var(--ls-wide);
   color: var(--dimmer);
+  font-variant-numeric: tabular-nums;
+  min-width: 0;
 }
 .cost b {
   display: block;
-  font-size: 15px;
+  font: var(--t-mid) var(--mono);
   color: var(--ink);
-  font-weight: 600;
 }
 /* The bundle's share of supply, on its own line above the arm switch — the last
    figure read before the click, and the one the sizing decision is actually
-   about, so the number itself is set as a tally while the words around it stay
-   at readout size. This column is narrow enough that "bundle takes / … / of
-   supply" has always stood as three right-aligned lines; measured both ways,
-   the tally sets the middle line without adding one, so the emphasis costs the
-   arm bar no height. */
+   about, so the number itself takes the top step of the scale while the words
+   around it stay at readout size.
+ *
+ * THIS IS WHERE --t-hero LIVES. The scale declares six steps and documents this
+ * one twice as "the arm bar's total"; it was referenced nowhere, so the console
+ * shipped a five-step scale with a spare token. It is spent here and only here:
+ * the arm bar is the last thing read before an irreversible click, and a scale
+ * whose top step is dead is not a scale. It is NOT spent on `.cost b` — that is
+ * "12 wallets buying", a count, and the rule this file states for `.stat b`
+ * holds just as hard in the arm bar: a count can never out-size the consequence
+ * it is a count of. */
 .cost .share-total {
   display: block;
   color: var(--dim);
   font-variant-numeric: tabular-nums;
 }
+.cost .tally {
+  font: var(--t-hero) var(--mono);
+  color: var(--ink);
+}
 
 /* ── result ──────────────────────────────────────────────────────────────── */
 
-/* Stat tiles: separate raised cards with a gap between them, like the reference's
-   summary row, rather than one hairline-divided strip. */
+/* ONE RULED INSTRUMENT STRIP, not four floating tiles. `auto-fit,
+   minmax(140px, 1fr)` reflowed to 2+2 or 3+1 at laptop widths and orphaned
+   Predicted MC onto a row of its own; an instrument reads its figures in one
+   line. The 1px gap over a ruled ground is the hairline between cells, so it
+   survives the two-column fallback below without a per-cell border to fix up. */
 .stats {
   display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
-  gap: 10px;
-  margin-bottom: 14px;
+  grid-auto-flow: column;
+  grid-auto-columns: minmax(0, 1fr);
+  gap: 1px;
+  background: var(--rule);
+  border: 1px solid var(--rule);
+  border-radius: var(--radius);
+  margin-bottom: var(--s3);
 }
 .stat {
   background: var(--panel-2);
-  border: 1px solid var(--rule);
+  border: 0;
   border-radius: var(--radius);
-  padding: 12px 14px;
+  padding: var(--s2) var(--s3);
+  min-width: 0;
 }
 .stat span {
   display: block;
-  font: 10px/1 var(--mono);
-  letter-spacing: 0.1em;
+  font: var(--t-micro) var(--mono);
+  letter-spacing: var(--ls-caps);
   text-transform: uppercase;
   color: var(--dimmer);
-  margin-bottom: 7px;
+  margin-bottom: var(--s1);
 }
+/* A count can never out-size the consequence it is a count of: the tile figure
+   sits at --t-mid, one step under the --t-fig the pane spends on the number its
+   amber button will act on. */
 .stat b {
-  font: 700 18px/1 var(--mono);
+  font: var(--t-mid) var(--mono);
+  /* A figure is set bold; --t-mid's own 500 is the weight for a heading, which
+     is the other thing this step carries. */
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
 }
 /* The denominator of a count — "/ 31", "of 27". The figure is the headline; the
    total it is measured against is context, so it sits smaller and dimmer beside
    it rather than competing at the same weight. */
 .stat-of {
-  font-size: 12px;
-  font-weight: 500;
+  font: var(--t-small) var(--mono);
   color: var(--dimmer);
+}
+/* …and it did none of that, because `.stat span` (0,1,1) outranks `.stat-of`
+   (0,1,0) and .stat-of ships on a <span>. Everything above except the colour
+   was dead: the denominator rendered display:block at the eyebrow's 10px/700
+   uppercase, so "/ 31" broke onto a line of its own under the figure it belongs
+   to, set in caps at the caption's weight — and the extra line inflated every
+   tile in the row to 97px, including the three tiles that carry no denominator
+   at all. Two forms, because the mark does two jobs: inside the <b> it is a
+   denominator and belongs beside its figure, and as the tile's last child it is
+   a trailing "room for N more" that keeps its own line. Neither changes a hue —
+   .stat span was already painting it --dimmer, which is what .stat-of asks for. */
+.stat b .stat-of {
+  display: inline;
+  font: var(--t-small) var(--mono);
+  text-transform: none;
+  letter-spacing: var(--ls-body);
+  margin-bottom: 0;
+}
+.stat > .stat-of {
+  font: var(--t-small) var(--mono);
+  text-transform: none;
+  letter-spacing: var(--ls-body);
+  margin-bottom: 0;
 }
 .stat.ok b {
   color: var(--jade);
@@ -1832,14 +2770,56 @@ a.addr-text.is-plain:focus-visible {
   color: var(--vermilion);
 }
 
+/* ── DISCRETE METER ───────────────────────────────────────────────────────
+   Anything that is a count is drawn as N cells with K of them lit, not as a
+   smooth bar: twelve of thirty-one reads as twelve lit cells, and a cell grid
+   is the one thing this design can actually prove. The only progress readout
+   in the console was an inline-styled smooth bar carrying the last literal
+   border-radius left in the app.
+
+   Pure CSS, driven by --n (how many cells) and --k (how many are lit), so a
+   panel opts in with one span and one style attribute and no shared cross-tab
+   component is created — the tab-isolation rule is not asked for an exemption.
+   Give it role="progressbar" and the aria-value* trio at the call site; the
+   cells are decoration over a value a screen reader reads from the ARIA.
+
+   Two background layers, and the order matters: the repeating gradient paints
+   the 1px gutter between cells IN THE TRACK COLOUR on top, so the lit run
+   underneath is cut into discrete cells rather than smeared across them.
+
+   SKY, not amber. A meter is a fact you came to read, not a spend, and amber in
+   this console means the one spending action of the step you are standing on. */
+.meter {
+  --n: 10;
+  --k: 0;
+  display: block;
+  width: 100%;
+  height: var(--s2);
+  margin: var(--s1) 0;
+  border: 1px solid var(--rule);
+  border-radius: var(--radius);
+  background-color: var(--panel-2);
+  background-image:
+    repeating-linear-gradient(
+      to right,
+      transparent 0 calc(100% / var(--n) - 1px),
+      var(--panel-2) calc(100% / var(--n) - 1px) calc(100% / var(--n))
+    ),
+    linear-gradient(
+      to right,
+      var(--sky) 0 calc(var(--k) / var(--n) * 100%),
+      transparent calc(var(--k) / var(--n) * 100%)
+    );
+}
+
 pre {
   background: var(--panel-2);
   border: 1px solid var(--rule);
-  border-radius: 5px;
-  padding: 13px;
+  border-radius: var(--radius);
+  padding: var(--s3);
   overflow: auto;
   max-height: 420px;
-  font: 11.5px/1.6 var(--mono);
+  font: var(--t-small) var(--mono);
   color: var(--dim);
   margin: 0;
   white-space: pre-wrap;
@@ -1850,12 +2830,12 @@ pre {
 
 .history {
   display: grid;
-  gap: 7px;
-  font: 12px var(--mono);
+  gap: var(--s1);
+  font: var(--t-base) var(--mono);
   color: var(--dimmer);
 }
 .history a {
-  color: var(--amber);
+  color: var(--indigo-bright);
   text-decoration: none;
 }
 .history a:hover {
@@ -1870,9 +2850,9 @@ pre {
 .logo {
   display: flex;
   flex-direction: column;
-  gap: 5px;
-  font: 500 11px/1.2 var(--mono);
-  letter-spacing: 0.08em;
+  gap: var(--s1);
+  font: var(--t-micro) var(--mono);
+  letter-spacing: var(--ls-caps);
   text-transform: uppercase;
   color: var(--dim);
 }
@@ -1880,31 +2860,37 @@ pre {
   display: flex;
   flex-direction: row;
   align-items: center;
-  gap: 7px;
-  font: 11px/1.3 var(--sans);
+  /* --s2, the same box-to-label gap .arm .switch and .modal-check declare, so
+     the console stops holding a tick box four different distances from the
+     words it belongs to. */
+  gap: var(--s2);
+  font: var(--t-small) var(--sans);
   letter-spacing: 0;
   text-transform: none;
   color: var(--dim);
   cursor: pointer;
 }
 .logo .logoConfirm input {
-  width: auto;
+  /* `width: auto` used to sit here to undo a width the sheet no longer applies;
+     all it did was hold this box at the browser's 13px while the rest of the
+     console moved to 16. The base rule owns the size now; this rule owns the
+     accent, which is the part that has to stay scoped. */
   padding: 0;
   accent-color: var(--amber);
 }
 .logoBox {
   display: flex;
   align-items: center;
-  gap: 12px;
-  padding: 10px;
+  gap: var(--s3);
+  padding: var(--s2);
   border: 1px solid var(--rule);
-  border-radius: 5px;
+  border-radius: var(--radius);
   background: var(--panel-2);
 }
 .logoThumb {
   width: 46px;
   height: 46px;
-  border-radius: 4px;
+  border-radius: var(--radius);
   object-fit: cover;
   background: var(--rule-soft);
   flex: none;
@@ -1912,7 +2898,7 @@ pre {
 .logoMeta {
   display: flex;
   flex-direction: column;
-  gap: 5px;
+  gap: var(--s1);
   flex: 1;
   min-width: 0;
 }
@@ -1932,51 +2918,50 @@ pre {
   .grid .half {
     grid-column: span 2;
   }
+  /* The strip is one line of chrome the shell replaced; kept legible in case
+     anything still renders it. */
   .readout {
     display: none;
   }
   .strip {
     flex-wrap: wrap;
     height: auto;
-    padding: 10px var(--pad);
+    padding: var(--s2) var(--pad);
   }
+
+  /* Four figures on one line stop being figures at this width. */
+  .stats {
+    grid-auto-flow: row;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
   /* `table { display: block; overflow-x: auto }` used to live here, and it was
      the only overflow handling in the whole stylesheet — quarantined behind a
      breakpoint a desktop operator is never at, which is exactly how the wallet
-     table came to be drawn outside its card at every width above it. The
-     .table-scroll wrapper does this job now, at every width and without
-     blockifying the table out of the accessibility tree, so a phone needs no
-     rule of its own here. Do not reintroduce one: it would nest a scroller
-     inside a scroller. */
+     table came to be drawn outside its pane at every width above it. The
+     .table-scroll wrapper and .table-card do this job now, at every width and
+     without blockifying the table out of the accessibility tree, so a phone
+     needs no rule of its own here. Do not reintroduce one: it would nest a
+     scroller inside a scroller. */
 
   /* The spine narrows but never goes away: it is the thing that says these
-     panels are one procedure, and a phone is exactly where a stack of cards
-     stops looking like an order. */
+     panes are one procedure, and a phone is exactly where a stack of windows
+     stops looking like an order.
+
+     Three tokens, and the mark, the node, the band bleed and the rail's centre
+     all follow from them — there are no second copies of the geometry here to
+     fall out of step with the desktop set. */
   .stage {
-    padding-left: 48px;
+    --gutter: 36px;
+    --node-size: 24px;
+    --mark-left: 6px;
   }
-  .stage-mark {
-    left: 12px;
-    width: 24px;
-  }
-  .stage-mark .node {
-    width: 24px;
-    height: 24px;
-    font-size: 12px;
-  }
-  .stage-rail {
-    left: 12px;
-    top: 32px;
-    /* `bottom` deliberately absent: the gap in `.sequence` is not narrowed at
-       this width, so the spine has the same distance to bridge as on desktop
-       and -41px is still exactly right. */
-  }
-  .stage h2 {
-    min-height: 24px;
+  section > h2 {
     flex-wrap: wrap;
   }
-  .chip {
+  section > h2 .chip {
     order: 0;
+    margin-left: auto;
   }
 }
 
@@ -1990,6 +2975,9 @@ pre {
   }
   input[type='number'] {
     max-width: none;
+  }
+  .stats {
+    grid-template-columns: minmax(0, 1fr);
   }
 }
 
@@ -2008,31 +2996,30 @@ pre {
    suggest there is something left to do. */
 .disperse-panel {
   background: var(--panel);
-  border: 1px solid var(--rule);
-  border-radius: 6px;
-  padding: 14px var(--pad);
+  border: 1px solid var(--rule-strong);
+  border-radius: var(--radius);
+  padding: var(--s3) var(--pad);
 }
 .disperse-panel > summary {
   cursor: pointer;
-  font: 600 12px/1.4 var(--mono);
-  letter-spacing: 0.04em;
+  font: var(--t-micro) var(--mono);
+  letter-spacing: var(--ls-caps);
   text-transform: uppercase;
   color: var(--dim);
   list-style-position: outside;
 }
 .disperse-panel[open] > summary {
-  margin-bottom: 10px;
+  margin-bottom: var(--s2);
   color: var(--ink);
 }
 .disperse-panel > summary .hint {
   display: inline;
   text-transform: none;
-  letter-spacing: 0;
+  letter-spacing: var(--ls-wide);
   font-weight: 400;
 }
 .disperser-list td {
   font-family: var(--mono);
-  font-size: 12px;
 }
 .disperser-list td:last-child {
   text-align: right;
@@ -2043,23 +3030,41 @@ pre {
 /* ── protocol switch ──────────────────────────────────────────────────────
    v1 and v2 are different factories with different rules, not versions of one
    form. The switch sits above the fields so it reads as "which protocol", not
-   "which option within a launch". */
+   "which option within a launch". Selected is INDIGO, not amber: choosing a
+   protocol moves no money, and the pane it sits in already spends its one amber
+   on the launch button. */
 .protocol {
   display: flex;
   align-items: center;
-  gap: 8px;
-  margin-bottom: 12px;
+  gap: var(--s2);
+  margin-bottom: var(--s3);
 }
 .protocol button {
-  font: 600 11px/1 var(--mono);
-  letter-spacing: 0.08em;
+  font: var(--t-micro) var(--mono);
+  letter-spacing: var(--ls-caps);
   text-transform: uppercase;
-  padding: 7px 14px;
+  padding: 6px var(--s3);
+  background: transparent;
+  color: var(--dim);
+  border: 1px solid var(--rule);
 }
-.protocol button.on {
-  background: var(--amber);
-  border-color: var(--amber);
-  color: var(--void);
+.protocol button:hover:not(:disabled) {
+  background: var(--panel-hi);
+  color: var(--ink);
+}
+/* Selected is an indigo FRAME, not an indigo block. The filled-block rung
+   belongs to the two tiers that move money, and a dark filled block with a
+   white label is specifically the armed-and-live signature — which in greyscale
+   this switch was wearing at 1.23:1 from it. See button.btn-primary in
+   shell.css: the neutral tier is off the fill rung entirely. The frame's second
+   pixel is an inset ring so the switch keeps its box and the two protocol
+   buttons stay exactly the same size whichever one is selected. */
+.protocol button.on,
+.protocol button.on:hover:not(:disabled) {
+  background: transparent;
+  border-color: var(--indigo);
+  box-shadow: inset 0 0 0 1px var(--indigo);
+  color: var(--indigo-bright);
 }
 
 /* ── sell everything ──────────────────────────────────────────────────────
@@ -2069,7 +3074,6 @@ pre {
    read together before anything is armed. */
 .sell-list td,
 .sell-results td {
-  font-size: 12px;
   vertical-align: top;
 }
 .sell-list td:first-child,
@@ -2086,41 +3090,42 @@ pre {
 }
 .sell-results .fill-ok {
   color: var(--jade);
+  font-weight: 700;
 }
 .sell-results .fill-bad {
   color: var(--vermilion);
+  font-weight: 700;
 }
 .sell-panel .stats {
-  margin-top: 14px;
+  margin-top: var(--s3);
 }
 
 /* ── activity log ─────────────────────────────────────────────────────────
    The kind tag is colour-coded by what it costs to get wrong: money moving,
-   contracts created, key material touched. */
+   contracts created, key material touched. One geometry with the rest of the
+   console's tags; only the hue differs. */
 .activity-list td {
-  font-size: 12px;
   vertical-align: top;
-}
-.activity-list .tag {
-  display: inline-block;
-  font: 600 10px/1 var(--mono);
-  letter-spacing: 0.08em;
-  text-transform: uppercase;
-  padding: 4px 7px;
-  border-radius: 3px;
-  border: 1px solid;
 }
 .activity-list .tag.moved {
   color: var(--jade);
-  border-color: var(--jade);
+  background: var(--tint-jade);
 }
 .activity-list .tag.built {
   color: var(--amber);
-  border-color: var(--amber);
+  background: var(--tint-amber);
 }
 .activity-list .tag.keys {
   color: var(--vermilion);
-  border-color: var(--vermilion);
+  background: var(--tint-vermilion);
+}
+/* An admin having opened someone else's log. Grey on purpose: it is neither
+   ready, dangerous, nor confirmed on chain, and the palette has no fourth
+   colour to spend on it. */
+.activity-list .tag.seen {
+  color: var(--dim);
+  background: transparent;
+  border-color: var(--rule);
 }
 /* Someone else's log, opened by an admin. Marked down the whole edge so that a
    glance, or a screenshot pasted into a chat, cannot be taken for your own
@@ -2130,9 +3135,10 @@ pre {
    thing that MOVES inside it: painted on the table, the marker slid off the
    left of the box as soon as a long row was read sideways — and a screenshot
    taken mid-scroll is precisely the case it exists for. */
-.table-scroll[data-elsewhere] {
+.table-scroll[data-elsewhere],
+.table-card[data-elsewhere] {
   border-left: 3px solid var(--amber-dim);
-  padding-left: 10px;
+  padding-left: var(--s2);
 }
 /* An activity row carries plain-text failure lines that name a wallet in full
    (a receipt is no use shortened), and an address is one unbreakable 302px
@@ -2140,14 +3146,6 @@ pre {
    the whole log into a sideways scroll. */
 .activity-list .hint {
   overflow-wrap: anywhere;
-}
-
-/* An admin having opened someone else's log. Grey on purpose: it is neither
-   ready, dangerous, nor confirmed on chain, and the palette has no fourth
-   colour to spend on it. */
-.activity-list .tag.seen {
-  color: var(--dim);
-  border-color: var(--rule);
 }
 
 /* ── confirmation dialogs ─────────────────────────────────────────────────
@@ -2163,38 +3161,57 @@ pre {
   z-index: 100;
   display: grid;
   place-items: center;
-  padding: 24px;
-  background: rgba(6, 9, 13, 0.72);
-  backdrop-filter: blur(3px);
+  padding: var(--s6);
+  /* Tokenised, so the scrim actually flips: the old rgba(6,9,13,0.72) stayed a
+     dark-mode black punched into a white page. The 3px blur is gone with it —
+     a terminal does not defocus its own ground. */
+  background: var(--scrim);
 }
 
+/* THE TOP BAND IS STRUCTURAL, NOT SEMANTIC. It was 4px of --amber-fill — the
+   lamp token — and Modal.jsx renders a routine confirm as a bare <button>,
+   which IS the amber-fill block. So every one of the 37 non-danger dialogs
+   carried two amber objects by construction, and one-amber-per-panel is scoped
+   to the pane where the decision is made, which is the dialog. Amber is defined
+   at the top of this file as "the ONE spending action"; a decorative top rule is
+   not one. The weight stays — the dialog is a heavier object than the pane
+   behind it — and the colour goes back to the boundary hairline. The dialog is
+   already unmistakable without spending the money colour to be found: square,
+   scrimmed, --rule-strong bordered, and the only thing on screen.
+   .modal.is-danger below is the case where band and confirm ARE one statement,
+   and it keeps its vermilion. */
 .modal {
   width: min(560px, 100%);
   max-height: calc(100vh - 48px);
   overflow-y: auto;
-  background: linear-gradient(180deg, var(--panel), var(--panel-2));
-  border: 1px solid var(--rule);
-  border-top: 3px solid var(--amber);
-  border-radius: var(--radius-lg);
-  padding: 22px;
-  box-shadow: 0 28px 70px -20px rgba(0, 0, 0, 0.8);
+  background: var(--panel);
+  border: 1px solid var(--rule-strong);
+  border-top: 4px solid var(--rule-strong);
+  border-radius: var(--radius);
+  padding: var(--pad);
+  box-shadow: var(--shadow-card);
 }
 /* The panel takes focus on open so a stray Enter has nothing to press; that
    should not draw a focus ring around the whole dialog. */
 .modal:focus {
   outline: none;
 }
+/* The heaviest guard in the app used to be a 3px stripe and a recoloured title.
+   It is an inverse-video header band now — the same filled vermilion block with
+   the white label the armed button wears — so a danger dialog cannot be taken
+   for a routine one at a glance, in either theme or in greyscale. */
 .modal.is-danger {
-  border-color: var(--vermilion-dim);
-  border-top-color: var(--vermilion);
+  border-color: var(--vermilion);
+  border-top-color: var(--vermilion-fill);
 }
 
-/* Overrides the section label: no hairline, and it is a sentence, not a
-   silkscreen tag. */
+/* Overrides the section label: no band, and it is a sentence, not a silkscreen
+   tag. It keeps the HUMAN voice deliberately — this is the line that states the
+   irreversible act, and a misread here costs money. */
 .modal-title {
   display: block;
-  margin: 0 0 10px;
-  font: 600 14px/1.45 var(--sans);
+  margin: 0 0 var(--s3);
+  font: var(--t-mid) var(--sans);
   letter-spacing: 0;
   text-transform: none;
   color: var(--ink);
@@ -2203,13 +3220,18 @@ pre {
   content: none;
 }
 .modal.is-danger .modal-title {
-  color: var(--vermilion);
-  font: 700 13px/1.45 var(--mono);
-  letter-spacing: 0.04em;
+  margin: calc(var(--pad) * -1) calc(var(--pad) * -1) var(--s3);
+  padding: var(--s2) var(--pad);
+  background: var(--vermilion-fill);
+  color: var(--on-fill-hot);
+  font: var(--t-mid) var(--sans);
+  letter-spacing: 0;
 }
 
 .modal-body p {
-  margin: 0 0 10px;
+  margin: 0 0 var(--s2);
+  font: var(--t-base) var(--sans);
+  letter-spacing: 0;
   color: var(--dim);
 }
 
@@ -2217,65 +3239,77 @@ pre {
    amounts stack against each other. */
 .modal-facts {
   display: grid;
-  gap: 1px;
-  background: var(--rule-soft);
-  border: 1px solid var(--rule);
-  border-radius: 4px;
+  border: 1px solid var(--rule-strong);
+  border-radius: var(--radius);
   overflow: hidden;
-  margin: 12px 0;
+  margin: var(--s3) 0;
 }
-/* A launch-changing warning inside the confirm dialog. Vermilion because, like
-   everywhere else in this console, it names a condition the operator must weigh
-   before an irreversible action. */
+/* A launch-changing warning inside the confirm dialog. --danger is vermilion
+   and is defined now: it was referenced three times here and declared nowhere,
+   so the launch dialog's only warning rendered in a literal #d9482b that
+   belonged to neither theme and never flipped. */
 .modal-warn {
-  margin: 10px 0 0;
-  padding: 10px 12px;
-  border: 1px solid var(--danger, #d9482b);
-  border-radius: 4px;
-  background: color-mix(in srgb, var(--danger, #d9482b) 12%, transparent);
-  color: var(--danger, #d9482b);
-  font-size: 13px;
-  line-height: 1.4;
+  margin: var(--s2) 0 0;
+  padding: var(--s2) var(--s3);
+  border: 1px solid var(--danger);
+  border-left: 3px solid var(--danger);
+  border-radius: var(--radius);
+  background: var(--tint-vermilion);
+  color: var(--danger);
+  font: var(--t-base) var(--mono);
 }
+/* Styled standalone, not through .modal-facts, so all 137 Fact rows get the
+   same two-column row — AND the hairline between them, which is the half that
+   was missing: only the 11 in a wrapper were separated, and the other 126
+   merged into one undifferentiated recessed block. The rule sits on the ROW,
+   between adjacent rows, so it works identically wrapped and bare and cannot
+   double up against a container's own gap. */
 .modal-fact {
   display: flex;
   align-items: baseline;
   justify-content: space-between;
-  gap: 16px;
-  padding: 9px 12px;
+  gap: var(--s4);
+  padding: var(--s2) var(--s3);
   background: var(--panel-2);
 }
+.modal-fact + .modal-fact {
+  border-top: 1px solid var(--rule);
+}
 .modal-fact span {
-  font: 500 11px/1.2 var(--mono);
-  letter-spacing: 0.08em;
+  font: var(--t-micro) var(--mono);
+  letter-spacing: var(--ls-caps);
   text-transform: uppercase;
   color: var(--dimmer);
   white-space: nowrap;
 }
+/* A fact is a machine's figure, so it is set in the machine's face — and the
+   full 42-character address a dialog prints is never anything else. */
 .modal-fact b {
-  font: 600 13px/1.35 var(--sans);
+  font: 700 var(--fs-base) / var(--lh) var(--mono);
   font-variant-numeric: tabular-nums;
   color: var(--ink);
   text-align: right;
 }
 .modal-fact b.addr {
-  font: 12px/1.35 var(--mono);
+  font-weight: 400;
   color: var(--dim);
   word-break: break-all;
 }
 
 .modal-question {
-  margin: 14px 0 0;
-  font: 600 13px/1.4 var(--sans);
+  margin: var(--s3) 0 0;
+  font: var(--t-base) var(--sans);
+  font-weight: 600;
+  letter-spacing: 0;
   color: var(--ink);
 }
 
 .modal-foot {
   display: flex;
   justify-content: flex-end;
-  gap: 8px;
-  margin-top: 18px;
-  padding-top: 14px;
+  gap: var(--s2);
+  margin-top: var(--s4);
+  padding-top: var(--s3);
   border-top: 1px solid var(--rule);
 }
 
@@ -2283,11 +3317,11 @@ pre {
 .modal-type {
   display: flex;
   flex-direction: column;
-  gap: 6px;
-  margin-top: 12px;
+  gap: var(--s1);
+  margin-top: var(--s3);
   /* The word to type is part of the instruction, so the instruction is not
      silkscreened into caps the way other field labels are. */
-  font: 500 12px/1.4 var(--sans);
+  font: var(--t-base) var(--sans);
   letter-spacing: 0;
   text-transform: none;
   color: var(--dim);
@@ -2295,5 +3329,27 @@ pre {
 .modal-type input {
   width: 100%;
   font-family: var(--mono);
-  letter-spacing: 0.1em;
+  letter-spacing: var(--ls-caps);
+}
+/* A checkbox inside a dialog — named in V4BackupControls and propped up by an
+   inline style object until now. */
+.modal-check {
+  display: flex;
+  flex-direction: row;
+  align-items: flex-start;
+  gap: var(--s2);
+  margin-top: var(--s3);
+  font: var(--t-base) var(--sans);
+  letter-spacing: 0;
+  text-transform: none;
+  color: var(--dim);
+  cursor: pointer;
+}
+.modal-check input {
+  flex: none;
+  width: 16px;
+  height: 16px;
+  padding: 0;
+  margin-top: 2px;
+  accent-color: var(--indigo);
 }

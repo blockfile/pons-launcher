@@ -1,26 +1,78 @@
 /* ══════════════════════════════════════════════════════════════════════════
-   SOLARBA-chrome shell — the dashboard frame the console lives in.
+   THE FRAME — CELL & CARET.
 
-   A left sidebar of destinations, a top bar of chips, the working area, and a
-   live status bar along the bottom. It replaces the centred column + top strip,
-   and it is presentation only: the same panels, the same controls, reparented
-   into a frame that reads as an operations console rather than a form. All new
-   class names, so nothing in styles.css is overridden.
+   A left column of destinations, a title rule, the working area, and a status
+   line along the bottom. Presentation only: the same panels, the same
+   controls, the same handlers, reparented into a frame that reads as the
+   machine's own chrome rather than an app's.
 
-   THE SIGNATURE IS THE FRAME ITSELF. A wallet dashboard is a neutral thing; an
-   arming console is not, and this one is one keystroke from spending real
-   money. So the frame carries that fact: indigo while the server broadcasts
-   nothing, and the whole left rail, the active tab and the mode chip turn
-   vermilion the instant it can spend. Nothing else in the reference does this,
-   and it is the one element that keeps the redesign from being a generic
-   dashboard.
+   The frame obeys the same three laws as the panels inside it:
+
+     SQUARE, HAIRLINE, FLAT.  Radius 0, no gradient, no shadow, no glow. Every
+       boundary in here is one rule at one of two weights — --rule-strong where
+       the frame divides itself from the work (sidebar edge, title rule, status
+       rule), --rule for anything subordinate. The only round thing left is the
+       status lamp, because a lamp is round.
+     MONO IS THE VOICE.  Everything in the frame is machine output — a tab
+       name, a chain id, a mode — so all of it is JetBrains Mono on the type
+       scale. There is no Inter in the shell at all; the frame never speaks a
+       human sentence.
+     THE CELL IS THE UNIT.  Nav rows are --row (28px). Tags are one 20px line.
+       Metrics come from --sidebar-w / --topbar-h / --statusbar-h so the frame
+       cannot drift from the token layer.
+
+   ── TWO SIGNATURES, AND THEY MUST NOT BE CONFUSED ─────────────────────────
+
+   THE CARET says WHERE YOU ARE. One solid --ink block, 0.6em by one line,
+   pinned in front of the active console, blinking at the VT100's 530ms. It is
+   always foreground-coloured and NEVER takes a money hue — position is not a
+   money state, which is exactly why the same mark can be reused wherever the
+   operator's attention is parked. It sits still under
+   prefers-reduced-motion: a blinking block is precisely the motion that rule
+   exists for.
+
+   THE LIVE FRAME says FUNDS CAN MOVE. This is the only "the server can spend"
+   indicator in the whole chrome, so it survives at full volume — the glow it
+   used to lean on is gone, so it is paid for in structure instead, and it is
+   now louder than it was, on five channels at once:
+
+     1. a 4px vermilion bar across the very top of the app (was 3px + glow)
+     2. the sidebar's own right edge turns vermilion, top to bottom
+     3. the active console's rail thickens 2px → 3px and turns vermilion
+     4. the mode chip becomes a solid vermilion block with a WHITE label —
+        the polarity break: the spend block is light with a dark label, the
+        irreversible block is dark with a white one
+     5. the status line takes a 2px vermilion top rule and its readout goes
+        from jade TEXT to a filled vermilion BLOCK
+
+   Top bar, left edge and status line bracket the working area on three sides.
+   All of it static — no pulse, no glow, no shadow. Both themes get the same
+   signal because the bar, the block and the rule are all painted in
+   --vermilion-fill, a lamp token that does not flip.
+
+   Nothing here is animated except the caret, and the caret stops when asked.
    ══════════════════════════════════════════════════════════════════════════ */
 
 .app-shell {
+  /* Frame geometry. Colours are never defined here — those all live in the
+     :root blocks of styles.css. These are cell measurements, and they are
+     local so the token layer stays the single source for anything themed.
+     The fallbacks are the pre-density frame, so the shell still stands if a
+     metric token is ever removed.
+
+     --caret-w / --caret-h / --caret-x are NOT here any more: they moved up to
+     :root in styles.css, because the caret has to be one mark drawn one way in
+     both the places it appears, and the plan strip's station cannot see a
+     property scoped to the shell. */
+  --nav-gutter: 20px;
+
   position: relative;
   display: grid;
-  grid-template-columns: 240px 1fr;
-  grid-template-rows: 58px 1fr 34px;
+  grid-template-columns: var(--sidebar-w, 240px) 1fr;
+  /* The title row may grow — the multi-user nginx hint drops onto a second
+     line rather than shoving the chips off the edge — and the content row is
+     minmax(0, 1fr) so its scroller can actually shrink. */
+  grid-template-rows: minmax(var(--topbar-h, 58px), auto) minmax(0, 1fr) var(--statusbar-h, 34px);
   grid-template-areas:
     'side top'
     'side content'
@@ -36,66 +88,101 @@
   flex-direction: column;
   min-height: 0;
   background: var(--panel-2);
-  border-right: 1px solid var(--rule);
+  /* A boundary, so it takes the structural weight. On white this hairline is
+     the only thing separating the column from the work. */
+  border-right: 1px solid var(--rule-strong);
 }
+
+/* Aligned to the title row so the two horizontal rules meet at the corner.
+
+   THE 3px TOP PAD IS A PARITY CORRECTION, NOT A SPACING CHOICE. The cell is
+   --topbar-h (40px) border-box and spends 1px of it on the rule below, so the
+   content field is an ODD 39px; centring a 20px line in it lands the word and
+   the glyph on 9.5, half a pixel off the grid, with the cap band 1.5px above
+   the cell's centre. Padding the top by 3 makes the field an even 36 and the
+   whole cell resolves to integers: glyph top 11, baseline 25, cap centre 20.00
+   — the cell's exact centre. The topbar carries the identical correction, and
+   it has to: these two cells sit side by side across the top of the app, so an
+   error in one is read against the other. */
 .side-brand {
   display: flex;
   align-items: center;
-  gap: 10px;
-  height: 58px;
-  padding: 0 18px;
-  border-bottom: 1px solid var(--rule);
+  gap: var(--s2);
+  height: var(--topbar-h, 58px);
+  padding: 3px var(--s3) 0;
+  border-bottom: 1px solid var(--rule-strong);
   flex: none;
 }
+/* Inverse video, not a badge: a square block with the letter knocked out of
+   it. Indigo because a brand mark moves no money. The radial gradient, the
+   8px radius and the drop glow this used to wear are all retired. */
 .side-brand .glyph {
   display: grid;
   place-items: center;
-  width: 28px;
-  height: 28px;
-  border-radius: 8px;
-  background: radial-gradient(120% 120% at 30% 20%, var(--indigo-bright), var(--indigo) 60%, var(--indigo-dim));
-  color: #fff;
-  font: 800 15px/1 var(--display);
-  box-shadow: 0 0 0 1px rgba(129, 140, 248, 0.35), 0 6px 18px -8px var(--indigo);
+  width: var(--s5);
+  height: var(--s5);
+  flex: none;
+  border-radius: var(--radius);
+  background: var(--indigo-fill);
+  color: var(--on-fill-cool);
+  font: var(--t-base) var(--mono);
+  font-weight: 700;
+  letter-spacing: 0;
 }
 .side-brand .word {
-  font: 700 16px/1 var(--display);
-  letter-spacing: 0.01em;
+  font: var(--t-base) var(--mono);
+  font-weight: 700;
+  letter-spacing: var(--ls-body);
+  white-space: nowrap;
+  overflow: hidden;
 }
 .side-brand .word b {
   color: var(--indigo-bright);
 }
 
+/* Rows run edge to edge so the active rail can sit on the sidebar's own
+   boundary rather than floating in a margin. */
 .side-nav {
   display: flex;
   flex-direction: column;
-  gap: 2px;
-  padding: 14px 12px;
+  padding: var(--s2) 0 var(--s3);
   overflow-y: auto;
+  overflow-x: hidden;
   min-height: 0;
+  scrollbar-width: thin;
 }
 .side-label {
-  font: 600 10px/1 var(--mono);
-  letter-spacing: 0.14em;
+  font: var(--t-micro) var(--mono);
+  letter-spacing: var(--ls-caps);
   text-transform: uppercase;
   color: var(--dimmer);
-  padding: 14px 10px 8px;
+  padding: var(--s3) var(--s3) var(--s2) var(--nav-gutter);
 }
+
+/* One nav row = one --row cell. The left inset is the caret's gutter: the
+   block lives in it, so nothing shifts when the active row changes — the
+   caret only ever lights a cell that was already reserved. */
 .side-item {
+  position: relative;
   display: flex;
   align-items: center;
-  gap: 11px;
+  gap: var(--s2);
   width: 100%;
-  padding: 9px 11px;
+  height: var(--row);
+  padding: 0 var(--s2) 0 var(--nav-gutter);
   border: 0;
-  border-radius: 9px;
+  border-radius: var(--radius);
   background: none;
+  box-shadow: none;
   color: var(--dim);
-  font: 500 13.5px/1.2 var(--sans);
+  font: var(--t-small) var(--mono);
+  letter-spacing: var(--ls-body);
+  text-transform: none;
   text-align: left;
+  white-space: nowrap;
+  overflow: hidden;
   cursor: pointer;
-  position: relative;
-  transition: background 0.12s, color 0.12s;
+  transition: background var(--dur-fast) var(--ease), color var(--dur-fast) var(--ease);
 }
 .side-item:hover {
   background: var(--panel-hi);
@@ -103,206 +190,466 @@
 }
 .side-item svg {
   flex: none;
-  opacity: 0.85;
 }
+/* The face is monospaced, so the weight can go to 700 without moving a single
+   character — the active row gets heavier in place. */
 .side-item.is-on {
   background: var(--tint-indigo);
   color: var(--ink);
-  font-weight: 600;
+  font-weight: 700;
 }
-/* The live-mode rail. Indigo when nothing is broadcast; the whole set turns
-   vermilion when the console can spend — see .app-shell.is-live below. */
+
+/* THE RAIL — the live-mode channel. Indigo while the server broadcasts
+   nothing; the whole set turns vermilion and thickens the instant the console
+   can spend. See .app-shell.is-live below. */
 .side-item.is-on::before {
   content: '';
   position: absolute;
-  left: -12px;
-  top: 8px;
-  bottom: 8px;
-  width: 3px;
-  border-radius: 0 3px 3px 0;
+  left: 0;
+  top: 0;
+  bottom: 0;
+  width: 2px;
+  border-radius: var(--radius);
   background: var(--indigo);
 }
+
+/* THE CARET — where you are. A solid foreground block, one cell, blinking at
+   the VT100's rate. Never a money hue: the rail beside it carries live, the
+   caret carries position, and keeping them different colours is what stops
+   "you are here" from ever being mistaken for "this can spend". */
+.side-item.is-on::after {
+  content: '';
+  position: absolute;
+  left: var(--caret-x);
+  top: 50%;
+  width: var(--caret-w);
+  height: var(--caret-h);
+  transform: translateY(-50%);
+  background: var(--ink);
+  animation: caret-blink var(--caret-blink, 530ms) steps(1, end) infinite;
+}
+@keyframes caret-blink {
+  0%,
+  49% {
+    opacity: 1;
+  }
+  50%,
+  100% {
+    opacity: 0;
+  }
+}
+
+/* A trailing figure on a nav row (no call site today; kept because panels are
+   allowed to grow one and the class is part of the shell's vocabulary). */
 .side-item .side-sub {
   margin-left: auto;
-  font: 500 11px/1 var(--mono);
+  padding-left: var(--s2);
+  font: var(--t-micro) var(--mono);
+  letter-spacing: var(--ls-caps);
   color: var(--dimmer);
 }
 .side-foot {
   margin-top: auto;
-  padding: 12px;
+  padding: var(--s3);
   border-top: 1px solid var(--rule);
   flex: none;
 }
 
-/* ── top bar ──────────────────────────────────────────────────────────────*/
+/* ── title rule ───────────────────────────────────────────────────────────*/
 .topbar {
   grid-area: top;
   display: flex;
   align-items: center;
-  gap: 14px;
-  padding: 0 20px;
+  /* Wrapping is what lets the deployment hint take its own line instead of
+     crushing the chips; the grid row grows to meet it. */
+  flex-wrap: wrap;
+  gap: var(--s3);
+  /* Same 3px parity correction as .side-brand, and for the same reason: 40px
+     border-box less the 1px rule is an odd 39px field, which puts every child
+     on a half-pixel (title 9.5, sub 11.5, mode chip 9.5) and lifts the title's
+     cap band 1.5px above the bar's centre. Padding the top by 3 makes it an
+     even 36: title top 11, baseline 25, cap centre 20.00 = the bar's centre.
+     The horizontal value is untouched. */
+  padding: 3px var(--s4) 0;
   background: var(--panel-2);
-  border-bottom: 1px solid var(--rule);
+  border-bottom: 1px solid var(--rule-strong);
+  min-width: 0;
 }
+/* One line, not two. The console name and what the console is sit on the same
+   baseline, so the title row costs one cell instead of three; the description
+   truncates rather than wrapping the whole bar into a pile. */
 .topbar-title {
-  font: 600 15px/1.1 var(--display);
-  letter-spacing: 0.01em;
+  display: flex;
+  align-items: baseline;
+  gap: var(--s2);
+  min-width: 0;
+  overflow: hidden;
+  font: var(--t-base) var(--mono);
+  font-weight: 700;
+  letter-spacing: var(--ls-body);
+  white-space: nowrap;
 }
 .topbar-title .sub {
   display: block;
-  font: 400 11px/1.3 var(--sans);
+  min-width: 0;
+  margin-top: 0;
+  font: var(--t-small) var(--mono);
+  letter-spacing: var(--ls-wide);
   color: var(--dim);
-  margin-top: 2px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+/* The deployment warning is a sentence, not a chip — it takes its own line
+   rather than being squeezed or clipped. The title row grows to hold it. */
+.topbar .hint {
+  flex: 1 0 100%;
+  margin: 0 0 var(--s2);
+}
+.topbar input {
+  height: var(--row);
+  width: 18ch;
+  padding: 0 var(--s2);
 }
 .topbar .spacer,
 .statusbar .spacer {
   margin-left: auto;
 }
 
-/* chips — the SOLARBA balance/chain pills. A bordered pill with an optional
-   status dot and mono figures, so a number reads as a value to check. */
+/* ── tags ─────────────────────────────────────────────────────────────────
+   ONE SQUARE TAG, TWO CALLERS. .chip is the top bar's chain/user readout here
+   and the step-header state pill in styles.css — same name, and until now two
+   opposite shapes, with this file loading second and silently pushing a 34px
+   sans pill into every step header. So the shape is declared once, here, in
+   the form both of them want: a 20px mono-caps cell, radius 0.
+
+   Deliberately no colour: the step chip's is-now / is-done / grey states stay
+   the business of styles.css, and only the top bar's own instance takes a
+   ground. Setting `order` is left alone too — that is what parks the step's
+   readout at the end of its title rule. */
 .chip {
   display: inline-flex;
   align-items: center;
-  gap: 8px;
-  height: 34px;
-  padding: 0 12px;
-  border: 1px solid var(--rule);
-  border-radius: 10px;
-  background: var(--panel);
-  color: var(--ink);
-  font: 500 12.5px/1 var(--sans);
+  /* --s1, not --s2, because the consolidated badge geometry runs on 4px: the
+     step chip, .fund-state, .role and .activity-list .tag all sit their dot and
+     their label 4px apart. Height, padding, border, type, tracking and radius
+     were already unified across that family; the internal gap was the one
+     measurement still disagreeing, so the top bar's chip and the .role badge —
+     identically built, and on screen together — spaced their dots differently. */
+  gap: var(--s1);
+  flex: none;
+  height: var(--s5);
+  padding: 0 var(--s2);
+  border-radius: var(--radius);
+  font: var(--t-micro) var(--mono);
+  letter-spacing: var(--ls-caps);
+  text-transform: uppercase;
   white-space: nowrap;
 }
-.chip .k {
-  color: var(--dim);
-  font-size: 11px;
+.topbar .chip {
+  border: 1px solid var(--rule);
+  background: var(--panel);
+  color: var(--dimmer);
 }
+.chip .k {
+  color: var(--dimmer);
+}
+/* A machine value is printed verbatim — not tracked, not capitalised. */
 .chip .v {
   font-family: var(--mono);
+  font-size: var(--fs-small);
+  font-weight: 700;
+  letter-spacing: var(--ls-body);
+  text-transform: none;
+  color: var(--ink);
   font-variant-numeric: tabular-nums;
 }
+/* The one round thing left in the console: a lamp is round. Painted in the
+   theme-independent fills, because a lamp reads the same on any ground. */
 .chip-dot {
-  width: 7px;
-  height: 7px;
-  border-radius: 50%;
+  width: 6px;
+  height: 6px;
+  border-radius: var(--radius-dot);
   background: var(--dimmer);
   flex: none;
 }
 .chip-dot.ok {
-  background: var(--jade);
-  box-shadow: 0 0 8px -1px var(--jade);
+  background: var(--jade-fill);
 }
 .chip-dot.live {
-  background: var(--vermilion);
-  box-shadow: 0 0 8px -1px var(--vermilion);
+  background: var(--vermilion-fill);
 }
 
-/* mode chip — the dry/live indicator, promoted into the top bar. */
+/* The dry/live readout. Jade outline while nothing broadcasts — already true,
+   past tense — and a solid vermilion block with a white label the moment it
+   can spend. The polarity is the point: the spend blocks elsewhere in the
+   console are light with dark labels, so this one is separable from them
+   without colour vision at all. */
 .mode-chip {
   display: inline-flex;
   align-items: center;
-  gap: 8px;
-  height: 34px;
-  padding: 0 13px;
-  border-radius: 10px;
+  gap: var(--s2);
+  flex: none;
+  height: var(--s5);
+  padding: 0 var(--s2);
+  border-radius: var(--radius);
   border: 1px solid var(--jade-dim);
   color: var(--jade);
   background: var(--tint-jade);
-  font: 700 11px/1 var(--mono);
-  letter-spacing: 0.1em;
+  font: var(--t-micro) var(--mono);
+  letter-spacing: var(--ls-caps);
   text-transform: uppercase;
+  white-space: nowrap;
 }
 .mode-chip.is-live {
-  border-color: var(--vermilion);
-  color: #fff;
-  background: var(--vermilion);
-  box-shadow: 0 0 0 1px var(--vermilion), 0 6px 20px -8px var(--vermilion);
+  border-color: var(--fill-edge);
+  color: var(--on-fill-hot);
+  background: var(--vermilion-fill);
+  box-shadow: none;
 }
 
 /* ── working area ─────────────────────────────────────────────────────────*/
 .content {
   grid-area: content;
+  min-height: 0;
   overflow-y: auto;
-  padding: 22px 26px 40px;
+  padding: var(--pad) var(--pad) var(--s10);
+  scrollbar-width: thin;
+  scrollbar-gutter: stable;
 }
 .content > main {
-  max-width: 1080px;
+  max-width: var(--measure, 1080px);
   margin: 0 auto;
 }
 
-/* ── status bar ───────────────────────────────────────────────────────────*/
+/* ── status line ──────────────────────────────────────────────────────────*/
 .statusbar {
   grid-area: status;
   display: flex;
   align-items: center;
-  gap: 18px;
-  padding: 0 18px;
+  gap: var(--s4);
+  /* Parity again, and here it also has to survive a state change. The bar is
+     --statusbar-h (24px) border-box; the dry rule costs 1px, leaving an odd 23
+     that put every readout on a half-pixel and its cap band 0.5px above centre.
+     1px of top padding makes the field an even 22 — one baseline, on the grid,
+     cap centre exactly on the bar's centre.
+
+     The live variant swaps that 1px rule for a 2px one, which flips the parity
+     back, so .app-shell.is-live .statusbar takes this padding off again. Both
+     states then inset their content 2px from the bar's top edge, which is the
+     point: ARMING THE CONSOLE MUST NOT MOVE THE TEXT. The live frame is a
+     signal, and a signal that nudges the readout it sits under reads as a
+     layout bug at the exact moment the operator is watching hardest. */
+  padding: 1px var(--s3) 0;
   background: var(--panel-2);
-  border-top: 1px solid var(--rule);
-  font: 500 11px/1 var(--mono);
+  border-top: 1px solid var(--rule-strong);
+  font: var(--t-micro) var(--mono);
+  letter-spacing: var(--ls-caps);
+  text-transform: uppercase;
   color: var(--dim);
-  letter-spacing: 0.02em;
 }
 .statusbar .k {
   color: var(--dimmer);
-  margin-right: 6px;
+  margin-right: var(--s1);
 }
+/* Values are machine output: verbatim case, no tracking, tabular. */
 .statusbar b {
   color: var(--ink);
-  font-weight: 600;
+  font-size: var(--fs-small);
+  /* An 11px inline inside the bar's 10px/16px strut grows the line box to 17px
+     and drags its own baseline half a pixel off everyone else's — so the items
+     carrying a value sat on a different baseline from the items that don't,
+     two baselines in one 24px bar. Capping the inline's line box below the
+     strut's 16px takes it out of the line-height calculation entirely. It sets
+     no size, weight or colour, and inline boxes are not clipped by
+     line-height, so nothing about the glyphs changes. */
+  line-height: 13px;
+  font-weight: 700;
+  letter-spacing: var(--ls-body);
+  text-transform: none;
+  font-variant-numeric: tabular-nums;
 }
 .statusbar .ok {
   color: var(--jade);
 }
+/* Not text — a block. See the live frame below. */
 .statusbar .live {
-  color: var(--vermilion);
+  padding: 0 var(--s2);
+  background: var(--vermilion-fill);
+  color: var(--on-fill-hot);
 }
 
-/* ── the live signal: a red bar across the top when funds can move ─────────
-   A framed box around everything was unmistakable and ugly. This says the same
-   thing more quietly: a slim vermilion bar along the very top of the app, the
-   solid LIVE chip in the top bar, and the active tab's rail turned red. Enough
-   to catch the eye without dressing the whole console as a warning. Works the
-   same in both themes because the bar is a solid colour on its own, not a
-   border tinting a surface. */
+/* THE HEARTBEAT — one cell in the status line that a poll can flip, so a
+   table refreshing on its 2s timer never looks identical to one that has
+   frozen. The cell is styled here and it is INERT ON PURPOSE: it does not
+   self-animate, because a block that blinks on a CSS timer would keep
+   blinking through a dead socket and would be a liveness indicator that
+   cannot tell you the truth. It lights only when something toggles `is-on`.
+
+   IT HAS NO CALL SITE, AND THAT IS A DELIBERATE SCOPE LINE, NOT AN OVERSIGHT.
+   The 2s polls live inside V3Console / V6Console / V7Console — separate modules
+   under the tab-isolation rule — while the status line is rendered by App.jsx.
+   Lighting this cell therefore needs an `onRead` callback threaded through App
+   and all three consoles, and the `t+00:02` counter beside it needs a 1s ticker
+   at the App root that re-renders the whole active console every second on top
+   of the 2s poll during a live run. That is new behaviour and new render
+   pressure during the exact window this console exists for, and this pass is
+   presentation only: no handler, no prop, no flow. The rule stays as the
+   reserved hook so the work is one span and one setState when it is taken on;
+   nothing renders it today and nothing pretends otherwise. */
+.statusbar .beat {
+  display: inline-block;
+  width: var(--caret-w);
+  height: var(--caret-h);
+  vertical-align: -0.2em;
+  background: var(--rule-strong);
+}
+.statusbar .beat.is-on {
+  background: var(--jade-fill);
+}
+
+/* ── THE LIVE FRAME ───────────────────────────────────────────────────────
+   The only "funds can actually move" signal in the chrome. It used to be a
+   3px bar with a glow; the glow is gone with every other shadow in this
+   design, so the signal is paid for in structure and is now louder than it
+   was — a 4px bar across the very top, the sidebar's whole right edge, the
+   active console's rail thickened and turned, the mode chip inverted to a
+   solid block, and the status readout inverted with it. Working area
+   bracketed top, left and bottom. Static: an arming console does not need a
+   pulse to be believed, and a pulse is the one thing an operator learns to
+   stop seeing.
+
+   All five channels are painted in --vermilion-fill, which does not flip with
+   the theme, so the frame says exactly the same thing on white as on black. */
 .app-shell.is-live::before {
   content: '';
   position: absolute;
   top: 0;
   left: 0;
   right: 0;
-  height: 3px;
-  background: var(--vermilion);
-  box-shadow: 0 0 14px 0 var(--vermilion);
+  height: 4px;
+  background: var(--vermilion-fill);
   z-index: 40;
 }
+.app-shell.is-live .side {
+  border-right-color: var(--vermilion-fill);
+}
 .app-shell.is-live .side-item.is-on::before {
-  background: var(--vermilion);
-  box-shadow: 0 0 10px -1px var(--vermilion);
+  width: 3px;
+  background: var(--vermilion-fill);
+}
+.app-shell.is-live .statusbar {
+  border-top: 2px solid var(--vermilion-fill);
+  /* The 2px rule already absorbs what the dry bar's 1px top padding was there
+     to absorb, so it comes off — otherwise the field goes odd again and the
+     readout drops back onto a half-pixel. With it off, content sits 2px below
+     the bar's top edge in BOTH states, so the status line does not shift when
+     the console arms. See the note on .statusbar. */
+  padding-top: 0;
 }
 
 /* ── indigo neutral primary ───────────────────────────────────────────────
    For forward actions that do NOT spend — Create, Generate, Preview, New. The
-   money-forward action of a step keeps the base amber button; this is its
-   quieter sibling, so a panel can have a clear primary without spending amber
-   on something that moves nothing. */
+   money-forward action of a step keeps the amber block; this is its quieter
+   sibling, so a panel can have a clear primary without spending amber on
+   something that moves nothing.
+
+   IT IS OFF THE FILL RUNG, and that is the whole point of this rule. The
+   amplitude ladder has three primitives — fill, outline, bare text — and both
+   money tiers have claimed the filled one: the light block with the dark label
+   is the spend, the dark block with the white label is armed and live. Drawn as
+   a dark indigo block with a white label wearing the same --fill-edge, THIS —
+   the tier that explicitly moves no money — was the armed block's twin in every
+   channel that survives colour loss. Measured: --indigo-fill greyscales to
+   #646464 against --vermilion-fill's #727272, 1.23:1 apart; deuteranopia-
+   simulated they are #005edd and #90800b, 1.45:1 apart; and their hover twins
+   both go darker and stay collided. An operator with no colour vision, or
+   anyone reading a greyscale screenshot, saw the safest control in the console
+   and the most dangerous one as the same object.
+
+   The fix is not a different indigo — the failure is a duplicated SHAPE, not a
+   wrong hue. So the neutral tier gives up the fill and takes a 2px --indigo
+   frame on the pane's own ground with an --indigo-bright label (--indigo 6.21:1
+   dark / 6.36:1 light as a boundary, --indigo-bright 8.18:1 / 8.61:1 as a
+   label). "Filled block" goes back to meaning money, and indigo goes back to
+   meaning it costs nothing.
+
+   The second pixel of the frame is an inset ring rather than a 2px border, and
+   that is not decoration: the padding stays at the ladder's 6px, so the control
+   keeps the console's 34px box and does not jump 2px shorter the moment Busy
+   disables it — and `button[disabled]:disabled` in styles.css already clears
+   box-shadow, so a disabled primary drops out of the ladder cleanly with no
+   second rule to remember. */
 button.btn-primary,
 .btn-primary {
-  background: var(--indigo);
+  background: transparent;
   border: 1px solid var(--indigo);
-  color: #fff;
-  font-weight: 600;
-  box-shadow: 0 1px 0 rgba(255, 255, 255, 0.08) inset, 0 6px 18px -10px var(--indigo);
+  box-shadow: inset 0 0 0 1px var(--indigo);
+  border-radius: var(--radius);
+  color: var(--indigo-bright);
+  font-weight: 700;
 }
 button.btn-primary:hover:not(:disabled),
 .btn-primary:hover:not(:disabled) {
-  background: var(--indigo-bright);
+  background: var(--tint-indigo);
   border-color: var(--indigo-bright);
+  box-shadow: inset 0 0 0 1px var(--indigo-bright);
+  color: var(--indigo-bright);
   filter: none;
 }
 
-/* ── narrow screens: the sidebar becomes a top row ────────────────────────*/
+/* ── theme toggle (sidebar footer) ────────────────────────────────────────*/
+.theme-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--s2);
+  width: 100%;
+  height: var(--row);
+  /* 7px, not --s2, and the missing pixel is the border's. This control is the
+     eighth icon in a vertical column of eight: the seven .side-item rows above
+     it are borderless and open their glyph at the --nav-gutter's 20px, while
+     this one sits in a --s3-padded foot (12) and pays 1px for its own frame, so
+     an 8px inset would start its glyph at 21 and break the column by a pixel.
+     12 + 1 + 7 lands on 20 with the rest. The right side keeps --s2 — nothing
+     aligns to this control's right edge. */
+  padding: 0 var(--s2) 0 7px;
+  color: var(--dim);
+  background: none;
+  border: 1px solid var(--rule);
+  border-radius: var(--radius);
+  box-shadow: none;
+  font: var(--t-small) var(--mono);
+  letter-spacing: var(--ls-body);
+  text-transform: none;
+  cursor: pointer;
+  transition: color var(--dur-fast) var(--ease), border-color var(--dur-fast) var(--ease),
+    background var(--dur-fast) var(--ease);
+}
+.theme-toggle:hover {
+  color: var(--ink);
+  border-color: var(--indigo);
+  background: var(--panel-hi);
+  filter: none;
+}
+/* The markup ships this glyph at 15px against the nav rows' 16px. Sized here
+   rather than left to the attribute so all eight icons in the column are one
+   size — and because 15 in a 26px content box centred on a half-pixel, which
+   is what made this one square render soft-edged against seven crisp ones. */
+.theme-toggle svg {
+  flex: none;
+  width: 16px;
+  height: 16px;
+}
+
+/* ── narrow screens ───────────────────────────────────────────────────────
+   The sidebar becomes a top row and the frame stops being a fixed-height
+   grid. The primitives inside (rows, stat grids, tables, modals) already
+   collapse on their own; this only tidies the chrome.
+
+   THE LIVE SIGNAL IS NOT DROPPED HERE. The rail cannot run down the left of a
+   wrapped row, so it becomes the row's bottom edge instead — same colour,
+   same thickening when live. The caret stays exactly as it is: it is the
+   answer to "which console am I in", which a wrapped nav needs more, not
+   less. */
 @media (max-width: 820px) {
   .app-shell {
     grid-template-columns: 1fr;
@@ -313,96 +660,93 @@ button.btn-primary:hover:not(:disabled),
   }
   .side {
     border-right: 0;
-    border-bottom: 1px solid var(--rule);
+    border-bottom: 1px solid var(--rule-strong);
+  }
+  .side-brand {
+    height: var(--row);
+    /* The cell shrinks to --row but keeps its rule, so the field is an odd 27
+       and needs the same 3px correction the full-height cell takes. */
+    padding: 3px var(--s3) 0;
   }
   .side-nav {
     flex-direction: row;
     flex-wrap: wrap;
+    padding: var(--s2) var(--s2) var(--s3);
     overflow: visible;
-  }
-  .side-item.is-on::before {
-    display: none;
-  }
-  .content {
-    padding: 16px;
-  }
-}
-
-/* ── theme toggle (sidebar footer) ────────────────────────────────────────*/
-.theme-toggle {
-  display: inline-flex;
-  align-items: center;
-  gap: 8px;
-  width: 100%;
-  padding: 8px 11px;
-  color: var(--dim);
-  background: var(--panel);
-  border: 1px solid var(--rule);
-  border-radius: 9px;
-  font: 500 12.5px/1 var(--sans);
-  cursor: pointer;
-  transition: color 0.12s, border-color 0.12s, background 0.12s;
-}
-.theme-toggle:hover {
-  color: var(--ink);
-  border-color: var(--indigo);
-  background: var(--panel-hi);
-}
-.theme-toggle svg {
-  flex: none;
-}
-
-/* ── mobile polish for the shell chrome ───────────────────────────────────
-   The primitives (rows, stat grids, the station row, tables, modals) already
-   collapse on their own; this only tidies the frame the redesign added. */
-@media (max-width: 820px) {
-  .side-brand {
-    height: 52px;
-  }
-  .side-nav {
-    padding: 8px 10px;
-    gap: 6px;
   }
   .side-label {
     width: 100%;
-    padding: 4px 4px 2px;
+    padding: var(--s1) var(--s1) var(--s1) var(--s2);
   }
   .side-item {
     width: auto;
   }
+  .side-item.is-on::before {
+    left: 0;
+    right: 0;
+    top: auto;
+    bottom: 0;
+    width: auto;
+    height: 2px;
+  }
+  .app-shell.is-live .side-item.is-on::before {
+    width: auto;
+    height: 3px;
+  }
   .side-foot {
     margin: 0;
     border-top: 0;
-    padding: 0 10px 10px;
+    padding: 0 var(--s2) var(--s2);
   }
   .theme-toggle {
     width: auto;
   }
-  /* the top bar wraps rather than pushing its chips off-screen */
+  /* Two lines are fine when the row is free to grow. */
   .topbar {
     flex-wrap: wrap;
-    gap: 8px 10px;
-    padding: 10px 14px;
-    height: auto;
+    gap: var(--s2) var(--s3);
+    padding: var(--s2) var(--s3);
   }
   .topbar-title {
     width: 100%;
+    flex-wrap: wrap;
+    white-space: normal;
+  }
+  .topbar-title .sub {
+    width: 100%;
+    white-space: normal;
+    overflow: visible;
   }
   .topbar .spacer {
     display: none;
   }
-  .chip,
-  .mode-chip {
-    height: 30px;
+  .content {
+    padding: var(--s3) var(--s3) var(--s8);
   }
-  /* the status bar scrolls sideways instead of clipping its figures */
+  /* The status line scrolls sideways instead of clipping its figures. */
   .statusbar {
+    min-height: var(--statusbar-h, 34px);
     overflow-x: auto;
     white-space: nowrap;
-    gap: 14px;
+    gap: var(--s3);
   }
-  /* keep a modal off the very edges on a small screen */
+  /* Keep a dialog off the very edges on a small screen. */
   .modal {
     width: min(560px, 92vw);
+  }
+}
+
+/* ── reduced motion ───────────────────────────────────────────────────────
+   A blinking block is exactly the motion this rule exists for, so the caret
+   stops and stays lit — it still marks the active console, it simply holds
+   still. The frame's hover transitions go with it. */
+@media (prefers-reduced-motion: reduce) {
+  .side-item.is-on::after {
+    animation: none;
+    opacity: 1;
+  }
+  .side-item,
+  .theme-toggle {
+    transition: none;
   }
 }

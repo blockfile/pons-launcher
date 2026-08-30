@@ -243,7 +243,7 @@ export default function V5LauncherPanel({ dev, lastLaunch, live, explorer, reloa
                 placeholder="0.0"
               />
             </label>
-            <label className="row" style={{ alignItems: 'center', gap: 7 }}>
+            <label className="row" style={{ alignItems: 'center', gap: 8 }}>
               <input
                 type="checkbox"
                 checked={withdrawAll}

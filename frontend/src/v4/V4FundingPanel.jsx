@@ -149,7 +149,6 @@ export default function V4FundingPanel({
                   checked={allTicked}
                   onChange={toggleAll}
                   disabled={rows.length === 0}
-                  style={{ width: 'auto' }}
                   aria-label="select all in this group"
                 />
               </th>
@@ -176,7 +175,6 @@ export default function V4FundingPanel({
                         type="checkbox"
                         checked={ticked.includes(w.id)}
                         onChange={() => toggleTick(w.id)}
-                        style={{ width: 'auto' }}
                         aria-label={`Select ${w.address}`}
                       />
                     </td>
@@ -566,7 +564,6 @@ export default function V4FundingPanel({
                             type="checkbox"
                             checked={isPicked(w)}
                             onChange={() => togglePick(w)}
-                            style={{ width: 'auto' }}
                             aria-label={`Fund ${w.address}`}
                           />
                         </td>

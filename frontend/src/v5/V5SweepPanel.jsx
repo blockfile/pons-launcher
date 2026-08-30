@@ -156,7 +156,7 @@ export default function V5SweepPanel({ step, dev, bundle, lastLaunch, live, expl
       )}
 
       <div className="row" style={{ marginTop: 12 }}>
-        <label className="hint" style={{ flexDirection: 'row', alignItems: 'center', gap: 7 }}>
+        <label className="hint" style={{ flexDirection: 'row', alignItems: 'center', gap: 8 }}>
           <input type="checkbox" checked={includeTokens} onChange={(e) => toggleIncludeTokens(e.target.checked)} />
           also sweep leftover tokens
         </label>

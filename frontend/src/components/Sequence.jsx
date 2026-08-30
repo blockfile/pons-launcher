@@ -30,10 +30,14 @@ export default function Sequence({ steps, notice }) {
                 <span>{s.detail}</span>
               </span>
               {s.state === 'now' && (
+                // A machine cursor jumps decisively and does not overshoot, so
+                // the caret travels on a tween at --dur with the console's one
+                // one-directional ease, not on the spring(420, 38) it used to
+                // ride. See the motion budget in styles.css.
                 <m.span
                   className="station-here"
                   layoutId="pons-here"
-                  transition={{ type: 'spring', stiffness: 420, damping: 38 }}
+                  transition={{ type: 'tween', duration: 0.18, ease: [0.2, 0, 0, 1] }}
                 />
               )}
             </a>

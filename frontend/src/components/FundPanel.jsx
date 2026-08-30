@@ -270,7 +270,7 @@ export default function FundPanel({ step, wallets, rows, dispersers, reload, rep
 
         <span className="spacer" />
 
-        <label className="hint" style={{ flexDirection: 'row', alignItems: 'center', gap: 7 }}>
+        <label className="hint" style={{ flexDirection: 'row', alignItems: 'center', gap: 8 }}>
           <input
             type="checkbox"
             checked={includeTokens}

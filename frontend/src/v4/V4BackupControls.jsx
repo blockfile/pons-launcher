@@ -207,12 +207,11 @@ export default function V4BackupControls({
             operator ticks this. The full backup takes them regardless and never shows
             this box. */}
         {isFiltered && (
-          <label className="modal-check" style={{ display: 'flex', gap: 8, alignItems: 'flex-start', marginTop: 10 }}>
+          <label className="modal-check">
             <input
               type="checkbox"
               checked={includeFunders}
               onChange={(e) => setIncludeFunders(e.target.checked)}
-              style={{ width: 'auto', marginTop: 3 }}
             />
             <span>
               Also include the {masters.length} funding {masters.length === 1 ? 'wallet' : 'wallets'} in
