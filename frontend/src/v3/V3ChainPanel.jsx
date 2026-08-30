@@ -23,6 +23,15 @@ const DEFAULT_VARIANCE_PCT = 30;
 
 const money = (v) => (v == null ? null : `$${Number(v).toLocaleString(undefined, { maximumFractionDigits: 2 })}`);
 
+// A figure the backend may or may not have been able to compute. Anything that
+// is not a real number comes back null, so a half-filled block is dropped whole
+// rather than printed as NaN.
+const num = (v) => {
+  if (v == null || v === '') return null;
+  const n = Number(v);
+  return Number.isFinite(n) ? n : null;
+};
+
 function duration(ms) {
   const s = Math.round(ms / 1000);
   if (s < 90) return `${s}s`;
@@ -80,6 +89,35 @@ export default function V3ChainPanel({
   const resumable = job && (job.status === 'stopped' || job.status === 'failed');
   const ready = token.trim() && Number(bigBuy) > 0 && wallets.length > 0;
   const link = (hash) => (explorer && hash ? `${explorer}/tx/${hash}` : '');
+
+  // The predicted market cap that rode along with the plan. Optional by
+  // contract — the backend leaves `mc` out whenever it cannot compute one — and
+  // optional again here: unless BOTH ends of the move read as real numbers the
+  // readout is dropped whole. A cap is a nice-to-know; it never blocks, never
+  // throws and never prints half of itself.
+  const mc = (() => {
+    const m = plan?.mc;
+    if (!m) return null;
+    const nowEth = num(m.nowEth);
+    const afterEth = num(m.afterEth);
+    if (nowEth == null || afterEth == null) return null;
+    const nowUsd = num(m.nowUsd);
+    const afterUsd = num(m.afterUsd);
+    // Dollars when there is a price feed, ETH when there is not — the same
+    // fallback the position and slice lines beside it already make. The ETH
+    // pair stays on show either way: dollars are for reading, ETH is the number
+    // the curve actually fixes.
+    const inUsd = nowUsd != null && afterUsd != null;
+    const eth = `${nowEth.toFixed(3)} → ${afterEth.toFixed(3)} ETH`;
+    return {
+      // With no feed the pair carries the unit once, on the figure it lands on.
+      now: inUsd ? money(nowUsd) : nowEth.toFixed(3),
+      after: inUsd ? money(afterUsd) : `${afterEth.toFixed(3)} ETH`,
+      aside: inUsd ? eth : '',
+      pairQuoted: Boolean(m.pairQuoted),
+      title: `market cap ${m.nowEth} → ${m.afterEth} ETH${m.supply ? ` against ${m.supply} supply` : ''}`,
+    };
+  })();
 
   return (
     <Step {...step}>
@@ -185,6 +223,28 @@ export default function V3ChainPanel({
               {plural(plan.walletCount, 'cycle')} · about {duration(plan.estimatedRunMs)}
             </span>
           </div>
+          {/* Where the big buy leaves the cap. Directly under the position it
+              buys, because this is the figure the amount above is really being
+              sized against — and as a move rather than a lone number: the cap
+              it lands on means nothing without the one it started from. */}
+          {mc && (
+            <div className="row">
+              <span title={mc.title}>
+                market cap{' '}
+                <span className="mc-headline">
+                  <b>{mc.now}</b>
+                  →<b>{mc.after}</b>
+                  {mc.aside && <span className="hint">{mc.aside}</span>}
+                </span>
+              </span>
+              {/* The curve is not priced in ETH, so these two figures are a
+                  conversion rather than the pool's own numbers. Said once,
+                  quietly, beside them. */}
+              {mc.pairQuoted && (
+                <span className="mc-row hint">priced in another token — converted to ETH</span>
+              )}
+            </div>
+          )}
           <div className="row">
             <span>
               each wallet buys with roughly{' '}

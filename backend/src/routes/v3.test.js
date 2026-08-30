@@ -5,7 +5,7 @@ const assert = require('node:assert/strict');
 const fs = require('fs');
 const os = require('os');
 const path = require('path');
-const { parseEther } = require('ethers');
+const { formatEther, parseEther } = require('ethers');
 
 // Mirrors routes/wallets.test.js and routes/v4.test.js: config.js and the
 // store/keystore modules compute their file paths once, at first require, so
@@ -22,6 +22,7 @@ const { _private: v3 } = require('./v3');
 const { keystoreFor } = require('../wallets/keystore');
 const { storeFor } = require('../v4/store');
 const engine = require('../v3/engine');
+const sizing = require('../v3/sizing');
 
 // The claim-seasoned tests below are unit tests over the route module's own
 // handler, not an HTTP harness — the repo has no supertest dependency. The
@@ -105,8 +106,12 @@ function harness({
   pairToken = null,
   routeImpactBps = 100, // the price impact the token-quote preflight sees (well under the cap)
   routeError = null, // if set, the route lookup throws it — "no funded swap pool"
+  perEthPair = TOKENS(1000), // the swap route's spot rate: 1 ETH buys 1000 pair tokens
   mainEth = parseEther('50'),
   snipeBps = 0,
+  totalSupply = TOKENS(1_000_000_000), // what the token's own ERC-20 reports
+  tokenDecimals = 18,
+  supplyError = null, // if set, totalSupply() throws it — the market cap must go missing, not fatal
 } = {}) {
   return {
     keystore: {
@@ -138,7 +143,30 @@ function harness({
         if (routeError) throw new Error(routeError);
         return { impactBps: routeImpactBps, fullOut: TOKENS(1), usdgFee: 3000 };
       },
+      // A linear route double at a fixed spot rate, in both directions — enough for the plan's
+      // ETH->pair sizing, its pair->ETH position estimate, and the per-ETH reference rate the
+      // feasibility replay and the market cap both convert with.
+      quoteEthToPair: async ({ amountInWei }) => ({
+        amountOut: (BigInt(amountInWei) * perEthPair) / 10n ** 18n,
+        usdgFee: 3000,
+      }),
+      quotePairToEth: async ({ amountIn }) => ({
+        amountOut: (BigInt(amountIn) * 10n ** 18n) / perEthPair,
+        usdgFee: 3000,
+      }),
     },
+    // The token's own ERC-20, read only for the market cap.
+    erc20: () => ({
+      totalSupply: async () => {
+        if (supplyError) throw new Error(supplyError);
+        return totalSupply;
+      },
+      // null stands for a token that does not expose decimals() at all.
+      decimals: async () => {
+        if (tokenDecimals === null) throw new Error('no decimals()');
+        return tokenDecimals;
+      },
+    }),
     rpc: { getBalance: async () => mainEth },
     getFeesFn: async () => ({ type: 2, maxFeePerGas: 1_000_000_000n, maxPriorityFeePerGas: 1n }),
     // Injected by default so no test reaches an exchange. Individual tests
@@ -341,6 +369,104 @@ test('a dead price feed leaves the dollar figures null rather than failing', asy
   assert.equal(plan.ethUsd, null);
   assert.equal(plan.slice.meanUsd, null);
   assert.ok(Number(plan.slice.meanEth) > 0, 'the ETH figures must still be there');
+});
+
+// ── the market cap block ───────────────────────────────────────────────────
+
+test('the plan states the market cap now and where the big buy would leave it', async () => {
+  const h = harness();
+  const plan = await v3.buildPlan(BODY, h.keystore, h);
+
+  // 40 ETH of quote (phantom + real) against 800M of a 1B supply: the cap is the
+  // spot price times the WHOLE supply, so 40 · 1e9/8e8 = 50 ETH.
+  assert.equal(plan.mc.nowEth, '50.0');
+
+  // The 5 ETH buy puts 4.9 into the reserve once the 1% fee and 1% creator tax
+  // come off, and takes the matching tokens out the other side. Recomputed here
+  // from the curve rather than copied out of the implementation.
+  const q0 = parseEther('40');
+  const t0 = TOKENS(800_000_000);
+  const supply = TOKENS(1_000_000_000);
+  const net = (parseEther('5') * 9800n) / 10_000n;
+  const bought = (t0 * net) / (q0 + net);
+  assert.equal(plan.mc.nowEth, formatEther((q0 * supply) / t0));
+  assert.equal(plan.mc.afterEth, formatEther(((q0 + net) * supply) / (t0 - bought)));
+
+  // Constant product squares the ratio of the reserves: 50 · (44.9/40)² ≈ 63.0003.
+  assert.ok(Math.abs(Number(plan.mc.afterEth) - 63.0003125) < 1e-6);
+  assert.ok(Number(plan.mc.afterEth) > Number(plan.mc.nowEth), 'a buy can only lift the cap');
+
+  assert.equal(plan.mc.nowUsd, '200000.00');
+  assert.equal(plan.mc.supply, '1000000000.0');
+  assert.equal(plan.mc.pairQuoted, false);
+});
+
+test('the market cap arithmetic matches a known launch on the live factory', () => {
+  // Launch config 0 on the live v2 factory: supply 1,000,000,000, phantom quote
+  // 1.68 ETH, curve fee 1%, no creator tax. A FRESH curve holds the whole supply,
+  // which is the case the chain itself can be checked against — a 1 ETH opening
+  // buy lands the cap at ~4.243 ETH and a 1.5 ETH one at ~5.963.
+  const supply = TOKENS(1_000_000_000);
+  const shape = {
+    quoteReserve: parseEther('1.68'),
+    tokenReserve: supply,
+    feeBps: 100,
+    creatorTaxBps: 0,
+  };
+  const capAfter = (buyEth) => {
+    const quoteIn = parseEther(buyEth);
+    const tokensBought = sizing.quoteBuyOut({ quoteIn, ...shape });
+    const caps = v3.marketCapQuote({ ...shape, quoteIn, tokensBought, totalSupply: supply });
+    return Number(formatEther(caps.afterQuote));
+  };
+  assert.ok(Math.abs(capAfter('1') - 4.243) < 0.001, `1 ETH buy gave ${capAfter('1')}`);
+  assert.ok(Math.abs(capAfter('1.5') - 5.963) < 0.001, `1.5 ETH buy gave ${capAfter('1.5')}`);
+
+  // Before any buy, a fresh curve's cap is exactly its phantom quote — the whole
+  // supply is still sitting in the token reserve.
+  const fresh = v3.marketCapQuote({ ...shape, quoteIn: 0n, tokensBought: 0n, totalSupply: supply });
+  assert.equal(formatEther(fresh.nowQuote), '1.68');
+});
+
+test('the market cap on a token-quoted curve is converted to ETH', async () => {
+  // An AMZN-quoted curve prices everything in AMZN, so the raw cap is in AMZN and
+  // would be meaningless beside the plan's ETH figures. At 1 ETH = 2 AMZN the same
+  // 50-unit cap is 25 ETH, and the 5 ETH big buy reaches the curve as 10 AMZN.
+  const h = harness({ isNativeQuote: false, pairToken: AMZN, perEthPair: TOKENS(2) });
+  const plan = await v3.buildPlan(BODY, h.keystore, h);
+
+  assert.equal(plan.mc.pairQuoted, true);
+  assert.equal(plan.mc.nowEth, '25.0'); // 50 AMZN of cap at 2 AMZN per ETH
+
+  const q0 = parseEther('40'); // the curve's reserves are AMZN, not ETH
+  const t0 = TOKENS(800_000_000);
+  const supply = TOKENS(1_000_000_000);
+  const perEth = TOKENS(2);
+  const quoteIn = (parseEther('5') * perEth) / 10n ** 18n;
+  const net = (quoteIn * 9800n) / 10_000n;
+  const bought = (t0 * net) / (q0 + net);
+  const toEth = (pair) => (pair * 10n ** 18n) / perEth;
+  assert.equal(plan.mc.nowEth, formatEther(toEth((q0 * supply) / t0)));
+  assert.equal(plan.mc.afterEth, formatEther(toEth(((q0 + net) * supply) / (t0 - bought))));
+  assert.equal(plan.mc.nowUsd, '100000.00');
+});
+
+test('a token that will not report its supply leaves the market cap out rather than failing the plan', async () => {
+  // The cap is the one figure in the plan that needs a read of the token itself.
+  // A token that does not answer must cost the operator that figure and nothing
+  // else — the plan it sits in is what decides whether a run starts.
+  const h = harness({ supplyError: 'execution reverted' });
+  const plan = await v3.buildPlan(BODY, h.keystore, h);
+  assert.equal(plan.mc, null);
+  assert.ok(Number(plan.position.eth) > 0, 'the rest of the plan must still be there');
+  assert.ok(Number(plan.slice.meanEth) > 0);
+});
+
+test('a token that exposes no decimals is still capped, and its supply printed as 18', async () => {
+  const h = harness({ tokenDecimals: null });
+  const plan = await v3.buildPlan(BODY, h.keystore, h);
+  assert.equal(plan.mc.supply, '1000000000.0');
+  assert.equal(plan.mc.nowEth, '50.0');
 });
 
 test('the plan estimates how long the run will take', async () => {

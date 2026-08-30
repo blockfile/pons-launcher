@@ -31,6 +31,7 @@ const { keystoreFor } = require('../wallets/keystore');
 const { activityFor } = require('../store/activity');
 const { requireApiKey, requireAuthConfigured } = require('../middleware/auth');
 const { provider } = require('../evm/provider');
+const { erc20 } = require('../evm/erc20');
 const { getFees, gasCost } = require('../evm/fees');
 const config = require('../config');
 const holdings = require('../evm/v2/holdings');
@@ -272,6 +273,165 @@ async function feasibilityOf(run, deps = {}) {
   });
 }
 
+// Basis points, kept local rather than read off `sizing` so a test that injects
+// a sizing double cannot change what the cap arithmetic means.
+const CAP_BPS = 10_000n;
+
+/**
+ * Spot market cap of a pons v2 curve, before and after the big buy, in the
+ * curve's OWN QUOTE ASSET.
+ *
+ * A pons v2 curve is constant product with a VIRTUAL ("phantom") quote reserve,
+ * so the marginal price of one token is just quoteReserve / tokenReserve — a
+ * price is not a trade, so no fee applies to it. Market cap is that price times
+ * the token's whole supply:
+ *
+ *   now:   q0 / t0 · supply
+ *   after: q1 / t1 · supply,   q1 = q0 + net,  t1 = t0 − tokensBought
+ *
+ * where `net` is the part of the big buy that actually reaches the reserve —
+ * quoteIn less the curve fee and the creator tax, taken off the input exactly
+ * as sizing.quoteBuyOut takes it, so q1 and t1 describe the same post-buy curve
+ * the position estimate above was drawn from rather than one a rounding apart.
+ *
+ * BOTH SIDES ARE BASE UNITS, so the token's decimals cancel: supply/tokenReserve
+ * is a pure ratio and the result comes out in quote base units (wei on a native
+ * curve) whatever the token's decimals are. Decimals are only ever used to print
+ * the supply for a human.
+ *
+ * Pure BigInt arithmetic and no I/O — this is the part that can be pinned to a
+ * known launch by a test rather than by watching a chain. Returns null rather
+ * than throwing on a curve shape the formula has no answer for (an empty
+ * reserve, a buy that takes the whole token side, a fee of 100%).
+ *
+ * @returns {{ nowQuote: bigint, afterQuote: bigint } | null}
+ */
+function marketCapQuote({
+  quoteReserve,
+  tokenReserve,
+  feeBps = 0,
+  creatorTaxBps = 0,
+  quoteIn,
+  tokensBought,
+  totalSupply,
+}) {
+  const q0 = BigInt(quoteReserve);
+  const t0 = BigInt(tokenReserve);
+  const supply = BigInt(totalSupply);
+  if (q0 <= 0n || t0 <= 0n || supply <= 0n) return null;
+
+  const takenBps = BigInt(feeBps) + BigInt(creatorTaxBps);
+  if (takenBps >= CAP_BPS) return null;
+
+  const net = (BigInt(quoteIn) * (CAP_BPS - takenBps)) / CAP_BPS;
+  const q1 = q0 + net;
+  const t1 = t0 - BigInt(tokensBought);
+  if (t1 <= 0n) return null;
+
+  return { nowQuote: (q0 * supply) / t0, afterQuote: (q1 * supply) / t1 };
+}
+
+/**
+ * The plan's `mc` block: what the token is capped at right now, and what the big
+ * buy would leave it capped at — in ETH, and in dollars when a rate is available.
+ *
+ * ADVISORY, AND NEVER ALLOWED TO FAIL A PLAN. It needs one chain read the rest
+ * of the plan does not — the token's own totalSupply() — and, on a token-quoted
+ * curve, one quote to price the pair token. A token that does not implement the
+ * getter, or a quoter that will not answer, must cost the operator a display
+ * figure and nothing else: a preview that refused to describe a run because a
+ * headline number was unavailable would be strictly worse than one that
+ * describes it without the number. So the whole body sits inside one catch and
+ * the caller gets null.
+ *
+ * TOKEN-QUOTED CURVES (e.g. AMZN) come out of the formula above in pair-token
+ * units and are converted by one reference quote, probed at 0.001 ETH and scaled
+ * to a per-ETH rate, then divided into the figure. Quoting a cap-sized amount
+ * directly would be nonsense: the QuoterV2 SATURATES rather than reverting on an
+ * oversized input, so a market-cap-sized quote reports what a pool that size
+ * could pay, not what the token is worth. The probe size is the point — see the
+ * note at the conversion itself.
+ *
+ * feasibilityOf's own rate is deliberately NOT changed to match. It feeds
+ * simulateChain, whose feasible/sustainedWallets verdict gates Start; this one
+ * only prints a headline. A display fix does not get to move a money decision.
+ */
+async function marketCapOf({ token, curve, tokensBought, curveQuoteIn, price }, deps = {}) {
+  try {
+    const rpc = deps.rpc || provider;
+    const erc20Fn = deps.erc20 || erc20;
+    const routeSwap = deps.swaproute || swaproute;
+    const erc = erc20Fn(token, rpc);
+
+    // The one read that decides whether there is an `mc` at all.
+    const totalSupply = BigInt(await erc.totalSupply());
+    // Display only — the arithmetic is decimals-free (see marketCapQuote). A
+    // token that does not expose decimals() is printed as the 18 everything on
+    // this chain uses.
+    const decimals = await erc
+      .decimals()
+      .then((d) => Number(d))
+      .catch(() => 18);
+    const places = Number.isInteger(decimals) && decimals >= 0 && decimals <= 36 ? decimals : 18;
+
+    const caps = marketCapQuote({
+      quoteReserve: curve.quoteReserve,
+      tokenReserve: curve.tokenReserve,
+      feeBps: curve.feeBps,
+      creatorTaxBps: curve.creatorTaxBps,
+      quoteIn: curveQuoteIn,
+      tokensBought,
+      totalSupply,
+    });
+    if (!caps) return null;
+
+    let nowWei = caps.nowQuote;
+    let afterWei = caps.afterQuote;
+    const pairQuoted = curve.isNativeQuote === false;
+    if (pairQuoted) {
+      // PROBED AT 0.001 ETH AND SCALED, NOT QUOTED AT 1 ETH. This rate is a
+      // PRICE, so it wants the near-spot rate — the same size swaproute's
+      // IMPACT_PROBE uses for exactly that reason. Quoting a whole ETH against
+      // the thin USDG/pairToken pool this path targets moves it: an impacted
+      // quote pays out fewer pair tokens, perEth lands under spot, and since
+      // the cap divides BY perEth the headline would come out HIGH by
+      // 1/(1-impact) — one-way, never conservative. And the size is wrong on
+      // its face: resolveRun refuses the run unless the big buy's own impact is
+      // under v3Route.maxImpactBps, so the trade that was allowed is often a
+      // small fraction of the ETH being quoted here, and nothing measures THIS
+      // quote's impact. The probe is unguarded for the same reason it needs no
+      // guard: at 0.001 ETH the impact is negligible on any pool funded enough
+      // to have routed the plan this far.
+      const probe = 10n ** 15n;
+      const out = BigInt(
+        (
+          await routeSwap.quoteEthToPair(
+            { pairToken: curve.pairToken, amountInWei: probe },
+            { provider: rpc }
+          )
+        ).amountOut
+      );
+      if (out <= 0n) return null;
+      // Scale to a per-ETH rate first, then divide — multiply-before-divide, so
+      // the pair-token figure never rounds through a truncated intermediate.
+      const perEth = out * (10n ** 18n / probe);
+      nowWei = (nowWei * 10n ** 18n) / perEth;
+      afterWei = (afterWei * 10n ** 18n) / perEth;
+    }
+
+    return {
+      nowEth: formatEther(nowWei),
+      nowUsd: usd(nowWei, price),
+      afterEth: formatEther(afterWei),
+      afterUsd: usd(afterWei, price),
+      supply: formatUnits(totalSupply, places),
+      pairQuoted,
+    };
+  } catch (_err) {
+    return null;
+  }
+}
+
 async function buildPlan(body, ks, deps = {}) {
   const run = await resolveRun(body, ks, deps);
   const t = deps.trade || trade;
@@ -320,6 +480,13 @@ async function buildPlan(body, ks, deps = {}) {
   const price = await priceFn()
     .then((p) => p.usd)
     .catch(() => null);
+
+  // Where the big buy leaves the token's market cap. Advisory, like the dollar
+  // figures — null when it cannot be computed, never a reason to refuse a plan.
+  const mc = await marketCapOf(
+    { token: run.token, curve, tokensBought, curveQuoteIn, price },
+    deps
+  );
 
   // Per the FIRST bundle wallet: the tax is a function of the recipient and the
   // clock, and every wallet in this run is in the same position.
@@ -400,6 +567,9 @@ async function buildPlan(body, ks, deps = {}) {
       highEth: formatEther(highWei),
       highUsd: usd(highWei, price),
     },
+    // Market cap now and after the big buy. Null when the token's supply could
+    // not be read — the panel simply shows nothing rather than a wrong figure.
+    mc,
     snipeTax,
     intervalMs: Number(body.intervalMs ?? engine.DEFAULT_INTERVAL_MS),
     jitterPct: Number(body.jitterPct ?? engine.DEFAULT_JITTER_PCT),
@@ -841,4 +1011,4 @@ router.post('/v3/sweep', requireApiKey, async (req, res, next) => {
 });
 
 module.exports = router;
-module.exports._private = { jsonSafe, parseAmount, resolveRun, buildPlan };
+module.exports._private = { jsonSafe, parseAmount, resolveRun, buildPlan, marketCapQuote };

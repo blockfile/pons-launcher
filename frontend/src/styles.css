@@ -91,8 +91,11 @@
  *                   the native checkbox. A terminal does not round its corners.
  *
  * THE ONE-FIGURE RULE mirrors one-amber-per-panel: --t-fig may appear at most
- * once per pane, and it is always the number that pane's amber button will act
- * on. --t-hero is rarer still — the arm bar's total, the live cycle counter.
+ * once per pane AS A FIGURE, and that figure is always the number the pane's
+ * amber button will act on. The step title takes the same SIZE at heading
+ * weight (500) — the rule is about the one BOLD figure, and the weight is what
+ * keeps a heading and a figure from reading as the same object.
+ * --t-hero is rarer still — the arm bar's total, the live cycle counter.
  *
  * ── TYPEFACE IS ITSELF A RULE ────────────────────────────────────────────────
  *
@@ -330,9 +333,12 @@
                   .share .reverts label.
        --t-small  hints, station detail, .stage-wait — with --ls-wide
        --t-base   body, buttons, inputs, td, labels — the default
-       --t-mid    .stage-t, .modal-title, .stat b
+       --t-mid    .modal-title, .stat b, .cost b
        --t-fig    THE figure a pane's amber button will act on. At most once per
-                  pane — the typographic twin of one-amber-per-panel.
+                  pane — the typographic twin of one-amber-per-panel. Also the
+                  step title (.stage-t), which takes the SIZE at 500: the rule
+                  governs the one BOLD figure, and the weight keeps the pane's
+                  heading and the pane's figure apart at the same size.
        --t-hero   rarer still: the arm bar's total, the live cycle counter.
 
      The bare sizes are exposed too, for the handful of rules that set a size
@@ -752,10 +758,16 @@ h2 {
   color: var(--dim);
 }
 
-/* THE TITLE BAND. A 30px strip bled to the pane's edges with a negative margin,
-   so Section.jsx's bare h2 and Step.jsx's stage heading stop reading as two
+/* THE TITLE BAND. A strip bled to the pane's edges with a negative margin, so
+   Section.jsx's bare h2 and Step.jsx's stage heading stop reading as two
    different products. Strict `section > h2`: a heading nested deeper is not a
    window title and must not bleed.
+
+   ITS HEIGHT IS --band, and it is the one thing the two callers differ on: 30px
+   here, the height of a single silkscreen label, and 40px inside a .stage,
+   which raises the token locally because a step's bar carries a --t-fig heading
+   rather than a caps tag. Fill, underline, bleed and inset are shared, so they
+   remain one product at two sizes — see .stage.
 
    IT IS DEFINED BY ITS RULE, NOT BY ITS FILL. Painted in --panel-hi with a
    --rule underline the band measured 1.09:1 against the pane and its edge
@@ -1696,10 +1708,11 @@ section > h2 .chip svg {
 }
 
 /* ── a step, and the spine running through it ─────────────────────────────
-   The spine is a chain of coupled numbers, so it is expressed as three local
-   custom properties and derived from them. Change --gutter, --node-size or
-   --mark-left and the mark, the node and the rail all follow; nothing here is
-   a magic number that can drift out of step with its neighbours.
+   The spine is a chain of coupled numbers, so it is expressed as four local
+   custom properties and derived from them. Change --gutter, --node-size,
+   --mark-left or --band and the mark, the node, the title bar and the rail all
+   follow; nothing here is a magic number that can drift out of step with its
+   neighbours.
 
    The rail's own two ends are the invariant that has broken before: it starts
    at the pane's own bottom edge and stops exactly on the next pane's top edge —
@@ -1711,6 +1724,19 @@ section > h2 .chip svg {
   position: relative;
   --node-size: 28px;
   --mark-left: 8px;
+  /* THE STEP BAND IS A HEADING BAND, and it is sized for the heading it holds.
+     The global --band (30px) is a silkscreen strip: it fits one 16px caps line,
+     which is all a plain Section title bar ever carries. A step's bar carries a
+     real heading — a 20px mixed-case title with descenders — and at 30px the
+     'y' of "Create treasury wallet" landed on the band's own underline. 40px is
+     --s10, and it is the only number changed here: `section > h2` takes its
+     min-height from --band and .stage-mark centres the node in it, so the bar,
+     the node and the title all move together and no second copy of the geometry
+     exists to drift. Nothing else reads --band, and no <section> is ever nested
+     inside a .stage, so the local value cannot leak into another pane's title.
+     Fill, underline and edge-to-edge bleed are untouched: the step bar and the
+     section bar are still one product, one of them sized to a bigger label. */
+  --band: var(--s10);
   padding-left: var(--gutter);
   /* Cleared for the sticky top bar, so a station link does not land its own
      heading underneath it. */
@@ -1729,7 +1755,9 @@ section > h2 .chip svg {
   top: 0;
   bottom: 0;
   width: var(--node-size);
-  /* Centres the node in the 30px title band. */
+  /* Centres the node in the title band, whatever --band currently is — .stage
+     raises it to 40px for the step heading and this follows without a second
+     number to keep in sync. */
   padding-top: calc((var(--band) - var(--node-size)) / 2);
 }
 .stage-mark .node {
@@ -1776,40 +1804,138 @@ section > h2 .chip svg {
   transform: scaleY(0);
 }
 
+/* "STEP 4" — A LABEL, NOT A LEFTOVER. It keeps the silkscreen it inherits from
+   h2 (--t-micro, caps, --ls-caps) because that is the console's word for "this
+   is a machine label", and it is deliberately the ONLY thing in the band still
+   set that way: against a 20px sentence-case title the caps read as the title's
+   index rather than as a second heading, which is exactly the subordination the
+   pairing needs. Two things changed and neither is size.
+
+   COLOUR: --dim on the lit band, up from --dimmer. --dimmer on --band-bg
+   measures 4.54:1 — AA by four hundredths, at 10px, which is not a margin to
+   ship a label on. --dim measures 5.94:1 dark and 6.65:1 light, and it is still
+   two full steps under the --ink title, so the pair reads as label-then-heading
+   and never as two headings. On a done or later step it drops to --dimmer,
+   which by then sits on the quieter --band-bg-later and measures 4.94:1 dark
+   and 5.39:1 light — see the state ladder below. Never amber: amber marks the
+   one spending button in the pane, and a second amber object dissolves the only
+   invariant the money law has.
+
+   SPACING: the band's own 8px gap plus 4px here. At --t-mid the eyebrow sat
+   comfortably 8px off the title; at --t-fig the title's larger ink crowded it,
+   and 12px is what restores the pair's own breathing room without letting the
+   two words drift apart into unrelated objects.
+
+   The old `margin-top: var(--s1)` is GONE, and its 2px of baseline correction
+   went with it rather than being re-tuned. It existed because a 16px caps line
+   box centred against the title's 20px one left the eyebrow's baseline 2px
+   high. The title's line box is 24px now and carries the band's cap-height
+   compensation itself (see .stage-t), which drops the two baselines within
+   0.4px of each other on their own — so the correction is not smaller, it is
+   unnecessary, and a compensation nobody needs is a number that will drift. */
 .stage-n {
-  color: var(--dimmer);
+  color: var(--dim);
   white-space: nowrap;
-  /* "STEP 3" and the step's title share a line and have to share a baseline.
-     The band centres its items, and centring a 16px line box against a 20px one
-     leaves the smaller type's baseline 2px high — two alignments on one line.
-     A centred flex item's margin moves its border box by half, so 4px of top
-     margin is the 2px the eyebrow has to come down. */
-  margin-top: var(--s1);
+  margin-right: var(--s1);
 }
-/* The step title reads as a heading — sentence case, a size up — rather than as
-   another line of silkscreen caps. The "STEP N" eyebrow beside it stays micro,
-   so the two do not compete. */
+
+/* THE STEP TITLE, AND IT IS THE HEADING OF ITS PANE. It sat at --t-mid, which
+   is the size of a stat tile's figure and one step off body copy: the heading
+   an operator navigates six panes by was the same weight of voice as the labels
+   inside them. It takes --t-fig now — a 7px jump, the biggest single step this
+   scale offers below the reserved --t-hero — so a glance down the console lands
+   on the six titles first and everything inside a pane is subordinate to the
+   title above it.
+
+   WEIGHT 500, NOT --t-fig's 700. The one-figure rule reserves --t-fig for the
+   number a pane's amber button will act on, and that number is bold; a bold
+   20px title beside a bold 20px .tally would be two objects claiming the same
+   rank. Size promotes the heading, weight keeps the figure distinguishable, and
+   500 is this stylesheet's stated heading weight (see .stat b). No amber, no
+   colour at all beyond the ink ladder below — a title is not a money state.
+
+   `margin-bottom: var(--s2)` is A CAP-HEIGHT COMPENSATION, not rhythm. The band
+   centres its items by LINE BOX, and a line box is not what the eye reads: the
+   ink of a mixed-case line sits low inside its own box, so a 24px line box
+   centred in the 40px bar puts the title's cap line ~4px below the strip's
+   optical centre and drops its descenders onto the underline. A centred flex
+   item's margin moves its border box by half, so 8px on the bottom lifts the
+   title the 4px it owes — landing the title's ink centre on the node's centre,
+   which is the alignment the whole spine is drawn to. */
 .stage-t {
   color: var(--ink);
-  font: var(--t-mid) var(--display);
+  font: var(--t-fig) var(--display);
+  font-weight: 500;
   letter-spacing: 0;
   text-transform: none;
+  margin-bottom: var(--s2);
 }
-.stage.is-later .stage-t {
-  color: var(--dim);
-}
-/* A step still ahead sits back a little — in its BAND, not in its boundary.
-   The pane's --rule-strong edge is what scopes "one amber per panel", so it can
-   never be dimmed: a later step is quieter, not less enclosed. No colour spent
-   on it either; it is neither ready, dangerous, nor confirmed, and the palette
-   has nothing for "not yet".
+
+/* ── THE STEP STATES, TOLD IN INK AND IN THE BAND ─────────────────────────────
+   NOW / DONE / LATER were separated by the node and the state chip alone, and
+   the heading itself said the same thing three times: --ink on --band-bg for a
+   step you are standing on AND for one you finished ten minutes ago. The band
+   is the largest object on the pane, so the console's loudest signal carried no
+   state at all. It does now, on two axes and no new colours:
+
+     now     --band-bg  · eyebrow --dim    · title --ink     (the only lit bar)
+     done    band quiet · eyebrow --dimmer · title --dim     (receded, readable)
+     readout band quiet · eyebrow --dimmer · title --dim     (a record, = done)
+     later   band quiet · eyebrow --dimmer · title --dimmer  (not yet arrived)
+
+   Each state is a distinct PAIR, and the label stays under the heading in the
+   two states you can still act on. Only LATER flattens the pair — eyebrow and
+   title on the same value — which is the right place for it: a step you have
+   not reached does not need its own internal hierarchy, and the flattening is
+   itself part of reading as not-yet-arrived.
+
+   DONE recedes but is never faint: --dim on --band-bg-later is 6.49:1 dark and
+   7.33:1 light, its eyebrow 4.94:1 and 5.39:1. It does not need the ink,
+   because done is already said three times in the semantic colour that owns it
+   — the jade node, the jade chip and the jade rail running out of the pane.
+   Spending ink on it as well would put the console's brightest heading on the
+   step with nothing left to do.
+
+   LATER goes one step further down the same ladder rather than into a colour:
+   --dimmer on --band-bg-later, 4.94:1 dark and 5.39:1 light. It is neither
+   ready, dangerous nor confirmed, and the palette has nothing for "not yet".
+
+   Nothing here touches the pane's --rule-strong edge: that boundary is what
+   scopes "one amber per panel", so it can never be dimmed. A step that is not
+   the current one is quieter, not less enclosed.
 
    --band-bg-later and not --panel-2: in the dark theme --panel-2 is DARKER than
-   the pane it sits on (1.04:1, and inverted), so a later step's band read as a
-   hole rather than as a quieter title bar. This is the same band one step down,
-   in both themes, and it keeps the --rule-strong underline that makes the strip
-   a strip. */
-.stage.is-later > h2 {
+   the pane it sits on (1.04:1, and inverted), so the quiet band read as a hole
+   rather than as a quieter title bar. This is the same band one step down, in
+   both themes, and it keeps the --rule-strong underline that makes the strip a
+   strip. `> h2` stays a direct child so a heading nested deeper never takes a
+   step's state.
+
+   SCOPED TO THE CURRENT STEP, NOT TO A LIST OF THE QUIET ONES. Written as
+   `.is-done, .is-later` this ladder missed a fourth state that already exists:
+   Step renders `stage is-${state}`, and an unnumbered pane passes
+   state="readout" (App's Result, V3's Result and Extras, and the same pane on
+   V4/V5/V6/V7). A readout therefore fell through to the defaults and wore the
+   NOW presentation byte-for-byte — --band-bg behind an --ink title — so V3 lit
+   three bars out of eight panes and "the only lit bar" was not true of any tab.
+   `:not(.is-now)` is the invariant itself rather than a list to keep in sync:
+   lit is a property of the step you are standing on, and every other state,
+   including one added later, starts from the quiet rung. A readout takes the
+   DONE rung on purpose — it is a record of what already happened.
+
+   The two `.is-later` overrides below carry equal specificity to the
+   `:not(.is-now)` rules (three classes each; `:not()` is transparent and counts
+   its argument), so they win on source order alone. They must stay AFTER. */
+.stage:not(.is-now) .stage-n {
+  color: var(--dimmer);
+}
+.stage:not(.is-now) .stage-t {
+  color: var(--dim);
+}
+.stage.is-later .stage-t {
+  color: var(--dimmer);
+}
+.stage:not(.is-now) > h2 {
   background: var(--band-bg-later);
 }
 
