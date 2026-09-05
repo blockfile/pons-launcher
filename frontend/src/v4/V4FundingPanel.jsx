@@ -806,12 +806,34 @@ export default function V4FundingPanel({
                 that hold the ETH, and the row's own delete tells the operator
                 the key is recoverable — which stops being true once the capped
                 archive evicts it. The file is what makes that promise good. */}
+            {/* THE SELECTION'S OWN EXPORT. This panel has always had a selection —
+                it drives the delete and picks the split’s targets — but no way to
+                export just those keys, so an operator who wanted three funders' keys
+                had to take every key V4 holds. offerFunders={false} because the ticked
+                set IS funding wallets: the "also include the funders" box would be
+                meaningless, and the copy must not call them seeds. */}
+            {tickedWallets.length > 0 && (
+              <V4BackupControls
+                masters={wallets}
+                seeds={seeds}
+                report={report}
+                reload={reload}
+                exportIds={tickedWallets.map((w) => w.id)}
+                selectionNoun="funding"
+                offerFunders={false}
+                label={`Export ${tickedWallets.length} selected`}
+              />
+            )}
+            {/* NAMED FOR WHAT IT ACTUALLY TAKES. It was "Export keys", which reads as
+                "the keys on this step" — it is every funding wallet, every super-main
+                AND every seed. An operator reaching for three funders’ keys and getting
+                the whole tab is exactly the surprise a key export must never spring. */}
             <V4BackupControls
               masters={wallets}
               seeds={seeds}
               report={report}
               reload={reload}
-              label="Export keys"
+              label="Export ALL V4 keys"
             />
             {/* Funding wallets on their own — they hold the ETH, and keeping that tier
                 backed up separately from the seeds is its own need. */}

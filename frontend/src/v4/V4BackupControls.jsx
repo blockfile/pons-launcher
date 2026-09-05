@@ -56,6 +56,14 @@ export default function V4BackupControls({
   // a wallet aside precisely once its key is in a file — never before. A failed export
   // throws first, so afterExport never runs on a wallet whose key was not saved.
   afterExport = null,
+  // What the named set IS, for the dialog's copy. A selection of FUNDING wallets
+  // is not "seed wallets", and a key-export dialog is the last place to be loose
+  // about which keys are in the file.
+  selectionNoun = 'seed',
+  // Whether to offer the "also include the funders" box. Meaningless when the
+  // selection already IS the funding wallets — offering it there implies the file
+  // is missing a tier it already holds.
+  offerFunders = true,
 }) {
   const [busy, setBusy] = useState(false);
   const [open, setOpen] = useState(false);
@@ -74,7 +82,7 @@ export default function V4BackupControls({
   const age = selecting || fundersOnly ? 0 : fixedMinAge || Math.max(0, Math.round(Number(minAge) || 0));
   const isFiltered = !fundersOnly && (selecting || age > 0);
   // The full (unfiltered) backup always includes the funders; a filtered one obeys the box.
-  const funderIn = isFiltered ? includeFunders : true;
+  const funderIn = isFiltered ? offerFunders && includeFunders : true;
   const funderCount = funderIn ? masters.length : 0;
   // Counted from each wallet's OWN funding, which is the only reading that is
   // useful: a wallet funded on the campaign's last day is young on the day the
@@ -181,7 +189,7 @@ export default function V4BackupControls({
         )}
         {selecting ? (
           <p className="hint">
-            <b>{exportIds.length}</b> seed wallet(s) from this section
+            <b>{exportIds.length}</b> {selectionNoun} wallet(s) in this export
             {funderIn
               ? masters.length === 1
                 ? ', plus the funding wallet'
@@ -206,7 +214,7 @@ export default function V4BackupControls({
             few seeds elsewhere, and it should not carry every funder's key unless the
             operator ticks this. The full backup takes them regardless and never shows
             this box. */}
-        {isFiltered && (
+        {isFiltered && offerFunders && (
           <label className="modal-check">
             <input
               type="checkbox"
