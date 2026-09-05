@@ -738,3 +738,24 @@ test('the public job never contains a BigInt', async () => {
   const seen = JSON.stringify(h.engine.status(USER)); // throws on a BigInt
   assert.ok(seen.length > 0);
 });
+
+// THE RESERVE. A bundle wallet that spends its last wei on the buy cannot pay to SELL
+// when the run is over: an exit is approve+sell on a native curve and approve x2 + sell
+// + swap on a route one, which costs MORE than gasBufferEth alone. The exit then skips
+// the wallet and the tokens strand. So the buy holds a reserve back, and the funding
+// floor rises by the same amount so a wallet is never funded with only gas + reserve.
+test('the buy holds a reserve back so the wallet can still pay to sell later', async () => {
+  const config = require('../config');
+  const keepBack = Number(config.v3KeepBackEth);
+  assert.ok(keepBack > 0, 'v3KeepBackEth must be configured for this reserve to exist');
+
+  const h = harness({ targets: [W1] });
+  await h.engine.start(USER, h.input);
+  await h.clock.drain();
+  const cycle = h.engine.status(USER).cycles.find((c) => c.kind === 'cycle');
+  const heldBack = Number(cycle.transferredEth) - Number(cycle.buyEth);
+  assert.ok(
+    heldBack > keepBack,
+    `held back ${heldBack} ETH, which does not clear the ${keepBack} ETH reserve on top of gas`
+  );
+});

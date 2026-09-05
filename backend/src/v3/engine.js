@@ -410,7 +410,12 @@ function createEngine(deps = {}) {
     // cannot strand it. Both the pre-sell viability check and the transfer guard gate on this, so a
     // cycle that could not fund a robust buy halts BEFORE selling / before Relaying — never after.
     const spikeMargin = job.isRoute ? (buyGas * BigInt(GAS_SPIKE_MARGIN_PCT)) / 100n : 0n;
-    const buyFloor = buyGas + buffer + spikeMargin;
+    // HELD BACK FROM THE BUY so the wallet can still pay to SELL when the run is over. It is
+    // added to the floor as well as subtracted from the spend, and the pairing is the point: fund
+    // a wallet with only gas + keep-back and it would keep the reserve and buy nothing, which is
+    // the same stranding this reserve exists to prevent, one step earlier.
+    const keepBack = parseEther(String(config.v3KeepBackEth || 0));
+    const buyFloor = buyGas + buffer + spikeMargin + keepBack;
 
     // How many wallets, including this one, still have to be served. This is
     // the divisor the slice is drawn against, and recomputing it every cycle is
@@ -651,7 +656,7 @@ function createEngine(deps = {}) {
       record.state = 'buying';
 
       const balance = BigInt(await rpc.getBalance(target.address));
-      const spend = balance - buyGas - buffer;
+      const spend = balance - buyGas - buffer - keepBack;
       if (spend <= 0n) {
         throw new Error(
           `${target.address} holds ${formatEther(balance)} ETH, which does not cover the gas to buy with`

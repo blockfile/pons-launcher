@@ -193,6 +193,15 @@ const config = {
   // Native ETH left in a bundle wallet when it buys with its "entire balance",
   // so it can still pay for the buy's own gas.
   gasBufferEth: num(process.env.GAS_BUFFER_ETH, 0.0004),
+
+  // WHAT A V3 BUNDLE WALLET KEEPS BACK AFTER ITS BUY, so it can still pay to SELL later.
+  // gasBufferEth alone (0.0004 ETH) does not cover an exit: a native sell is approve+sell
+  // and a ROUTE sell is approve x2 + sell + swap, which costs MORE than the buffer left
+  // behind — so on a token-quoted curve every bundle wallet ended the run unable to fund
+  // its own exit, and the exit skipped it and stranded the tokens. This reserve is held
+  // out of the buy and raises the funding floor by the same amount, so a wallet is never
+  // funded with enough to keep back and nothing to buy with. 0 restores the old behaviour.
+  v3KeepBackEth: Math.max(0, num(process.env.V3_KEEP_BACK_ETH, 0.0025)),
   // Bundle buys are signed BEFORE the pool exists, so they cannot be estimated
   // against a live pool — this limit is used instead.
   buyGasLimit: num(process.env.BUY_GAS_LIMIT, 400000),
