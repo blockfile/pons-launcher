@@ -36,6 +36,10 @@ export default function V8BackupControls({
   const [busy, setBusy] = useState(false);
   const [open, setOpen] = useState(false);
   const [typed, setTyped] = useState('');
+  // 'json' = the full record (address, label, role, createdAt, key). 'keys' = bare
+  // private keys one per line, for pasting into another tool's import box. Strictly
+  // less information than the JSON, so it needs no extra gate beyond the typed confirm.
+  const [format, setFormat] = useState('json');
 
   const selecting = Array.isArray(walletIds);
   const exportCount = selecting ? walletIds.length : count;
@@ -48,7 +52,7 @@ export default function V8BackupControls({
   async function run() {
     setBusy(true);
     try {
-      report(await downloadV8Backup({ role, roleLabel, walletIds: selecting ? walletIds : null }));
+      report(await downloadV8Backup({ role, roleLabel, walletIds: selecting ? walletIds : null, format }));
     } catch (err) {
       report(`ERROR: ${err.message}`);
     } finally {
@@ -91,6 +95,22 @@ export default function V8BackupControls({
               ? ` — just the ${roleLabel} — `
               : ' — the source wallet and every destination — '}
           and never another tab's keys.
+        </p>
+        {/* FORMAT, not a second permission: the keys-only file is a strict subset of
+            the JSON one, so it sits inside the same typed confirm rather than adding
+            another key-export control to every panel. */}
+        <label className="modal-type">
+          File format
+          <select value={format} onChange={(e) => setFormat(e.target.value)}>
+            <option value="json">JSON — address, label, role, date and key</option>
+            <option value="keys">Private keys only — one per line (.txt)</option>
+          </select>
+        </label>
+        <p className="hint">
+          {format === 'keys'
+            ? `A plain .txt of ${exportCount} bare private key(s), one per line and nothing else — for pasting`
+              + ' straight into another tool. It does not say which address each key belongs to.'
+            : 'The full record, so months later you can still tell which wallet each key belongs to.'}
         </p>
         <label className="modal-type">
           Type EXPORT to continue.

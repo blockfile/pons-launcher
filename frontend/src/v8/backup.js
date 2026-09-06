@@ -17,8 +17,14 @@ import { getApiKey } from '../api.js';
  * they exist in one encrypted file on one machine, and this tab is about to
  * send real ETH to every one of them. Lose the file before the keys are
  * exported and the ETH is gone with it.
+ *
+ * TWO FORMATS, one endpoint. `json` is the full record — address, label, role,
+ * createdAt and the key — which is what a backup is for: months later you need to
+ * know WHICH wallet a key belongs to. `keys` is the bare private keys, one per
+ * line, for pasting straight into another tool's import box. It is strictly less
+ * information, never more, so it is an export shape and not a second permission.
  */
-export async function downloadV8Backup({ role = null, roleLabel = '', walletIds = null } = {}) {
+export async function downloadV8Backup({ role = null, roleLabel = '', walletIds = null, format = 'json' } = {}) {
   // An empty selection is treated as no selection, so a mis-wired caller can
   // never ask for a file with nothing in it.
   const ids = Array.isArray(walletIds) && walletIds.length ? walletIds : null;
@@ -35,16 +41,23 @@ export async function downloadV8Backup({ role = null, roleLabel = '', walletIds 
   if (!res.ok) throw new Error(json.error || 'backup failed');
 
   const wallets = Array.isArray(json.wallets) ? json.wallets : [];
-  const blob = new Blob([JSON.stringify(json, null, 2)], { type: 'application/json' });
+  // Bare keys, newline-separated, with a trailing newline so the last line is a
+  // complete line — some importers drop an unterminated one.
+  const keysOnly = format === 'keys';
+  const body2 = keysOnly
+    ? wallets.map((w) => w.privateKey).filter(Boolean).join('\n') + '\n'
+    : JSON.stringify(json, null, 2);
+  const blob = new Blob([body2], { type: keysOnly ? 'text/plain' : 'application/json' });
   const url = URL.createObjectURL(blob);
   const a = document.createElement('a');
   a.href = url;
   const tag = ids ? '-selected' : roleLabel ? `-${roleLabel}` : '';
-  a.download = `pons-v8-wallets${tag}-${new Date().toISOString().slice(0, 10)}.json`;
+  a.download = `pons-v8-wallets${tag}${keysOnly ? '-keys' : ''}-${new Date().toISOString().slice(0, 10)}.${keysOnly ? 'txt' : 'json'}`;
   a.click();
   URL.revokeObjectURL(url);
 
-  if (ids) return `Backed up ${wallets.length} selected V8 wallet key(s). Keep this file offline.`;
-  if (roleLabel) return `Backed up ${wallets.length} V8 ${roleLabel} wallet key(s). Keep this file offline.`;
-  return `Backed up ${wallets.length} V8 wallet key(s). Keep this file offline.`;
+  const shape = keysOnly ? 'private key(s), one per line' : 'wallet key(s)';
+  if (ids) return `Backed up ${wallets.length} selected V8 ${shape}. Keep this file offline.`;
+  if (roleLabel) return `Backed up ${wallets.length} V8 ${roleLabel} ${shape}. Keep this file offline.`;
+  return `Backed up ${wallets.length} V8 ${shape}. Keep this file offline.`;
 }
