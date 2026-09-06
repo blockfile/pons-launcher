@@ -201,7 +201,19 @@ const config = {
   // its own exit, and the exit skipped it and stranded the tokens. This reserve is held
   // out of the buy and raises the funding floor by the same amount, so a wallet is never
   // funded with enough to keep back and nothing to buy with. 0 restores the old behaviour.
-  v3KeepBackEth: Math.max(0, num(process.env.V3_KEEP_BACK_ETH, 0.0025)),
+  // Randomised per wallet within this band, so the leftovers are not an identical
+  // figure across every wallet in a run -- a uniform remainder is itself a pattern.
+  // ~$20-$30 at $2500/ETH. V3_KEEP_BACK_ETH still works as a FIXED override (it sets
+  // both ends), so V3_KEEP_BACK_ETH=0 restores spend-everything-but-gas.
+  v3KeepBackMinEth: Math.max(0, num(process.env.V3_KEEP_BACK_MIN_ETH, num(process.env.V3_KEEP_BACK_ETH, 0.008))),
+  v3KeepBackMaxEth: Math.max(0, num(process.env.V3_KEEP_BACK_MAX_ETH, num(process.env.V3_KEEP_BACK_ETH, 0.012))),
+  // ADAPTS TO SMALL BUYS. The band above is what a healthy run keeps; on a small buy it
+  // would be most of the slice, so the reserve is capped at this SHARE of what actually
+  // arrived in the wallet, and never drops below the floor -- which must still cover an
+  // exit sell (approve x2 + sell + swap on a routed curve, ~0.00065 ETH) or the wallet
+  // ends the run holding tokens it cannot sell, which is the whole point of the reserve.
+  v3KeepBackFloorEth: Math.max(0, num(process.env.V3_KEEP_BACK_FLOOR_ETH, 0.0015)),
+  v3KeepBackMaxSharePct: Math.min(90, Math.max(1, num(process.env.V3_KEEP_BACK_MAX_SHARE_PCT, 25))),
   // Bundle buys are signed BEFORE the pool exists, so they cannot be estimated
   // against a live pool — this limit is used instead.
   buyGasLimit: num(process.env.BUY_GAS_LIMIT, 400000),

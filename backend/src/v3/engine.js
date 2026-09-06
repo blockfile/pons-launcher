@@ -130,6 +130,20 @@ function gasFigures(fees, { route = false } = {}) {
   };
 }
 
+/**
+ * The reserve ONE bundle wallet keeps back from its buy, drawn uniformly from the
+ * configured band. Randomised per wallet because an identical remainder in every
+ * wallet of a run is itself a signature -- the same reason the slice carries variance.
+ * The draw is folded into basis points so everything after it stays BigInt.
+ */
+function rollKeepBack(rand) {
+  const min = parseEther(String(config.v3KeepBackMinEth || 0));
+  const max = parseEther(String(config.v3KeepBackMaxEth || 0));
+  if (max <= min) return min;
+  const roll = Math.min(1, Math.max(0, Number(rand())));
+  return min + ((max - min) * BigInt(Math.round(roll * 10_000))) / 10_000n;
+}
+
 function iso(ms) {
   return new Date(ms).toISOString();
 }
@@ -414,8 +428,19 @@ function createEngine(deps = {}) {
     // added to the floor as well as subtracted from the spend, and the pairing is the point: fund
     // a wallet with only gas + keep-back and it would keep the reserve and buy nothing, which is
     // the same stranding this reserve exists to prevent, one step earlier.
-    const keepBack = parseEther(String(config.v3KeepBackEth || 0));
-    const buyFloor = buyGas + buffer + spikeMargin + keepBack;
+    // Rolled ONCE per wallet and remembered on the record. A Resume re-enters this
+    // function, and re-rolling could hand a resumed cycle a LARGER reserve than the
+    // wallet was actually funded for -- the buy would then halt for want of gas on a
+    // wallet that was funded correctly the first time.
+    const keepBackRolled =
+      record.keepBackWei != null ? BigInt(record.keepBackWei) : rollKeepBack(randomFn);
+    record.keepBackWei = keepBackRolled;
+    // The FLOOR reserves only the MINIMUM, not the rolled figure. Funding every wallet for
+    // the top of the band would refuse small runs outright; instead the buy adapts the
+    // reserve down to a share of what actually arrived (see the buy block), so a small
+    // slice keeps proportionally less rather than being ruled out altogether.
+    const keepBackFloor = parseEther(String(config.v3KeepBackFloorEth || 0));
+    const buyFloor = buyGas + buffer + spikeMargin + keepBackFloor;
 
     // How many wallets, including this one, still have to be served. This is
     // the divisor the slice is drawn against, and recomputing it every cycle is
@@ -656,6 +681,14 @@ function createEngine(deps = {}) {
       record.state = 'buying';
 
       const balance = BigInt(await rpc.getBalance(target.address));
+      // ADAPTIVE: keep the rolled reserve when the buy can carry it, but never more than
+      // maxSharePct of what arrived -- on a small slice the full band would be most of the
+      // buy. Never below the floor either, or the wallet cannot pay to sell later, which is
+      // the reserve's whole reason to exist. The share cap also keeps spend positive for
+      // any balance that cleared buyFloor.
+      const shareCap = (balance * BigInt(config.v3KeepBackMaxSharePct)) / 100n;
+      const keepBack =
+        keepBackRolled < shareCap ? keepBackRolled : shareCap > keepBackFloor ? shareCap : keepBackFloor;
       const spend = balance - buyGas - buffer - keepBack;
       if (spend <= 0n) {
         throw new Error(

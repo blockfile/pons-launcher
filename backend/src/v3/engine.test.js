@@ -70,6 +70,7 @@ function harness({
   cycleCostMs = 0, // how long each cycle's work takes on the fake clock
   readFailTimes = 0, // make the FIRST readCurve throw this many times, then succeed
   isNativeQuote = true, // false => a TOKEN-quoted (route) curve, so the engine sizes route gas
+  sellEth = '1', // what each fake sell pays; a SMALL value reaches the reserve's adaptive branch
 } = {}) {
   let readFails = 0;
   const calls = [];
@@ -165,7 +166,7 @@ function harness({
           sellHash: `0xse${index}`,
           status: 'confirmed',
           blockNumber: 1,
-          ethReceived: parseEther('1'),
+          ethReceived: parseEther(sellEth),
           tokensIn,
         };
       },
@@ -459,16 +460,19 @@ test('the transfer carries what the sell raised, less gas and a relay allowance'
   assert.ok(transfer.amountWei > parseEther('0.9'), `held back too much: ${transfer.amountWei}`);
 });
 
-test('the buy spends everything that arrived, less gas', async () => {
+test('the buy spends what arrived, less gas and the reserve', async () => {
   const h = harness({ targets: [W1] });
   await h.engine.start(USER, h.input);
   await h.clock.drain();
   const cycle = h.engine.status(USER).cycles.find((c) => c.kind === 'cycle');
   // Whatever the transfer delivered, minus gas — never a preset figure.
   assert.ok(Number(cycle.buyEth) < Number(cycle.transferredEth), 'gas must be left behind');
+  // Gas plus the rolled reserve, and nothing beyond it.
+  const cfg = require('../config');
+  const held = Number(cycle.transferredEth) - Number(cycle.buyEth);
   assert.ok(
-    Number(cycle.buyEth) > Number(cycle.transferredEth) * 0.99,
-    `bought with ${cycle.buyEth} of the ${cycle.transferredEth} that arrived — too much held back`
+    held < Number(cfg.v3KeepBackMaxEth) + 0.002,
+    `held back ${held} ETH — more than the reserve band plus gas`
   );
 });
 
@@ -746,8 +750,8 @@ test('the public job never contains a BigInt', async () => {
 // floor rises by the same amount so a wallet is never funded with only gas + reserve.
 test('the buy holds a reserve back so the wallet can still pay to sell later', async () => {
   const config = require('../config');
-  const keepBack = Number(config.v3KeepBackEth);
-  assert.ok(keepBack > 0, 'v3KeepBackEth must be configured for this reserve to exist');
+  const keepBack = Number(config.v3KeepBackFloorEth);
+  assert.ok(keepBack > 0, 'v3KeepBackFloorEth must be configured for this reserve to exist');
 
   const h = harness({ targets: [W1] });
   await h.engine.start(USER, h.input);
@@ -758,4 +762,32 @@ test('the buy holds a reserve back so the wallet can still pay to sell later', a
     heldBack > keepBack,
     `held back ${heldBack} ETH, which does not clear the ${keepBack} ETH reserve on top of gas`
   );
+});
+
+// THE RESERVE ADAPTS DOWN. The band is what a healthy buy keeps; on a small slice it
+// would be most of the buy, so it is capped at a share of what actually arrived. Without
+// this a small run either keeps almost nothing to buy with, or is refused outright.
+test('a small buy keeps a proportional reserve, not the full band', async () => {
+  const cfg = require('../config');
+  const big = harness({ targets: [W1], sellEth: '1' });
+  await big.engine.start(USER, big.input);
+  await big.clock.drain();
+  const bc = big.engine.status(USER).cycles.find((c) => c.kind === 'cycle');
+  const bigHeld = Number(bc.transferredEth) - Number(bc.buyEth);
+
+  const small = harness({ targets: [W1], sellEth: '0.02' });
+  await small.engine.start(USER, small.input);
+  await small.clock.drain();
+  const sc = small.engine.status(USER).cycles.find((c) => c.kind === 'cycle');
+  const smallHeld = Number(sc.transferredEth) - Number(sc.buyEth);
+
+  // The big buy keeps the rolled band; the small one keeps far less than the band floor
+  // would have taken, because the share cap bound it.
+  assert.ok(bigHeld > Number(cfg.v3KeepBackMinEth), `big buy held only ${bigHeld}`);
+  assert.ok(
+    smallHeld < bigHeld,
+    `small buy held ${smallHeld}, not less than the big buy’s ${bigHeld} — the cap did not bind`
+  );
+  // and it still bought something rather than being eaten by the reserve
+  assert.ok(Number(sc.buyEth) > 0, 'the small buy must still spend something');
 });
