@@ -121,12 +121,14 @@ async function run(userId, { token, curve, confirm }, deps = {}) {
   }
 
   const { state, wallets } = await readPositions(userId, { token, curve }, deps);
-  if (state.graduated) {
-    throw new Error(
-      `the curve at ${curve} has graduated — a graduated token trades in a Uniswap v4 pool and ` +
-        'cannot be sold here. Sell it manually, or on ponsfamily.com.'
-    );
-  }
+  // A GRADUATED CURVE BLOCKS THE SELLS, NOT THE PAIR RECOVERY. Selling the launchpad token
+  // needs the curve, which no longer exists — but a wallet left holding stranded pairToken
+  // (its route buy swapped ETH->pair, then curve.buy reverted) can still swap that back to
+  // ETH, and that swap never touches the curve at all. Refusing the whole exit here stranded
+  // real money: a live run bonded mid-cycle and left a wallet holding 1.75 SPCX that the
+  // recovery pass below would have rescued. So the refusal moves AFTER that pass, and fires
+  // only when there is genuinely nothing to recover.
+  const graduated = Boolean(state.graduated);
 
   const fees = await w.getFeesFn(FEE_BUMP_PCT);
   // A token-quoted curve sells via the ETH<->pairToken route (four txs) — reserve its gas.
@@ -134,7 +136,9 @@ async function run(userId, { token, curve, confirm }, deps = {}) {
 
   const skipped = [];
   const sellable = [];
-  for (const { wallet, balance } of wallets) {
+  // Nothing can be sold into a curve that has migrated; leave sellable empty and let the
+  // pair-recovery pass below do the only work still possible.
+  for (const { wallet, balance } of graduated ? [] : wallets) {
     if (balance <= 0n) {
       skipped.push({ walletId: wallet.id, address: wallet.address, reason: 'holds none of this token' });
       continue;
@@ -184,6 +188,13 @@ async function run(userId, { token, curve, confirm }, deps = {}) {
   }
 
   if (!sellable.length && !recoverable.length) {
+    if (graduated) {
+      throw new Error(
+        `the curve at ${curve} has graduated — a graduated token trades in a Uniswap v4 pool and ` +
+          'cannot be sold here, and no wallet holds stranded ' +
+          `${state.pairToken || 'pair token'} to recover. Sell the position manually, or on ponsfamily.com.`
+      );
+    }
     throw new Error('no v3 wallet holds a sellable balance of this token — nothing to sell');
   }
 

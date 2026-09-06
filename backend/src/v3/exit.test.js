@@ -9,6 +9,7 @@ const exit = require('./exit');
 const USER = 'u1';
 const TOKEN = '0x3333333333333333333333333333333333333333';
 const CURVE = '0x2222222222222222222222222222222222222222';
+const PAIR = '0x4444444444444444444444444444444444444444';
 const MAIN = { id: 'main', role: 'v3main', address: '0x1111111111111111111111111111111111111111' };
 const W1 = { id: 'w1', role: 'v3bundle', address: '0x00000000000000000000000000000000000000b1' };
 const W2 = { id: 'w2', role: 'v3bundle', address: '0x00000000000000000000000000000000000000b2' };
@@ -21,8 +22,12 @@ function harness({
   eth = { [MAIN.address]: parseEther('1'), [W1.address]: parseEther('1'), [W2.address]: parseEther('1') },
   graduated = false,
   revertFor = [],
+  isNativeQuote = true,          // false => a token-quoted (route) curve
+  pairToken = null,              // the curve's quote asset on a route curve
+  pairHoldings = {},             // stranded pairToken, by wallet address
 } = {}) {
   const sold = [];
+  const recovered = [];
   const logged = [];
   const wallets = [MAIN, W1, W2, OTHER];
 
@@ -44,8 +49,16 @@ function harness({
         creatorTaxBps: 100,
         graduated,
         readyToGraduate: false,
+        isNativeQuote,
+        pairToken,
       }),
-      tokenBalance: async (_t, owner) => holdings[owner] ?? 0n,
+      tokenBalance: async (t, owner) =>
+        pairToken && t === pairToken ? (pairHoldings[owner] ?? 0n) : (holdings[owner] ?? 0n),
+      // The stranded-pairToken rescue: a pure pair->ETH swap that never touches the curve.
+      recoverPair: async ({ wallet }) => {
+        recovered.push({ walletId: wallet.id });
+        return { status: 'confirmed', swapHash: `0xr${wallet.id}`, ethReceived: parseEther('0.1') };
+      },
       sell: async ({ wallet, tokensIn }) => {
         sold.push({ walletId: wallet.id, tokensIn });
         if (revertFor.includes(wallet.id)) {
@@ -63,7 +76,7 @@ function harness({
     },
   };
 
-  return { deps, sold, logged };
+  return { deps, sold, recovered, logged };
 }
 
 test('the exit includes v3main as well as the bundle wallets', async () => {
@@ -170,4 +183,31 @@ test('no field of the result is a BigInt', async () => {
   const h = harness();
   const out = await exit.run(USER, { token: TOKEN, curve: CURVE, confirm: true }, h.deps);
   assert.ok(JSON.stringify(out).length > 0);
+});
+
+// A GRADUATED CURVE BLOCKS THE SELLS, NOT THE PAIR RECOVERY. A route buy swaps ETH->pair
+// and then calls curve.buy; if the curve bonds in between, the swap has already happened
+// and the wallet is left holding pairToken. That is recoverable by swapping it back, which
+// never touches the curve — but the exit used to refuse the whole run on `graduated` and
+// strand it. Seen live: a run bonded mid-cycle and left 1.75 SPCX in a bundle wallet.
+test('a graduated curve still recovers stranded pair tokens', async () => {
+  const h = harness({
+    graduated: true,
+    isNativeQuote: false,
+    pairToken: PAIR,
+    holdings: {},                                  // nobody holds the launchpad token
+    pairHoldings: { [W1.address]: parseEther('1.75') },
+  });
+  const out = await exit.run(USER, { token: TOKEN, curve: CURVE, confirm: true }, h.deps);
+  assert.deepEqual(h.recovered.map((r) => r.walletId), ['w1'], 'the stranded pair token must be swapped back');
+  assert.equal(h.sold.length, 0, 'nothing may be sold into a curve that has migrated');
+  assert.ok(out, 'the exit must return a result rather than throwing');
+});
+
+test('a graduated curve with nothing to recover still refuses, and says why', async () => {
+  const h = harness({ graduated: true, isNativeQuote: false, pairToken: PAIR, holdings: {}, pairHoldings: {} });
+  await assert.rejects(
+    () => exit.run(USER, { token: TOKEN, curve: CURVE, confirm: true }, h.deps),
+    /graduated/
+  );
 });
