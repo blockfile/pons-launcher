@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import { LazyMotion, MotionConfig, domMax } from 'framer-motion';
-import { LuRocket, LuArrowRightLeft, LuLink, LuClock, LuBanknote, LuRepeat, LuFlame } from 'react-icons/lu';
+import { LuRocket, LuArrowRightLeft, LuLink, LuClock, LuBanknote, LuRepeat, LuFlame, LuSend } from 'react-icons/lu';
 import ThemeToggle from './ThemeToggle.jsx';
 import { api, getApiKey, setApiKey } from './api.js';
 import { shortAddress } from './format.js';
@@ -38,6 +38,10 @@ import V6Console from './v6/V6Console.jsx';
 // native-quoted flap tokens) — its own console, its own directory, sharing no
 // state with any tab. Same branch-not-blend rule as V3/V6.
 import V7Console from './v7/V7Console.jsx';
+// V8 is not a launcher at all — no launch, no token, no buy, no sell. It moves
+// ETH from one source wallet out to many through Relay and sweeps it back. Its
+// own console, its own directory, sharing no state with any tab.
+import V8Console from './v8/V8Console.jsx';
 
 const { bundleShare } = bundleShareModule;
 
@@ -62,6 +66,7 @@ const TAB_TITLE = {
   v5: 'V5 · letscash',
   v6: 'V6 · letscash relay',
   v7: 'V7 · flap relay',
+  v8: 'V8 · relay transfer',
 };
 
 // What a launch cannot be armed without, in the order step 5 asks for it, and
@@ -493,6 +498,14 @@ export default function App() {
                 V7 · flap relay
               </button>
               */}
+              <button
+                type="button"
+                className={tab === 'v8' ? 'side-item is-on' : 'side-item'}
+                onClick={() => setTab('v8')}
+              >
+                <LuSend size={16} aria-hidden="true" />
+                V8 · relay transfer
+              </button>
             </nav>
             <div className="side-foot">
               <ThemeToggle />
@@ -516,7 +529,9 @@ export default function App() {
                         ? 'not a launcher — drips ETH into fresh wallets over weeks'
                         : tab === 'v5'
                           ? 'the letscash.fun bundler — launcher first buy, fanned out to a bundle'
-                          : 'not a launcher — distributes a live letscash token through Relay, one wallet at a time'}
+                          : tab === 'v8'
+                            ? 'not a launcher — moves ETH from one wallet to many through Relay, then back'
+                            : 'not a launcher — distributes a live letscash token through Relay, one wallet at a time'}
               </span>
             </div>
 
@@ -622,6 +637,14 @@ export default function App() {
             />
           ) : tab === 'v7' ? (
             <V7Console
+              health={health}
+              credential={credential}
+              report={report}
+              output={output}
+              reportedAt={reportedAt}
+            />
+          ) : tab === 'v8' ? (
+            <V8Console
               health={health}
               credential={credential}
               report={report}

@@ -164,6 +164,15 @@ const ROLES = new Set([
   'v7dev',
   'v7main',
   'v7bundle',
+  // v8main / v8bundle are the ninth owner — the "relay transfer" tab, a pure ETH
+  // mover with NO launchpad in it (no launch, no token, no buy, no sell). Names
+  // live in v8/roles.js, v8's own table (shares nothing with the others). v8main
+  // is a singleton — one source wallet — and joins SINGLETON_ROLES below;
+  // v8bundle is plural and, unlike v1's and v2's, UNCAPPED: the 31 in
+  // routes/wallets.js is the factory's snipe-tax exemption list and v8 never
+  // launches, so v8bundle is deliberately not in that file's BUNDLE_ROLES.
+  'v8main',
+  'v8bundle',
 ]);
 // v3main joins the singletons: the chain sells from one position, and a second
 // main wallet would mean half the supply sitting somewhere the engine never
@@ -187,6 +196,10 @@ const SINGLETON_ROLES = new Set([
   // curve position and making every sell. A second v7main would strand supply.
   'v7dev',
   'v7main',
+  // The v8 relay-transfer tab: ONE source wallet fans ETH out to many receivers and
+  // is where a sweep returns it. A second v8main would be ETH sitting in a wallet
+  // the tab never looks at.
+  'v8main',
 ]);
 const instances = new Map();
 // Same alphabet as users.slug() (backend/src/users/users.js). Duplicated

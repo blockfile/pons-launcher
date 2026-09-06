@@ -25,6 +25,10 @@ const v6Routes = require('./src/routes/v6');
 // no edit to any earlier tab's money path — unmounting this line removes the whole
 // strategy. See src/v7/roles.js for why it does not share with v6.
 const v7Routes = require('./src/routes/v7');
+// V8, "relay transfer" — a pure ETH mover with no launchpad in it at all: one main
+// wallet fans ETH out to many bundle wallets through Relay, and sweeps it back. Its
+// own router and modules under src/v8; unmounting this line removes the tab whole.
+const v8Routes = require('./src/routes/v8');
 // Holder-fee sharing: re-point a launched v2 token's creator fee at a per-token
 // distributor so it pays the holders. Its own router, sharing only the factory
 // and the keystore — see src/routes/holderFees.js. Unrelated to distributorRoutes
@@ -79,6 +83,7 @@ app.use('/api', v4Routes);
 app.use('/api', v5Routes);
 app.use('/api', v6Routes);
 app.use('/api', v7Routes);
+app.use('/api', v8Routes);
 app.use('/api', holderFeeRoutes);
 
 app.use((req, res) => {
