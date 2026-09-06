@@ -71,12 +71,15 @@ function harness({
   readFailTimes = 0, // make the FIRST readCurve throw this many times, then succeed
   isNativeQuote = true, // false => a TOKEN-quoted (route) curve, so the engine sizes route gas
   sellEth = '1', // what each fake sell pays; a SMALL value reaches the reserve's adaptive branch
+  staleBalanceOnce = false, // the buy reads the wallet ONCE before the fill has settled
 } = {}) {
   let readFails = 0;
   const calls = [];
   const logged = [];
   const balances = { [MAIN.address]: parseEther('50') };
   let polls = 0;
+  let staleUsed = false;
+  let stale = staleBalanceOnce;
   // The main wallet's token position, walked down by each fake sell.
   let position = TOKENS(1_000_000);
   // What each bundle wallet's solver fill delivered, by address.
@@ -111,7 +114,13 @@ function harness({
         // The solver's fill: exactly what the transfer ordered, once enough
         // polls have gone by. Modelled rather than faked as a constant so the
         // buy really is sized from what arrived.
-        return polls >= fillAfter ? (filled[a] ?? 0n) : 0n;
+        const have = polls >= fillAfter ? (filled[a] ?? 0n) : 0n;
+        // The live race: the solver fill lands a moment AFTER the engine looks.
+        if (stale && !staleUsed && have > 0n) {
+          staleUsed = true;
+          return 0n;
+        }
+        return have;
       },
     },
     getFeesFn: async () => ({ type: 2, maxFeePerGas: 1_000_000_000n, maxPriorityFeePerGas: 1n }),
@@ -207,6 +216,9 @@ function harness({
     deps,
     balances,
     polls: () => polls,
+    // Arm the late-fill race for the NEXT balance read — used to reproduce the resume
+    // path, where the fill wait is skipped because record.fillDone is already true.
+    armStale: () => { stale = true; staleUsed = false; },
     position: () => position,
   };
 }
@@ -790,4 +802,29 @@ test('a small buy keeps a proportional reserve, not the full band', async () => 
   );
   // and it still bought something rather than being eaten by the reserve
   assert.ok(Number(sc.buyEth) > 0, 'the small buy must still spend something');
+});
+
+// THE LATE FILL. A Resume re-enters the cycle with record.fillDone ALREADY true, so the
+// fill wait is skipped -- and a solver fill still settling then reads as dust, halting a
+// cycle that was funded correctly. Seen live: a wallet held 0.00074 ETH at the halt and
+// 0.0507 a moment later. The buy must wait for the transfer it ordered rather than
+// blaming the gas. Verified to FAIL without the re-wait.
+test('a fill that lands late on a resume is waited for, not treated as missing gas', async () => {
+  const h = harness({ targets: [W1], fail: { step: 'buy', index: 1 } });
+  await h.engine.start(USER, h.input);
+  await h.clock.drain();
+  assert.equal(h.engine.status(USER).status, 'failed', 'setup: the first buy must fail');
+
+  // Clear the fault, then arm the race so the RESUME reads the wallet before its fill has
+  // settled -- record.fillDone is already true, so nothing waits for it but the new guard.
+  h.deps.trade.buy = async ({ wallet }) => {
+    h.calls.push({ step: 'buy', index: 1, walletId: wallet.id });
+    return { hash: '0xok', status: 'confirmed', blockNumber: 1, tokensOut: TOKENS(1) };
+  };
+  h.armStale();
+  h.engine.resume(USER);
+  await h.clock.drain();
+
+  const job = h.engine.status(USER);
+  assert.equal(job.status, 'complete', `halted instead of waiting: ${job.failure && job.failure.error}`);
 });

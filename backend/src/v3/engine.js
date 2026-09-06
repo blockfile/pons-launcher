@@ -680,7 +680,20 @@ function createEngine(deps = {}) {
       record.step = 'buying';
       record.state = 'buying';
 
-      const balance = BigInt(await rpc.getBalance(target.address));
+      let balance = BigInt(await rpc.getBalance(target.address));
+      // A RESUME re-enters this block with record.fillDone ALREADY true, so the wait above
+      // is skipped entirely -- and a solver fill that is still settling then reads here as
+      // dust and halts a cycle that was funded correctly. Seen live: a wallet held 0.00074
+      // ETH at the halt and 0.0507 a moment later. So when the balance is short of what a
+      // buy needs AND a transfer was ordered, wait for that transfer once more rather than
+      // giving up. If it genuinely never lands, waitForFill throws its own timeout, which
+      // names the real problem instead of blaming the gas.
+      if (record.transferredWei && balance < buyGas + buffer + keepBackFloor) {
+        record.step = 'waiting-fill';
+        await waitForFill(record, target.address, (record.transferredWei * 99n) / 100n);
+        record.step = 'buying';
+        balance = BigInt(await rpc.getBalance(target.address));
+      }
       // ADAPTIVE: keep the rolled reserve when the buy can carry it, but never more than
       // maxSharePct of what arrived -- on a small slice the full band would be most of the
       // buy. Never below the floor either, or the wallet cannot pay to sell later, which is
