@@ -154,6 +154,31 @@ function ceilDiv(a, b) {
 }
 
 /**
+ * WHAT A WALLET MUST KEEP IN ETH ON TOP OF ITS SWAP INPUT.
+ *
+ * Lifted out of swapBundleToPair unchanged — same constants, same order, same
+ * arithmetic — so that the read-only planner in bundle/pairQuote.js, which sizes
+ * a swap AGAINST this reserve, cannot drift from the run that refuses a wallet
+ * for lacking it. Two implementations of "what this wallet must be funded with"
+ * is the exact drift this module refuses everywhere else; a second copy of the
+ * figure would be one.
+ *
+ * The three terms and why each is here are in "THE GAS RESERVE" in the header.
+ *
+ * @param {object} fees getFees(FEE_BUMP_PCT) — the basis prepareV2 checks against
+ * @param {bigint|string|number} buyGasLimit config.buyGasLimit, the limit prepareV2 signs with
+ * @param {string} gasBufferEth config.gasBufferEth, prepareV2's own preflight buffer
+ * @returns {bigint} wei
+ */
+function gasReserveWei(fees, { buyGasLimit, gasBufferEth }) {
+  return (
+    gasCost(fees, SWAP_GAS) +
+    gasCost(fees, APPROVE_GAS + BigInt(buyGasLimit)) * LATER_LEG_FEE_MULT +
+    parseEther(String(gasBufferEth))
+  );
+}
+
+/**
  * The ETH input whose quote clears `need` of the pair token.
  *
  * quoteEthToPair is exact-INPUT, so this inverts it: take the near-spot rate from a
@@ -325,10 +350,7 @@ async function swapBundleToPair(input, deps = {}) {
   // The swap pays gas now, at these fees. The approve and the buy pay it later, at
   // launch-time fees nobody can read yet — reserved at double. The buffer is
   // prepareV2's own, so a wallet that passes here also passes its preflight.
-  const gasReserve =
-    gasCost(fees, SWAP_GAS) +
-    gasCost(fees, APPROVE_GAS + buyGas) * LATER_LEG_FEE_MULT +
-    parseEther(bufferEth);
+  const gasReserve = gasReserveWei(fees, { buyGasLimit: buyGas, gasBufferEth: bufferEth });
 
   const results = [];
   let totalEth = 0n;
@@ -527,5 +549,8 @@ module.exports = {
   swapBundleToPair,
   sizeEthForPair,
   resolveApprovedPair,
+  gasReserveWei,
+  OVERSHOOT_BPS,
+  FEE_BUMP_PCT,
   _private: { SWAP_GAS, APPROVE_GAS, OVERSHOOT_BPS, FEE_BUMP_PCT, LATER_LEG_FEE_MULT, MAX_TARGETS },
 };

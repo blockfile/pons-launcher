@@ -1288,6 +1288,96 @@ button.spend[disabled]:disabled {
   color: var(--amber);
 }
 
+/* ── THE CONVERTER, AND THE FILL-FROM-BALANCE PREVIEW ────────────────────────
+   Two sub-rows INSIDE the auto-fill box, because both write the same fields it
+   writes — one turns an ETH figure into a pair-token total, the other reads the
+   balances already in the wallets. Neither moves money, so neither takes a money
+   colour and neither becomes a second amber object: the step's one amber is the
+   stripe on .distribute around them, unchanged.
+
+   Separated from the box above by a --rule hairline (the subordinate separator,
+   for a division INSIDE a pane) rather than by a border of their own, so they
+   read as more of the auto-fill rather than as new tools. Every value is at
+   --ink; every label and caveat at --dim/--dimmer through .hint. No new tokens:
+   --rule, --s1..--s3, --ink and the type scale. */
+.convert {
+  flex-basis: 100%;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--s2);
+  margin-top: var(--s2);
+  padding-top: var(--s2);
+  border-top: 1px solid var(--rule);
+  font-size: var(--fs-base);
+}
+/* Deliberately NOT .distribute-title, which is amber. The eyebrow names a
+   read-only tool, and the law gives grey to everything that is not a state. */
+.convert-eyebrow {
+  flex-basis: 100%;
+  font: var(--t-micro) var(--mono);
+  letter-spacing: var(--ls-caps);
+  text-transform: uppercase;
+  color: var(--dim);
+}
+.convert-line {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--s2);
+}
+/* Weight and tabular figures, NOT a hue. A converted number is a quote, and a
+   quote is not a state — colouring it would say something the palette reserves
+   for what is true, what is live, or what is being spent. */
+.convert b {
+  color: var(--ink);
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
+}
+.convert-field {
+  display: flex;
+  flex-direction: row;
+  align-items: center;
+  gap: var(--s2);
+}
+.convert input {
+  font: inherit;
+}
+/* The standing caveat under both halves: a rate moves, and nothing here is
+   written. Full width so it is read as being about the whole row. */
+.convert-note {
+  flex-basis: 100%;
+}
+
+/* The priced plan, shown BEFORE anything is written. It is a preview, so it sits
+   flat on the box rather than in a frame of its own. */
+.from-balance-plan {
+  flex-basis: 100%;
+  display: flex;
+  flex-direction: column;
+  gap: var(--s1);
+  margin-top: var(--s1);
+}
+.from-balance-head b {
+  color: var(--ink);
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
+}
+/* The wallets being left alone, named. Small, but never hidden: a wallet
+   silently skipped is the failure this control exists to end. */
+.from-balance-skips {
+  margin: var(--s1) 0 0;
+  padding-left: var(--s4);
+  color: var(--dim);
+  font-size: var(--fs-small);
+}
+.from-balance-skips li {
+  margin-bottom: var(--s1);
+}
+.from-balance-skips code {
+  font: var(--t-base) var(--mono);
+  color: var(--ink);
+}
+
 /* PAIR FUNDING — the pre-launch step that makes every bundle wallet hold the
    launch's quote asset. Drawn as a sibling of .distribute and deliberately NOT a
    second amber box: this step already spends its one amber on the auto-fill
@@ -2584,6 +2674,25 @@ a.addr-text.is-plain:focus-visible {
 .bal.short {
   color: var(--vermilion);
   font-weight: 700;
+}
+/* A wallet that ALREADY holds what its Buy amount will demand of it — the pair
+   column on a paired launch. Jade in the one sense the law allows: past tense,
+   already true, nothing left to do about it. It is not a money colour and names
+   no action; the step's single amber object is still the auto-fill stripe. */
+.bal.has {
+  color: var(--jade);
+  font-weight: 700;
+}
+/* How much more of the pair token this row needs, under the balance that is
+   short of it. No colour of its own — it inherits the vermilion above — so this
+   adds the size of the problem to a row that is already flagged, rather than
+   flagging a second thing. Same geometry and reasoning as .share .reverts. */
+.bal .gap {
+  display: block;
+  margin-top: var(--s1);
+  font: var(--t-micro) var(--mono);
+  letter-spacing: var(--ls-caps);
+  text-transform: uppercase;
 }
 
 /* What a typed amount buys, drawn beside the amount. Grey: it is a figure, not

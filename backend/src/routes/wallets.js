@@ -24,6 +24,7 @@ const { requireApiKey, requireAuthConfigured } = require('../middleware/auth');
 const { findSellable, withDeadline } = require('../evm/v2/holdings');
 const { prepareSell } = require('../bundle/prepareSell');
 const { swapBundleToPair } = require('../bundle/swapToPair');
+const pairQuote = require('../bundle/pairQuote');
 const { fireSell } = require('../bundle/fireSell');
 const { jsonSafe, withLaunchLock } = require('./launch');
 const relayFunding = require('../relay/funding');
@@ -48,6 +49,15 @@ const MAX_BUNDLE_WALLETS = 31;
 // the two launchers each get their own 31 instead of eating each other's.
 const BUNDLE_ROLES = new Set(['bundle', 'v2bundle']);
 
+// The native quote asset is address(0) and the console's picker sends it as its
+// own value, so "native" arrives here as a real string rather than as an absent
+// parameter. A native launch has no pair balance to show and must make no extra
+// read for one, so it is filtered out before anything is resolved.
+const NATIVE_PAIR_TOKEN = '0x0000000000000000000000000000000000000000';
+function isNativePairToken(value) {
+  return !value || String(value).toLowerCase() === NATIVE_PAIR_TOKEN;
+}
+
 function assertBundleRoom(ks, role, adding) {
   if (!BUNDLE_ROLES.has(role)) return;
   const have = ks.walletsWithRole(role).length;
@@ -62,10 +72,82 @@ function assertBundleRoom(ks, role, adding) {
 }
 
 // GET /api/wallets — addresses, roles and balances. Never key material.
+//
+// ?pairToken=0x… is the paired-launch addition, and it is the ONLY thing that
+// changes what this reads. Without it — which is every native launch, and every
+// paired one before step 5 has picked its quote asset — the handler runs exactly
+// the code it always has: no approval read, no token read, and the same array of
+// the same fields. With it, and only if the factory approves that token RIGHT
+// NOW, every wallet also carries what it holds of it, read in ONE batched call.
+//
+// The approval check is the point of resolving here rather than trusting the
+// query string: an address that is not an approved quote asset is not one any
+// launch can be denominated in, so a column of its balances would be a column
+// about nothing. It is IGNORED rather than rejected — a listing the whole console
+// depends on must not 400 because a picker is momentarily out of step with the
+// factory — and the console can see it was ignored, because the pair fields are
+// then simply absent.
 router.get('/wallets', requireApiKey, async (req, res, next) => {
   try {
     const ks = keystoreFor(req.user.id);
-    res.json(await funding.balances({ keystore: ks }));
+    const wanted = req.query?.pairToken;
+    let pair = null;
+    if (wanted && !isNativePairToken(wanted)) {
+      try {
+        pair = await pairQuote.approvedPair(wanted);
+      } catch (_err) {
+        // Not an address, not approved, or the factory could not be read. The
+        // listing is the console's floor and answers either way.
+        pair = null;
+      }
+    }
+    res.json(await funding.balances({ keystore: ks, pair }));
+  } catch (err) {
+    next(err);
+  }
+});
+
+// ── READ-ONLY PAIR PRICING ─────────────────────────────────────────────────
+// Both of these sign nothing, send nothing, take no launch lock and touch no
+// nonce, which is why they are GETs and why neither is wrapped in withLaunchLock.
+// See bundle/pairQuote.js for why they exist rather than being read off the
+// swap-to-pair dry run.
+
+// GET /api/wallets/pair-quote?pairToken=&ethIn=&pairIn=
+//
+// The live rate, in whichever direction was asked for — "what is 0.5 ETH in
+// NVDA" and "what does 20 NVDA cost in ETH". It is a QUOTE and it moves, so the
+// answer carries the moment it was taken; nothing in the console writes from it
+// without the operator putting the figure into a field themselves.
+router.get('/wallets/pair-quote', requireApiKey, async (req, res, next) => {
+  try {
+    const { pairToken, ethIn, pairIn } = req.query || {};
+    res.json(
+      jsonSafe(await pairQuote.convertPair({ pairToken, ethIn, pairIn }))
+    );
+  } catch (err) {
+    next(err);
+  }
+});
+
+// GET /api/wallets/pair-from-balance?pairToken=&variant=&sells=
+//
+// What the ETH each bundle wallet ALREADY HOLDS would buy, once gas is held back
+// for the swap, the launch's approve + buy and `sells` exits. Returns a Buy
+// amount per wallet and names every wallet it is skipping. Writes nothing: the
+// console shows these figures, and only fills the column if the operator says so.
+router.get('/wallets/pair-from-balance', requireApiKey, async (req, res, next) => {
+  try {
+    const ks = keystoreFor(req.user.id);
+    const { pairToken, variant, sells } = req.query || {};
+    res.json(
+      jsonSafe(
+        await pairQuote.planFromBalance(
+          { pairToken, variant: variant || DEFAULT_VARIANT, sells },
+          { keystore: ks }
+        )
+      )
+    );
   } catch (err) {
     next(err);
   }

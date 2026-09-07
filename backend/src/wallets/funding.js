@@ -6,11 +6,11 @@
 // sequential round-trips against a public RPC is slow enough to matter when
 // you are funding minutes before a launch.
 
-const { parseEther, formatEther, getAddress } = require('ethers');
+const { parseEther, formatEther, formatUnits, getAddress } = require('ethers');
 const config = require('../config');
 const { provider } = require('../evm/provider');
 const { getFees, gasCost } = require('../evm/fees');
-const { erc20, readTokenBalance } = require('../evm/erc20');
+const { erc20, readTokenBalance, readTokenBalances } = require('../evm/erc20');
 const { rpcMessage } = require('../evm/errors');
 const { shouldBatch, splitAcross, buildDisperseTx, addresses } = require('../evm/disperse');
 const keystore = require('./keystore');
@@ -45,14 +45,52 @@ async function transferGas(from, to, rpc = provider) {
 const DISPERSE_FEE_BUMP_PCT = 25;
 const SWEEP_FEE_BUMP_PCT = 25;
 
-async function balances({ keystore: ks = keystore } = {}) {
+/**
+ * Addresses, roles and balances. Never key material.
+ *
+ * `pair` is OPTIONAL and is the whole of the paired-launch behaviour here: pass
+ * an already-resolved, already-APPROVED quote asset — `{address, symbol,
+ * decimals}` — and every wallet also carries what it holds of it. Pass nothing
+ * (a native launch, which is every launch until step 5 picks a pair) and this
+ * function makes exactly the reads it has always made and returns exactly the
+ * shape it has always returned: no extra request, no extra fields.
+ *
+ * The approval check is deliberately NOT here. This module knows about balances,
+ * not about which quote assets a factory will accept, and resolving that needs
+ * the v2 factory. The route does it and hands the answer down, which also means
+ * an unapproved or unresolvable token degrades to the native shape rather than
+ * failing the listing the whole console reads.
+ *
+ * The pair read is ONE batched call for every wallet (see evm/erc20.js), not one
+ * per wallet — the native loop above it is already N sequential round-trips and
+ * doubling that on a 31-wallet bundle is what this avoids. A wallet whose slot
+ * could not be read gets `pairBalance: null`, never "0": an unread balance and an
+ * empty wallet are different facts and the table must not conflate them.
+ */
+async function balances({ keystore: ks = keystore, pair = null, ...deps } = {}) {
+  const rpc = deps.provider || provider;
+  const readMany = deps.readTokenBalances || readTokenBalances;
   const wallets = ks.list();
   const out = [];
   for (const w of wallets) {
-    const wei = await provider.getBalance(w.address);
+    const wei = await rpc.getBalance(w.address);
     out.push({ ...w, balanceWei: wei.toString(), balanceEth: formatEther(wei) });
   }
-  return out;
+  if (!pair || !pair.address || !out.length) return out;
+
+  const heldRaw = await readMany(pair.address, out.map((w) => w.address), { provider: rpc });
+  const decimals = Number(pair.decimals);
+  return out.map((w, i) => {
+    const raw = heldRaw[i];
+    return {
+      ...w,
+      pairToken: pair.address,
+      pairSymbol: pair.symbol,
+      pairDecimals: decimals,
+      pairBalanceWei: raw == null ? null : raw.toString(),
+      pairBalance: raw == null ? null : formatUnits(raw, decimals),
+    };
+  });
 }
 
 /**

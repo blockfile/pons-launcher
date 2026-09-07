@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { LazyMotion, MotionConfig, domMax } from 'framer-motion';
 import { LuRocket, LuArrowRightLeft, LuLink, LuClock, LuBanknote, LuRepeat, LuFlame, LuSend } from 'react-icons/lu';
 import ThemeToggle from './ThemeToggle.jsx';
@@ -212,7 +212,24 @@ export default function App() {
     setReportedAt(new Date().toLocaleTimeString());
   };
 
-  const loadWallets = useCallback(async () => setWallets(await api('/wallets')), []);
+  // THE LISTING'S ONE QUERY PARAMETER, AND THE WHOLE OF THE PAIR COLUMN'S COST.
+  //
+  // `pair` is null on a native launch and on every launch until step 5 picks a
+  // quote asset, and the listing then makes exactly the reads it has always made
+  // and returns exactly the fields it has always returned. With an address it
+  // also carries what each wallet holds of that token, read server-side in one
+  // batched call — see routes/wallets.js.
+  //
+  // Read through a ref rather than closed over, so this callback keeps a STABLE
+  // identity: every panel below takes it as `reload`, and handing them a new
+  // function each time the picker moved would re-run their effects for nothing.
+  const pairAddress = pair?.address || null;
+  const pairRef = useRef(pairAddress);
+  pairRef.current = pairAddress;
+  const loadWallets = useCallback(async () => {
+    const token = pairRef.current;
+    setWallets(await api(token ? `/wallets?pairToken=${encodeURIComponent(token)}` : '/wallets'));
+  }, []);
   // Per launcher. The store is one file per user and the variant is what
   // separates the two inside it — without this filter v2's step 5 reads v1's
   // launches as its own and reports DONE for a run it never made.
@@ -253,6 +270,22 @@ export default function App() {
   // is entitled — otherwise they hide their own errors as "no key yet".
   const credential =
     key || health?.user || (health && !health.apiKeyRequired ? 'open' : '');
+
+  // A CHANGED QUOTE ASSET RE-READS THE LISTING, and nothing else does. The pair
+  // column has to be about the launch now on screen, and switching NVDA → SPCX
+  // leaves every balance in it answering the wrong question.
+  //
+  // Deliberately not on mount: the previous value is seeded, so native → native
+  // (both null) never fires and a native launch is left with loadAll's single
+  // read, exactly as before. A failed re-read is swallowed — the listing already
+  // on screen is still true about ETH, and loadAll reports its own errors.
+  const lastPairRef = useRef(pairAddress);
+  useEffect(() => {
+    if (lastPairRef.current === pairAddress) return;
+    lastPairRef.current = pairAddress;
+    if (!credential) return;
+    loadWallets().catch(() => {});
+  }, [pairAddress, credential, loadWallets]);
 
   // Only ask for a key when one is actually missing. If nginx supplies it, or
   // the deployment has none, the field is not a prompt — it is a lie.
