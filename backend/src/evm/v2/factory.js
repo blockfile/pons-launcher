@@ -19,7 +19,7 @@
 // address with no contract — which on the EVM SUCCEEDS and silently keeps the
 // money.
 
-const { Contract, Interface, getAddress, ZeroAddress, hexlify, randomBytes } = require('ethers');
+const { Contract, Interface, Transaction, getAddress, ZeroAddress, hexlify, randomBytes } = require('ethers');
 const config = require('../../config');
 const { provider } = require('../provider');
 const { rpcMessage } = require('../errors');
@@ -77,6 +77,46 @@ function factory(runner = provider) {
 /** A fresh salt. Any value works; it only has to be one nobody has used. */
 function newSalt() {
   return hexlify(randomBytes(32));
+}
+
+// Both launch entry points — the factory's launchToken and the forwarder's
+// launchAndBuy — in one interface with no address bound to it, so a SERIALIZED
+// launch can be decoded back into the params it carries.
+//
+// This exists for one reason: the salt is what makes the curve address
+// predictable, and on the paired path fireV2 broadcasts approvals naming that
+// predicted curve BEFORE the launch. Reading the salt back out of the exact
+// bytes about to go on the wire is the only way to prove the launch really is
+// the one those approvals were built against. See the salt pin in fireV2.
+const LAUNCH_CALLS = new Interface(
+  [...FACTORY_V2_ABI, ...FORWARDER_V2_ABI].filter(
+    (f) => typeof f === 'string' && (f.includes(' launchToken(') || f.includes(' launchAndBuy('))
+  )
+);
+
+const SALT_HEX = /^0x[0-9a-fA-F]{64}$/;
+
+/**
+ * The salt inside a serialized launch transaction.
+ *
+ * Reads the transaction bytes themselves rather than any field alongside them,
+ * so it cannot agree with a plan that has drifted from what was signed. Throws
+ * rather than returning null on anything it cannot read: a caller asking this
+ * is about to bet a bundle on the answer, and "no idea" must never be mistaken
+ * for "it matches".
+ *
+ * @param {string} raw a serialized transaction, signed or not
+ * @returns {string} the 32-byte salt, lowercased
+ */
+function saltFromLaunchTx(raw) {
+  const tx = Transaction.from(raw);
+  const parsed = LAUNCH_CALLS.parseTransaction({ data: tx.data, value: tx.value });
+  if (!parsed) throw new Error('not a pons v2 launchToken or launchAndBuy call');
+  const salt = parsed.args?.[0]?.salt;
+  if (typeof salt !== 'string' || !SALT_HEX.test(salt)) {
+    throw new Error('the launch call carries no readable 32-byte salt');
+  }
+  return salt.toLowerCase();
 }
 
 /**
@@ -407,6 +447,16 @@ module.exports = {
   buildLaunchTx,
   buildLaunchAndBuyTx,
   parseLaunch,
+  saltFromLaunchTx,
   explainRevert,
   MAX_SNIPE_TAX_EXEMPTIONS,
+  // RE-EXPORTED BECAUSE prepareV2 READS IT OFF THIS MODULE. It was imported
+  // here and used internally (assertExemptions, wiring) but never put on the
+  // exports, so `v2mod.MAX_EXEMPTIONS_VIA_FORWARDER` at prepareV2.js:257 was
+  // `undefined` on every launch that has a dev buy — which is all of them —
+  // and the forwarder's tighter cap never fired. It failed safe (the same
+  // check inside buildLaunchAndBuyTx throws before anything is signed) but
+  // only with a later and much vaguer message. The tests never caught it
+  // because they inject the constant rather than reading it from here.
+  MAX_EXEMPTIONS_VIA_FORWARDER,
 };
