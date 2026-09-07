@@ -93,6 +93,18 @@
  * ORDERING. This must run BEFORE the launch is armed. prepareV2 reads each wallet's
  * pending nonce when it signs, so a swap broadcast after arming would consume the
  * nonce the pre-signed approve is holding. The route shares the launch lock.
+ *
+ * REPORTING A PRICE FOR A WALLET THAT HOLDS NOTHING YET. A dry run is the console's
+ * pricing instrument, and the console prices this BEFORE step 4 has funded anything
+ * — auto-fill is what computes the Fund column, so at that moment every bundle
+ * wallet holds 0 ETH and every row lands in `skipped-short`. `row.swapEth` is
+ * therefore recorded the moment the swap is SIZED rather than once the wallet has
+ * passed the balance check, and the reserve the check is made against is returned
+ * as `gasReserveEth`. Both are reporting only: no decision reads either, no wallet's
+ * outcome changes, and the two figures were already spelled out in prose inside the
+ * skipped-short reason. Without them the console would have to re-derive the swap
+ * price and four gas constants for itself, and a second implementation of "what this
+ * wallet must be funded with" is exactly the drift this module refuses elsewhere.
  */
 
 const { getAddress, parseEther, parseUnits, formatUnits, formatEther, ZeroAddress } = require('ethers');
@@ -362,6 +374,12 @@ async function swapBundleToPair(input, deps = {}) {
       // The margin. See "THE MARGIN" in the header.
       const ethIn = (sized.ethIn * (BPS + BigInt(OVERSHOOT_BPS))) / BPS;
 
+      // RECORDED THE MOMENT IT IS KNOWN, not once the wallet has passed every
+      // check — see "REPORTING A PRICE FOR A WALLET THAT HOLDS NOTHING YET" in
+      // the header. Reporting only: nothing below reads it, and the figure is
+      // the same one the skipped-short reason has always spelled out in prose.
+      row.swapEth = formatEther(ethIn);
+
       // ── can the wallet cover the swap AND everything it still has to pay for? ──
       const balance = BigInt(await rpc.getBalance(address));
       if (balance < ethIn + gasReserve) {
@@ -420,8 +438,6 @@ async function swapBundleToPair(input, deps = {}) {
       // and the ETH stays put.
       const percentFloor = (fullOut * (BPS - BigInt(OVERSHOOT_BPS))) / BPS;
       const minOut = percentFloor > short ? percentFloor : short;
-
-      row.swapEth = formatEther(ethIn);
 
       if (dryRun) {
         row.status = 'would-swap';
@@ -497,6 +513,12 @@ async function swapBundleToPair(input, deps = {}) {
     skippedImpact: count('skipped-impact'),
     failed: count('failed'),
     totalEth: formatEther(totalEth),
+    // What every wallet must hold ON TOP of its swap input for this run to send
+    // at all — the same figure the skipped-short refusal is measured against.
+    // Reported so the console can size the Fund column with the number that
+    // decides the refusal rather than a second guess at it. Reporting only:
+    // nothing here reads it back.
+    gasReserveEth: formatEther(gasReserve),
     results,
   };
 }

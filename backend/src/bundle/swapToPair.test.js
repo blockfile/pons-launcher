@@ -224,6 +224,32 @@ test('a wallet that cannot cover the swap plus its gas is refused, and NOTHING i
   assert.match(r.reason, /reserved for the swap, the launch's approve \+ buy, and the gas buffer/);
 });
 
+test('a wallet holding NO ETH is still PRICED — the console sizes the Fund column before step 4 funds anything', async () => {
+  // The auto-fill case: the operator has typed a total, nothing has been funded
+  // yet, so every wallet is skipped-short. The refusal is unchanged; what it must
+  // also carry is the number, because that number IS the Fund column.
+  const { deps, sent } = harness({ ethBalances: { [W1.address]: 0n } });
+  const out = await swapBundleToPair(
+    { variant: 'v1', pairToken: NVDA, dryRun: true, targets: [{ walletId: 'w1', amountPair: '10' }] },
+    deps
+  );
+
+  assert.equal(sent.length, 0);
+  const r = row(out, 'w1');
+  assert.equal(r.status, 'skipped-short', 'an empty wallet is still refused');
+  assert.ok(Number(r.swapEth) > 0, 'and still reports what its swap would cost');
+  // The prose and the field are the same figure, so neither can drift from the other.
+  assert.ok(r.reason.includes(`${r.swapEth} to buy`), r.reason);
+  // The reserve behind the refusal, reported so the console funds to the number
+  // the refusal is measured against rather than to a second guess at it.
+  assert.equal(out.gasReserveEth, formatEther(RESERVE));
+  assert.equal(
+    parseEther(r.swapEth) + parseEther(out.gasReserveEth),
+    parseEther(r.reason.match(/needs ([\d.]+) /)[1]),
+    'swapEth + gasReserveEth is exactly what the wallet was asked for'
+  );
+});
+
 test('the gas reserve leaves the launch its approve AND its buy, at double the current fee', async () => {
   // Price the swap first, then hand the wallet one wei less than the whole plan
   // costs. The boundary is what pins the reserve: swap gas + 2 x (approve + buy)

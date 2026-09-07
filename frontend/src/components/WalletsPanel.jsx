@@ -6,6 +6,7 @@ import Address from './Address.jsx';
 import Modal, { Fact } from './Modal.jsx';
 import Share, { pct, tokens } from './Share.jsx';
 import BackupControls from './BackupControls.jsx';
+import { splitTotal, pairedFunds, pairedReserveEth } from './autoFill.js';
 import { rolesFor } from '../variant.js';
 
 // Balances arrive as decimal strings. Six places everywhere, so the column and
@@ -86,6 +87,12 @@ export default function WalletsPanel({
   // table, and the live gas cost of a buy/sell so the fund reserve is exact.
   const [totalBuy, setTotalBuy] = useState('');
   const [gas, setGas] = useState(null); // { buyGasEth, sellGasEth }
+  // What the last auto-fill did on a PAIRED launch — the ETH it priced, and the
+  // wallets it could not price. Null on a native launch (where the Fund column is
+  // arithmetic, not a quote) and until Distribute has been pressed. It is an
+  // account of a fill that has already happened, so it is dropped the moment the
+  // total or the quote asset changes and it would be answering a stale question.
+  const [fill, setFill] = useState(null);
 
   // ── PAIRED LAUNCH: the bundle must HOLD the pair token BEFORE the launch ────
   // A paired launch denominates every bundle buy in the pair token, and those buys
@@ -133,6 +140,14 @@ export default function WalletsPanel({
       alive = false;
     };
   }, []);
+
+  // A different quote asset makes the last fill's figures the answer to a
+  // different question — an ETH total priced against NVDA says nothing about a
+  // launch now paired with SPCX, and native has no quote at all. Dropped rather
+  // than left on screen reading as current.
+  useEffect(() => {
+    setFill(null);
+  }, [pair?.address]);
 
   // How many V4-seasoned seed wallets are ready to claim into this bundle.
   // Read-only background poll of a small figure, same shape as the eth-price
@@ -239,12 +254,29 @@ export default function WalletsPanel({
   // rather than a third of the bundle silently skipped at preflight for lack of
   // funds. The dev buy and the launch fee are on top of this and set elsewhere.
   const reservePerWallet = Number(gas?.buyGasEth || 0) + SELL_RESERVE * Number(gas?.sellGasEth || 0);
-  const fundNeeded = Number(totalBuy) > 0 ? Number(totalBuy) + bundle.length * reservePerWallet : 0;
+  // NATIVE ONLY, and now said so in the code rather than only in the copy: this
+  // adds the typed total to a gas figure, and on a paired launch the typed total
+  // is in the PAIR TOKEN. The paired readout is below and is built from ETH the
+  // swap endpoint priced, never from arithmetic across two currencies.
+  const fundNeeded = !pair && Number(totalBuy) > 0 ? Number(totalBuy) + bundle.length * reservePerWallet : 0;
+
+  // THE ASSET THE TYPED TOTAL IS IN. It is the asset the Buy column is in, which
+  // is the launch's quote asset: ETH on a native launch, the pair token on a
+  // paired one. Named on screen beside the field, because a number with an
+  // assumed unit is the bug this control had.
+  const buyUnit = pair ? pair.symbol : 'ETH';
 
   // Split the typed total across the bundle wallets into a random, jittered
   // spread — no two the same, so the buys read as organic rather than a pattern
   // — and fill each row's Buy and Fund. Moves NO ETH: it only writes the table
   // fields the operator was going to type by hand. Both fields stay editable.
+  //
+  // TWO CURRENCIES, ONE TABLE. Buy is in the launch's quote asset; Fund is ALWAYS
+  // ETH. On a native launch those are the same asset and Fund is buy + gas — the
+  // arithmetic this control has always done. On a PAIRED launch they are not, and
+  // `buy + gas` added NVDA to ETH and wrote the sum into an ETH field. The paired
+  // branch below never does that: the Buy amounts stay in the pair token, and the
+  // ETH is asked of the endpoint that will actually spend it.
   async function distribute() {
     const total = Number(totalBuy);
     if (!(total > 0)) return notify('Enter a total buy amount first.', 'error');
@@ -265,21 +297,100 @@ export default function WalletsPanel({
 
     // ±30% jitter around equal, normalised to the exact total; the rounding
     // drift is pushed onto the last wallet so the sum is exactly what was typed.
-    const weights = bundle.map(() => 1 + (Math.random() - 0.5) * 0.6);
-    const wsum = weights.reduce((a, b) => a + b, 0);
-    const amounts = bundle.map((_, i) => Math.round((weights[i] / wsum) * total * 1e6) / 1e6);
-    const drift = Math.round((total - amounts.reduce((a, b) => a + b, 0)) * 1e6) / 1e6;
-    amounts[amounts.length - 1] = Math.round((amounts[amounts.length - 1] + drift) * 1e6) / 1e6;
+    // Six decimals on a native launch, exactly as before; on a paired one, capped
+    // at the pair token's own decimals so every amount is one the launch — and
+    // the pricing call below — can parse.
+    const places = pair ? Math.min(6, Number(pair.decimals) || 6) : 6;
+    const amounts = splitTotal(bundle.length, total, { places });
 
+    // ── NATIVE: buy and fund are the same asset, so Fund is arithmetic ─────────
+    if (!pair) {
+      bundle.forEach((w, i) => {
+        const buy = amounts[i];
+        setRow(w.id, { mode: 'fixed', buy: String(buy), fund: (buy + reserve).toFixed(6) });
+      });
+      report(
+        `distributed ${total} ETH across ${bundle.length} wallets — each funded for its buy plus gas for ` +
+          `${SELL_RESERVE} sells. Nothing was sent; edit any row, then Fund and launch as usual.`
+      );
+      notify(`Filled ${bundle.length} wallets for ${total} ETH. No ETH moved — edit, then Fund.`, 'ok');
+      return;
+    }
+
+    // ── PAIRED: the Buy amounts are in the pair token, so the ETH must be PRICED ─
+    // Priced by the dry run of the endpoint that will buy the pair token, because
+    // that is the code that decides what a wallet must hold: it sizes the swap
+    // against live quotes and it reports the reserve it will refuse a wallet for
+    // lacking. A dry run takes no launch lock (see routes/wallets.js — it is
+    // exempted precisely so the console can price in the background), signs
+    // nothing and touches no nonce.
+    setBusy('auto-fill');
+    setFill(null);
+    const targets = bundle
+      .map((w, i) => ({ walletId: w.id, amountPair: String(amounts[i]) }))
+      // A wallet whose share rounds to nothing has no swap to price, and the
+      // endpoint refuses the whole request over a zero amount rather than
+      // guessing. It is left unpriced and counted below.
+      .filter((t) => Number(t.amountPair) > 0);
+
+    let plan = null;
+    let error = '';
+    try {
+      plan = await api('/wallets/swap-to-pair', 'POST', {
+        variant,
+        pairToken: pair.address,
+        targets,
+        dryRun: true,
+      });
+    } catch (err) {
+      error = err.message;
+    }
+    setBusy('');
+
+    // What each wallet keeps on top of its swap: the endpoint's OWN reserve — the
+    // swap's gas, the launch's approve and buy at double, the preflight buffer —
+    // so a wallet funded to this passes the very check that would refuse it, plus
+    // this console's standing promise of gas for SELL_RESERVE exits.
+    const filled = plan
+      ? pairedFunds(plan, pairedReserveEth(plan.gasReserveEth, g.sellGasEth, SELL_RESERVE))
+      : { funds: {}, unpriced: bundle.map((w) => w.id), totalEth: 0 };
+
+    // The Buy column is filled either way — it is the pair-token split, and it
+    // needs no quote. A wallet with no price gets NO Fund figure rather than a
+    // wrong one; blank is a question the operator can answer.
     bundle.forEach((w, i) => {
-      const buy = amounts[i];
-      setRow(w.id, { mode: 'fixed', buy: String(buy), fund: (buy + reserve).toFixed(6) });
+      setRow(w.id, { mode: 'fixed', buy: String(amounts[i]), fund: filled.funds[w.id] ?? '' });
     });
+
+    const priced = Object.keys(filled.funds).length;
+    const unpriced = bundle.length - priced;
+    setFill({ total, unit: pair.symbol, ethTotal: filled.totalEth, priced, unpriced, error });
+
+    if (priced === 0) {
+      report(
+        `filled the Buy column with ${total} ${pair.symbol} across ${bundle.length} wallets, but could NOT ` +
+          `price the ETH side: ${error || `no wallet could be priced against the ${pair.symbol} pool`}. ` +
+          'The Fund column was left BLANK rather than filled with a wrong number — type it, or fix the ' +
+          'pair and run this again. Nothing was sent.'
+      );
+      return notify(
+        `Buy column filled in ${pair.symbol}. Fund left blank — the ETH could not be priced.`,
+        'error'
+      );
+    }
+
     report(
-      `distributed ${total} ETH across ${bundle.length} wallets — each funded for its buy plus gas for ` +
-        `${SELL_RESERVE} sells. Nothing was sent; edit any row, then Fund and launch as usual.`
+      `distributed ${total} ${pair.symbol} across ${bundle.length} wallets — the Buy column is ` +
+        `${pair.symbol}; each Fund is the ETH to SWAP for that ${pair.symbol} plus gas for the swap, the ` +
+        `launch's approve + buy and ${SELL_RESERVE} sells, ≈${filled.totalEth.toFixed(6)} ETH in total` +
+        (unpriced > 0 ? `. ${unpriced} wallet(s) could not be priced and were left blank` : '') +
+        `. Nothing was sent; edit any row, Fund in step 4, then buy ${pair.symbol} above.`
     );
-    notify(`Filled ${bundle.length} wallets for ${total} ETH. No ETH moved — edit, then Fund.`, 'ok');
+    notify(
+      `Filled ${bundle.length} wallets for ${total} ${pair.symbol} ≈ ${filled.totalEth.toFixed(4)} ETH. ` +
+        'No ETH moved — edit, then Fund.',
+      unpriced > 0 ? 'error' : 'ok'
+    );
   }
 
   // ── the pair funding plan ───────────────────────────────────────────────────
@@ -666,7 +777,11 @@ export default function WalletsPanel({
 
       {bundle.length > 0 && (
         <div className="distribute">
-          <b className="distribute-title">Auto-fill buys</b>
+          {/* The unit is in the eyebrow as well as beside the field. This box
+              writes the Buy column, the Buy column is in the launch's quote
+              asset, and on a paired launch that is not ETH — the whole defect
+              being fixed here was a number whose unit had to be inferred. */}
+          <b className="distribute-title">Auto-fill buys{pair ? ` · in ${pair.symbol}` : ''}</b>
           <label style={{ display: 'flex', flexDirection: 'row', alignItems: 'center', gap: 6 }}>
             Total buy
             <input
@@ -675,19 +790,59 @@ export default function WalletsPanel({
               step="0.01"
               placeholder="0.5"
               value={totalBuy}
-              onChange={(e) => setTotalBuy(e.target.value)}
+              // WHY THE TOTAL IS IN THE PAIR TOKEN, NOT ETH CONVERTED AT THE
+              // QUOTE. The alternative — an ETH total converted to pair amounts
+              // at the live rate — was rejected for three reasons. (1) The Buy
+              // column IS the pair token: it is the number prepareV2 parses and
+              // then demands the wallet hold, so a pair-token total is the only
+              // one whose exact-sum guarantee is a guarantee about anything the
+              // launch reads. Converting would make the typed number equal to no
+              // number in the table. (2) The rate moves between the conversion
+              // and the launch, so an "ETH total" would silently stop being that
+              // total the moment it was typed — a second unit ambiguity dressed
+              // as a convenience, and this control's bug was a unit ambiguity.
+              // (3) The ETH question is still answered, and answered better:
+              // priced per wallet by the swap endpoint below and stated as its
+              // own figure. So the operator types what the bundle BUYS and reads
+              // what it COSTS, with neither pretending to be the other.
+              title={
+                pair
+                  ? `the total in ${pair.symbol} — the asset every bundle buy is denominated in on this ` +
+                    'launch. The ETH each wallet needs is priced against the live pool and written to Fund.'
+                  : undefined
+              }
+              onChange={(e) => {
+                setTotalBuy(e.target.value);
+                // The last fill priced a different total. It is no longer an
+                // account of anything on screen.
+                setFill(null);
+              }}
               style={{ width: 90 }}
             />
-            ETH
+            {buyUnit}
           </label>
           {/* Deliberately NOT the amber default: amber in this console means a
               spend, and this only writes fields. Ghost, like Generate/Import. */}
-          <Busy className="ghost" disabled={!(Number(totalBuy) > 0)} onClick={distribute}>
+          <Busy
+            className="ghost"
+            busy={busy === 'auto-fill'}
+            disabled={!(Number(totalBuy) > 0)}
+            onClick={distribute}
+          >
             Distribute across {bundle.length} wallet{bundle.length === 1 ? '' : 's'}
           </Busy>
           <span className="hint">
-            random split · each funded for its buy + gas for {SELL_RESERVE} sells · fields stay editable ·
-            moves no ETH
+            {pair ? (
+              <>
+                random split in {pair.symbol} · each Fund is the ETH to swap for its {pair.symbol} + gas ·
+                fields stay editable · moves no ETH
+              </>
+            ) : (
+              <>
+                random split · each funded for its buy + gas for {SELL_RESERVE} sells · fields stay
+                editable · moves no ETH
+              </>
+            )}
           </span>
           {fundNeeded > 0 && (
             <div className="distribute-fund">
@@ -697,6 +852,53 @@ export default function WalletsPanel({
                 ({Number(totalBuy).toFixed(4)} buys + {(bundle.length * reservePerWallet).toFixed(4)} gas
                 reserve) — your dev buy and the launch fee are on top. Underfunded wallets are skipped.
               </span>
+            </div>
+          )}
+
+          {/* THE PAIRED READOUT. The same slot, the same class, and deliberately
+              not a second box: this is still the auto-fill's own figure. What it
+              may never be is the native line with a pair symbol swapped in — that
+              line adds the typed total to a gas figure, and here the typed total
+              is NVDA. So it states nothing until Distribute has priced the ETH,
+              and then states what the pricing found, including what it could not
+              price. */}
+          {pair && Number(totalBuy) > 0 && (
+            <div className="distribute-fund">
+              {!fill ? (
+                <span className="hint">
+                  Buy is in {pair.symbol}; Fund is always ETH. Distribute prices that ETH per wallet
+                  against the live {pair.symbol} pool — it is not this total converted, and no{' '}
+                  {pair.symbol} figure is ever written into an ETH field.
+                </span>
+              ) : fill.priced === 0 ? (
+                // No <b> here on purpose: .distribute-fund b is amber, amber is
+                // this panel's money colour, and "nothing could be priced" is the
+                // absence of a figure rather than one.
+                <>
+                  Fund column left blank — the ETH could not be priced
+                  <span className="hint">
+                    {' '}
+                    {fill.error || `no wallet could be priced against the ${pair.symbol} pool`}. The Buy
+                    column is filled, in {pair.symbol}. Type the Fund amounts, or fix the pair and run
+                    this again — a wrong ETH figure was not written.
+                  </span>
+                </>
+              ) : (
+                <>
+                  Dev wallet needs ≈ <b>{fill.ethTotal.toFixed(4)} ETH</b> to fund{' '}
+                  {fill.priced === bundle.length ? `all ${bundle.length}` : `${fill.priced} of ${bundle.length}`}{' '}
+                  wallets
+                  <span className="hint">
+                    {' '}
+                    ({fill.total} {fill.unit} of buys, priced against the live pool, plus the gas each
+                    wallet keeps for the swap, the launch's approve + buy and {SELL_RESERVE} sells) — your
+                    dev buy and the launch fee are on top.
+                    {fill.unpriced > 0 &&
+                      ` ${fill.unpriced} wallet${fill.unpriced === 1 ? '' : 's'} could not be priced — ` +
+                        `${fill.unpriced === 1 ? 'its Fund was' : 'their Funds were'} left blank.`}
+                  </span>
+                </>
+              )}
             </div>
           )}
         </div>
