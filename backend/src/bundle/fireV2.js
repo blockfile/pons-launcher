@@ -6,8 +6,9 @@
 //   pre-signed buy → collect receipts
 //
 //   PAIRED (ERC-20 quote asset): warm the pool → check the salt pin →
-//   broadcast EVERY approve → broadcast the launch → blast the buys, and only
-//   the buys → collect receipts
+//   broadcast EVERY approve → ISSUE the launch → blast the buys, and only the
+//   buys, WITHOUT waiting for the launch to be acknowledged → collect receipts,
+//   the launch's included
 //
 // WHY THE APPROVES MOVED IN FRONT OF THE LAUNCH. The opening snipe tax is
 // startBps >> ((elapsed * 14) / window) and it steps on whole wall-clock
@@ -22,10 +23,36 @@
 // need the curve to exist — it is an allowance on the PAIR token naming an
 // address — so it can go out before the launch, and now does.
 //
-// The native path is untouched, deliberately. There the buy carries its ETH as
-// value, and a buy that lands before the launch pays into a codeless address,
-// SUCCEEDS on the EVM and keeps the money (1.798 ETH, 2026-08-13). Nothing on
-// that path is reordered.
+// WHY THE PAIRED LAUNCH IS NO LONGER AWAITED BEFORE THE BUYS. Moving the
+// approves in front bought back a quarter second and left exactly one full RPC
+// round trip in the critical path: the `await` on the launch's own broadcast.
+// That await buys nothing — no buy reads anything out of the launch's answer,
+// because the curve address came from the salt — and it costs the same ~250ms,
+// which is 2-3 blocks and, when the launch lands late in a second, the whole
+// tax tier. So on the paired path the launch's send is ISSUED and the buys
+// follow it immediately; the launch's answer is collected at the end, before
+// this function returns, where it is still reported but no longer paid for.
+//
+// The risk that accepts is an OVERTAKE: one buy's request reaching the
+// sequencer before the launch's. It is bounded, and it is asymmetric, and the
+// asymmetry is the whole argument:
+//
+//   PAIRED — the buy carries `value: 0` (evm/v2/curve.js). It calls an address
+//   with no contract, which SUCCEEDS on the EVM, moves nothing, and leaves the
+//   wallet holding all of its pair tokens. Cost: that wallet's gas and its
+//   nonce, and it does not get to buy. Nothing is stranded, no funds are lost.
+//
+//   NATIVE — the identical buy carries its ETH as value, and paying ETH into a
+//   codeless address ALSO succeeds and the ETH IS GONE PERMANENTLY (1.798 ETH,
+//   2026-08-13). So the native path is untouched, deliberately: its launch is
+//   awaited before a single buy is issued, and nothing on it is reordered. The
+//   switch that turns this on (config.v2PairedAsyncLaunch) is not even read on
+//   that path — see the note at the branch.
+//
+// Overtakes are not left to be inferred. Every buy's receipt is compared with
+// the launch's by block number and then by transaction index; each buy reports
+// which side of the launch it was sequenced on and how many blocks after it
+// landed, and the count is raised to the top of the result.
 //
 // Nothing is signed here and nothing is read from a receipt before the buys go
 // out. prepareV2 already knows the curve address, because the live factory
@@ -159,6 +186,33 @@ function assertSaltPin(plan, { saltFromLaunch }) {
   }
 }
 
+// A transaction's position inside its block. ethers v6 calls it `index`; a raw
+// JSON-RPC receipt calls it `transactionIndex`. Both are read, and a receipt
+// carrying neither reports null rather than 0 — 0 is the strongest possible
+// claim about ordering and the one most likely to be wrong.
+function txIndexOf(receipt) {
+  const i = receipt?.index ?? receipt?.transactionIndex;
+  return typeof i === 'number' && Number.isFinite(i) ? i : null;
+}
+
+/**
+ * WHICH SIDE OF THE LAUNCH A BUY WAS SEQUENCED ON.
+ *
+ * 'ahead' is the overtake — the buy reached the sequencer first, so it executed
+ * against an address that had no contract yet. On the paired path that is a
+ * wasted nonce and nothing worse; on the native path it is ETH gone. Either way
+ * it is a fact in a receipt, not something to infer from a missing balance.
+ *
+ * Same block is decided on transaction index, because the block number alone
+ * cannot tell a bundle that won its slot from one that jumped the launch.
+ */
+function sideOfLaunch(buy, launchBlock, launchIndex) {
+  if (buy.blockNumber == null || launchBlock == null) return null;
+  if (buy.blockNumber !== launchBlock) return buy.blockNumber < launchBlock ? 'ahead' : 'behind';
+  if (buy.txIndex == null || launchIndex == null) return 'unknown';
+  return buy.txIndex < launchIndex ? 'ahead' : 'behind';
+}
+
 async function recheckLaunch(rpc, tx, explain, { timeoutMs = RECHECK_MS } = {}) {
   // A provider that cannot estimate simply skips the extra check — the bundle is
   // never held up for a capability the node does not offer.
@@ -196,6 +250,10 @@ async function fireV2(plan, deps = {}) {
       mode: plan.mode,
       token: plan.token,
       curve: plan.curve,
+      // Which ordering a live run of this plan would take — a paired plan (its
+      // buys carry approves) does not wait for the launch's acknowledgement, a
+      // native one always does. Reported here so a dry run says which.
+      launchAsync: plan.buys.some((b) => b.approve) && config.v2PairedAsyncLaunch,
       launch: { address: plan.launch.address, hash: null, status: 'simulated' },
       buys: plan.buys.map((b) => ({
         walletId: b.walletId,
@@ -356,8 +414,49 @@ async function fireV2(plan, deps = {}) {
     }
   }
 
-  let launchResp;
-  if (approvesSent) {
+  // ── the launch ────────────────────────────────────────────────────────────
+  // THE SWITCH, and the reason it is one.
+  //
+  // PAIRED: the launch's send is issued and NOT awaited. It was the last full
+  // RPC round trip in the critical path (~250ms, 2-3 blocks) and it bought
+  // nothing — no buy reads the launch's answer, because prepareV2 got the curve
+  // address from the salt. A buy that overtakes the launch here carries value 0,
+  // calls a codeless address, moves nothing, and costs its wallet gas and a
+  // nonce. No funds are lost, which is why this trade is worth making.
+  //
+  // NATIVE: awaited, always, and the flag is never consulted. `paired &&` is
+  // what makes that unconditional — no environment variable can switch it on.
+  // An overtaking native buy pays its ETH into a codeless address, the call
+  // SUCCEEDS, and the ETH is unrecoverable: 1.798 ETH on 2026-08-13.
+  const asyncLaunch = paired && (deps.asyncPairedLaunch ?? config.v2PairedAsyncLaunch);
+
+  let launchResp = null;
+  // Settles into a tagged outcome and NEVER rejects, so a launch that fails
+  // while the buys are still going out cannot surface as an unhandled rejection.
+  // It is collected — and reported, with the buys that were already sent —
+  // below, after the burst.
+  let launchSettled = null;
+  let launchAckMs = null;
+
+  if (asyncLaunch) {
+    launchSettled = rpc.broadcastTransaction(plan.launch.raw).then(
+      (resp) => ({ ok: true, resp }),
+      (err) => ({ ok: false, err })
+    );
+
+    // THE LEAD, and why it is not a sleep. Ordering is decided at the sequencer
+    // by arrival, and the only lever left here is how far ahead of the buys the
+    // launch's request is handed to the network. Issuing it first already puts
+    // it first in the provider's send queue, but by tens of microseconds — the
+    // same order as the jitter between two sockets, so on its own it is a weak
+    // guarantee. One event-loop turn lets the JSON-RPC drain carrying the launch
+    // fire and write before a buy is even serialised, for ~1ms: about 1% of a
+    // block and 0.1% of the one-second tax step this whole change exists to win.
+    // config caps it at 5ms so it can never grow back into the latency it
+    // replaced; 0 issues the buys in the same turn, still strictly after it.
+    const lead = deps.launchLeadMs ?? config.v2PairedLaunchLeadMs;
+    if (lead > 0) await new Promise((r) => setTimeout(r, lead));
+  } else if (approvesSent) {
     try {
       launchResp = await rpc.broadcastTransaction(plan.launch.raw);
     } catch (err) {
@@ -371,11 +470,15 @@ async function fireV2(plan, deps = {}) {
   } else {
     launchResp = await rpc.broadcastTransaction(plan.launch.raw);
   }
+  // The launch is on the wire. On the awaited path this is also the moment its
+  // acknowledgement came back; on the async path that lands later and is
+  // reported separately as launchAckMs, so the round trip stays measurable.
   const sentMs = Date.now() - t0;
 
-  // Straight into the buys, AND NOTHING BUT THE BUYS. The launch is in flight,
-  // not confirmed — and it does not need to be, because the curve address does
-  // not depend on anything the launch tells us. On the paired path the approve
+  // Straight into the buys, AND NOTHING BUT THE BUYS. The launch is in flight —
+  // on the paired path not even acknowledged yet — and it does not need to be,
+  // because the curve address does not depend on anything the launch tells us,
+  // nor on anything its RPC answer tells us. On the paired path the approve
   // that used to sit here, costing every wallet a full round trip after the
   // launch, has already been broadcast above; this loop only reports what
   // happened to it.
@@ -413,12 +516,42 @@ async function fireV2(plan, deps = {}) {
   );
   const burstMs = Date.now() - t0;
 
+  // THE ROUND TRIP THAT LEFT THE CRITICAL PATH, COLLECTED. It was taken out of
+  // FRONT of the buys, not out of the result: nothing returns from this function
+  // until the launch's own broadcast has answered for itself.
+  if (launchSettled) {
+    const settled = await launchSettled;
+    launchAckMs = Date.now() - t0;
+    if (!settled.ok) {
+      // The one case this change creates that the awaited ordering could not:
+      // buys already on the wire behind a launch that never reached the node.
+      // Say all of it — what went out, what it cost, and what is NOT true.
+      const sent = results.filter((r) => r.status === 'sent');
+      const pairLabel = plan.pairSymbol || 'pair';
+      throw new Error(
+        `the launch FAILED TO BROADCAST: ${rpcMessage(settled.err)}. ${sent.length} bundle buy(s) had ` +
+          'ALREADY BEEN SENT — on this ERC-20-quoted path the buys are not held for the launch\'s ' +
+          'acknowledgement, which is what wins the block. Those buys carry no ETH (value 0): each called ' +
+          'an address with no contract, moved nothing and cost gas only, so NOTHING IS STRANDED and every ' +
+          `wallet still holds its ${pairLabel} balance in full. The ${approvesSent} approve(s) that went ` +
+          'out ahead of them granted an allowance on a curve that was never created — also harmless. But ' +
+          'every one of those wallets HAS MOVED ON A NONCE, so this plan is spent: RE-RUN PREFLIGHT before ' +
+          'launching again. Buys already sent: ' +
+          (sent.length ? sent.map((r) => `${r.address} ${r.hash}`).join(', ') : 'none')
+      );
+    }
+    launchResp = settled.resp;
+  }
+
   // Only now, with everything on the wire, do we wait for anything.
   const launchReceipt = await awaitReceipt(rpc, launchResp.hash);
   const launch = {
     hash: launchResp.hash,
     status: !launchReceipt ? 'pending' : launchReceipt.status === 1 ? 'confirmed' : 'reverted',
     blockNumber: launchReceipt?.blockNumber ?? null,
+    // The launch's own slot in its block — the yardstick every buy below is
+    // measured against, so an overtake is read rather than guessed.
+    txIndex: txIndexOf(launchReceipt),
     // The dev's forwarder approve, on the ERC-20 dev-buy path only.
     ...(devApprove ? { approve: devApprove } : {}),
   };
@@ -454,11 +587,60 @@ async function fireV2(plan, deps = {}) {
     const receipt = await awaitReceipt(rpc, r.hash);
     r.status = !receipt ? 'pending' : receipt.status === 1 ? 'confirmed' : 'reverted';
     r.blockNumber = receipt?.blockNumber ?? null;
+    r.txIndex = txIndexOf(receipt);
   }
+
+  // ── WHERE EACH BUY LANDED RELATIVE TO THE LAUNCH ──────────────────────────
+  // The point of not waiting for the launch's acknowledgement is to land in the
+  // launch's own block or the one after it; the risk it takes is landing in
+  // FRONT of the launch. Both are read off the receipts here, per wallet, so the
+  // operator sees them instead of inferring them from a balance that never
+  // arrives. Measured on every path — the native one has no overtakes to find,
+  // and if it ever does that is exactly when this has to be visible.
+  for (const r of results) {
+    r.blocksAfterLaunch =
+      r.blockNumber != null && launch.blockNumber != null
+        ? r.blockNumber - launch.blockNumber
+        : null;
+    r.vsLaunch = sideOfLaunch(r, launch.blockNumber, launch.txIndex);
+  }
+  const ahead = results.filter((r) => r.vsLaunch === 'ahead');
 
   const sameBlock = results.filter(
     (r) => r.blockNumber != null && r.blockNumber === launch.blockNumber
   ).length;
+  // The number this change is judged on: buys in the launch block or the next
+  // one (+0/+1). Two blocks is ~0.2s, so unless the launch landed right at the
+  // end of a second that is the launch's OWN second — the tier a non-exempt
+  // sniper pays 99% in.
+  const withinOneBlock = results.filter(
+    (r) => r.blocksAfterLaunch === 0 || r.blocksAfterLaunch === 1
+  ).length;
+
+  // An overtake is not a rounding detail, so it gets its own line at the top of
+  // the result — and a different one per path, because the two cost completely
+  // different things and reading the native text on a paired launch would send
+  // the operator hunting for money that never moved.
+  let overtake = null;
+  if (ahead.length) {
+    const who = ahead.map((r) => r.address).join(', ');
+    if (paired) {
+      for (const r of ahead) r.boughtNothing = true;
+      overtake =
+        `${ahead.length} buy(s) were sequenced AHEAD of the launch (${who}). On this ` +
+        `${plan.pairSymbol || 'pair'}-quoted path the buy carries no ETH, so it called an address with ` +
+        'no contract, moved nothing and cost gas only — NOTHING IS STRANDED and those wallets still hold ' +
+        'their pair balance. But they did NOT buy, and their nonce is spent: do not count them in the ' +
+        'bundle, and re-run preflight before trying to buy with them again.';
+    } else {
+      for (const r of ahead) r.strandSuspected = true;
+      overtake =
+        `${ahead.length} buy(s) were sequenced AHEAD of the launch (${who}). On the NATIVE path that buy ` +
+        'sent its ETH to an address with no contract: the call SUCCEEDED, no tokens were received, and ' +
+        'THE ETH IS UNRECOVERABLE. Check these wallets now. The native launch is awaited precisely so ' +
+        'this cannot happen, so treat it as a bug in the ordering as well as a loss.';
+    }
+  }
 
   // A buy can report "confirmed" while having STRANDED. Paying native value into
   // the predicted curve address before — or without — the launch that deploys a
@@ -471,11 +653,24 @@ async function fireV2(plan, deps = {}) {
   if (launch.status !== 'confirmed') {
     const exposed = results.filter((r) => r.status === 'confirmed' || r.status === 'sent' || r.status === 'pending');
     if (exposed.length) {
-      for (const r of exposed) r.strandSuspected = true;
-      strand =
-        `the launch is ${launch.status} but ${exposed.length} buy(s) were broadcast — they may have paid ` +
-        `into a curve that was never created and stranded. Check these wallets' token balances before ` +
-        `treating this launch as done; a "confirmed" buy here does NOT mean it received tokens.`;
+      if (paired) {
+        // Not a strand, and saying so matters as much as raising it: the ERC-20
+        // buy carries value 0, so there is no money sitting at a codeless
+        // address. What IS true is that these wallets bought nothing and spent
+        // their nonces.
+        for (const r of exposed) r.boughtNothing = true;
+        strand =
+          `the launch is ${launch.status} but ${exposed.length} buy(s) were broadcast. On this ` +
+          `${plan.pairSymbol || 'pair'}-quoted path they carry no ETH, so they cost gas only and STRANDED ` +
+          'NOTHING — every wallet still holds its pair balance — but they bought nothing either and their ' +
+          'nonces are spent. Re-run preflight before treating this launch as done.';
+      } else {
+        for (const r of exposed) r.strandSuspected = true;
+        strand =
+          `the launch is ${launch.status} but ${exposed.length} buy(s) were broadcast — they may have paid ` +
+          `into a curve that was never created and stranded. Check these wallets' token balances before ` +
+          `treating this launch as done; a "confirmed" buy here does NOT mean it received tokens.`;
+      }
     }
   }
 
@@ -487,6 +682,12 @@ async function fireV2(plan, deps = {}) {
     launch,
     buys: results,
     sameBlock,
+    // Buys in the launch block or the one after it — the +0/+1 target.
+    withinOneBlock,
+    // Buys the sequencer put IN FRONT of the launch. On the paired path each is
+    // a wallet that burned gas and bought nothing; on the native path each is
+    // ETH gone. Zero is the expected value on both.
+    overtook: ahead.length,
     confirmed: results.filter((r) => r.status === 'confirmed').length,
     sentMs,
     burstMs,
@@ -494,8 +695,14 @@ async function fireV2(plan, deps = {}) {
     // has none). burstMs - sentMs is the number that decides the launch: the
     // post-launch burst, which is now buys only.
     approveMs,
+    // Whether the launch's acknowledgement was taken out of the critical path
+    // (paired only — always false for native), and when it finally came back.
+    // launchAckMs - sentMs is the round trip this change stopped paying for.
+    launchAsync: asyncLaunch,
+    ...(launchAckMs != null ? { launchAckMs } : {}),
     ...(mismatch ? { mismatch } : {}),
     ...(strand ? { strand } : {}),
+    ...(overtake ? { overtake } : {}),
   };
 }
 

@@ -209,3 +209,127 @@ test('a warm-up that throws never stops a native launch', async () => {
   assert.equal(res.confirmed, 2);
   assert.equal(rpc.order[0], 'LAUNCH');
 });
+
+// ── THE NATIVE LAUNCH IS AWAITED. THIS IS THE LINE THAT MUST NOT MOVE. ──────
+//
+// On the PAIRED path the launch's acknowledgement was taken out of the critical
+// path: the send is issued and the buys follow without waiting for the answer,
+// because a paired buy carries `value: 0` and a buy that overtakes the launch
+// calls a codeless address, moves nothing and costs gas and a nonce.
+//
+// A NATIVE buy carries its ETH as value. The identical overtake pays that ETH
+// into an address with no contract, the call SUCCEEDS, and the ETH is gone —
+// 1.798 ETH on 2026-08-13. So the native launch is awaited, always, and the
+// switch is not consulted here at all. These fail the moment that stops being
+// true, including if someone wires the paired flag through by hand.
+
+/** A provider that records the launch's send at once but answers it only on release. */
+function gatedNativeProvider({ order = [] } = {}) {
+  let release;
+  const gate = new Promise((r) => {
+    release = r;
+  });
+  return {
+    order,
+    release: () => release(),
+    async broadcastTransaction(raw) {
+      order.push(raw);
+      if (raw === 'LAUNCH') await gate;
+      return { hash: `hash:${raw}` };
+    },
+    async getTransactionReceipt(hash) {
+      return { status: 1, blockNumber: 10, index: 0, logs: [], hash };
+    },
+  };
+}
+
+test('NOT ONE native buy is issued until the launch has been acknowledged', async () => {
+  const order = [];
+  const rpc = gatedNativeProvider({ order });
+  // The paired switch is turned ON explicitly, and the lead removed, so this
+  // proves the native path ignores both rather than merely defaulting away.
+  const run = fireV2(plan, {
+    provider: rpc,
+    ...deps({ asyncPairedLaunch: true, launchLeadMs: 0 }),
+  });
+  run.catch(() => {});
+
+  try {
+    // Half a second — five blocks — with the launch unanswered.
+    await new Promise((r) => setTimeout(r, 50));
+    assert.deepEqual(
+      order,
+      ['LAUNCH'],
+      'a native buy on the wire before the launch is acknowledged is how 1.798 ETH was lost on 2026-08-13'
+    );
+  } finally {
+    rpc.release();
+  }
+
+  const res = await run;
+  assert.equal(res.launchAsync, false, 'the native path never runs the async ordering');
+  assert.equal(res.launchAckMs, undefined, 'there is no deferred acknowledgement to report');
+  assert.deepEqual(order.slice(1).sort(), ['BUY_A', 'BUY_B']);
+  assert.equal(res.confirmed, 2);
+});
+
+test('a native launch that will not broadcast takes no buy with it', async () => {
+  const order = [];
+  const rpc = {
+    order,
+    async broadcastTransaction(raw) {
+      if (raw === 'LAUNCH') throw new Error('launch rejected');
+      order.push(raw);
+      return { hash: `hash:${raw}` };
+    },
+    async getTransactionReceipt() {
+      return { status: 1, blockNumber: 10, logs: [] };
+    },
+  };
+  // The raw RPC error surfaces exactly as it always has — no approves went out,
+  // so there is nothing to add to it.
+  await assert.rejects(
+    () => fireV2(plan, { provider: rpc, ...deps({ asyncPairedLaunch: true }) }),
+    /launch rejected/
+  );
+  assert.equal(order.length, 0, 'no ETH-carrying buy may chase a launch that never went out');
+});
+
+// ── the overtake accounting, on the path where an overtake is a loss ────────
+
+test('a native buy sequenced ahead of the launch is called what it is: ETH gone', async () => {
+  const rpc = fakeProvider();
+  const res = await fireV2(plan, {
+    provider: rpc,
+    ...deps({
+      waitForReceipt: async (_rpc, hash) =>
+        hash === 'hash:LAUNCH'
+          ? { status: 1, blockNumber: 10, index: 5 }
+          : { status: 1, blockNumber: 9, index: 0 },
+    }),
+  });
+
+  assert.equal(res.overtook, 2);
+  assert.match(res.overtake, /sequenced AHEAD of the launch/);
+  assert.match(res.overtake, /UNRECOVERABLE/);
+  assert.ok(res.buys.every((b) => b.strandSuspected), 'every overtaking native buy is flagged');
+  assert.ok(res.buys.every((b) => b.blocksAfterLaunch === -1));
+  assert.ok(res.buys.every((b) => b.vsLaunch === 'ahead'));
+});
+
+test('a native bundle in the launch block reports the +0/+1 landing, not an overtake', async () => {
+  const rpc = fakeProvider();
+  const res = await fireV2(plan, {
+    provider: rpc,
+    ...deps({
+      waitForReceipt: async (_rpc, hash) =>
+        hash === 'hash:LAUNCH'
+          ? { status: 1, blockNumber: 10, index: 0 }
+          : { status: 1, blockNumber: 10, index: 3 },
+    }),
+  });
+  assert.equal(res.overtook, 0);
+  assert.equal(res.overtake, undefined);
+  assert.equal(res.withinOneBlock, 2);
+  assert.ok(res.buys.every((b) => b.vsLaunch === 'behind'));
+});

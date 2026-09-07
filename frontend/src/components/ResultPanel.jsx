@@ -43,10 +43,18 @@ export default function ResultPanel({ step, output }) {
               buy can report "confirmed" while having paid into a curve that was
               never created. fireV2 raises `strand` when the launch did not
               confirm but buys went out; it goes to the top, in danger colour. */}
-          {(result?.strand || result?.mismatch) && (
+          {result && (result.strand || result.mismatch || result.overtake) && (
             <div className="notice danger">
               <h3>Check these wallets before treating this as done</h3>
-              <p>{result.strand || result.mismatch}</p>
+              {/* All of them, not the first one. `overtake` leads because it is
+                  the newest and the least expected: on a paired launch the buys
+                  are sent without waiting for the launch's acknowledgement, so a
+                  buy CAN be sequenced ahead of the launch. fireV2 counts those
+                  off the receipts and says what each path's overtake costs —
+                  gas and a nonce on the paired path, the ETH itself on native. */}
+              {[result.overtake, result.strand, result.mismatch].filter(Boolean).map((msg, i) => (
+                <p key={i}>{msg}</p>
+              ))}
             </div>
           )}
           {result && (
@@ -70,6 +78,14 @@ export default function ResultPanel({ step, output }) {
                 <span>In launch block</span>
                 <b>{result.sameBlock ?? 0}</b>
               </div>
+              {/* Only when it happened, and then it is not a neutral number: a
+                  buy the sequencer put in front of the launch bought nothing. */}
+              {result.overtook > 0 && (
+                <div className="stat bad">
+                  <span>Ahead of launch</span>
+                  <b>{result.overtook}</b>
+                </div>
+              )}
             </div>
           )}
 

@@ -312,14 +312,44 @@ test('a dev approve that will not broadcast aborts before the launch', async () 
   assert.ok(!order.includes('LAUNCH'), 'the launch must not go out behind a missing approve');
 });
 
-test('a launch that will not broadcast says the approves already went out', async () => {
+// A launch that will not broadcast is the one case the async ordering creates
+// that the awaited one could not: the buys are already gone. It used to be
+// asserted here that "no buy chases a missing launch" — that property is
+// deliberately given up on the PAIRED path, because a buy that chases a missing
+// launch there carries value 0 and costs gas and a nonce, nothing more. What
+// replaces it is a report that says all of that without being read for it.
+test('a launch that will not broadcast reports the buys already sent, and that NOTHING stranded', async () => {
   const order = [];
   const rpc = fakeProvider({ order, failLaunch: true });
   await assert.rejects(
     () => fireV2(plan, { provider: rpc, ...deps() }),
+    (err) => {
+      assert.match(err.message, /FAILED TO BROADCAST/);
+      // How many buys are already out there, in the first sentence.
+      assert.match(err.message, /2 bundle buy\(s\) had ALREADY BEEN SENT/);
+      // What is NOT true: no money is sitting at a codeless address.
+      assert.match(err.message, /carry no ETH \(value 0\)/);
+      assert.match(err.message, /NOTHING IS STRANDED/);
+      // What IS true, and what the operator must do about it.
+      assert.match(err.message, /HAS MOVED ON A NONCE/);
+      assert.match(err.message, /RE-RUN PREFLIGHT/);
+      // And the hashes, so those buys are findable rather than merely counted.
+      assert.match(err.message, /hash:BUY_A/);
+      assert.match(err.message, /hash:BUY_B/);
+      return true;
+    }
+  );
+  assert.ok(order.includes('BUY_A') && order.includes('BUY_B'), 'the buys really were already sent');
+});
+
+test('with the async ordering switched OFF, the paired launch is awaited and no buy chases it', async () => {
+  const order = [];
+  const rpc = fakeProvider({ order, failLaunch: true });
+  await assert.rejects(
+    () => fireV2(plan, { provider: rpc, ...deps({ asyncPairedLaunch: false }) }),
     /approve\(s\) were already sent/
   );
-  // Gas only, nothing stranded — but the operator has to know the nonces moved.
+  // The pre-change ordering, reachable exactly, so the switch is a real switch.
   assert.ok(!order.includes('BUY_A') && !order.includes('BUY_B'), 'no buy chases a missing launch');
 });
 
@@ -385,4 +415,226 @@ test('a paired launch without a dev buy still puts its approves in front', async
   assert.deepEqual(order.slice(launchAt + 1).sort(), ['BUY_A', 'BUY_B']);
   assert.equal(res.confirmed, 2);
   assert.equal(res.launch.approve, undefined);
+});
+
+// ── the launch's acknowledgement is off the critical path ──────────────────
+//
+// Moving the approves in front of the launch left exactly one full RPC round
+// trip between the launch and the first buy: the `await` on the launch's own
+// broadcast (~250ms measured, 2-3 blocks at 0.101s). It bought nothing — no buy
+// reads the launch's answer, the curve address came from the salt — and it cost
+// the tax tier, which steps on whole wall-clock seconds. So on the PAIRED path
+// the launch's send is issued and the buys follow without waiting for it.
+//
+// These tests hold the launch's acknowledgement open and assert the buys go out
+// anyway. Under the old ordering nothing but the launch is on the wire while
+// that gate is shut, which is exactly how they fail if this is ever undone.
+
+/** A provider whose LAUNCH broadcast is recorded at once but answers only on release. */
+function gatedProvider({ order = [] } = {}) {
+  let release;
+  const gate = new Promise((r) => {
+    release = r;
+  });
+  return {
+    order,
+    release: (err) => release(err || null),
+    async broadcastTransaction(raw) {
+      const name = label(raw);
+      // Recorded BEFORE the gate, so "the launch was issued first" is testable
+      // separately from "the launch was acknowledged".
+      order.push(name);
+      if (raw === LAUNCH_RAW) {
+        const err = await gate;
+        if (err) throw err;
+      }
+      return { hash: `hash:${name}` };
+    },
+  };
+}
+
+test("every buy is sent while the launch's acknowledgement is still outstanding", async () => {
+  const order = [];
+  const rpc = gatedProvider({ order });
+  const run = fireV2(plan, { provider: rpc, ...deps() });
+  run.catch(() => {}); // never leave a rejection unhandled if an assert throws
+
+  try {
+    // 50ms is fifty times the lead and half a second of blocks — if the buys
+    // were waiting on the launch's answer they would still be waiting.
+    await new Promise((r) => setTimeout(r, 50));
+
+    const launchAt = order.indexOf('LAUNCH');
+    assert.notEqual(launchAt, -1, 'the launch was issued');
+    assert.deepEqual(order.slice(0, launchAt).sort(), ['APPROVE_A', 'APPROVE_B', 'DEV_APPROVE']);
+    // THE ASSERTION. Both buys are on the wire with the launch unanswered.
+    assert.deepEqual(order.slice(launchAt + 1).sort(), ['BUY_A', 'BUY_B']);
+  } finally {
+    rpc.release();
+  }
+
+  const res = await run;
+  assert.equal(res.confirmed, 2);
+  assert.equal(res.launchAsync, true, 'the result says which ordering ran');
+});
+
+test("the launch's send is still ISSUED first — a buy never precedes it on the wire", async () => {
+  const order = [];
+  const rpc = gatedProvider({ order });
+  const run = fireV2(plan, { provider: rpc, ...deps() });
+  run.catch(() => {});
+  try {
+    await new Promise((r) => setTimeout(r, 50));
+    assert.ok(order.indexOf('LAUNCH') < order.indexOf('BUY_A'), 'BUY_A follows the launch');
+    assert.ok(order.indexOf('LAUNCH') < order.indexOf('BUY_B'), 'BUY_B follows the launch');
+  } finally {
+    rpc.release();
+  }
+  await run;
+});
+
+test('with no lead at all the launch is STILL issued before any buy', async () => {
+  // The lead is a hedge against cross-socket jitter, not the thing that orders
+  // the sends. Issuing the launch's send first is.
+  const order = [];
+  const rpc = gatedProvider({ order });
+  const run = fireV2(plan, { provider: rpc, ...deps({ launchLeadMs: 0 }) });
+  run.catch(() => {});
+  try {
+    await new Promise((r) => setTimeout(r, 50));
+    const launchAt = order.indexOf('LAUNCH');
+    assert.deepEqual(order.slice(launchAt + 1).sort(), ['BUY_A', 'BUY_B']);
+  } finally {
+    rpc.release();
+  }
+  await run;
+});
+
+test("the launch's acknowledgement is not skipped, only moved — it is awaited before returning", async () => {
+  const order = [];
+  const rpc = gatedProvider({ order });
+  let settled = false;
+  const run = fireV2(plan, { provider: rpc, ...deps() }).then((r) => {
+    settled = true;
+    return r;
+  });
+  await new Promise((r) => setTimeout(r, 50));
+  assert.equal(settled, false, 'fireV2 must not return while the launch is unanswered');
+  rpc.release();
+  const res = await run;
+  assert.equal(res.launch.hash, 'hash:LAUNCH');
+  assert.equal(res.launch.status, 'confirmed');
+  // The round trip that left the critical path is still measured, so what it
+  // used to cost stays visible in the record.
+  assert.equal(typeof res.launchAckMs, 'number');
+  assert.ok(res.launchAckMs >= res.sentMs);
+});
+
+// ── the overtake accounting ────────────────────────────────────────────────
+//
+// Not waiting for the launch's answer accepts one risk: a buy's request reaching
+// the sequencer first. It is cheap on this path (value 0, gas and a nonce) but
+// it is never free, so it is read off the receipts rather than inferred.
+
+/** Receipts keyed by hash, so a test can place each transaction in a block exactly. */
+const receiptsFrom = (byHash) => async (_rpc, hash) =>
+  byHash[hash] || { status: 1, blockNumber: 10, index: 99 };
+
+test('a buy sequenced AHEAD of the launch is counted, named, and not called a strand', async () => {
+  const rpc = fakeProvider();
+  const res = await fireV2(plan, {
+    provider: rpc,
+    ...deps({
+      waitForReceipt: receiptsFrom({
+        'hash:LAUNCH': { status: 1, blockNumber: 10, index: 4 },
+        // A overtook: same block, earlier slot than the launch.
+        'hash:BUY_A': { status: 1, blockNumber: 10, index: 2 },
+        // B is where this change is aiming: the block after the launch.
+        'hash:BUY_B': { status: 1, blockNumber: 11, index: 0 },
+      }),
+    }),
+  });
+
+  const a = res.buys.find((b) => b.walletId === 'a');
+  const b = res.buys.find((b) => b.walletId === 'b');
+  assert.equal(a.vsLaunch, 'ahead');
+  assert.equal(a.txIndex, 2);
+  assert.equal(a.blocksAfterLaunch, 0);
+  assert.equal(a.boughtNothing, true, 'an overtaking paired buy bought nothing');
+  assert.equal(a.strandSuspected, undefined, 'and stranded nothing — it carried value 0');
+  assert.equal(b.vsLaunch, 'behind');
+  assert.equal(b.blocksAfterLaunch, 1);
+
+  assert.equal(res.overtook, 1);
+  assert.equal(res.withinOneBlock, 2, 'both landed inside the +0/+1 target');
+  assert.equal(res.launch.txIndex, 4);
+  assert.match(res.overtake, /1 buy\(s\) were sequenced AHEAD of the launch/);
+  assert.match(res.overtake, /0xa/);
+  assert.match(res.overtake, /NOTHING IS STRANDED/);
+  assert.match(res.overtake, /did NOT buy/);
+});
+
+test('a bundle that landed behind the launch reports no overtake at all', async () => {
+  const rpc = fakeProvider();
+  const res = await fireV2(plan, {
+    provider: rpc,
+    ...deps({
+      waitForReceipt: receiptsFrom({
+        'hash:LAUNCH': { status: 1, blockNumber: 10, index: 0 },
+        'hash:BUY_A': { status: 1, blockNumber: 10, index: 1 },
+        'hash:BUY_B': { status: 1, blockNumber: 10, index: 2 },
+      }),
+    }),
+  });
+  assert.equal(res.overtook, 0);
+  assert.equal(res.overtake, undefined);
+  assert.equal(res.sameBlock, 2);
+  assert.equal(res.withinOneBlock, 2);
+  assert.ok(res.buys.every((b) => b.vsLaunch === 'behind'));
+});
+
+test('a raw receipt naming transactionIndex reads the same as an ethers one naming index', async () => {
+  const rpc = fakeProvider();
+  const res = await fireV2(plan, {
+    provider: rpc,
+    ...deps({
+      waitForReceipt: receiptsFrom({
+        'hash:LAUNCH': { status: 1, blockNumber: 10, transactionIndex: 6 },
+        'hash:BUY_A': { status: 1, blockNumber: 10, transactionIndex: 3 },
+        'hash:BUY_B': { status: 1, blockNumber: 10, transactionIndex: 7 },
+      }),
+    }),
+  });
+  assert.equal(res.overtook, 1);
+  assert.equal(res.buys.find((b) => b.walletId === 'a').vsLaunch, 'ahead');
+  assert.equal(res.buys.find((b) => b.walletId === 'b').vsLaunch, 'behind');
+});
+
+test('a same-block buy whose slot is unknown is reported unknown, never guessed', async () => {
+  const rpc = fakeProvider();
+  const res = await fireV2(plan, {
+    provider: rpc,
+    // No index on any receipt: same block, nothing to order them by. Calling
+    // that "behind" would be the comfortable answer and an invented one.
+    ...deps({ waitForReceipt: async () => ({ status: 1, blockNumber: 10 }) }),
+  });
+  assert.ok(res.buys.every((b) => b.vsLaunch === 'unknown'));
+  assert.equal(res.overtook, 0, 'unknown is not counted as an overtake');
+  assert.equal(res.overtake, undefined);
+});
+
+test('a paired launch that did not confirm says gas only, not stranded', async () => {
+  const rpc = fakeProvider();
+  const res = await fireV2(plan, {
+    provider: rpc,
+    ...deps({
+      waitForReceipt: receiptsFrom({ 'hash:LAUNCH': { status: 0, blockNumber: 10, index: 0 } }),
+      parseLaunch: () => null,
+    }),
+  });
+  assert.equal(res.launch.status, 'reverted');
+  assert.match(res.strand, /STRANDED NOTHING/);
+  assert.match(res.strand, /nonces are spent/);
+  assert.ok(res.buys.every((b) => b.boughtNothing));
+  assert.ok(res.buys.every((b) => b.strandSuspected === undefined));
 });

@@ -218,6 +218,56 @@ const config = {
   // against a live pool — this limit is used instead.
   buyGasLimit: num(process.env.BUY_GAS_LIMIT, 400000),
 
+  // ── THE PAIRED BUNDLE'S LAUNCH ROUND TRIP ─────────────────────────────────
+  // ON for an ERC-20-quoted (PAIRED) pons v2 launch, and never consulted at all
+  // on a NATIVE one. That asymmetry is the entire safety argument for this
+  // flag, not a tuning preference — see below.
+  //
+  // fireV2 broadcasts the launch and then the pre-signed bundle buys. Awaiting
+  // the launch's JSON-RPC acknowledgement before issuing the first buy costs one
+  // full round trip — ~250ms measured, 2-3 blocks at 0.101s. The opening snipe
+  // tax steps on WHOLE WALL-CLOCK SECONDS (99.00% at 0s, 6.18% at 1s, 0.19% at
+  // 2s, nothing at 3s), so a quarter second there is the difference between the
+  // bundle owning the launch's own second and a non-exempt sniper buying in
+  // front of it cheaply. A live launch lost 2,960,772 tokens — 2.09% of the
+  // bundle — exactly that way.
+  //
+  // With this on, the launch's send is ISSUED first and the buys follow without
+  // waiting for its answer. The risk it accepts is that one buy's request reaches
+  // the sequencer BEFORE the launch's. What that costs is decided entirely by
+  // the quote asset, and the two answers are not comparable:
+  //
+  //   PAIRED — the buy carries `value: 0` (see evm/v2/curve.js). It calls an
+  //   address that has no contract yet, which SUCCEEDS on the EVM, moves
+  //   nothing, and leaves the wallet holding every one of its pair tokens. The
+  //   cost is that wallet's gas and its nonce, and that it did not get to buy.
+  //   NO FUNDS ARE LOST.
+  //
+  //   NATIVE — the identical buy carries its ETH as `value`. Paying ETH to a
+  //   codeless address ALSO succeeds, and the ETH is GONE PERMANENTLY: 1.798 ETH
+  //   on 2026-08-13 (recorded in bundle/prepareV2.js). There is no block worth
+  //   winning at that price, so a native launch is always awaited before a
+  //   single buy is issued and fireV2 does not read this flag on that path.
+  //
+  // V2_PAIRED_ASYNC_LAUNCH=false puts the paired path back on the fully awaited
+  // ordering, byte for byte as it was.
+  v2PairedAsyncLaunch: bool(process.env.V2_PAIRED_ASYNC_LAUNCH, true),
+
+  // How long the launch is left ALONE on the wire before the buys follow it,
+  // when the flag above is on. Not a sleep to be tuned upward: it is one
+  // event-loop turn, which is what it takes for the JSON-RPC drain carrying the
+  // launch to fire and hand its request to a warm socket before any buy is even
+  // serialised. It turns a dispatch gap measured in tens of microseconds into
+  // one measured in a millisecond, which is the same order as the cross-socket
+  // jitter it is defending against.
+  //
+  // 1ms is ~1% of a block and ~0.1% of the one-second tax step — far too small
+  // to give back the block this whole change exists to win. HARD-CAPPED at 5ms
+  // for that reason: past that it stops being a lead and starts being the
+  // latency it replaced. 0 removes the yield entirely (the buys are then issued
+  // in the same event-loop turn as the launch, still strictly after it).
+  v2PairedLaunchLeadMs: Math.min(5, Math.max(0, num(process.env.V2_PAIRED_LAUNCH_LEAD_MS, 1))),
+
   // A V4 seed wallet is claimable by V1/V3 once it has been funded and has aged
   // at least this many hours — the "done seasoning" gate. 24h by default.
   seasonedMinHours: num(process.env.SEASONED_MIN_HOURS, 24),
