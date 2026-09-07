@@ -140,3 +140,72 @@ test('a dry run broadcasts nothing', async () => {
   assert.equal(res.curve, CURVE, 'a dry run still reports where the buys would go');
   assert.ok(res.buys.every((b) => b.status === 'simulated'));
 });
+
+// ── the native path is not the paired one, and must not drift into it ──────
+//
+// On the paired path every approve now goes out BEFORE the launch, so the
+// post-launch burst is buys only. None of that applies here: a native buy
+// carries its ETH as value, and a buy that lands before the launch pays into an
+// address with no contract, SUCCEEDS on the EVM and keeps the money — 1.798 ETH
+// on 2026-08-13. These pin the native ordering so a later change to the paired
+// path cannot quietly take this one with it.
+
+test('NOTHING is broadcast before the launch on the native path', async () => {
+  const rpc = fakeProvider();
+  await fireV2(plan, { provider: rpc, ...deps() });
+
+  assert.equal(rpc.order[0], 'LAUNCH', 'the launch is the first thing on the wire');
+  assert.equal(rpc.order.length, 3, 'one launch and two buys, nothing else');
+  assert.deepEqual(rpc.order.slice(1).sort(), ['BUY_A', 'BUY_B']);
+});
+
+test('a native plan has no approves to pin, and the salt pin does not run', async () => {
+  // No salt, no curve, no approves — a native plan as prepareV2 builds it. The
+  // pin must not refuse it: it guards approves broadcast ahead of a launch, and
+  // this path broadcasts none.
+  const rpc = fakeProvider();
+  const noSalt = { ...plan, salt: undefined };
+  const res = await fireV2(noSalt, {
+    provider: rpc,
+    ...deps({
+      saltFromLaunch: () => {
+        throw new Error('the salt pin must never run on the native path');
+      },
+    }),
+  });
+  assert.equal(res.confirmed, 2);
+  assert.equal(rpc.order[0], 'LAUNCH');
+});
+
+test('the pool is warmed for one socket per buy plus the launch', async () => {
+  let count = 'never called';
+  let gotRpc = null;
+  const rpc = fakeProvider();
+  await fireV2(plan, {
+    provider: rpc,
+    ...deps({
+      warmPool: async (n, r) => {
+        count = n;
+        gotRpc = r;
+      },
+    }),
+  });
+  // Two buys, one transaction each, plus the launch. A native buy signs no
+  // approve, so there is no second socket per wallet.
+  assert.equal(count, 3);
+  assert.equal(gotRpc, rpc);
+});
+
+test('a warm-up that throws never stops a native launch', async () => {
+  const rpc = fakeProvider();
+  const res = await fireV2(plan, {
+    provider: rpc,
+    ...deps({
+      warmPool: async () => {
+        throw new Error('socket storm');
+      },
+    }),
+  });
+  assert.equal(res.confirmed, 2);
+  assert.equal(rpc.order[0], 'LAUNCH');
+});

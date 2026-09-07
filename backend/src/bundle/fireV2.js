@@ -2,8 +2,30 @@
 
 // Broadcasts a pons v2 launch and the bundle behind it.
 //
-//   warm the pool → broadcast the launch → immediately blast every pre-signed
-//   buy → collect receipts
+//   NATIVE: warm the pool → broadcast the launch → immediately blast every
+//   pre-signed buy → collect receipts
+//
+//   PAIRED (ERC-20 quote asset): warm the pool → check the salt pin →
+//   broadcast EVERY approve → broadcast the launch → blast the buys, and only
+//   the buys → collect receipts
+//
+// WHY THE APPROVES MOVED IN FRONT OF THE LAUNCH. The opening snipe tax is
+// startBps >> ((elapsed * 14) / window) and it steps on whole wall-clock
+// SECONDS: 99.00% at 0s, 6.18% at 1s, 0.19% at 2s, nothing at 3s. Being exempt
+// grants no ordering power — only speed puts a bundle in the 99% tier. On the
+// paired NVDA launch of record the bundle wallets already held tx indexes 5, 6,
+// 8, 10, 11, 12 and 13 in the sniper's own block while he held 17: they were
+// sequenced AHEAD of him and spent the slot on `approve` instead of `buy`.
+// Every `await broadcastTransaction` is a full round trip (~250ms measured,
+// 2-3 blocks at 0.101s), so an approve between the launch and the buy pushed
+// every buy a wall-clock quarter-second late for nothing. The approve does not
+// need the curve to exist — it is an allowance on the PAIR token naming an
+// address — so it can go out before the launch, and now does.
+//
+// The native path is untouched, deliberately. There the buy carries its ETH as
+// value, and a buy that lands before the launch pays into a codeless address,
+// SUCCEEDS on the EVM and keeps the money (1.798 ETH, 2026-08-13). Nothing on
+// that path is reordered.
 //
 // Nothing is signed here and nothing is read from a receipt before the buys go
 // out. prepareV2 already knows the curve address, because the live factory
@@ -58,6 +80,83 @@ function isDefiniteRevert(err) {
     err?.revert?.data ||
     (typeof err?.value === 'string' && err.value.startsWith('0x') ? err.value : null);
   return typeof data === 'string' && data.startsWith('0x') && data.length >= 10;
+}
+
+const SALT_HEX = /^0x[0-9a-fA-F]{64}$/;
+const ADDRESS_HEX = /^0x[0-9a-fA-F]{40}$/;
+
+/**
+ * THE SALT PIN — the one check that has to hold before an approve goes out
+ * ahead of its launch.
+ *
+ * A bundle approve names the PREDICTED CURVE as its spender, and that address
+ * exists only as a function of the launch salt. prepareV2 mints exactly one
+ * salt per call and uses it for the prediction, the factory's own simulation,
+ * the launch transaction, the approves and the buys — and /v2/launch prepares
+ * and fires in the same request, so nothing can slip between them. That is the
+ * design. This is the proof, and it is checked BEFORE the first broadcast:
+ *
+ *   1. the plan names a real 32-byte salt and a real curve;
+ *   2. the SIGNED LAUNCH BYTES decode to that same salt (read out of the
+ *      transaction itself, not from a field sitting next to it);
+ *   3. every approve records that same salt, and names that same curve.
+ *
+ * If any of those disagree the approves would grant an allowance on a curve the
+ * launch never creates, and every buy behind them would be lost. So this throws
+ * and nothing is broadcast. It never repairs, re-derives or guesses a salt.
+ *
+ * @param {object} plan from prepareV2()
+ * @param {{saltFromLaunch: (raw: string) => string}} io the decoder
+ */
+function assertSaltPin(plan, { saltFromLaunch }) {
+  const salt = plan.salt;
+  if (typeof salt !== 'string' || !SALT_HEX.test(salt)) {
+    throw new Error(
+      'the plan carries no 32-byte salt, so the curve its approves name cannot be tied to the launch ' +
+        'about to be sent. Nothing was broadcast — re-run preflight.'
+    );
+  }
+  const curve = plan.curve;
+  if (typeof curve !== 'string' || !ADDRESS_HEX.test(curve) || /^0x0+$/.test(curve)) {
+    throw new Error(
+      `the plan's curve address (${String(curve)}) is not usable, so the approves cannot be checked ` +
+        'against it. Nothing was broadcast — re-run preflight.'
+    );
+  }
+
+  let launchSalt;
+  try {
+    launchSalt = saltFromLaunch(plan.launch.raw);
+  } catch (err) {
+    throw new Error(
+      'the signed launch cannot be read back as a pons v2 launch, so the salt its approves were built ' +
+        `against cannot be verified: ${err.message}. Nothing was broadcast — re-run preflight.`
+    );
+  }
+  if (launchSalt.toLowerCase() !== salt.toLowerCase()) {
+    throw new Error(
+      `SALT MISMATCH — nothing was broadcast. The bundle's approves were built against salt ${salt} ` +
+        `(curve ${curve}), but the launch about to be sent carries salt ${launchSalt}. That launch ` +
+        'creates a DIFFERENT curve: every approve and every buy would name one that never exists. ' +
+        'Re-run preflight.'
+    );
+  }
+
+  for (const b of plan.buys) {
+    if (!b.approve) continue;
+    if (typeof b.approve.salt !== 'string' || b.approve.salt.toLowerCase() !== salt.toLowerCase()) {
+      throw new Error(
+        `SALT MISMATCH — nothing was broadcast. ${b.address}'s approve was built against salt ` +
+          `${String(b.approve.salt)}, not this launch's ${salt}. Re-run preflight.`
+      );
+    }
+    if (String(b.approve.spender).toLowerCase() !== curve.toLowerCase()) {
+      throw new Error(
+        `nothing was broadcast: ${b.address}'s approve names spender ${b.approve.spender}, not the ` +
+          `curve ${curve} this plan predicted from salt ${salt}. Re-run preflight.`
+      );
+    }
+  }
 }
 
 async function recheckLaunch(rpc, tx, explain, { timeoutMs = RECHECK_MS } = {}) {
@@ -125,9 +224,38 @@ async function fireV2(plan, deps = {}) {
     throw new Error(`${unsigned.length} buy(s) are unsigned — re-run preflight`);
   }
 
+  // Is this the ERC-20 pair path? Exactly one thing decides it: whether the
+  // bundle's buys carry pre-signed approvals. A native buy signs none.
+  const paired = plan.buys.some((b) => b.approve);
+
+  // THE SALT PIN. Offline, free, and first — a plan that cannot prove its
+  // approves and its launch share one salt must not reach the network at all,
+  // not even to warm a socket. It is what makes broadcasting an approve ahead
+  // of its launch safe. On the native path there is nothing to pin (no approve
+  // is broadcast) and this does not run, so that path cannot be refused by a
+  // check it never had.
+  if (paired) {
+    assertSaltPin(plan, { saltFromLaunch: deps.saltFromLaunch || v2factory.saltFromLaunchTx });
+  }
+
   // Open the sockets before the clock matters. A cold TLS handshake in the
-  // middle of the burst costs more than everything else here put together.
-  await warm();
+  // middle of the burst costs more than everything else here put together
+  // (~131ms measured — 1.3 blocks).
+  //
+  // THE COUNT IS NOT OPTIONAL. warmPool(count, rpc) does
+  // Array.from({length: count}), and Array.from({length: undefined}) is an
+  // EMPTY array — so the bare `await warm()` this line used to be opened ZERO
+  // sockets while the comment above claimed otherwise. Every socket the burst
+  // needs is counted here: one broadcast per buy, a second per buy on the
+  // paired path (approve then buy), the dev approve if there is one, and the
+  // launch itself.
+  const warmCount = plan.buys.length * (paired ? 2 : 1) + (plan.launch.approve ? 1 : 0) + 1;
+  try {
+    await warm(warmCount, rpc);
+  } catch (err) {
+    // A warm-up is an optimisation. Never let it stop a launch.
+    console.warn(`[pons-launcher] connection warm-up failed: ${err.message}`);
+  }
 
   // The bounded re-check. Uses the now-warm socket, runs before the launch goes
   // out, and aborts only on a definitive revert — so a launch that turned
@@ -164,33 +292,95 @@ async function fireV2(plan, deps = {}) {
   }
 
   const t0 = Date.now();
-  // On the ERC-20 dev-buy path the dev's approve(forwarder) is broadcast first,
-  // at the nonce just below the launch. The sequencer runs a wallet's nonces in
-  // order, so the allowance is in place by the time launchAndBuy executes — the
-  // same trick the buy pairs below use. No receipt is awaited between them.
+
+  // ── every approve, BEFORE the launch ──────────────────────────────────────
+  // The dev's approve(forwarder) sits at the nonce just below the launch, and
+  // each bundle wallet's approve(curve) sits at the nonce just below its buy.
+  // The sequencer runs a wallet's nonces in order, so both allowances are in
+  // place by the time the transaction above them executes; no receipt is
+  // awaited for any of them.
+  //
+  // ALL OF THEM GO OUT AT ONCE, in a single concurrent round trip, for two
+  // reasons. It is the shortest possible pre-launch phase, so it telegraphs the
+  // least: an approve naming the predicted curve is a public signal, and the
+  // window between the first one and the launch is the only warning a watcher
+  // gets. And it leaves the post-launch burst holding buys and nothing else —
+  // which is the entire point of the change.
+  //
+  // An approve costs gas and moves no funds, so a wallet whose approve is on
+  // the wire when something later aborts has lost nothing but its nonce.
+  const approveOutcome = new Array(plan.buys.length).fill(null);
   let devApprove = null;
-  if (plan.launch.approve) {
-    try {
-      const resp = await rpc.broadcastTransaction(plan.launch.approve.raw);
-      devApprove = { hash: resp.hash, status: 'sent', nonce: plan.launch.approve.nonce };
-    } catch (err) {
+  let approvesSent = 0;
+  let approveMs = 0;
+  if (paired || plan.launch.approve) {
+    const pending = [];
+    if (plan.launch.approve) pending.push({ dev: true, raw: plan.launch.approve.raw });
+    plan.buys.forEach((b, i) => {
+      if (b.approve) pending.push({ index: i, raw: b.approve.raw });
+    });
+
+    const settled = await Promise.allSettled(pending.map((p) => rpc.broadcastTransaction(p.raw)));
+    let devError = null;
+    settled.forEach((r, k) => {
+      const p = pending[k];
+      if (p.dev) {
+        if (r.status === 'fulfilled') {
+          devApprove = { hash: r.value.hash, status: 'sent', nonce: plan.launch.approve.nonce };
+        } else {
+          devError = r.reason;
+        }
+        return;
+      }
+      const { approve } = plan.buys[p.index];
+      approveOutcome[p.index] =
+        r.status === 'fulfilled'
+          ? { nonce: approve.nonce, hash: r.value.hash, status: 'sent' }
+          : { nonce: approve.nonce, hash: null, status: 'failed', error: rpcMessage(r.reason) };
+      if (r.status === 'fulfilled') approvesSent += 1;
+    });
+    approveMs = Date.now() - t0;
+
+    if (devError) {
       // A dev approve that will not broadcast leaves the launch at n+1 queued
       // behind a gap it can never fill. Abort loudly rather than send the launch
       // (and the whole bundle) into a hole.
       throw new Error(
-        `the dev approve for the ${plan.pairSymbol || 'pair'} launch failed to broadcast, so ` +
-          `nothing else was sent: ${rpcMessage(err)}`
+        `the dev approve for the ${plan.pairSymbol || 'pair'} launch failed to broadcast, so the ` +
+          `launch was NOT sent: ${rpcMessage(devError)}` +
+          (approvesSent
+            ? `. ${approvesSent} bundle approve(s) had already gone out — they cost gas only and ` +
+              'strand nothing, but those wallets have moved on a nonce, so re-run preflight'
+            : '')
       );
     }
   }
-  const launchResp = await rpc.broadcastTransaction(plan.launch.raw);
+
+  let launchResp;
+  if (approvesSent) {
+    try {
+      launchResp = await rpc.broadcastTransaction(plan.launch.raw);
+    } catch (err) {
+      throw new Error(
+        `the launch failed to broadcast after ${approvesSent} bundle approve(s) were already sent: ` +
+          `${rpcMessage(err)}. Those wallets granted an allowance on a curve that was never created ` +
+          '— gas only, nothing is stranded — but they have moved on a nonce, so re-run preflight ' +
+          'before trying again.'
+      );
+    }
+  } else {
+    launchResp = await rpc.broadcastTransaction(plan.launch.raw);
+  }
   const sentMs = Date.now() - t0;
 
-  // Straight into the buys. The launch is in flight, not confirmed — and it
-  // does not need to be, because the curve address does not depend on anything
-  // the launch tells us.
+  // Straight into the buys, AND NOTHING BUT THE BUYS. The launch is in flight,
+  // not confirmed — and it does not need to be, because the curve address does
+  // not depend on anything the launch tells us. On the paired path the approve
+  // that used to sit here, costing every wallet a full round trip after the
+  // launch, has already been broadcast above; this loop only reports what
+  // happened to it.
   const results = await Promise.all(
-    plan.buys.map(async (b) => {
+    plan.buys.map(async (b, i) => {
       const entry = {
         walletId: b.walletId,
         address: b.address,
@@ -198,20 +388,15 @@ async function fireV2(plan, deps = {}) {
         nonce: b.nonce,
         exempt: b.exempt,
       };
-      // ERC-20 pair: approve(curve) at nonce n, buy at n+1 — both broadcast
-      // without waiting for the approve's receipt, exactly as the sell path does.
-      // If the approve will not even broadcast, the buy at n+1 would sit behind a
-      // nonce gap forever, so it is NOT sent.
+      // ERC-20 pair: approve(curve) at nonce n went out before the launch, the
+      // buy at n+1 goes out now. If the approve would not even broadcast, the
+      // buy would sit behind a nonce gap forever, so it is NOT sent.
       if (b.approve) {
-        entry.approve = { nonce: b.approve.nonce, hash: null, status: 'pending' };
-        try {
-          const resp = await rpc.broadcastTransaction(b.approve.raw);
-          entry.approve.hash = resp.hash;
-          entry.approve.status = 'sent';
-        } catch (err) {
-          entry.approve.status = 'failed';
+        const sent = approveOutcome[i];
+        entry.approve = { nonce: sent.nonce, hash: sent.hash, status: sent.status };
+        if (sent.status !== 'sent') {
           entry.status = 'failed';
-          entry.error = rpcMessage(err);
+          entry.error = sent.error;
           return entry;
         }
       }
@@ -305,9 +490,13 @@ async function fireV2(plan, deps = {}) {
     confirmed: results.filter((r) => r.status === 'confirmed').length,
     sentMs,
     burstMs,
+    // How long the pre-launch approve phase took (0 on the native path, which
+    // has none). burstMs - sentMs is the number that decides the launch: the
+    // post-launch burst, which is now buys only.
+    approveMs,
     ...(mismatch ? { mismatch } : {}),
     ...(strand ? { strand } : {}),
   };
 }
 
-module.exports = { fireV2, recheckLaunch, RECHECK_MS };
+module.exports = { fireV2, recheckLaunch, assertSaltPin, RECHECK_MS };

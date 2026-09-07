@@ -610,7 +610,14 @@ router.post('/v2/relay/timed-fund/resume', requireApiKey, (req, res, next) => {
 });
 
 // POST /api/sweep — return funds to the dev wallet. ETH only unless asked.
-router.post('/sweep', requireApiKey, async (req, res, next) => {
+//
+// IT TAKES THE LAUNCH LOCK. A sweep signs a transaction FROM every bundle
+// wallet, at the very nonce the pre-signed approve/buy pair is holding — and on
+// the paired path the approve is now broadcast ahead of the launch, so that
+// pair is on the wire for longer than it used to be. A sweep landing in the
+// middle of it strands the buy behind a consumed nonce. Sweeping during a
+// launch is never intended, so it is refused with a 409 rather than raced.
+router.post('/sweep', requireApiKey, withLaunchLock(async (req, res, next) => {
   try {
     const ks = keystoreFor(req.user.id);
     const { includeTokens = false, tokenAddress = null, variant = DEFAULT_VARIANT } = req.body || {};
@@ -626,7 +633,7 @@ router.post('/sweep', requireApiKey, async (req, res, next) => {
   } catch (err) {
     next(err);
   }
-});
+}));
 
 // ── selling out ───────────────────────────────────────────────────────────
 // Exit 100% of a launched token from every bundle wallet holding it, in one
@@ -755,7 +762,12 @@ router.post('/sell/preflight', requireApiKey, async (req, res, next) => {
 // POST /api/sell — prepare, then fire. Irreversible and touches every wallet,
 // so it takes an explicit confirm as well as the API key, the same two locks a
 // key export takes.
-router.post('/sell', requireApiKey, async (req, res, next) => {
+//
+// IT ALSO TAKES THE LAUNCH LOCK, for the same reason the sweep above does: a
+// sell signs approve/sell FROM every bundle wallet, at the nonces a launch's
+// pre-signed approve/buy pair is holding. Selling during a launch is never
+// intended; a 409 is the right answer.
+router.post('/sell', requireApiKey, withLaunchLock(async (req, res, next) => {
   try {
     const { token, confirm } = req.body || {};
     if (confirm !== true) {
@@ -800,7 +812,7 @@ router.post('/sell', requireApiKey, async (req, res, next) => {
   } catch (err) {
     next(err);
   }
-});
+}));
 
 // ── disperser contracts ───────────────────────────────────────────────────
 // Deploying from the console rather than the shell, and recorded in a file

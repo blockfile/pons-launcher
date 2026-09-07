@@ -99,7 +99,15 @@ async function fireSell(plan, deps = {}) {
 
   // Open the sockets before the clock matters. A cold TLS handshake in the
   // middle of the burst costs more than everything else here put together.
-  await warm(plan.wallets.length * 2);
+  // Two per wallet: an approve and a sell. The provider is passed explicitly so
+  // the sockets warmed are the ones this burst will broadcast on, and the whole
+  // thing is guarded — a warm-up is an optimisation and must never be able to
+  // stop a sell.
+  try {
+    await warm(plan.wallets.length * 2, rpc);
+  } catch (err) {
+    console.warn(`[pons-launcher] connection warm-up failed: ${err.message}`);
+  }
 
   // Native balances before anything moves. This is what makes "ETH received"
   // reportable at all: the curve's sell returns its output as a return value,

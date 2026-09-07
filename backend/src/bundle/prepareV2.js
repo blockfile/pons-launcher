@@ -43,6 +43,40 @@ const APPROVE_ABI = ['function approve(address spender, uint256 amount) returns 
 // spent on the ERC-20 pair path — a native launch signs no approvals.
 const APPROVE_GAS = 100_000n;
 
+// THE SALT IS THE WHOLE BUNDLE.
+//
+// The curve address is derived from it, every bundle approve names that curve
+// as its spender, and every buy is signed against it. A salt that is not a
+// 32-byte value cannot produce the address this plan predicted, and a salt that
+// arrives from outside must be exactly what the caller meant — so it is checked
+// here rather than left to blow up inside an ABI encoder, and never coerced.
+//
+// One salt is minted per prepareV2 call and used for the prediction, the
+// simulation, the launch transaction, the approves and the buys. /v2/launch
+// prepares and fires in the same request (routes/launch.js), so the salt the
+// approves are built against IS the salt the launch carries — and fireV2 proves
+// it by reading the salt back out of the signed launch before broadcasting
+// anything. A preflight's salt is never reused: preflight signs nothing that is
+// ever broadcast.
+const SALT_HEX = /^0x[0-9a-fA-F]{64}$/;
+
+function pinSalt(supplied, mint) {
+  if (supplied !== undefined && supplied !== null && supplied !== '') {
+    if (typeof supplied !== 'string' || !SALT_HEX.test(supplied)) {
+      throw new Error(
+        `salt ${String(supplied)} is not a 32-byte hex value — refusing to guess one. ` +
+          'Omit it to have a fresh salt minted.'
+      );
+    }
+    return supplied;
+  }
+  const minted = mint();
+  if (typeof minted !== 'string' || !SALT_HEX.test(minted)) {
+    throw new Error(`the minted salt ${String(minted)} is not a 32-byte hex value — nothing was signed`);
+  }
+  return minted;
+}
+
 /** Strip fields signTransaction rejects, and pin chainId. */
 function toSignable(tx, { nonce, gasLimit, fees, chainId }) {
   const { from, ...rest } = tx;
@@ -196,7 +230,7 @@ async function prepareV2(input, deps = {}) {
     // it is non-zero, and pinning it turns an owner tweaking an unrelated fee
     // between preflight and launch into a reverted launch.
     expectedEconomics: `0x${'00'.repeat(32)}`,
-    salt: params.salt || v2mod.newSalt(),
+    salt: pinSalt(params.salt, () => v2mod.newSalt()),
   };
 
   const fees = await getFeesFn(FEE_BUMP_PCT);
@@ -386,6 +420,11 @@ async function prepareV2(input, deps = {}) {
     devBuyEth: nonNative ? formatUnits(devBuy, pairDecimals) : formatEther(devBuy),
     nonce: launchNonce,
     atomic: devBuy > 0n,
+    // The salt this launch was built with, stamped alongside the signed bytes
+    // that carry it. fireV2 checks BOTH — this field and the salt decoded out of
+    // `raw` — against the salt the bundle's approves name, and refuses to
+    // broadcast if any of the three disagree.
+    salt: fullParams.salt,
     // Present only on the ERC-20 dev-buy path; its presence tells fireV2 to
     // broadcast it before the launch and to skip the fire-time re-estimate (which
     // would falsely revert on the not-yet-mined allowance).
@@ -495,6 +534,12 @@ async function prepareV2(input, deps = {}) {
       approve = {
         nonce: baseNonce,
         spender: curve,
+        // WHICH SALT THIS APPROVE IS BOUND TO. `spender` is the curve predicted
+        // from it, and nothing else; recording the salt makes that binding
+        // checkable at fire time instead of assumed. fireV2 broadcasts these
+        // AHEAD of the launch, so an approve carrying a stale salt would grant
+        // an allowance on a curve the launch never creates and lose the bundle.
+        salt: fullParams.salt,
         raw: await signer.signTransaction(
           toSignable(approveTx, { nonce: baseNonce, gasLimit: APPROVE_GAS, fees, chainId })
         ),

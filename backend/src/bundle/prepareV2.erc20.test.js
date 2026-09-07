@@ -286,3 +286,78 @@ test('d: a NATIVE launch is unchanged — one tx per wallet, no approvals, ETH a
   const w1buy = signed.find((s) => s.id === 'w1').tx;
   assert.equal(w1buy.value, parseEther('0.1'), 'a native buy sends its quote as value');
 });
+
+// ── the salt pin, at the end prepareV2 owns ────────────────────────────────
+//
+// The curve every bundle approve names as its spender exists only as a function
+// of the launch salt, and fireV2 now broadcasts those approves BEFORE the
+// launch. So the salt each artefact was built against is recorded on the
+// artefact itself, and fireV2 refuses to broadcast when the three disagree.
+// prepareV2's job is to make sure they cannot: one salt per call, stamped
+// everywhere it is used.
+
+test('one salt is minted per call and stamped on the launch and on every approve', async () => {
+  const big = 100n * 10n ** 6n;
+  const { deps } = harness({ pairBalances: { [DEV]: big, [W1]: big, [W2]: big } });
+
+  const plan = await prepareV2(
+    {
+      ...BASE,
+      pairToken: USDG,
+      devBuyEth: '10',
+      wallets: [
+        { walletId: 'w1', amountEth: '5' },
+        { walletId: 'w2', amountEth: '5' },
+      ],
+    },
+    deps
+  );
+
+  assert.match(plan.salt, /^0x[0-9a-fA-F]{64}$/);
+  assert.equal(plan.params.salt, plan.salt);
+  assert.equal(plan.launch.salt, plan.salt, 'the launch records the salt it was built with');
+  for (const b of plan.buys) {
+    assert.equal(b.approve.salt, plan.salt, 'every approve records the salt its curve came from');
+    assert.equal(getAddress(b.approve.spender), CURVE, 'and names the curve that salt predicts');
+  }
+});
+
+test('a caller-supplied salt is used as given, never coerced', async () => {
+  const pinned = '0x' + 'ab'.repeat(32);
+  const { deps } = harness({ pairBalances: { [W1]: 100n * 10n ** 6n } });
+
+  const plan = await prepareV2(
+    { ...BASE, params: { ...BASE.params, salt: pinned }, pairToken: USDG, wallets: [{ walletId: 'w1', amountEth: '5' }] },
+    deps
+  );
+  assert.equal(plan.salt, pinned);
+  assert.equal(plan.buys[0].approve.salt, pinned);
+});
+
+test('a salt that is not 32 bytes is REFUSED rather than guessed at', async () => {
+  const { signed, deps } = harness({ pairBalances: { [W1]: 100n * 10n ** 6n } });
+
+  for (const bad of ['0x00', 'not-a-salt', 42, '0x' + 'ab'.repeat(31)]) {
+    await assert.rejects(
+      () =>
+        prepareV2(
+          { ...BASE, params: { ...BASE.params, salt: bad }, pairToken: USDG, wallets: [{ walletId: 'w1', amountEth: '5' }] },
+          deps
+        ),
+      /refusing to guess one/,
+      `salt ${String(bad)} must be refused`
+    );
+  }
+  assert.equal(signed.length, 0, 'nothing is signed against a salt that cannot be trusted');
+});
+
+test('a NATIVE plan carries the salt too, but signs no approve to bind it to', async () => {
+  const { deps } = harness({ pairToken: ZeroAddress });
+  const plan = await prepareV2(
+    { ...BASE, pairToken: ZeroAddress, wallets: [{ walletId: 'w1', amountEth: '0.01' }] },
+    deps
+  );
+  assert.match(plan.salt, /^0x[0-9a-fA-F]{64}$/);
+  assert.equal(plan.launch.salt, plan.salt);
+  assert.ok(plan.buys.every((b) => !b.approve), 'a native buy signs no approval');
+});
