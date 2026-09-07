@@ -552,5 +552,11 @@ module.exports = {
   gasReserveWei,
   OVERSHOOT_BPS,
   FEE_BUMP_PCT,
+  // The two gas limits the reserve above is built from. Public because the REVERSE
+  // direction (bundle/swapFromPair.js) reserves for the same approve and the same
+  // swap and must not carry a second copy of either figure — the same rule that put
+  // gasReserveWei itself here. Nothing about this module's behaviour changes.
+  SWAP_GAS,
+  APPROVE_GAS,
   _private: { SWAP_GAS, APPROVE_GAS, OVERSHOOT_BPS, FEE_BUMP_PCT, LATER_LEG_FEE_MULT, MAX_TARGETS },
 };

@@ -24,6 +24,7 @@ const { requireApiKey, requireAuthConfigured } = require('../middleware/auth');
 const { findSellable, withDeadline } = require('../evm/v2/holdings');
 const { prepareSell } = require('../bundle/prepareSell');
 const { swapBundleToPair } = require('../bundle/swapToPair');
+const { swapBundleFromPair } = require('../bundle/swapFromPair');
 const pairQuote = require('../bundle/pairQuote');
 const { fireSell } = require('../bundle/fireSell');
 const { jsonSafe, withLaunchLock } = require('./launch');
@@ -452,6 +453,79 @@ router.post('/wallets/swap-to-pair', requireApiKey, (req, res, next) => {
   // pre-signs against.
   if ((req.body || {}).dryRun === true) return swapToPairHandler(req, res, next);
   return swapToPairLocked(req, res, next);
+});
+
+// POST /api/wallets/swap-from-pair — THE WAY BACK, and the exact reverse of the route
+// above.
+//
+// swap-to-pair is a one-way door: once a wallet holds NVDA the console has no path to
+// get the ETH back, so a changed pair, an abandoned launch or a mis-sized bundle
+// strands the token in up to 31 wallets. This sells it back, per wallet, each with its
+// own ETH paying its own gas — no sweep to the dev wallet, so no on-chain
+// buyers->dev link either.
+//
+// `targets[].amountPair` is OPTIONAL here, unlike the funding direction: omitted means
+// sell the wallet's WHOLE balance, which is the recovery case. Given, it sells exactly
+// that and leaves the rest.
+//
+// It shares the LAUNCH LOCK for the same reason swap-to-pair does, and one more: this
+// consumes TWO nonces per wallet (an ERC-20 has to be approved to the router before it
+// can be pulled), so running it against an armed launch would eat the nonces the
+// pre-signed approve and buy are holding — and selling the pair token out from under
+// an armed launch would drop the wallet at preflight anyway.
+const swapFromPairHandler = async (req, res, next) => {
+  try {
+    const ks = keystoreFor(req.user.id);
+    const { variant = DEFAULT_VARIANT, pairToken, targets, dryRun = false } = req.body || {};
+    const out = await swapBundleFromPair({ variant, pairToken, targets, dryRun }, { keystore: ks });
+    if (!out.dryRun) {
+      // Every refusal on the log line, not only in the payload — the same rule the
+      // funding direction keeps. "sold for 18/31" with no account of the other 13 is
+      // the silence this endpoint exists to end.
+      activityFor(req.user.id).record(
+        'fund',
+        `[${variant}] sold ${out.pairSymbol}->ETH for ${out.swapped}/${out.count} wallet(s), ` +
+          `${out.totalPairSold} ${out.pairSymbol} sold for ${out.totalEthOut} ETH` +
+          (out.skippedEmpty ? `, ${out.skippedEmpty} held none` : '') +
+          (out.skippedShortPair ? `, ${out.skippedShortPair} held less than asked` : '') +
+          (out.skippedShort ? `, ${out.skippedShort} short of gas` : '') +
+          (out.skippedImpact ? `, ${out.skippedImpact} refused on price impact` : '') +
+          (out.skippedDust ? `, ${out.skippedDust} dust` : '') +
+          (out.failed ? `, ${out.failed} failed` : ''),
+        {
+          variant,
+          pairToken: out.pairToken,
+          pairSymbol: out.pairSymbol,
+          totalPairSold: out.totalPairSold,
+          totalEthOut: out.totalEthOut,
+          swaps: out.results.map((r) => ({
+            walletId: r.walletId,
+            address: r.address,
+            status: r.status,
+            heldPair: r.heldPair,
+            soldPair: r.soldPair,
+            holdingPair: r.holdingPair,
+            receivedEth: r.receivedEth,
+            approveHash: r.approveHash,
+            hash: r.hash,
+            reason: r.reason,
+          })),
+        }
+      );
+    }
+    res.json(jsonSafe(out));
+  } catch (err) {
+    next(err);
+  }
+};
+const swapFromPairLocked = withLaunchLock(swapFromPairHandler);
+router.post('/wallets/swap-from-pair', requireApiKey, (req, res, next) => {
+  // A DRY RUN TAKES NO LOCK, for the same reason the funding direction's does not: it
+  // reads quotes, signs nothing and touches no nonce, and the console prices this in
+  // the background to show what the recovery would return. The real run takes it,
+  // because it spends from the very wallets a launch pre-signs against.
+  if ((req.body || {}).dryRun === true) return swapFromPairHandler(req, res, next);
+  return swapFromPairLocked(req, res, next);
 });
 
 // POST /api/v2/relay/fund — fund v2 bundle wallets through Relay solver orders.

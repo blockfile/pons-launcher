@@ -87,6 +87,43 @@ export function pairShortfall(held, need) {
 }
 
 /**
+ * WHICH WALLETS HAVE SOMETHING TO RECOVER, and how much is sitting in them.
+ *
+ * The reverse of the funding question. Once a wallet has bought the pair token it
+ * is stuck with it — a changed pair, an abandoned launch or a mis-sized bundle
+ * leaves NVDA in 31 wallets — and the console offers the way back only when there
+ * is actually something to sell. That is a fact this file already owns: the pair
+ * column reads the same balance, from the same listing, parsed the same way.
+ *
+ * A balance that was NOT READ is counted in `unknown` and is never offered as a
+ * target. It is not zero (that claim would say a funded wallet is empty) and it is
+ * not a holding either — it is a question, and a wallet is not sold from on the
+ * strength of a question. Nothing is lost by leaving it out: the run reads every
+ * balance on chain for itself, so a wallet that really does hold some is one
+ * refresh away from appearing here.
+ *
+ * The total is a sum in ONE asset — every term is the pair token — added as scaled
+ * integers, never as floats. It is a display figure and a dialog figure; the amount
+ * each wallet actually sells is read on chain by the endpoint.
+ */
+export function recoverTargets(wallets) {
+  const targets = [];
+  let totalRaw = 0n;
+  let unknown = 0;
+  for (const w of wallets || []) {
+    const held = toUnits(w?.pairBalance);
+    if (held === null) {
+      unknown += 1;
+      continue;
+    }
+    if (held <= 0n) continue;
+    targets.push({ walletId: w.id, address: w.address, heldPair: String(w.pairBalance) });
+    totalRaw += held;
+  }
+  return { targets, total: fromUnits(totalRaw), unknown };
+}
+
+/**
  * Turn the read-only "use available ETH" plan into row patches.
  *
  * ONLY a row the backend marked `ok` gets an amount, and it gets the backend's

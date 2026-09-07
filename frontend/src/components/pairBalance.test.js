@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 
-import { toUnits, fromUnits, pairStatus, pairShortfall, balanceFill } from './pairBalance.js';
+import { toUnits, fromUnits, pairStatus, pairShortfall, balanceFill, recoverTargets } from './pairBalance.js';
 
 // ── parsing: a figure that cannot be read is not zero ────────────────────────
 
@@ -110,4 +110,51 @@ test('an OK row with no amount is treated as skipped rather than written as blan
 test('no plan at all is an empty fill, not a crash', () => {
   assert.deepEqual(balanceFill(null), { patches: {}, filled: 0, skipped: [] });
   assert.deepEqual(balanceFill({}), { patches: {}, filled: 0, skipped: [] });
+});
+
+// ── the way back: which wallets have something to recover ────────────────────
+
+test('only wallets actually holding the pair token are offered as recovery targets', () => {
+  const { targets, total } = recoverTargets([
+    { id: 'a', address: '0xaa', pairBalance: '1.5' },
+    { id: 'b', address: '0xbb', pairBalance: '0' },
+    { id: 'c', address: '0xcc', pairBalance: '0.029125' },
+  ]);
+  assert.deepEqual(
+    targets.map((t) => t.walletId),
+    ['a', 'c']
+  );
+  // A sum in ONE asset, added as integers: 1.5 + 0.029125 is exact here and is not
+  // 1.5291249999999998.
+  assert.equal(total, '1.529125');
+});
+
+test('a balance that was not READ is never sold from, and is never counted as zero', () => {
+  const { targets, total, unknown } = recoverTargets([
+    { id: 'a', address: '0xaa', pairBalance: null },
+    { id: 'b', address: '0xbb', pairBalance: undefined },
+    { id: 'c', address: '0xcc', pairBalance: '1e-7' },
+    { id: 'd', address: '0xdd', pairBalance: '2' },
+  ]);
+  assert.deepEqual(
+    targets.map((t) => t.walletId),
+    ['d']
+  );
+  assert.equal(unknown, 3, 'an unread balance is a question, not a holding and not an empty wallet');
+  assert.equal(total, '2');
+});
+
+test('no holders means no control at all — an empty target list, not a zero-amount run', () => {
+  assert.deepEqual(recoverTargets([{ id: 'a', address: '0xaa', pairBalance: '0' }]), {
+    targets: [],
+    total: '0',
+    unknown: 0,
+  });
+  assert.deepEqual(recoverTargets([]), { targets: [], total: '0', unknown: 0 });
+  assert.deepEqual(recoverTargets(null), { targets: [], total: '0', unknown: 0 });
+});
+
+test('each target carries the balance it was picked on, so a changed balance re-prices', () => {
+  const { targets } = recoverTargets([{ id: 'a', address: '0xaa', pairBalance: '1.5' }]);
+  assert.deepEqual(targets[0], { walletId: 'a', address: '0xaa', heldPair: '1.5' });
 });
