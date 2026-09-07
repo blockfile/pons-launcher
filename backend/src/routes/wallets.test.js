@@ -182,3 +182,47 @@ test('POST /wallets/claim-seasoned answers cleanly when nothing is available to 
   assert.equal(ks.walletsWithRole('bundle').length, 0);
   assert.equal(ks.walletsWithRole('v4seed').length, 1);
 });
+
+// V2 WAS THE ONLY LAUNCHER THAT COULD NOT TAKE THEM. claim() is one-way -- it re-roles the
+// wallet out of V4 permanently -- and that was the stated reason v2 was excluded. But the same
+// one-way-ness applies on v3/v5/v6/v7/v8, which all claim, so excluding only v2 left wallets
+// aged for weeks to look unrelated claimable ONLY into the launcher that funds through the
+// disperser, from one visible address. v2 funds through Relay.
+test('POST /wallets/claim-seasoned claims into the v2 bundle when the variant asks for it', async () => {
+  const userId = 'claim-seasoned-v2';
+  const ks = keystoreFor(userId);
+  const store = storeFor(userId);
+  const seed1 = seedAgedWallet(ks, store, { userTag: 'v2a', campaignId: 'cv2a' });
+  const seed2 = seedAgedWallet(ks, store, { userTag: 'v2b', campaignId: 'cv2b' });
+
+  const handler = findRouteHandler('post', '/wallets/claim-seasoned');
+  const res = fakeRes();
+  await handler({ user: { id: userId }, body: { count: 5, variant: 'v2' } }, res, (err) => {
+    if (err) throw err;
+  });
+
+  assert.equal(res.body.claimed.length, 2);
+  const after = keystoreFor(userId);
+  assert.deepEqual(
+    after.walletsWithRole('v2bundle').map((w) => w.address).sort(),
+    [seed1.address, seed2.address].sort(),
+    'the seeds must land in v2bundle'
+  );
+  assert.equal(after.walletsWithRole('bundle').length, 0, 'and never in v1 bundle');
+});
+
+test('POST /wallets/claim-seasoned refuses an unknown variant and re-roles nothing', async () => {
+  const userId = 'claim-seasoned-bad-variant';
+  const ks = keystoreFor(userId);
+  const store = storeFor(userId);
+  seedAgedWallet(ks, store, { userTag: 'bad', campaignId: 'cbad' });
+
+  const handler = findRouteHandler('post', '/wallets/claim-seasoned');
+  let caught = null;
+  await handler({ user: { id: userId }, body: { count: 1, variant: 'v9' } }, fakeRes(), (err) => {
+    caught = err;
+  });
+  assert.ok(caught && /variant/i.test(caught.message), 'an unknown variant must be refused by name');
+  const after = keystoreFor(userId);
+  assert.equal(after.walletsWithRole('v4seed').length, 1, 'the seed must still be a v4 seed');
+});

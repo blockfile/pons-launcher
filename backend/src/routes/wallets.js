@@ -6,6 +6,7 @@ const { keystoreFor } = require('../wallets/keystore');
 const funding = require('../wallets/funding');
 const {
   DEFAULT_VARIANT,
+  roles: rolesFor,
   devWalletFor,
   bundleWalletsFor,
   usesDispersers,
@@ -126,22 +127,40 @@ router.post('/wallets/:id/role', requireApiKey, (req, res, next) => {
   }
 });
 
-// POST /api/wallets/claim-seasoned — pull N of V4's finished-seasoning wallets
-// into V1's bundle role, most-aged first. They arrive pre-aged and pre-funded.
+// POST /api/wallets/claim-seasoned — pull N of V4's finished-seasoning wallets into a
+// launcher's bundle role, most-aged first. They arrive pre-aged and pre-funded.
+//
+// `variant` names the destination and DEFAULTS TO v1, so every existing caller is unchanged.
+// It was v1-only on the grounds that re-roling into v2 would "spend a seasoned wallet on the
+// wrong launcher with no way back" — true, claim() is one-way — but that risk is identical on
+// v3/v5/v6/v7/v8, which all have claim endpoints. Excluding only v2 left the odd result that
+// wallets aged for weeks to look unrelated could ONLY be claimed into the launcher that then
+// funds them through the disperser, from one visible address; v2 funds through Relay. The
+// one-way-ness is handled the way every other tab handles it: the caller names where they go.
 router.post('/wallets/claim-seasoned', requireApiKey, (req, res, next) => {
   try {
     const ks = keystoreFor(req.user.id);
     const store = storeFor(req.user.id);
-    const want = Math.max(1, Math.round(Number((req.body || {}).count) || 0));
+    const body = req.body || {};
+    const variant = body.variant === undefined || body.variant === null ? DEFAULT_VARIANT : String(body.variant);
+    // rolesFor throws by name on anything unknown, so a typo can never re-role into a real
+    // role by accident — it refuses before a single wallet is touched.
+    const bundleRole = rolesFor(variant).bundle;
+    const want = Math.max(1, Math.round(Number(body.count) || 0));
     const pool = seasoned.available(ks, store, Date.now());
     const take = pool.slice(0, want);
     if (take.length === 0) {
       return res.json({ claimed: [], available: pool.length, shortfall: want });
     }
-    assertBundleRoom(ks, 'bundle', take.length); // refuses before any re-role
-    const out = seasoned.claim(ks, store, take.map((w) => w.id), { toRole: 'bundle', toTab: 'v1', now: Date.now() });
-    activityFor(req.user.id).record('wallets', `claimed ${out.claimed.length} seasoned wallet(s) into v1 bundle`, {
+    assertBundleRoom(ks, bundleRole, take.length); // refuses before any re-role
+    const out = seasoned.claim(ks, store, take.map((w) => w.id), {
+      toRole: bundleRole,
+      toTab: variant,
+      now: Date.now(),
+    });
+    activityFor(req.user.id).record('wallets', `claimed ${out.claimed.length} seasoned wallet(s) into ${variant} bundle`, {
       count: out.claimed.length,
+      variant,
     });
     res.json({ claimed: out.claimed, available: pool.length, shortfall: Math.max(0, want - take.length) });
   } catch (err) {

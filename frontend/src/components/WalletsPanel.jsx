@@ -52,9 +52,12 @@ export default function WalletsPanel({ step, wallets, rows, setRow, share, reloa
   const [showImport, setShowImport] = useState(false);
   const [keys, setKeys] = useState('');
   const [busy, setBusy] = useState('');
-  // V4's seasoned seed wallets ready to hand off into this bundle. V1 only —
-  // v2 has no claim endpoint, because re-roling a wallet into v2's bundle role
-  // would spend a seasoned wallet on the wrong launcher with no way back.
+  // V4's seasoned seed wallets ready to hand off into THIS tab's bundle role. Claiming is
+  // one-way — the backend re-roles v4seed -> the target bundle and there is no un-claim — so
+  // the destination is named in the confirm rather than assumed. It was v1-only on the
+  // grounds that v2 would be "the wrong launcher with no way back", but v3/v5/v6/v7/v8 all
+  // claim under the identical risk, and excluding v2 meant wallets aged for weeks to look
+  // unrelated could only go to the launcher that funds them from one visible address.
   const [seasoned, setSeasoned] = useState({ count: 0 });
   const [seasonedCount, setSeasonedCount] = useState(5);
   // The native token's USD price, for showing a predicted market cap the way an
@@ -107,7 +110,7 @@ export default function WalletsPanel({ step, wallets, rows, setRow, share, reloa
   // and gas reads above; guarded quietly for the same reason — V4 may be
   // unreachable or disabled and this control should just read 0, not error.
   useEffect(() => {
-    if (variant !== 'v1') return;
+    if (variant !== 'v1' && variant !== 'v2') return;
     let alive = true;
     api('/v4/seasoned')
       .then((s) => alive && setSeasoned(s))
@@ -141,15 +144,16 @@ export default function WalletsPanel({ step, wallets, rows, setRow, share, reloa
   }
 
   /**
-   * Hand N seasoned V4 seed wallets over into this bundle. The backend
-   * re-roles them v4seed → bundle and this is the only place that happens for
-   * v1 — see the guard on the control below for why v2 never reaches this.
+   * Hand N seasoned V4 seed wallets over into THIS tab's bundle. The backend re-roles them
+   * v4seed -> the variant's bundle role, which is ONE WAY: there is no un-claim, so a wallet
+   * sent to the wrong launcher has spent its aging there. The variant travels with the
+   * request so the server never has to guess which bundle the operator meant.
    */
   async function claimSeasoned() {
     setBusy('claim-seasoned');
     try {
       const n = Math.max(1, Math.round(Number(seasonedCount) || 0));
-      const out = await api('/wallets/claim-seasoned', 'POST', { count: n });
+      const out = await api('/wallets/claim-seasoned', 'POST', { count: n, variant });
       report(
         out.shortfall > 0
           ? `claimed ${out.claimed.length} seasoned wallet(s), ${out.shortfall} short — only ${out.available} were ready`
@@ -445,10 +449,11 @@ export default function WalletsPanel({ step, wallets, rows, setRow, share, reloa
         </button>
       </div>
 
-      {/* SEASONED (V1 ONLY). V2 has no claim-seasoned endpoint — re-roling a V4
-          seed into v2's bundle role would use the wrong role and there is no way
-          back short of the keystore archive. See the mount-time fetch above. */}
-      {variant === 'v1' && (
+      {/* SEASONED. Available on BOTH launchers, and the destination is named on the button
+          because the claim is ONE WAY: the backend re-roles v4seed -> this tab's bundle role
+          and there is no un-claim short of the keystore archive. A wallet claimed onto the
+          wrong launcher has spent its weeks of aging there. */}
+      {(variant === 'v1' || variant === 'v2') && (
         <div className="row">
           <span className="ctl-label">Seasoned</span>
           <input
@@ -476,11 +481,14 @@ export default function WalletsPanel({ step, wallets, rows, setRow, share, reloa
             }
             onClick={claimSeasoned}
           >
-            Use {seasonedCount} seasoned wallets
+            Use {seasonedCount} seasoned wallets in {variant.toUpperCase()}
           </Busy>
           <span className="hint">
             {seasoned.count} seasoned ready
             {bundleRoom > 0 ? ` · ${bundleRoom} bundle slot${bundleRoom === 1 ? '' : 's'} left` : ' · bundle full'}
+            {' · '}
+            <b>one way</b>
+            {` — they leave V4 for ${variant.toUpperCase()}'s bundle and cannot be claimed back`}
           </span>
         </div>
       )}
