@@ -668,6 +668,57 @@ function shareV2({
 }
 
 /**
+ * THE CURVE A PAIRED LAUNCH ACTUALLY RUNS ON.
+ *
+ * A launch config carries a phantomQuote and a graduationThreshold, and on a
+ * NATIVE launch those are the curve: config #0 live is 1.68 ETH against a 4.2
+ * ETH threshold. On a PAIRED launch they are not. The factory keeps a separate
+ * set per approved quote asset — pairTokenEconomics(pairToken) — and the curve
+ * the launch opens uses those, in the pair token's own units. Read live from
+ * the factory: NVDA is 16.64 / 41.6, SPCX 28.88 / 72.2, GME 147.6 / 369, USDG
+ * 3236 / 8090 at six decimals. Against native's 1.68 that is three orders of
+ * magnitude of spread, so a paired bundle walked through the config's own
+ * numbers is not a slightly-off figure — it is a different curve.
+ *
+ * This is the substitution, and it lives here because BOTH runtimes need it and
+ * the two must not answer differently: prepareV2 makes it at preflight and the
+ * console makes it on every keystroke. It was inline in prepareV2 alone, which
+ * is exactly how the console came to report 61.20% for a bundle that takes
+ * 14.20% — the preflight was right and the screen was wrong about the same
+ * bundle.
+ *
+ * NATIVE IS THE IDENTITY. With no pair economics the config is returned AS IT
+ * WAS — the same object, not a copy — so nothing downstream can differ by so
+ * much as a key order.
+ *
+ * Only the two curve constants move. supply, curveFeeBps and everything else on
+ * the config are the launch's whatever it is priced in.
+ */
+function pairedLaunchConfig(launchConfig, pairEconomics) {
+  if (!launchConfig) return null;
+  if (!pairEconomics) return launchConfig;
+  return {
+    ...launchConfig,
+    phantomQuote: String(pairEconomics.phantomQuote),
+    graduationThreshold: String(pairEconomics.graduationThreshold),
+  };
+}
+
+/**
+ * Can a pair's economics be used to price a curve at all?
+ *
+ * A phantom reserve of zero is not a small curve, it is no curve: every buy
+ * against it returns zero tokens and every share reads 0.00%, which is a wrong
+ * number wearing the shape of a right one. A caller that cannot get a true here
+ * must show NOTHING and say why — never fall back to the config's native
+ * figures, which is the bug this whole seam exists to prevent.
+ */
+function hasPairEconomics(pairEconomics) {
+  if (!pairEconomics) return false;
+  return toBig(pairEconomics.phantomQuote) > 0n;
+}
+
+/**
  * The one entry point both the console and preflight call.
  *
  * @param {object} input
@@ -712,6 +763,8 @@ module.exports = {
   openingPool,
   constantProductBuy,
   v2Buy,
+  pairedLaunchConfig,
+  hasPairEconomics,
   shareV1,
   shareV2,
   bundleShare,

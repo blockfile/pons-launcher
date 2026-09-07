@@ -89,6 +89,9 @@ export default function LaunchForm({
   // and null whenever no dialog is open, which is the only state in which a
   // launch can be fired at all.
   const [pending, setPending] = useState(null);
+  // The asset the frozen dev buy above is denominated in, captured with it. "ETH"
+  // on a native launch, which is what the dialog has always said.
+  const [pendingUnit, setPendingUnit] = useState('ETH');
 
   const set = (k) => (e) => setF((prev) => ({ ...prev, [k]: e.target.value }));
   const setLogo = (logo) => setF((prev) => ({ ...prev, logo }));
@@ -106,18 +109,44 @@ export default function LaunchForm({
   const pair = selectedPair(v2, pairToken);
   const nativePair = isNativePair(pair.address);
 
-  // The resolved selection, handed to App for step 3's pair funding. Only this
-  // form knows it: the symbol and the DECIMALS come from the /v2/configs read it
-  // owns, and step 3 cannot size a pair-token amount without them. Null on a
-  // native launch, which is what makes the funding control invisible there.
+  // The resolved selection, handed to App for step 3's pair funding AND for what
+  // the bundle amounts BUY. Only this form knows it: the symbol, the DECIMALS and
+  // the pair's own CURVE CONSTANTS come from the /v2/configs read it owns. Null on
+  // a native launch, which is what makes the funding control invisible there.
+  //
+  // phantomQuote and graduationThreshold are the factory's pairTokenEconomics for
+  // this quote asset, already on every entry of the pairTokens list (see
+  // evm/v2/pairTokens.js, which reads them in the same multicall as the symbol).
+  // They used to be dropped here, and dropping them is the bug: the wallet table
+  // then had nothing to price a paired bundle against and silently used the launch
+  // config's own constants, which are the NATIVE curve — 1.68 ETH against NVDA's
+  // real 16.64 NVDA. It reported 61.20% of supply for a bundle that takes 14.95%.
   //
   // The deps are the resolved fields rather than `pair` itself: selectedPair
   // returns a fresh object every render, so depending on it would re-fire this on
   // every render and loop against App's setState.
   useEffect(() => {
-    onPair(isV2 && !nativePair ? { address: pair.address, symbol: pair.symbol, decimals: pair.decimals } : null);
+    onPair(
+      isV2 && !nativePair
+        ? {
+            address: pair.address,
+            symbol: pair.symbol,
+            decimals: pair.decimals,
+            phantomQuote: pair.phantomQuote,
+            graduationThreshold: pair.graduationThreshold,
+          }
+        : null
+    );
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [isV2, nativePair, pair.address, pair.symbol, pair.decimals]);
+  }, [
+    isV2,
+    nativePair,
+    pair.address,
+    pair.symbol,
+    pair.decimals,
+    pair.phantomQuote,
+    pair.graduationThreshold,
+  ]);
 
   // v2's factory is a different contract with its own configs and its own
   // gating, so they are read separately and only when the operator asks for it.
@@ -253,6 +282,9 @@ export default function LaunchForm({
   // Opens the confirmation. Nothing is sent from here; only the dialog's
   // confirm button reaches fire().
   function launch() {
+    // Kept beside `pending` rather than inside it: `pending` IS the request body
+    // and nothing that is not a field of the API goes in it.
+    setPendingUnit(pair.symbol);
     setPending(body());
   }
 
@@ -551,7 +583,11 @@ export default function LaunchForm({
           <b>
             {buying} wallet{buying === 1 ? '' : 's'} buying
           </b>
-          dev buy {f.devBuyEth || 0} ETH
+          {/* NAMED FOR THE ASSET IT ACTUALLY SPENDS, like the field above it. The
+              input has said "Dev buy (NVDA)" since be9a6b1; this line and the
+              dialog's Fact still said ETH, and this is the last figure read
+              before the arm. pair.symbol is "ETH" on a native launch. */}
+          dev buy {f.devBuyEth || 0} {pair.symbol}
           {/* The same figure the wallet table draws per row, totalled. It is
               here as well as up there because this is where the operator arms:
               the last thing read before the click should be what the bundle
@@ -587,7 +623,12 @@ export default function LaunchForm({
         {!live && <p>Nothing will be broadcast.</p>}
         <div className="modal-facts">
           <Fact label="Symbol">{pending?.params.symbol || '—'}</Fact>
-          <Fact label="Dev buy">{pending?.devBuyEth || 0} ETH</Fact>
+          {/* FROZEN WITH THE BODY. The dialog states what is about to be
+              broadcast, so the unit has to be the one the body's pairToken names
+              — not whatever the picker says by the time it is read. */}
+          <Fact label="Dev buy">
+            {pending?.devBuyEth || 0} {pendingUnit}
+          </Fact>
           <Fact label="Bundle wallets">{pending?.wallets.length ?? 0}</Fact>
           {share && (
             <Fact label={share.exact ? 'Bundle share' : 'Bundle share (est)'}>
@@ -595,8 +636,13 @@ export default function LaunchForm({
               {pct(share.bundle.bps)} of supply
             </Fact>
           )}
+          {/* The market cap is in the LAUNCH'S QUOTE ASSET, which is ETH only on a
+              native launch. share.pairSymbol is what bundleShare walked the curve
+              in, so it cannot disagree with the figure beside it. */}
           {share?.marketCap && (
-            <Fact label="Predicted MC">{Number(share.marketCap.finalEth).toFixed(3)} ETH</Fact>
+            <Fact label="Predicted MC">
+              {Number(share.marketCap.finalEth).toFixed(3)} {share.pairSymbol || 'ETH'}
+            </Fact>
           )}
         </div>
         {/* The one condition that changes what this launch IS, surfaced at the
@@ -605,8 +651,9 @@ export default function LaunchForm({
             through the curve. */}
         {share?.graduation?.crosses && (
           <p className="modal-warn">
-            ⚠ This bundle puts {share.graduation.raisedEth} ETH into the curve, at or over the{' '}
-            {share.graduation.thresholdEth} ETH graduation threshold. The curve <b>graduates on the way in</b>,
+            ⚠ This bundle puts {share.graduation.raisedEth} {share.pairSymbol || 'ETH'} into the curve,
+            at or over the {share.graduation.thresholdEth} {share.pairSymbol || 'ETH'} graduation
+            threshold. The curve <b>graduates on the way in</b>,
             and a graduated launch can only be exited through the Uniswap v4 pool — not the curve. Size down
             if you did not intend this.
           </p>

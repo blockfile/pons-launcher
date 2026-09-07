@@ -11,6 +11,9 @@ import { shortAddress } from './format.js';
 import bundleShareModule from '../../shared/bundleShare.js';
 import { rolesFor } from './variant.js';
 import { NATIVE_PAIR } from './pairAssets.js';
+// Which curve a paired launch is priced against, and the one place a pair-token
+// figure becomes an ETH one. See components/pairCurve.js.
+import { shareInputs } from './components/pairCurve.js';
 import Guide from './components/Guide.jsx';
 import Sequence from './components/Sequence.jsx';
 import DevWalletPanel from './components/DevWalletPanel.jsx';
@@ -44,7 +47,7 @@ import V7Console from './v7/V7Console.jsx';
 // own console, its own directory, sharing no state with any tab.
 import V8Console from './v8/V8Console.jsx';
 
-const { bundleShare } = bundleShareModule;
+const { bundleShare, pairedLaunchConfig, hasPairEconomics } = bundleShareModule;
 
 // One definition of the shortener, in format.js, so there is one place to look
 // when asking where an address is ever displayed less than whole. The sequence
@@ -175,27 +178,58 @@ export default function App() {
    * reserve or the graduation threshold between one launch and the next, and a
    * console that remembered last week's numbers would be confidently wrong.
    */
-  const share = useMemo(() => {
-    if (!sizing?.launchConfig) return null;
-    return bundleShare({
+  const sized = useMemo(() => {
+    if (!sizing?.launchConfig) return { share: null, blocked: null };
+    // WHICH CURVE. A native launch is the launch config's own phantom reserve and
+    // graduation threshold; a PAIRED one is the factory's pairTokenEconomics for
+    // the chosen quote asset, and the amounts in the Buy column are that token
+    // rather than ETH. Both facts come from `pair`, and both were missing here:
+    // this walked NVDA amounts through native's 1.68 ETH curve and drew the
+    // result as ETH. See components/pairCurve.js. Native is the identity — the
+    // same config object, bundleShare's own defaults — so it is unchanged.
+    const inputs = shareInputs({
       protocol: sizing.protocol,
       launchConfig: sizing.launchConfig,
-      creatorTaxBps: sizing.creatorTaxBps,
-      devBuyEth: sizing.devBuyEth,
-      // Table order is firing order — prepare() walks the same list the same
-      // way — and on a curve the order is the price, so it has to match.
-      buys: wallets
-        .filter((w) => w.role === roles.bundle)
-        .map((w) => ({
-          key: w.id,
-          // "all − gas" is resolved server-side from the live balance. The
-          // balance is its ceiling and gas is a rounding error beside a buy,
-          // so the row is shown rather than left blank — flagged as an
-          // approximation in the summary under the table.
-          amountEth: rows[w.id]?.mode === 'all' ? w.balanceEth : rows[w.id]?.buy,
-        })),
+      pair,
+      pairedLaunchConfig,
+      hasPairEconomics,
     });
-  }, [sizing, wallets, rows, roles]);
+    // A pair whose curve did not reach the console gets NO share. Every figure
+    // downstream is a percentage of supply or a market cap, and off the wrong
+    // curve each of them is wrong by a multiple rather than a rounding — so the
+    // panels draw nothing and print `blocked` instead.
+    if (!inputs.launchConfig) return { share: null, blocked: inputs.blocked };
+    return {
+      blocked: null,
+      share: bundleShare({
+        protocol: sizing.protocol,
+        launchConfig: inputs.launchConfig,
+        creatorTaxBps: sizing.creatorTaxBps,
+        // Denominated in the LAUNCH'S QUOTE ASSET, exactly as prepareV2 parses it
+        // — the field is labelled "Dev buy (NVDA)" on a paired launch and it is
+        // pair-token units the curve receives.
+        devBuyEth: sizing.devBuyEth,
+        // The quote asset every *Eth figure that comes back is in. Native leaves
+        // these at bundleShare's own defaults and every number unchanged.
+        pairDecimals: inputs.pairDecimals,
+        pairSymbol: inputs.pairSymbol,
+        // Table order is firing order — prepare() walks the same list the same
+        // way — and on a curve the order is the price, so it has to match.
+        buys: wallets
+          .filter((w) => w.role === roles.bundle)
+          .map((w) => ({
+            key: w.id,
+            // "all − gas" is resolved server-side from the live balance. The
+            // balance is its ceiling and gas is a rounding error beside a buy,
+            // so the row is shown rather than left blank — flagged as an
+            // approximation in the summary under the table.
+            amountEth: rows[w.id]?.mode === 'all' ? w.balanceEth : rows[w.id]?.buy,
+          })),
+      }),
+    };
+  }, [sizing, wallets, rows, roles, pair]);
+  const share = sized.share;
+  const shareBlocked = sized.blocked;
 
   // Strings stay strings so errors read as errors; everything else is a payload
   // for ResultPanel to lay out.
@@ -799,6 +833,7 @@ export default function App() {
             rows={rows}
             setRow={setRow}
             share={share}
+            shareBlocked={shareBlocked}
             pair={pair}
             live={live}
             reload={loadWallets}

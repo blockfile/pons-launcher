@@ -7,8 +7,11 @@ import Modal, { Fact } from './Modal.jsx';
 import Share, { pct, tokens } from './Share.jsx';
 import BackupControls from './BackupControls.jsx';
 import { splitTotal, pairedFunds, pairedReserveEth } from './autoFill.js';
-import { pairStatus, pairShortfall, balanceFill } from './pairBalance.js';
+import { pairStatus, pairShortfall, balanceFill, recoverTargets } from './pairBalance.js';
 import { rolesFor } from '../variant.js';
+// Which curve a paired launch is priced against, and the one place a pair-token
+// figure becomes an ETH one — for display, at the very end. See pairCurve.js.
+import { ethEquivalent, isNativeLaunch, pairPerEthFrom } from './pairCurve.js';
 
 // Balances arrive as decimal strings. Six places everywhere, so the column and
 // the dialog show the same number.
@@ -37,10 +40,22 @@ const eth = (v) => Number(v || 0).toFixed(6);
  * and a step away from the delete that made room for it. Both halves of that
  * rotation are in step 1 now.
  */
-// A market cap in USD from its native-ETH figure and a hand-entered ETH price.
-// The ETH figure is the exact one the curve fixes; the dollar figure is only as
-// good as the price typed beside it, which is why the price is editable and the
-// ETH is always shown next to the dollars.
+// The probe the ETH<->pair rate is read at, and it is deliberately tiny: 0.001
+// ETH, the same size and for the same reason as swaproute's IMPACT_PROBE. A
+// market cap wants the NEAR-SPOT rate, not what a trade the size of the market
+// cap would fill at — quoting the cap itself would price BUYING that much of the
+// pair token, impact and all, which is a different question.
+const MC_PROBE_ETH = '0.001';
+
+// A market cap in USD from its ETH figure and a hand-entered ETH price.
+//
+// UNCHANGED, and deliberately: on a native launch the figure handed to it is the
+// exact one the curve fixes. On a PAIRED launch the curve's figure is in the pair
+// token, so what reaches this is that figure already converted to ETH at a live
+// quote (ethEquivalent) — or NULL, in which case no dollar figure is drawn at all
+// and the reason is said under the table. The dollar side is only ever as good as
+// the price typed beside it, which is why the price is editable and the launch's
+// own unit is always shown next to the dollars.
 function usdMc(ethStr, price) {
   const v = Number(ethStr || 0) * Number(price || 0);
   if (!Number.isFinite(v) || v <= 0) return null;
@@ -54,6 +69,10 @@ export default function WalletsPanel({
   rows,
   setRow,
   share,
+  // Why there is no share, when there is a launch config but nothing to price it
+  // against: a paired launch whose pairTokenEconomics never reached the console.
+  // A sentence, drawn where the figures would have been. See App's `sized`.
+  shareBlocked = null,
   reload,
   report,
   // The launch's quote asset, resolved by step 5 and lifted through App. NULL on a
@@ -110,6 +129,18 @@ export default function WalletsPanel({
   const [pairAsk, setPairAsk] = useState(null);
   const [pairOut, setPairOut] = useState(null); // what the last real run did, per wallet
 
+  // ── AND THE WAY BACK OUT OF IT ──────────────────────────────────────────────
+  // Buying the pair token used to be a one-way door: a wallet holding NVDA had no
+  // console path back to ETH, so a changed quote asset, an abandoned launch or a
+  // mis-sized bundle stranded the token in up to 31 wallets. These four are the
+  // mirror of the four above — the priced dry run, its error, the frozen dialog and
+  // the last real run — and the whole control is absent unless a bundle wallet is
+  // actually holding some of the pair token, which the pair column already knows.
+  const [backPlan, setBackPlan] = useState(null); // the priced dry run
+  const [backErr, setBackErr] = useState('');
+  const [backAsk, setBackAsk] = useState(null); // frozen with the targets it was priced against
+  const [backOut, setBackOut] = useState(null); // what the last real sell did, per wallet
+
   // ── THE CONVERTER ───────────────────────────────────────────────────────────
   // The Total buy field is, and stays, in the pair token: it is the number that
   // becomes the Buy column, which is the number prepareV2 parses and then demands
@@ -122,6 +153,21 @@ export default function WalletsPanel({
   const [ethTotal, setEthTotal] = useState('');
   const [rate, setRate] = useState(null); // the live two-way quote
   const [rateErr, setRateErr] = useState('');
+
+  // ── THE MARKET-CAP RATE ─────────────────────────────────────────────────────
+  // A SECOND, standing quote, and not the converter's: that one answers what the
+  // operator typed and is null until they type it, while this one has to be there
+  // for every market cap on the table from the moment a pair is picked.
+  //
+  // It exists because on a paired launch NOTHING upstream of it is in ETH. The
+  // curve, the market cap and the graduation threshold are all in the pair token
+  // — NVDA's curve opens at 16.64 NVDA, not 1.68 ETH — and the dollar figure the
+  // operator reads is the last step of pair -> ETH -> USD. Null whenever the
+  // quote could not be taken, and null means NO dollar figure and a line saying
+  // why: a market cap converted at a guessed rate is indistinguishable on screen
+  // from one that is real.
+  const [mcRate, setMcRate] = useState(null); // { perEth, quotedAt, symbol }
+  const [mcRateErr, setMcRateErr] = useState('');
 
   // ── "USE THE ETH THE WALLETS ALREADY HOLD" ──────────────────────────────────
   // The priced plan, and it is only ever a PREVIEW: the operator sees what would
@@ -177,6 +223,14 @@ export default function WalletsPanel({
     setRateErr('');
     setBalPlan(null);
     setBalErr('');
+    // And the recovery preview: a sell priced against the NVDA pool is not an
+    // account of what the SPCX one would pay for anything.
+    setBackPlan(null);
+    setBackErr('');
+    // Same for the market-cap rate. Its effect re-takes it immediately; clearing
+    // it here is what stops NVDA's rate from pricing an SPCX cap for one render.
+    setMcRate(null);
+    setMcRateErr('');
   }, [pair?.address]);
 
   // THE LIVE RATE. Both directions in one read — whichever fields have something
@@ -220,6 +274,49 @@ export default function WalletsPanel({
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [pair?.address, totalBuy, ethTotal]);
+
+  // THE MARKET-CAP RATE, re-taken with the quote asset and once a minute after
+  // that — the same cadence as the ETH price it is multiplied by, so the two
+  // halves of a dollar figure are never far apart in age.
+  //
+  // Not debounced and not driven by a field: it is a standing fact about the
+  // pair, quoted at a fixed 0.001 ETH probe through the same route the funding
+  // swap uses (backend bundle/pairQuote.js). Native launches make no request at
+  // all — their figures already are ETH.
+  //
+  // A failure sets NO rate and keeps the reason. Nothing here falls back to a
+  // previous pair's rate, to a default, or to treating the pair figure as ETH,
+  // which is the bug this panel is being fixed for.
+  useEffect(() => {
+    if (isNativeLaunch(pair)) return undefined;
+    let alive = true;
+    const load = async () => {
+      try {
+        const q = new URLSearchParams({ pairToken: pair.address, ethIn: MC_PROBE_ETH });
+        const out = await api(`/wallets/pair-quote?${q.toString()}`);
+        if (!alive) return;
+        const perEth = pairPerEthFrom(out, MC_PROBE_ETH);
+        if (perEth === null) {
+          setMcRate(null);
+          setMcRateErr(`the ${pair.symbol} pool quoted nothing for ${MC_PROBE_ETH} ETH`);
+          return;
+        }
+        setMcRate({ perEth, quotedAt: out.quotedAt, symbol: out.pairSymbol || pair.symbol });
+        setMcRateErr('');
+      } catch (err) {
+        if (!alive) return;
+        setMcRate(null);
+        setMcRateErr(err.message);
+      }
+    };
+    load();
+    const t = setInterval(load, 60_000);
+    return () => {
+      alive = false;
+      clearInterval(t);
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [pair?.address, pair?.symbol]);
 
   // How many V4-seasoned seed wallets are ready to claim into this bundle.
   // Read-only background poll of a small figure, same shape as the eth-price
@@ -668,6 +765,99 @@ export default function WalletsPanel({
     }
   }
 
+  // ── the recovery plan: which wallets are HOLDING the pair token ─────────────
+  // Not "which wallets have a Buy amount" — that is the funding question, and it is
+  // asked of the table's fields. This one is asked of the CHAIN: the listing already
+  // carries each wallet's real pair balance (the column beside Balance), so the
+  // wallets with something to recover are the wallets holding some, whatever the Buy
+  // column says. A balance that was not read is left out rather than assumed empty —
+  // see recoverTargets in pairBalance.js.
+  const recover = pair ? recoverTargets(bundle) : { targets: [], total: '0', unknown: 0 };
+  // Serialised with the BALANCES, not just the ids, so the preview re-prices when a
+  // wallet's holding changes rather than only when the set of holders does.
+  const recoverKey = JSON.stringify(recover.targets.map((t) => ({ walletId: t.walletId, heldPair: t.heldPair })));
+  // The endpoint's own shape: no amountPair at all, which is what "sell the whole
+  // balance" means. The amount is read on chain per wallet by the code that sells it,
+  // so nothing here has to be right about a number.
+  const recoverTargetsSent = () => JSON.parse(recoverKey).map(({ walletId }) => ({ walletId }));
+
+  // WHAT THE RECOVERY WOULD RETURN, priced server-side against live quotes — the
+  // operator must not be asked to approve a sale whose proceeds are a guess. It is a
+  // dry run of the real endpoint, so the figure is produced by the code that will
+  // sell, including its impact refusals and its dust skips. Debounced, because it is
+  // a chain read per wallet and the listing refreshes between funding steps.
+  useEffect(() => {
+    if (!pair || recover.targets.length === 0) {
+      setBackPlan(null);
+      setBackErr('');
+      return undefined;
+    }
+    let alive = true;
+    const t = setTimeout(async () => {
+      try {
+        const out = await api('/wallets/swap-from-pair', 'POST', {
+          variant,
+          pairToken: pair.address,
+          targets: recoverTargetsSent(),
+          dryRun: true,
+        });
+        if (!alive) return;
+        setBackPlan(out);
+        setBackErr('');
+      } catch (err) {
+        if (!alive) return;
+        setBackPlan(null);
+        setBackErr(err.message);
+      }
+    }, 1200);
+    return () => {
+      alive = false;
+      clearTimeout(t);
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [pair?.address, recoverKey, variant]);
+
+  /**
+   * Sell the pair token back to ETH, one wallet at a time, each keeping its own
+   * proceeds.
+   *
+   * The ETH lands back in the wallet that held the token — there is no sweep to the
+   * dev wallet here, for the same reason the funding direction does not distribute
+   * from it: an on-chain line between the dev wallet and the buyers is exactly what
+   * a bundle is trying not to draw. Step 6's sweep is a separate, deliberate act.
+   *
+   * The result is kept on the panel as well as sent to the readout: a run where some
+   * wallets sold, some were refused for price impact and some held only dust must not
+   * be reduced to one line somebody scrolls past.
+   */
+  async function runPairSell() {
+    setBusy('pair-sell');
+    setBackOut(null);
+    try {
+      const out = await api('/wallets/swap-from-pair', 'POST', {
+        variant,
+        pairToken: backAsk.pairToken,
+        targets: backAsk.targets,
+      });
+      setBackOut(out);
+      report(out);
+      const left = out.count - out.swapped;
+      notify(
+        left === 0
+          ? `All ${out.count} wallet(s) sold their ${out.pairSymbol}. Recovered ${Number(out.totalEthOut).toFixed(6)} ETH.`
+          : `${out.swapped} sold, ${left} still holding — read the list under the table.`,
+        left === 0 ? 'ok' : 'error'
+      );
+      await reload();
+    } catch (err) {
+      report(`ERROR: ${err.message}`);
+      notify(`Selling ${pair?.symbol} back failed — ${err.message}`, 'error');
+    } finally {
+      setBusy('');
+      setBackAsk(null);
+    }
+  }
+
   // The delete list is derived from the bundle wallets and intersected with the
   // ticks, never read out of the tick set directly. The dev wallet signs every
   // launch and holds the funds, so it is kept out of the bulk path by
@@ -768,6 +958,30 @@ export default function WalletsPanel({
   // wallet that is buying, and counting it as one would misstate the bundle.
   const buyingCount = (share?.buys || []).filter((b) => b.estBps > 0).length;
 
+  // ── THE LAUNCH'S QUOTE ASSET, AND THE ONE BRIDGE OUT OF IT ─────────────────
+  //
+  // Every quote-denominated figure on `share` — bundle.eth, total.eth, each
+  // leg's mcEth, marketCap, the graduation threshold — is in the asset the launch
+  // is PRICED IN. That is ETH on a native launch and on v1, and the pair token on
+  // a paired one, and this panel used to write "ETH" after all of them regardless.
+  //
+  // `unit` is that asset's name, taken from the share itself rather than from
+  // `pair`, so a label can never disagree with the arithmetic beside it: it is
+  // whatever bundleShare actually walked the curve in.
+  //
+  // `toEth` is the ONLY conversion, and it is the last step before a dollar sign.
+  // Native returns its argument untouched. Paired divides by the live rate, and
+  // returns null when there is no usable one — which is the whole point: a
+  // missing dollar figure is a question the operator can answer, and a wrong one
+  // is not visible at all.
+  const nativeQuote = isNativeLaunch(pair);
+  const unit = share?.pairSymbol || 'ETH';
+  const toEth = (amount) =>
+    ethEquivalent(amount, { isNative: nativeQuote, pairPerEth: mcRate?.perEth });
+  // Whether a dollar figure can be drawn at all. Native always can; paired needs
+  // the rate. Used only to decide whether to say why one is missing.
+  const dollarsBlocked = !nativeQuote && !mcRate;
+
   // What the delete dialog is asking about, and the figures it has to state.
   const pending = deleting || [];
   const pendingEth = pending.reduce((s, w) => s + Number(w.balanceEth || 0), 0);
@@ -808,7 +1022,9 @@ export default function WalletsPanel({
         </div>
         <div className="stat">
           <span>Bundle buy</span>
-          <b>{share && Number(share.bundle.eth) > 0 ? `${share.bundle.eth} ETH` : '—'}</b>
+          {/* In the launch's own quote asset. `unit` is ETH on a native launch
+              and on v1, so this tile is unchanged there. */}
+          <b>{share && Number(share.bundle.eth) > 0 ? `${share.bundle.eth} ${unit}` : '—'}</b>
         </div>
         <div
           className={`stat ${
@@ -818,8 +1034,8 @@ export default function WalletsPanel({
           <span>Predicted MC</span>
           <b>
             {share?.marketCap && Number(share.marketCap.finalEth) > 0
-              ? usdMc(share.marketCap.finalEth, ethPrice) ||
-                `${Number(share.marketCap.finalEth).toFixed(3)} ETH`
+              ? usdMc(toEth(share.marketCap.finalEth), ethPrice) ||
+                `${Number(share.marketCap.finalEth).toFixed(3)} ${unit}`
               : '—'}
           </b>
         </div>
@@ -1403,6 +1619,135 @@ export default function WalletsPanel({
         </div>
       )}
 
+      {/* THE WAY BACK — the exact reverse of the box above, and the box above is why
+          it exists: buying the pair token was a one-way door, so a changed quote
+          asset, an abandoned launch or a bundle sized wrong left NVDA sitting in up
+          to 31 wallets with no console path to the ETH inside it.
+
+          IT IS DRAWN ONLY WHEN THERE IS SOMETHING TO RECOVER. Not "on a paired
+          launch", not "when there are wallets" — only when a bundle wallet is
+          actually HOLDING some of the pair token, which the column beside Balance
+          already knows. A recovery control on an empty bundle is an invitation to
+          press a spending button that would do nothing.
+
+          Same tier as the funding trigger beside it: a .ghost button with a dialog
+          standing behind it, because this spends real gas and sells a real position
+          and the confirm belongs in the dialog. NOT a second amber object — this
+          step's one amber is still the auto-fill stripe, and this box reuses the
+          same .pair-fund classes as the funding one, which carry no money colour. */}
+      {/* `|| backOut` is not decoration. A run that empties every wallet also empties
+          `recover.targets`, so without it the box — and the per-wallet account of what
+          just happened — would unmount at the exact moment it is most needed, leaving
+          a completed spend reported only in the readout a page below. A run stays on
+          screen until the operator navigates away from it. */}
+      {pair && (recover.targets.length > 0 || backOut) && (
+        <div className="pair-fund">
+          <b className="pair-fund-title">Recover ETH · sell {pair.symbol} back</b>
+          {recover.targets.length === 0 ? (
+            <span className="hint">
+              No bundle wallet holds {pair.symbol} any more — what the last run did is below.
+            </span>
+          ) : (
+            <>
+            <span>
+              {recover.targets.length} wallet{recover.targets.length === 1 ? '' : 's'} hold{' '}
+              <b>
+                {Number(recover.total).toFixed(6)} {pair.symbol}
+              </b>
+            </span>
+            <Busy
+              className="ghost"
+              busy={busy === 'pair-sell'}
+              disabled={busy === 'pair-sell' || !backPlan || backPlan.wouldSwap === 0}
+              onClick={() => setBackAsk({ ...backPlan, targets: recoverTargetsSent() })}
+            >
+              Sell {pair.symbol} from {backPlan ? backPlan.wouldSwap : recover.targets.length} wallet
+              {(backPlan ? backPlan.wouldSwap : recover.targets.length) === 1 ? '' : 's'}
+            </Busy>
+            <span className="hint">
+              each wallet sells its WHOLE {pair.symbol} balance and keeps the ETH · run this before
+              arming a launch, never against one already armed
+            </span>
+
+            {/* THE PROCEEDS. A sale is never offered without what it returns: this is the
+                real endpoint's own dry run, so the figure is produced by the code that
+                will sell it, and its refusals are the refusals the real run will make. */}
+            <div className="pair-fund-cost">
+              {backErr ? (
+                <span className="hint">could not price this: {backErr}</span>
+              ) : !backPlan ? (
+                <span className="hint">
+                  pricing {recover.targets.length} wallet(s) against the live pool…
+                </span>
+              ) : backPlan.wouldSwap === 0 ? (
+                // No <b> here on purpose: .pair-fund-cost b is the headline figure, and
+                // "nothing can be sold" is the absence of one rather than one.
+                <>
+                  Nothing can be sold right now
+                  <span className="hint">
+                    {backPlan.skippedImpact > 0 &&
+                      ` · ${backPlan.skippedImpact} refused, the pool is too thin for that size`}
+                    {backPlan.skippedDust > 0 &&
+                      ` · ${backPlan.skippedDust} hold dust worth less than the gas to sell it`}
+                    {backPlan.skippedShort > 0 && ` · ${backPlan.skippedShort} short of gas for the sale`}
+                    {backPlan.skippedEmpty > 0 && ` · ${backPlan.skippedEmpty} hold none`}
+                    {backPlan.failed > 0 && ` · ${backPlan.failed} could not be priced`}
+                    {' · '}nothing was sent.
+                  </span>
+                </>
+              ) : (
+                <>
+                  Sells{' '}
+                  <b>
+                    {Number(backPlan.totalPairSold).toFixed(6)} {pair.symbol}
+                  </b>{' '}
+                  for ≈ <b>{Number(backPlan.totalQuotedEth).toFixed(6)} ETH</b> back into{' '}
+                  {backPlan.wouldSwap} wallet{backPlan.wouldSwap === 1 ? '' : 's'}
+                  <span className="hint">
+                    {' '}
+                    — a live quote, floored at {(backPlan.overshootBps / 100).toFixed(1)}% below it, so a
+                    worse fill reverts with the {pair.symbol} intact
+                    {backPlan.skippedImpact > 0 &&
+                      ` · ${backPlan.skippedImpact} refused, the pool is too thin for that size`}
+                    {backPlan.skippedDust > 0 &&
+                      ` · ${backPlan.skippedDust} hold dust worth less than the gas to sell it`}
+                    {backPlan.skippedShort > 0 && ` · ${backPlan.skippedShort} short of gas for the sale`}
+                    {backPlan.failed > 0 && ` · ${backPlan.failed} could not be priced`}
+                    {recover.unknown > 0 &&
+                      ` · ${recover.unknown} wallet(s) have no ${pair.symbol} balance read yet and are not ` +
+                        'included — refresh balances'}
+                  </span>
+                </>
+              )}
+            </div>
+            </>
+          )}
+
+          {/* What the last real sale actually did, per wallet — the same refusal
+              instrument the funding run and the delete run report through. */}
+          {backOut && (
+            <div className={`notice ${backOut.swapped === backOut.count ? '' : 'danger'}`}>
+              <h3>
+                {backOut.swapped} of {backOut.count} sold · {backOut.totalPairSold} {backOut.pairSymbol}{' '}
+                for {backOut.totalEthOut} ETH
+              </h3>
+              <ul>
+                {backOut.results.map((r) => (
+                  <li key={r.walletId}>
+                    <code>
+                      {r.address.slice(0, 6)}…{r.address.slice(-4)}
+                    </code>{' '}
+                    {r.status} — sold {r.soldPair ?? '0'} {backOut.pairSymbol}
+                    {r.receivedEth ? ` for ${r.receivedEth} ETH` : ''}, still holds {r.holdingPair}
+                    {r.reason ? `. ${r.reason}` : ''}
+                  </li>
+                ))}
+              </ul>
+            </div>
+          )}
+        </div>
+      )}
+
       <div className="table-scroll">
         <table className="wallet-list">
           <thead>
@@ -1646,13 +1991,21 @@ export default function WalletsPanel({
                         in order behind the dev buy. Updates as the amount is
                         typed. */}
                     {(() => {
-                      const mcEth = isDev ? share?.dev?.mcEth : legs.get(w.id)?.mcEth;
-                      if (!(Number(mcEth) > 0)) return null;
-                      const dollars = usdMc(mcEth, ethPrice);
+                      // In the LAUNCH'S QUOTE ASSET — the curve is walked in it,
+                      // so the cap comes out in it. The dollars are that figure
+                      // taken to ETH at the live rate and no other way; with no
+                      // rate there are simply no dollars, and the line under the
+                      // table says why.
+                      const mcQuote = isDev ? share?.dev?.mcEth : legs.get(w.id)?.mcEth;
+                      if (!(Number(mcQuote) > 0)) return null;
+                      const dollars = usdMc(toEth(mcQuote), ethPrice);
                       return (
-                        <div className="mc-row hint" title={`predicted market cap after this buy — ${mcEth} ETH`}>
+                        <div
+                          className="mc-row hint"
+                          title={`predicted market cap after this buy — ${mcQuote} ${unit}`}
+                        >
                           MC {dollars ? `${dollars} · ` : ''}
-                          {Number(mcEth).toFixed(3)} ETH
+                          {Number(mcQuote).toFixed(3)} {unit}
                         </div>
                       );
                     })()}
@@ -1678,6 +2031,29 @@ export default function WalletsPanel({
       {/* The bundle total, next to the amounts that make it, and honest about
           how much it can be trusted. This is the question the operator has been
           answering by launching and looking afterwards. */}
+      {/* NO SHARE, AND WHY. A paired launch whose pairTokenEconomics never
+          reached the console cannot be priced at all: the launch config's own
+          constants are the NATIVE curve and using them is not an approximation,
+          it is a different launch — 61.20% where the truth was 14.95%. So the
+          share column, the per-row caps and this whole box are absent, and the
+          absence is explained rather than left looking like a bundle of nothing.
+          A plain notice: grey rule, grey body, no <b>. The one amber in this
+          panel is the Distribute stripe and it stays the only one. */}
+      {!share && shareBlocked && (
+        <div className="notice">
+          <h3>
+            <span>no supply share for this pair</span>
+          </h3>
+          <ul>
+            <li>{shareBlocked}</li>
+            <li>
+              A wrong figure here is worse than an absent one: it is what the whole table is
+              sized against, and it does not look wrong.
+            </li>
+          </ul>
+        </div>
+      )}
+
       {share && (share.bundle.bps > 0 || share.dev) && (
         <div className={`notice ${share.over.length || share.graduation?.crosses ? 'danger' : ''}`}>
           {/* The figure the whole run is sized against, and until now one
@@ -1708,12 +2084,13 @@ export default function WalletsPanel({
               <span className="mc-headline">
                 predicted MC{' '}
                 <b className="tally">
-                  {usdMc(share.marketCap.finalEth, ethPrice) || `${Number(share.marketCap.finalEth).toFixed(3)} ETH`}
+                  {usdMc(toEth(share.marketCap.finalEth), ethPrice) ||
+                    `${Number(share.marketCap.finalEth).toFixed(3)} ${unit}`}
                 </b>
                 <span className="hint">
-                  {Number(share.marketCap.finalEth).toFixed(3)} ETH · opens{' '}
-                  {usdMc(share.marketCap.openingEth, ethPrice) ||
-                    `${Number(share.marketCap.openingEth).toFixed(3)} ETH`}
+                  {Number(share.marketCap.finalEth).toFixed(3)} {unit} · opens{' '}
+                  {usdMc(toEth(share.marketCap.openingEth), ethPrice) ||
+                    `${Number(share.marketCap.openingEth).toFixed(3)} ${unit}`}
                 </span>
               </span>
             )}
@@ -1758,10 +2135,10 @@ export default function WalletsPanel({
           )}
           <ul>
             <li>
-              {buyingCount} wallet{buyingCount === 1 ? '' : 's'} · {share.bundle.eth} ETH · ≈
+              {buyingCount} wallet{buyingCount === 1 ? '' : 's'} · {share.bundle.eth} {unit} · ≈
               {tokens(share.bundle.tokens)} tokens
               {share.dev
-                ? ` · ${share.total.eth} ETH and ${share.exact ? '' : '≈'}${pct(
+                ? ` · ${share.total.eth} ${unit} and ${share.exact ? '' : '≈'}${pct(
                     share.total.bps
                   )} counting the dev buy`
                 : ''}
@@ -1796,6 +2173,51 @@ export default function WalletsPanel({
               </li>
             )}
 
+            {/* WHICH CURVE THESE FIGURES ARE OFF. The launch config's phantom
+                reserve and graduation threshold are the NATIVE ones; a paired
+                launch runs on the factory's own economics for the quote asset,
+                in that asset's units. Saying so is not decoration — this panel
+                priced paired bundles against the native curve and reported
+                61.20% of supply for a bundle that takes 14.95%, and the figure
+                that was wrong looked exactly like the figure that is right. */}
+            {!nativeQuote && share.marketCap && (
+              <li>
+                Priced against the {unit} curve the factory sets for this pair — it opens at{' '}
+                {Number(share.marketCap.openingEth).toFixed(3)} {unit}
+                {share.graduation
+                  ? ` and graduates at ${Number(share.graduation.thresholdEth).toFixed(3)} ${unit}`
+                  : ''}
+                . NOT the launch config{'’'}s own phantom reserve and threshold, which are the
+                native ETH ones: every approved pair has its own, and they span three orders of
+                magnitude, so neither is an approximation of the other. Every {unit} figure above
+                is the pair token; the Fund column is still ETH.
+              </li>
+            )}
+
+            {/* THE DOLLAR FIGURES, AND WHEN THERE ARE NONE. A market cap in the
+                pair token becomes dollars through a live ETH<->pair quote and no
+                other way. Without one the caps stand — they are arithmetic — and
+                the $ is simply absent, said here rather than left to look like a
+                launch worth nothing. No <b>: .distribute-fund b is this panel's
+                amber and an absent figure must not wear the money colour. */}
+            {!nativeQuote && mcRate && (
+              <li>
+                Dollar figures convert {unit} to ETH at {mcRate.perEth.toFixed(6)} {unit} per ETH —
+                a live quote taken{' '}
+                {mcRate.quotedAt ? new Date(mcRate.quotedAt).toLocaleTimeString() : 'just now'} at a{' '}
+                {MC_PROBE_ETH} ETH probe, refreshed each minute, and then multiplied by the ETH
+                price above. It moves; the {unit} figures beside it do not.
+              </li>
+            )}
+            {dollarsBlocked && (
+              <li>
+                No $ figures: the ETH to {unit} rate could not be quoted
+                {mcRateErr ? ` (${mcRateErr})` : ''}, so the market cap is shown in {unit} only. The
+                shares and caps above are unaffected — they are the curve{'’'}s own arithmetic
+                and need no quote. Nothing here is converted at a guessed rate.
+              </li>
+            )}
+
             {allMode > 0 && (
               <li>
                 {allMode} wallet{allMode === 1 ? '' : 's'} on “all − gas” — counted at the whole
@@ -1824,8 +2246,8 @@ export default function WalletsPanel({
 
             {share.graduation?.crosses && (
               <li>
-                {share.graduation.raisedEth} ETH into the curve reaches the{' '}
-                {share.graduation.thresholdEth} ETH graduation threshold — this bundle graduates the
+                {share.graduation.raisedEth} {unit} into the curve reaches the{' '}
+                {share.graduation.thresholdEth} {unit} graduation threshold — this bundle graduates the
                 curve on the way in, and a graduated launch cannot be exited through the curve.
               </li>
             )}
@@ -1919,6 +2341,50 @@ export default function WalletsPanel({
           Every wallet keeps enough ETH for the launch's own approve and buy. A wallet that cannot
           cover both is refused rather than part-funded, and every wallet is reported either way.
           Run this BEFORE arming the launch — arming signs against each wallet's current nonce.
+        </p>
+      </Modal>
+
+      {/* The recovery confirm. Vermilion when the console is live, exactly as the
+          funding dialog beside it: this sells a real position from up to 31 wallets at
+          a public pool's price and there is no undo — the ETH comes back, but the
+          tokens are gone at whatever the pool paid. One amber object in here, the
+          confirm button, and no amber band. */}
+      <Modal
+        open={Boolean(backAsk)}
+        danger={live}
+        title={
+          live
+            ? `Sell ${Number(backAsk?.totalPairSold || 0).toFixed(6)} ${pair?.symbol} back to ETH?`
+            : `Dry run: sell ${pair?.symbol} back`
+        }
+        question={null}
+        confirmLabel={live ? `Sell from ${backAsk?.wouldSwap} wallet(s)` : 'Run (dry run)'}
+        onConfirm={runPairSell}
+        onCancel={() => setBackAsk(null)}
+      >
+        <div className="modal-facts">
+          <Fact label="Pair token" mono>
+            {pair?.symbol} · {pair?.address}
+          </Fact>
+          <Fact label="Wallets">
+            {backAsk?.wouldSwap} of {backAsk?.count} (the rest hold none, hold dust, or were refused)
+          </Fact>
+          <Fact label="Total to sell">
+            {backAsk?.totalPairSold} {pair?.symbol}
+          </Fact>
+          <Fact label="Expected back">≈ {backAsk?.totalQuotedEth} ETH, at the quote just taken</Fact>
+          <Fact label="Each wallet keeps">its own proceeds — nothing is swept anywhere</Fact>
+        </div>
+        <p>
+          Each sale is floored at {((backAsk?.overshootBps ?? 300) / 100).toFixed(1)}% below the live
+          quote, so a worse fill reverts and that wallet keeps its {pair?.symbol} rather than dumping
+          it. A wallet whose whole balance would move the pool too far is refused outright, and one
+          holding less than the gas costs to sell is left alone. Every wallet is reported either way.
+        </p>
+        <p className="hint">
+          The quote moves between this dialog and the block that mines it. Run this BEFORE arming a
+          launch — each wallet spends two nonces here (an approve and the swap), and arming signs
+          against the nonce it reads.
         </p>
       </Modal>
 

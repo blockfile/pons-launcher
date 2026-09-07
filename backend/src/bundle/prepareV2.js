@@ -25,7 +25,7 @@ const { getFees, gasCost } = require('../evm/fees');
 const v2 = require('../evm/v2/factory');
 const { buildBuyTx } = require('../evm/v2/curve');
 const erc20mod = require('../evm/erc20');
-const { bundleShare } = require('../../../shared/bundleShare');
+const { bundleShare, pairedLaunchConfig } = require('../../../shared/bundleShare');
 const keystore = require('../wallets/keystore');
 const { DEFAULT_VARIANT, devWalletFor } = require('../wallets/variants');
 const { spendableFromBalance } = require('../wallets/funding');
@@ -527,14 +527,13 @@ async function prepareV2(input, deps = {}) {
   // phantomQuote/graduationThreshold — those are the native ones. It uses the
   // pair token's economics, in the pair token's decimals, so the share must be
   // walked against those. Native is unchanged: it inherits the config's values.
-  const shareLaunchConfig =
-    nonNative && pairEconomics
-      ? {
-          ...launchConfig,
-          phantomQuote: pairEconomics.phantomQuote.toString(),
-          graduationThreshold: pairEconomics.graduationThreshold.toString(),
-        }
-      : launchConfig;
+  //
+  // The substitution itself moved into shared/bundleShare.js, unchanged, because
+  // the CONSOLE has to make the identical one and was not making it at all — it
+  // priced every paired bundle against native's 1.68 ETH phantom and reported
+  // 61.20% for a bundle this preflight put at 14.20%. Two runtimes, one
+  // expression, which is the whole rule that module opens with.
+  const shareLaunchConfig = pairedLaunchConfig(launchConfig, nonNative ? pairEconomics : null);
   const share = bundleShare({
     protocol: 'v2',
     launchConfig: shareLaunchConfig,
