@@ -191,6 +191,39 @@ async function resolveRun(body = {}, ks, deps = {}) {
     }
   }
 
+  // ── would this big buy graduate the curve on impact? ───────────────────────────────────
+  // graduated/readyToGraduate above are the CLIFF EDGE: readyToGraduate is true only once there
+  // is nothing left to sell, so both can be false while a buy this size takes the curve straight
+  // over. The curve clamps an oversized buy and refunds the excess rather than reverting, so the
+  // ETH is not lost — but the RUN is: the curve dies, the position can only be sold on a Uniswap
+  // pool V3 does not trade, and every wallet after the first is stranded. Measured on the token
+  // side because that is the side a buy cannot overshoot. Skipped when the curve does not expose
+  // sellableTokens (older curve, or a test double) — an unknown headroom must not block a run.
+  if (curve.sellableTokens != null && curve.sellableTokens > 0n) {
+    const quoteIn = curve.isNativeQuote
+      ? bigBuyWei
+      : (await routeSwap.quoteEthToPair({ pairToken: curve.pairToken, amountInWei: bigBuyWei }, { provider: rpc }))
+          .amountOut;
+    const tokensBought = sizing.quoteBuyOut({
+      quoteIn,
+      quoteReserve: curve.quoteReserve,
+      tokenReserve: curve.tokenReserve,
+      feeBps: curve.feeBps,
+      creatorTaxBps: curve.creatorTaxBps,
+    });
+    const cap =
+      (curve.sellableTokens * BigInt(Math.round(config.v3Route.maxHeadroomFrac * 100))) / 100n;
+    if (tokensBought >= cap) {
+      throw new Error(
+        `this ${formatEther(bigBuyWei)} ETH big buy would take ~${formatUnits(tokensBought, 18)} tokens, but ` +
+          `only ${formatUnits(curve.sellableTokens, 18)} remain before ${token} graduates — V3 refuses a big ` +
+          `buy past ${Math.round(config.v3Route.maxHeadroomFrac * 100)}% of that headroom. Graduating mid-run ` +
+          `moves the token to a Uniswap pool V3 cannot sell into and strands the whole position. Use a ` +
+          `smaller big buy, or pick a token further from graduation.`
+      );
+    }
+  }
+
   return {
     token,
     curve: getAddress(record.curve),

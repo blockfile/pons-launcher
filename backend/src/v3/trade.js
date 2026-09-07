@@ -151,6 +151,19 @@ async function readCurve(curveAddress, deps = {}) {
       c.readyToGraduate(),
     ]);
 
+  // HOW FAR FROM GRADUATION, not just whether it has happened. readyToGraduate is a cliff
+  // edge — true only once there is nothing left to sell — so a preflight that reads only the
+  // boolean can approve a big buy that graduates the curve on impact. sellableTokens() is the
+  // distance to that edge, expressed on the TOKEN side because that is the side a buy cannot
+  // overshoot (the curve clamps and refunds rather than reverting). Read defensively: a curve
+  // without the getter, or a test double, yields null and every caller treats that as unknown.
+  let sellableTokens = null;
+  try {
+    sellableTokens = BigInt(await c.sellableTokens());
+  } catch (_e) {
+    sellableTokens = null;
+  }
+
   // The curve's quote asset. For a native-quote curve this is a native sentinel/WETH and is
   // ignored; for a token-quote curve (e.g. AMZN) it is what the route swaps ETH to and from.
   // Read defensively — a curve that predates the getter, or a test double without it, yields null.
@@ -172,6 +185,7 @@ async function readCurve(curveAddress, deps = {}) {
     creatorTaxBps: Number(creatorTaxBps),
     graduated: Boolean(graduated),
     readyToGraduate: Boolean(readyToGraduate),
+    sellableTokens,
   };
 }
 

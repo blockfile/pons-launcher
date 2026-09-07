@@ -337,6 +337,13 @@ const config = {
     // pool-draining trade — this ceiling can. 1000 = 10%. A big buy that would impact the thin
     // USDG/pair pool past this is refused rather than silently losing the ETH.
     maxImpactBps: num(process.env.V3_ROUTE_MAX_IMPACT_BPS, 1000),
+    // THE GRADUATION CAP. The most of the curve's REMAINING headroom a single big buy may take.
+    // readyToGraduate is a cliff edge — true only once nothing is left to sell — so a preflight
+    // that reads only the boolean happily approves a buy that graduates the curve on impact,
+    // which strands the whole position on a pool V3 cannot trade. V7 has carried this guard
+    // since launch (FLAP_MAX_HEADROOM_FRAC); V3 did not, and a live 2.7 ETH run was lost to
+    // exactly that. 0.8 = refuse a big buy taking more than 80% of what is left.
+    maxHeadroomFrac: Math.min(1, Math.max(0.05, Number(process.env.V3_MAX_HEADROOM_FRAC || '0.8'))),
   },
 };
 

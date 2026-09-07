@@ -109,6 +109,7 @@ function harness({
   perEthPair = TOKENS(1000), // the swap route's spot rate: 1 ETH buys 1000 pair tokens
   mainEth = parseEther('50'),
   snipeBps = 0,
+  sellableTokens = null, // tokens left before graduation; null = the curve does not say
   totalSupply = TOKENS(1_000_000_000), // what the token's own ERC-20 reports
   tokenDecimals = 18,
   supplyError = null, // if set, totalSupply() throws it — the market cap must go missing, not fatal
@@ -132,6 +133,7 @@ function harness({
         creatorTaxBps: 100,
         graduated,
         readyToGraduate,
+        sellableTokens,
       }),
       snipeTax: async () => ({ bps: snipeBps, windowSeconds: 600 }),
       tokenBalance: async () => TOKENS(1000),
@@ -658,4 +660,26 @@ test('POST /v3/wallets/backup still requires confirm:true with a filter present'
   const { caught } = await callBackup(userId, { role: 'v3bundle' });
   assert.ok(caught);
   assert.match(caught.message, /confirm: true/);
+});
+
+// THE GRADUATION CLIFF. graduated/readyToGraduate are the EDGE, not the distance: readyToGraduate
+// is true only once nothing remains to sell, so both read false while a big buy this size takes
+// the curve straight over. The curve clamps and refunds the excess, so the ETH survives — but the
+// RUN does not: the curve dies, the position can only be sold on a Uniswap pool V3 cannot trade,
+// and every wallet after the first is stranded. A live 2.7 ETH run was lost to exactly this.
+test('it refuses a big buy that would take most of the remaining headroom', async () => {
+  // 5 ETH into a 40-ETH-reserve curve buys ~88.9M tokens; only 50M remain before graduation.
+  const h = harness({ sellableTokens: TOKENS(50_000_000) });
+  await assert.rejects(() => resolve(h), /headroom|graduat/i);
+});
+
+test('it allows a big buy that leaves the curve real headroom', async () => {
+  const h = harness({ sellableTokens: TOKENS(500_000_000) });
+  await assert.doesNotReject(() => resolve(h));
+});
+
+test('a curve that does not report headroom is not blocked by the cap', async () => {
+  // Older curves and test doubles yield null; an UNKNOWN headroom must never refuse a run.
+  const h = harness({ sellableTokens: null });
+  await assert.doesNotReject(() => resolve(h));
 });
