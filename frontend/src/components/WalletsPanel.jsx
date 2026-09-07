@@ -603,7 +603,11 @@ export default function WalletsPanel({ step, wallets, rows, setRow, share, reloa
               <th>Balance</th>
               <th>Fund (ETH)</th>
               <th>Buy mode</th>
-              <th>Buy (ETH)</th>
+              {/* NOT "(ETH)". On a paired launch every bundle buy is denominated in the PAIR
+                  token, and this panel has no way to know which one — the pair is chosen in
+                  step 5. Naming a unit here was wrong half the time, so it names none. The
+                  Fund column keeps (ETH) because that really is ETH: gas, whatever the pair. */}
+              <th>Buy amount</th>
               {/* Not "Est. share": on v2 it is not an estimate. The ~ on each
                   figure is what says which one this is. */}
               <th>Supply share</th>

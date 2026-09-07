@@ -410,10 +410,20 @@ export default function LaunchForm({
           </label>
         )}
         <label className="half">
-          Dev buy (ETH)
+          {/* NAMED FOR THE ASSET IT ACTUALLY SPENDS. This said "(ETH)" on every launch, but a
+              paired launch denominates the dev buy in the PAIR token — so the field read ETH
+              while the preflight refused with "holds 0.0 NVDA but the dev buy needs 0.05 NVDA".
+              pair.symbol is "ETH" on a native launch, so the native case is unchanged. */}
+          Dev buy ({pair.symbol})
           <input type="number" step="0.0001" value={f.devBuyEth} onChange={set('devBuyEth')} />
           <span className="hint">
             Bought inside the launch itself — nothing can get ahead of it, and no cap applies.
+            {!nativePair && (
+              <>
+                {' '}
+                <b>Spent in {pair.symbol}, not ETH</b> — the dev wallet needs a {pair.symbol} balance.
+              </>
+            )}
           </span>
         </label>
       </div>
