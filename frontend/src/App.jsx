@@ -10,6 +10,7 @@ import { shortAddress } from './format.js';
 // import because that file is CommonJS: the backend requires it directly.
 import bundleShareModule from '../../shared/bundleShare.js';
 import { rolesFor } from './variant.js';
+import { NATIVE_PAIR } from './pairAssets.js';
 import Guide from './components/Guide.jsx';
 import Sequence from './components/Sequence.jsx';
 import DevWalletPanel from './components/DevWalletPanel.jsx';
@@ -131,6 +132,16 @@ export default function App() {
   // amounts BUY, so LaunchForm pushes it up here the way it already pushes the
   // logo up for the sequence.
   const [sizing, setSizing] = useState(null);
+  // THE QUOTE ASSET, lifted out of LaunchForm because two panels need it now.
+  // Step 5 prices the launch in it; step 3 has to make every bundle wallet HOLD
+  // it before the launch is armed, because a paired launch's bundle buys are
+  // pre-signed in the pair token and a wallet without it is dropped by the
+  // preflight. `pairToken` is the picker's own value, owned here and handed back
+  // down; `pair` is what LaunchForm resolved it to against the live /v2/configs
+  // read it owns — symbol and decimals included — and is null on a native launch,
+  // which is what keeps the pair funding control off a native launcher entirely.
+  const [pairToken, setPairToken] = useState(NATIVE_PAIR);
+  const [pair, setPair] = useState(null);
   // What steps 2 and 6 found, handed up by the panels that already fetched it.
   // The strip at the top of the page states every step's state, and it must not
   // do that by making the same two requests a second time.
@@ -755,6 +766,8 @@ export default function App() {
             rows={rows}
             setRow={setRow}
             share={share}
+            pair={pair}
+            live={live}
             reload={loadWallets}
             report={report}
           />
@@ -787,6 +800,9 @@ export default function App() {
             report={report}
             onDraft={setDraft}
             onSizing={setSizing}
+            pairToken={pairToken}
+            onPairToken={setPairToken}
+            onPair={setPair}
           />
           {/* The console's answer, between the launch and the exit because that is
               where it falls: you launch, you read this, and only later do you

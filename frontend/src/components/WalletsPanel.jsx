@@ -46,7 +46,21 @@ function usdMc(ethStr, price) {
   return `$${Math.round(v)}`;
 }
 
-export default function WalletsPanel({ step, wallets, rows, setRow, share, reload, report, variant = 'v1' }) {
+export default function WalletsPanel({
+  step,
+  wallets,
+  rows,
+  setRow,
+  share,
+  reload,
+  report,
+  // The launch's quote asset, resolved by step 5 and lifted through App. NULL on a
+  // native launch — and that is the whole visibility rule for the pair funding
+  // control below: a native bundle buys with the ETH it already holds.
+  pair = null,
+  live = false,
+  variant = 'v1',
+}) {
   const roles = rolesFor(variant);
   const [count, setCount] = useState(5);
   const [showImport, setShowImport] = useState(false);
@@ -72,6 +86,21 @@ export default function WalletsPanel({ step, wallets, rows, setRow, share, reloa
   // table, and the live gas cost of a buy/sell so the fund reserve is exact.
   const [totalBuy, setTotalBuy] = useState('');
   const [gas, setGas] = useState(null); // { buyGasEth, sellGasEth }
+
+  // ── PAIRED LAUNCH: the bundle must HOLD the pair token BEFORE the launch ────
+  // A paired launch denominates every bundle buy in the pair token, and those buys
+  // are signed before the token exists — so a wallet that is not already holding it
+  // is dropped by the preflight ("holds 0.0 NVDA, needs 0.029125 NVDA — skipped")
+  // and the bundle fires empty. These four hold the priced plan, the last real run,
+  // and the dialog between them. All of it is dead weight on a native launch, where
+  // `pair` is null and none of it renders.
+  const [pairPlan, setPairPlan] = useState(null); // the priced dry run
+  const [pairErr, setPairErr] = useState('');
+  // The plan the dialog is asking about, FROZEN with the targets it was priced
+  // against — so what the operator reads is what is broadcast, even if the Buy
+  // column is edited while the dialog is open. Same rule the launch dialog keeps.
+  const [pairAsk, setPairAsk] = useState(null);
+  const [pairOut, setPairOut] = useState(null); // what the last real run did, per wallet
 
   useEffect(() => {
     let alive = true;
@@ -251,6 +280,99 @@ export default function WalletsPanel({ step, wallets, rows, setRow, share, reloa
         `${SELL_RESERVE} sells. Nothing was sent; edit any row, then Fund and launch as usual.`
     );
     notify(`Filled ${bundle.length} wallets for ${total} ETH. No ETH moved — edit, then Fund.`, 'ok');
+  }
+
+  // ── the pair funding plan ───────────────────────────────────────────────────
+  // WHICH WALLETS. Every bundle wallet with a Buy amount typed — that amount IS
+  // the requirement, in the pair token's own units, because it is the same number
+  // prepareV2 parses and then demands the wallet hold. A wallet on "all − gas" is
+  // deliberately excluded: on a paired launch that mode means "spend whatever pair
+  // balance you have", which names no amount to buy, so there is nothing to size a
+  // swap against. It is stated below rather than silently dropped.
+  const pairTargets = pair
+    ? bundle
+        .filter((w) => (rows[w.id]?.mode ?? 'fixed') !== 'all' && Number(rows[w.id]?.buy) > 0)
+        .map((w) => ({ walletId: w.id, amountPair: String(rows[w.id].buy) }))
+    : [];
+  const pairAllMode = pair ? bundle.filter((w) => rows[w.id]?.mode === 'all').length : 0;
+  const pairTotal = pairTargets.reduce((sum, t) => sum + Number(t.amountPair), 0);
+  // Serialised so the preview below re-runs when the AMOUNTS change and not merely
+  // when the array identity does (it is rebuilt every render).
+  const pairKey = JSON.stringify(pairTargets);
+
+  // The ETH this will cost, priced server-side against live quotes — the operator
+  // must not be asked to approve a spend whose size is a guess. It is a dry run of
+  // the real endpoint, so the figure on screen is produced by the code that will
+  // spend it, including its skips and its refusals. Debounced, because it is a
+  // chain read per wallet and the Buy column is typed in.
+  useEffect(() => {
+    if (!pair || pairTargets.length === 0) {
+      setPairPlan(null);
+      setPairErr('');
+      return undefined;
+    }
+    let alive = true;
+    const t = setTimeout(async () => {
+      try {
+        const out = await api('/wallets/swap-to-pair', 'POST', {
+          variant,
+          pairToken: pair.address,
+          targets: JSON.parse(pairKey),
+          dryRun: true,
+        });
+        if (!alive) return;
+        setPairPlan(out);
+        setPairErr('');
+      } catch (err) {
+        if (!alive) return;
+        setPairPlan(null);
+        setPairErr(err.message);
+      }
+    }, 1200);
+    return () => {
+      alive = false;
+      clearTimeout(t);
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [pair?.address, pairKey, variant]);
+
+  /**
+   * Buy the pair token, one wallet at a time, each with its own ETH.
+   *
+   * The dev wallet never sends the token on: distributing it would write
+   * dev → 20 wallets → they all buy the launch onto the chain, which is the
+   * coordination a bundle is trying not to advertise.
+   *
+   * The result is kept on the panel as well as sent to the readout, because a run
+   * where some wallets swapped, some were already funded and some were refused for
+   * gas must not be reduced to one line somebody scrolls past.
+   */
+  async function runPairSwap() {
+    setBusy('pair-swap');
+    setPairOut(null);
+    try {
+      const out = await api('/wallets/swap-to-pair', 'POST', {
+        variant,
+        pairToken: pairAsk.pairToken,
+        targets: pairAsk.targets,
+      });
+      setPairOut(out);
+      report(out);
+      const stuck = out.count - out.swapped - out.skippedAlreadyFunded;
+      notify(
+        stuck === 0
+          ? `All ${out.count} wallet(s) hold their ${out.pairSymbol}. Spent ${out.totalEth} ETH.`
+          : `${out.swapped} swapped, ${stuck} not funded — read the list under the table.`,
+        stuck === 0 ? 'ok' : 'error'
+      );
+      await reload();
+    } catch (err) {
+      report(`ERROR: ${err.message}`);
+      notify(`Pair funding failed — ${err.message}`, 'error');
+    } finally {
+      setBusy('');
+      setPairAsk(null);
+    }
   }
 
   // The delete list is derived from the bundle wallets and intersected with the
@@ -575,6 +697,101 @@ export default function WalletsPanel({ step, wallets, rows, setRow, share, reloa
                 ({Number(totalBuy).toFixed(4)} buys + {(bundle.length * reservePerWallet).toFixed(4)} gas
                 reserve) — your dev buy and the launch fee are on top. Underfunded wallets are skipped.
               </span>
+            </div>
+          )}
+        </div>
+      )}
+
+      {/* PAIR FUNDING — only on a paired launch, and only when there are wallets to
+          fund. On a native launch `pair` is null and this whole block is absent, which
+          is why nothing here has to reason about ETH-quoted curves.
+
+          Deliberately NOT a second amber box. The step's one amber object is the
+          auto-fill stripe above; the money signal for this control belongs on the
+          action, and the action is a .ghost because a dialog stands behind it. */}
+      {pair && bundle.length > 0 && (
+        <div className="pair-fund">
+          <b className="pair-fund-title">Pair funding · {pair.symbol}</b>
+          <span>
+            {pairTargets.length} wallet{pairTargets.length === 1 ? '' : 's'} need{' '}
+            <b>
+              {pairTotal.toFixed(6)} {pair.symbol}
+            </b>
+          </span>
+          <Busy
+            className="ghost"
+            busy={busy === 'pair-swap'}
+            disabled={busy === 'pair-swap' || !pairPlan || pairPlan.wouldSwap === 0}
+            onClick={() => setPairAsk({ ...pairPlan, targets: JSON.parse(pairKey) })}
+          >
+            Buy {pair.symbol} for {pairPlan ? pairPlan.wouldSwap : pairTargets.length} wallet
+            {(pairPlan ? pairPlan.wouldSwap : pairTargets.length) === 1 ? '' : 's'}
+          </Busy>
+          <span className="hint">
+            each wallet buys its own {pair.symbol} with its own ETH · run this BEFORE arming the
+            launch
+          </span>
+
+          {/* THE PRICE. A spend is never offered without its size: this is the real
+              endpoint's own dry run, so the number is produced by the code that will
+              spend it, and its skips are the skips the real run will make. */}
+          <div className="pair-fund-cost">
+            {pairTargets.length === 0 ? (
+              <span className="hint">
+                No bundle wallet has a Buy amount yet — type one (or use Auto-fill above). On a
+                paired launch that column is in {pair.symbol}, not ETH.
+              </span>
+            ) : pairErr ? (
+              <span className="hint">could not price this: {pairErr}</span>
+            ) : !pairPlan ? (
+              <span className="hint">pricing {pairTargets.length} wallet(s) against the live pool…</span>
+            ) : (
+              <>
+                Spends ≈ <b>{Number(pairPlan.totalEth).toFixed(6)} ETH</b> to buy {pairPlan.wouldSwap}{' '}
+                wallet{pairPlan.wouldSwap === 1 ? '' : 's'} their {pair.symbol}
+                <span className="hint">
+                  {pairPlan.skippedAlreadyFunded > 0 && ` · ${pairPlan.skippedAlreadyFunded} already funded`}
+                  {pairPlan.skippedShort > 0 && ` · ${pairPlan.skippedShort} short of ETH`}
+                  {pairPlan.skippedImpact > 0 &&
+                    ` · ${pairPlan.skippedImpact} refused, the pool is too thin for that size`}
+                  {pairPlan.failed > 0 && ` · ${pairPlan.failed} could not be priced`}
+                  {pairAllMode > 0 &&
+                    ` · ${pairAllMode} on "all − gas" are not funded here: that mode spends whatever ` +
+                      `${pair.symbol} balance a wallet has, so there is no amount to buy`}
+                </span>
+              </>
+            )}
+          </div>
+
+          {/* What the last real run actually did, per wallet — the console's own
+              refusal instrument, the same one the delete run reports through. A run
+              where some swapped, some were already funded and some were refused for
+              gas must never be reduced to a single count. */}
+          {pairOut && (
+            <div
+              // `danger`, not `warn`, exactly as the delete run's outcome above:
+              // amber is this step's spending action and there is only one of it.
+              className={`notice ${
+                pairOut.swapped + pairOut.skippedAlreadyFunded === pairOut.count ? '' : 'danger'
+              }`}
+            >
+              <h3>
+                {pairOut.swapped} of {pairOut.count} swapped · {pairOut.totalEth} ETH spent
+                {pairOut.skippedAlreadyFunded ? ` · ${pairOut.skippedAlreadyFunded} already funded` : ''}
+              </h3>
+              <ul>
+                {pairOut.results
+                  .filter((r) => r.status !== 'skipped-already-funded')
+                  .map((r) => (
+                    <li key={r.walletId}>
+                      <code>
+                        {r.address.slice(0, 6)}…{r.address.slice(-4)}
+                      </code>{' '}
+                      {r.status} — holds {r.holdingPair} {pairOut.pairSymbol} of {r.needPair}
+                      {r.reason ? `. ${r.reason}` : ''}
+                    </li>
+                  ))}
+              </ul>
             </div>
           )}
         </div>
@@ -961,6 +1178,36 @@ export default function WalletsPanel({ step, wallets, rows, setRow, share, reloa
           test for dropping the colour, and the way back is now a shell command
           on the server — the opposite of a second click. One dialog for one
           wallet and for twelve. */}
+      {/* The pair funding confirm. Vermilion when the console is live, exactly as the
+          launch dialog is: this buys a token with real ETH from up to 31 wallets and
+          there is no undo. One amber object in here — the confirm button — and no
+          amber band, which is the defect this console keeps re-growing. */}
+      <Modal
+        open={Boolean(pairAsk)}
+        danger={live}
+        title={live ? `Buy ${pair?.symbol} with ${pairAsk?.totalEth} ETH?` : `Dry run: buy ${pair?.symbol}`}
+        question={null}
+        confirmLabel={live ? `Buy ${pair?.symbol} for ${pairAsk?.wouldSwap} wallet(s)` : 'Run (dry run)'}
+        onConfirm={runPairSwap}
+        onCancel={() => setPairAsk(null)}
+      >
+        <div className="modal-facts">
+          <Fact label="Pair token" mono>
+            {pair?.symbol} · {pair?.address}
+          </Fact>
+          <Fact label="Wallets">
+            {pairAsk?.wouldSwap} of {pairAsk?.count} (the rest are already funded or refused)
+          </Fact>
+          <Fact label="Total to spend">{pairAsk?.totalEth} ETH</Fact>
+          <Fact label="Each wallet buys">its own {pair?.symbol}, with its own ETH</Fact>
+        </div>
+        <p>
+          Every wallet keeps enough ETH for the launch's own approve and buy. A wallet that cannot
+          cover both is refused rather than part-funded, and every wallet is reported either way.
+          Run this BEFORE arming the launch — arming signs against each wallet's current nonce.
+        </p>
+      </Modal>
+
       <Modal
         open={pending.length > 0}
         danger

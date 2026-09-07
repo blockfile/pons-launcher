@@ -23,8 +23,9 @@ const { formatEther } = require('ethers');
 const { requireApiKey, requireAuthConfigured } = require('../middleware/auth');
 const { findSellable, withDeadline } = require('../evm/v2/holdings');
 const { prepareSell } = require('../bundle/prepareSell');
+const { swapBundleToPair } = require('../bundle/swapToPair');
 const { fireSell } = require('../bundle/fireSell');
-const { jsonSafe } = require('./launch');
+const { jsonSafe, withLaunchLock } = require('./launch');
 const relayFunding = require('../relay/funding');
 const timedRelayFunding = require('../relay/timedFunding');
 const { storeFor } = require('../v4/store');
@@ -302,6 +303,73 @@ router.post('/fund', requireApiKey, async (req, res, next) => {
   } catch (err) {
     next(err);
   }
+});
+
+// POST /api/wallets/swap-to-pair — the PRE-LAUNCH funding step for a PAIRED launch.
+//
+// A paired launch denominates every bundle buy in the pair token, and those buys are
+// pre-signed, so each wallet must ALREADY hold the token when the launch fires. This
+// makes each wallet buy its own, with its own ETH, through the verified Uniswap route
+// — no transfer from the dev wallet, so no on-chain dev->buyers link.
+//
+// `targets[].amountPair` is what the wallet must END UP holding, taken from the
+// operator's per-wallet Buy amount so it is the same figure prepareV2's preflight
+// will demand of it. Wallets already holding enough are skipped; a wallet that cannot
+// cover the swap plus the gas its launch legs still need is refused, not half-spent.
+//
+// It shares the LAUNCH LOCK, and it must run BEFORE the launch is armed: prepareV2
+// reads each wallet's pending nonce when it signs, so a swap broadcast afterwards
+// would consume the nonce the pre-signed approve is holding.
+const swapToPairHandler = async (req, res, next) => {
+  try {
+    const ks = keystoreFor(req.user.id);
+    const { variant = DEFAULT_VARIANT, pairToken, targets, dryRun = false } = req.body || {};
+    const out = await swapBundleToPair({ variant, pairToken, targets, dryRun }, { keystore: ks });
+    if (!out.dryRun) {
+      // The skips are on the log line, not only in the payload: "swapped 18/31" with
+      // no account of the other 13 is exactly the silence this endpoint exists to end.
+      activityFor(req.user.id).record(
+        'fund',
+        `[${variant}] swapped ETH->${out.pairSymbol} for ${out.swapped}/${out.count} wallet(s), ` +
+          `${out.totalEth} ETH spent` +
+          (out.skippedAlreadyFunded ? `, ${out.skippedAlreadyFunded} already funded` : '') +
+          (out.skippedShort ? `, ${out.skippedShort} short of ETH` : '') +
+          (out.skippedImpact ? `, ${out.skippedImpact} refused on price impact` : '') +
+          (out.swappedShort ? `, ${out.swappedShort} still short after swapping` : '') +
+          (out.failed ? `, ${out.failed} failed` : ''),
+        {
+          variant,
+          pairToken: out.pairToken,
+          pairSymbol: out.pairSymbol,
+          totalEth: out.totalEth,
+          swaps: out.results.map((r) => ({
+            walletId: r.walletId,
+            address: r.address,
+            status: r.status,
+            needPair: r.needPair,
+            holdingPair: r.holdingPair,
+            swapEth: r.swapEth,
+            hash: r.hash,
+            reason: r.reason,
+          })),
+        }
+      );
+    }
+    res.json(jsonSafe(out));
+  } catch (err) {
+    next(err);
+  }
+};
+const swapToPairLocked = withLaunchLock(swapToPairHandler);
+router.post('/wallets/swap-to-pair', requireApiKey, (req, res, next) => {
+  // A DRY RUN TAKES NO LOCK. It reads quotes, signs nothing and touches no nonce,
+  // and the console prices this in the background while the Buy column is being
+  // typed in — so holding the launch lock for it would make "Arm" answer "a launch
+  // is already in progress" for a request that is not a launch and is not spending.
+  // The real run takes it, because it spends from the very wallets a launch
+  // pre-signs against.
+  if ((req.body || {}).dryRun === true) return swapToPairHandler(req, res, next);
+  return swapToPairLocked(req, res, next);
 });
 
 // POST /api/v2/relay/fund — fund v2 bundle wallets through Relay solver orders.

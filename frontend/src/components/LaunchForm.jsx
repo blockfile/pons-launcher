@@ -57,6 +57,13 @@ export default function LaunchForm({
   report,
   onDraft,
   onSizing,
+  // The v2 quote asset. The SELECTION lives in App now, because two panels need
+  // it: this form prices the launch in it, and step 3 funds the bundle with it.
+  // Everything below still reads `pairToken` and derives `pair` exactly as it did
+  // when the useState was here.
+  pairToken = NATIVE_PAIR,
+  onPairToken = () => {},
+  onPair = () => {},
   variant = 'v1',
 }) {
   const roles = rolesFor(variant);
@@ -70,9 +77,9 @@ export default function LaunchForm({
   const [protocol, setProtocol] = useState(SHOW_PONS_V1 ? 'v1' : 'v2');
   const [v2, setV2] = useState(null);
   const [launchConfigId, setLaunchConfigId] = useState(0);
-  // The v2 quote asset. Native ETH (the zero-address sentinel) by default, which
-  // is byte-for-byte the backend's own default — a native launch is unchanged.
-  const [pairToken, setPairToken] = useState(NATIVE_PAIR);
+  // Native ETH (the zero-address sentinel) by default, which is byte-for-byte the
+  // backend's own default — a native launch is unchanged.
+  const setPairToken = onPairToken;
   const [dexId, setDexId] = useState(0);
   const [busy, setBusy] = useState('');
   const [uploading, setUploading] = useState(false);
@@ -98,6 +105,19 @@ export default function LaunchForm({
   const pairTokens = pairOptions(v2);
   const pair = selectedPair(v2, pairToken);
   const nativePair = isNativePair(pair.address);
+
+  // The resolved selection, handed to App for step 3's pair funding. Only this
+  // form knows it: the symbol and the DECIMALS come from the /v2/configs read it
+  // owns, and step 3 cannot size a pair-token amount without them. Null on a
+  // native launch, which is what makes the funding control invisible there.
+  //
+  // The deps are the resolved fields rather than `pair` itself: selectedPair
+  // returns a fresh object every render, so depending on it would re-fire this on
+  // every render and loop against App's setState.
+  useEffect(() => {
+    onPair(isV2 && !nativePair ? { address: pair.address, symbol: pair.symbol, decimals: pair.decimals } : null);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [isV2, nativePair, pair.address, pair.symbol, pair.decimals]);
 
   // v2's factory is a different contract with its own configs and its own
   // gating, so they are read separately and only when the operator asks for it.
