@@ -6,11 +6,14 @@ import {
   stepOrder,
   pairHoldings,
   shortOfPair,
+  ethShortfall,
   pairChangeImpact,
   strandedRecord,
   strandingCleared,
   stepNeed,
   fundGate,
+  swapGate,
+  recoverGate,
   launchGate,
   listOf,
 } from './quoteAsset.js';
@@ -22,6 +25,10 @@ const SPCX = { address: '0xSPCX', symbol: 'SPCX' };
 // The numbering a v2 plan produces, so the copy can be checked for the step it
 // actually names rather than for a number hardcoded in two places.
 const V2_NUMS = { quote: 1, dev: 2, wallets: 3, fund: 4, launch: 5, sell: 6 };
+// The same launcher priced in a quote asset: the swap station exists, so launch
+// and sell move down one. Every piece of copy that names another station is
+// checked against THIS map, not against a number written twice.
+const V2P_NUMS = { quote: 1, dev: 2, wallets: 3, fund: 4, swap: 5, launch: 6, sell: 7 };
 const V1_NUMS = { dev: 1, disperser: 2, wallets: 3, fund: 4, launch: 5, sell: 6 };
 
 // ── ORDERING ────────────────────────────────────────────────────────────────
@@ -233,9 +240,9 @@ test('a paired launch tells the dev step it also needs the quote asset', () => {
   assert.equal(stepNeed('dev', { hasDev: true }), null);
 });
 
-test('the launch step points at the pair funding control when wallets are short', () => {
+test('the launch step points at the SWAP station when wallets are short', () => {
   const need = stepNeed('launch', {
-    nums: V2_NUMS,
+    nums: V2P_NUMS,
     paired: true,
     pairSymbol: 'NVDA',
     draftMissing: [],
@@ -243,13 +250,15 @@ test('the launch step points at the pair funding control when wallets are short'
     shortOfPair: 2,
   });
   assert.match(need, /2 do not/);
-  assert.match(need, /step 3/);
-  assert.match(need, /Pair funding/);
+  // Step 5 on a paired plan is the swap. It used to say step 3 and name a box
+  // inside the wallet table, which is where the control no longer is.
+  assert.match(need, /step 5/);
+  assert.doesNotMatch(need, /Pair funding/);
 });
 
 test('missing form fields outrank a pair shortfall — the nearer fix is said first', () => {
   const need = stepNeed('launch', {
-    nums: V2_NUMS,
+    nums: V2P_NUMS,
     paired: true,
     pairSymbol: 'NVDA',
     draftMissing: ['a logo'],
@@ -257,7 +266,7 @@ test('missing form fields outrank a pair shortfall — the nearer fix is said fi
     shortOfPair: 2,
   });
   assert.match(need, /a logo/);
-  assert.doesNotMatch(need, /Pair funding/);
+  assert.doesNotMatch(need, /already hold/);
 });
 
 test('a launch that has already run stops listing what it needs', () => {
@@ -349,4 +358,365 @@ test('listOf reads as a sentence at one, two and three items', () => {
   assert.equal(listOf(['a symbol', 'a logo']), 'a symbol and a logo');
   assert.equal(listOf(['a name', 'a symbol', 'a logo']), 'a name, a symbol and a logo');
   assert.equal(listOf([]), '');
+});
+
+// ── THE SWAP STATION ────────────────────────────────────────────────────────
+// Relay and the funding run both move NATIVE ETH only, so the quote asset can
+// never be SENT to a bundle wallet — each wallet has to buy its own with its own
+// ETH, between being funded and being armed. That is a third thing to do, and
+// these are the tests that it is a station rather than a paragraph.
+
+test('a PAIRED launch puts the swap between funding and launching', () => {
+  const plan = stepOrder({ dispersers: false, quote: true, paired: true });
+  assert.deepEqual(plan, ['quote', 'dev', 'wallets', 'fund', 'swap', 'launch', 'sell']);
+  // The whole order the operator asked for: ETH first, then the asset, then arm.
+  assert.ok(plan.indexOf('fund') < plan.indexOf('swap'));
+  assert.ok(plan.indexOf('swap') < plan.indexOf('launch'));
+});
+
+test('a NATIVE v2 launch has no swap station at all — its plan is what it was', () => {
+  assert.deepEqual(stepOrder({ dispersers: false, quote: true, paired: false }), [
+    'quote',
+    'dev',
+    'wallets',
+    'fund',
+    'launch',
+    'sell',
+  ]);
+});
+
+test('v1 is untouched in shape whatever `paired` says — it has no quote asset to swap into', () => {
+  const v1 = ['dev', 'disperser', 'wallets', 'fund', 'launch', 'sell'];
+  assert.deepEqual(stepOrder({ dispersers: true, quote: false }), v1);
+  assert.deepEqual(stepOrder({ dispersers: true, quote: false, paired: true }), v1);
+});
+
+test('the swap station states ETH as its precondition, and names the step that sends it', () => {
+  const f = {
+    nums: V2P_NUMS,
+    paired: true,
+    pairSymbol: 'NVDA',
+    // The operator's own screen: 31 bundle wallets holding 0.000478 ETH each,
+    // each needing about 0.0107, against a NVDA column reading 0.000000.
+    bundleCount: 31,
+    swapTargets: 31,
+    shortOfEth: 31,
+    missingEth: '0.316822',
+    shortOfPair: 31,
+  };
+  const need = stepNeed('swap', f);
+  assert.match(need, /31/, 'says how many wallets are short');
+  assert.match(need, /0\.316822 ETH/, 'says how much ETH is missing in total');
+  assert.match(need, /step 4/, 'names the funding step as the one that supplies it');
+});
+
+test('the swap station asks for wallets, then amounts, then ETH — nearest fix first', () => {
+  const base = { nums: V2P_NUMS, paired: true, pairSymbol: 'NVDA', shortOfEth: 8, shortOfPair: 5 };
+  assert.match(stepNeed('swap', { ...base, bundleCount: 0 }), /Needs bundle wallets/);
+  assert.match(
+    stepNeed('swap', { ...base, bundleCount: 8, swapTargets: 0 }),
+    /Buy amount/,
+    'no amount typed outranks no ETH — one is a field, the other is a transfer'
+  );
+  assert.match(
+    stepNeed('swap', { ...base, bundleCount: 8, swapTargets: 8 }),
+    /8 of 8 wallets have too little ETH/
+  );
+});
+
+test('once every buying wallet holds its quote asset the swap station stops asking', () => {
+  const done = stepNeed('swap', {
+    nums: V2P_NUMS,
+    paired: true,
+    pairSymbol: 'NVDA',
+    bundleCount: 8,
+    swapTargets: 8,
+    shortOfEth: 0,
+    shortOfPair: 0,
+  });
+  assert.equal(done, null);
+});
+
+test('funded but not yet swapped, the station explains the mechanism rather than a shortfall', () => {
+  const need = stepNeed('swap', {
+    nums: V2P_NUMS,
+    paired: true,
+    pairSymbol: 'NVDA',
+    bundleCount: 8,
+    swapTargets: 8,
+    shortOfEth: 0,
+    shortOfPair: 8,
+  });
+  assert.match(need, /cannot be sent/i);
+  assert.match(need, /step 6/, 'and says it must happen before the launch is armed');
+});
+
+test('every station of a PAIRED plan states a precondition when it cannot run', () => {
+  const fresh = {
+    nums: V2P_NUMS,
+    paired: true,
+    pairSymbol: 'NVDA',
+    hasDev: false,
+    bundleCount: 0,
+    fundTargets: 0,
+    buyTargets: 0,
+    swapTargets: 0,
+    shortOfEth: 0,
+    draftMissing: ['a name', 'a symbol', 'a logo'],
+    sellCount: 0,
+  };
+  for (const key of stepOrder({ dispersers: false, quote: true, paired: true })) {
+    const need = stepNeed(key, fresh);
+    assert.equal(typeof need, 'string', `${key} said nothing`);
+    assert.ok(need.length > 0, `${key} said nothing`);
+  }
+});
+
+test('the funding step says it sends ETH and only ETH, and where that ETH goes next', () => {
+  const need = stepNeed('fund', {
+    nums: V2P_NUMS,
+    paired: true,
+    pairSymbol: 'NVDA',
+    bundleCount: 8,
+    fundTargets: 8,
+  });
+  assert.match(need, /cannot be transferred/i);
+  assert.match(need, /step 5/, 'points forward at the swap, not back at the table');
+});
+
+// ── HOW MUCH ETH IS MISSING ─────────────────────────────────────────────────
+// The operator's own reading of the screen: 31 wallets holding 0.000478 ETH,
+// each needing about 0.0107. That subtraction is done once, here.
+
+const w = (id, balanceEth) => ({ id, address: `0x${id}`, balanceEth });
+
+test('the dry run is the authority: swapEth plus the reserve is what a wallet needs', () => {
+  const out = ethShortfall({
+    bundle: [w('a', '0.000478'), w('b', '0.000478')],
+    rows: { a: { buy: '1' }, b: { buy: '1' } },
+    plan: {
+      gasReserveEth: '0.008850',
+      results: [
+        { walletId: 'a', status: 'would-swap', swapEth: '0.001850' },
+        { walletId: 'b', status: 'would-swap', swapEth: '0.001850' },
+      ],
+    },
+  });
+  assert.equal(out.short, 2);
+  assert.equal(out.ready, 0);
+  assert.equal(out.targets, 2);
+  // (0.00185 + 0.00885 − 0.000478) × 2 — the operator's own screen, doubled.
+  assert.equal(out.missing, '0.020444');
+  assert.equal(out.need, '0.0214');
+});
+
+test('with no dry run the Fund column is the requirement — it is what the fill wrote', () => {
+  const out = ethShortfall({
+    bundle: [w('a', '0.000478'), w('b', '0.020000')],
+    rows: { a: { buy: '1', fund: '0.010700' }, b: { buy: '1', fund: '0.010700' } },
+  });
+  assert.equal(out.short, 1);
+  assert.equal(out.ready, 1);
+  assert.equal(out.missing, '0.010222');
+});
+
+test('a wallet already holding its quote asset is ready, not short — it has no swap to fund', () => {
+  const out = ethShortfall({
+    bundle: [w('a', '0')],
+    rows: { a: { buy: '1', fund: '5' } },
+    plan: {
+      gasReserveEth: '0.00885',
+      results: [{ walletId: 'a', status: 'skipped-already-funded', swapEth: null }],
+    },
+  });
+  assert.equal(out.short, 0);
+  assert.equal(out.ready, 1);
+  assert.equal(out.missing, '0');
+});
+
+test('a wallet with no requirement at all is unknown — never counted short', () => {
+  const out = ethShortfall({ bundle: [w('a', '0')], rows: { a: { buy: '1' } } });
+  assert.equal(out.unknown, 1);
+  assert.equal(out.short, 0);
+  assert.equal(out.targets, 1);
+});
+
+test('rows on "all − gas" and rows with no Buy amount are not in this question', () => {
+  const out = ethShortfall({
+    bundle: [w('a', '0'), w('b', '0'), w('c', '0')],
+    rows: { a: { mode: 'all' }, b: { buy: '0' }, c: { buy: '2', fund: '1' } },
+  });
+  assert.equal(out.targets, 1);
+  assert.equal(out.short, 1);
+  assert.equal(out.missing, '1');
+});
+
+test('exactly enough is ready — the comparison is exact, not a float', () => {
+  const out = ethShortfall({
+    bundle: [w('a', '0.010700')],
+    rows: { a: { buy: '1', fund: '0.0107' } },
+  });
+  assert.equal(out.short, 0);
+  assert.equal(out.ready, 1);
+});
+
+test('an empty bundle is a finished question, not a crash', () => {
+  const out = ethShortfall({});
+  assert.deepEqual(
+    { ...out },
+    { ready: 0, short: 0, unknown: 0, targets: 0, missing: '0', need: '0' }
+  );
+});
+
+// ── WHETHER THE SWAP CAN BE PRESSED ─────────────────────────────────────────
+// The defect: "Buy NVDA for 0 wallets" drawn as a live button with the blocking
+// reason in small text underneath.
+
+const SHORT = { short: 31, missing: '0.3168220' };
+const OK = { short: 0, missing: '0' };
+const READY_PLAN = { wouldSwap: 4, skippedAlreadyFunded: 0, skippedShort: 0 };
+
+test('a bundle short of ETH cannot buy, and the refusal says all three things', () => {
+  const gate = swapGate({
+    symbol: 'NVDA',
+    bundleCount: 31,
+    targets: 31,
+    funding: SHORT,
+    plan: { wouldSwap: 0, skippedShort: 31 },
+    nums: V2P_NUMS,
+  });
+  assert.equal(gate.enabled, false);
+  assert.equal(gate.blocked, 'eth');
+  assert.match(gate.why, /31 wallets/, 'how many');
+  assert.match(gate.why, /0\.316822 ETH/, 'how much is missing');
+  assert.match(gate.why, /step 4/, 'which step provides it');
+  // And the mechanism, because that is the thing the operator asked about.
+  assert.match(gate.why, /cannot be transferred/i);
+});
+
+test('the ETH shortfall outranks the plan — a wallet cannot be refused for a pool it never reaches', () => {
+  const gate = swapGate({
+    symbol: 'NVDA',
+    bundleCount: 31,
+    targets: 31,
+    funding: SHORT,
+    plan: { wouldSwap: 0, skippedImpact: 31 },
+    nums: V2P_NUMS,
+  });
+  assert.equal(gate.blocked, 'eth');
+});
+
+test('no wallets, then no amounts, then no ETH — the nearest fix is named first', () => {
+  assert.equal(swapGate({ bundleCount: 0, funding: SHORT, nums: V2P_NUMS }).blocked, 'wallets');
+  assert.equal(
+    swapGate({ bundleCount: 31, targets: 0, funding: SHORT, nums: V2P_NUMS }).blocked,
+    'amounts'
+  );
+  assert.equal(
+    swapGate({ bundleCount: 31, targets: 31, funding: SHORT, nums: V2P_NUMS }).blocked,
+    'eth'
+  );
+});
+
+test('a bundle entirely on "all − gas" is told why it names no amount', () => {
+  const gate = swapGate({
+    symbol: 'NVDA',
+    bundleCount: 4,
+    targets: 0,
+    allMode: 4,
+    funding: OK,
+    nums: V2P_NUMS,
+  });
+  assert.equal(gate.blocked, 'amounts');
+  assert.match(gate.why, /all − gas/);
+});
+
+test('a PARTLY funded bundle is still offered — the shortfall refuses only when it refuses all', () => {
+  // 20 of 31 can pay. Blocking the whole run because 11 cannot would be the same
+  // defect the other way round: a live control drawn dead.
+  const gate = swapGate({
+    symbol: 'NVDA',
+    bundleCount: 31,
+    targets: 31,
+    funding: { short: 11, missing: '0.11' },
+    plan: { wouldSwap: 20, skippedShort: 11 },
+    nums: V2P_NUMS,
+  });
+  assert.equal(gate.enabled, true);
+  assert.equal(gate.blocked, null);
+});
+
+test('a funded bundle with a priced plan can actually buy', () => {
+  const gate = swapGate({
+    symbol: 'NVDA',
+    bundleCount: 4,
+    targets: 4,
+    funding: OK,
+    plan: READY_PLAN,
+    nums: V2P_NUMS,
+  });
+  assert.equal(gate.enabled, true);
+  assert.equal(gate.why, null);
+  assert.equal(gate.blocked, null);
+});
+
+test('a plan that would swap nobody is a refusal, never an offer', () => {
+  const already = swapGate({
+    symbol: 'NVDA',
+    bundleCount: 4,
+    targets: 4,
+    funding: OK,
+    plan: { wouldSwap: 0, skippedAlreadyFunded: 4 },
+    nums: V2P_NUMS,
+  });
+  assert.equal(already.enabled, false);
+  assert.match(already.why, /already hold/);
+
+  const thin = swapGate({
+    symbol: 'NVDA',
+    bundleCount: 4,
+    targets: 4,
+    funding: OK,
+    plan: { wouldSwap: 0, skippedImpact: 4 },
+    nums: V2P_NUMS,
+  });
+  assert.equal(thin.enabled, false);
+  assert.match(thin.why, /too thin/);
+});
+
+test('an unpriced or failed quote is stated, and never armed through', () => {
+  const pricing = swapGate({ symbol: 'NVDA', bundleCount: 4, targets: 4, funding: OK, nums: V2P_NUMS });
+  assert.equal(pricing.enabled, false);
+  assert.equal(pricing.blocked, 'pricing');
+
+  const failed = swapGate({
+    symbol: 'NVDA',
+    bundleCount: 4,
+    targets: 4,
+    funding: OK,
+    error: 'the pool is empty',
+    nums: V2P_NUMS,
+  });
+  assert.equal(failed.enabled, false);
+  assert.match(failed.why, /the pool is empty/);
+});
+
+// ── AND THE WAY BACK ────────────────────────────────────────────────────────
+
+test('the recovery is dead when nothing is held, and says so rather than offering 0 wallets', () => {
+  const empty = recoverGate({ symbol: 'NVDA', holders: 0 });
+  assert.equal(empty.enabled, false);
+  assert.match(empty.why, /No bundle wallet holds/);
+
+  const dust = recoverGate({
+    symbol: 'NVDA',
+    holders: 3,
+    plan: { wouldSwap: 0, skippedDust: 3 },
+  });
+  assert.equal(dust.enabled, false);
+  assert.match(dust.why, /dust/);
+
+  const live = recoverGate({ symbol: 'NVDA', holders: 3, plan: { wouldSwap: 3 } });
+  assert.equal(live.enabled, true);
+  assert.equal(live.why, null);
 });

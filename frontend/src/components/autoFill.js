@@ -14,6 +14,92 @@
 // Moves no money. It writes form fields.
 
 /**
+ * THE THREE WAYS TO FILL ONE COLUMN, as one choice instead of three boxes.
+ *
+ * The panel used to stack them: "Auto-fill buys · Distribute across 31 wallets",
+ * then a converter with its own "use as total", then "OR FILL FROM THE ETH THE
+ * WALLETS ALREADY HOLD". Three mechanisms for one outcome, each with its own
+ * heading, its own field and its own button — which is the "Distributions and
+ * converts etc." the operator called confusing. They are not three tools. They
+ * are three answers to one question: WHAT DECIDES THE SIZE OF THE BUYS.
+ *
+ *   'pair'  a total in the launch's quote asset, split across the bundle
+ *   'eth'   a total in ETH, converted at the live pool into that same total
+ *   'held'  whatever ETH the wallets are already holding, priced per wallet
+ *
+ * Only 'pair' exists on a native launch: there is one asset, so there is nothing
+ * to convert from and nothing to price against a pool.
+ *
+ * NOTHING HERE WRITES. It decides which basis is active, whether its action can
+ * do anything, and what that action is called — the writes stay exactly where
+ * they were: splitTotal + the swap dry run for 'pair' and 'eth', balanceFill for
+ * 'held'. In particular 'eth' still lands on TAKING the quote into the total
+ * rather than on distributing it, because a converted figure becoming a written
+ * one is a deliberate press and always has been.
+ */
+export const FILL_BASES = ['pair', 'eth', 'held'];
+
+/**
+ * @param {object} o
+ * @param {string} o.basis        the basis the operator has chosen
+ * @param {boolean} o.paired      is the launch priced in something other than ETH
+ * @param {string} o.symbol       the quote asset's ticker
+ * @param {number} o.bundleCount  bundle wallets on the table
+ * @param {number} o.fundedCount  how many of them hold any ETH at all
+ * @param {string} o.totalBuy     the quote-asset total field
+ * @param {string} o.ethTotal     the ETH field
+ * @param {number|null} o.quotedPair what the live quote says `ethTotal` buys, and
+ *                                   ONLY when the quote is about what is typed —
+ *                                   a stale answer must not arm a button
+ * @returns {{basis: string, unit: string, enabled: boolean, why: string|null, label: string}}
+ */
+export function fillAction({
+  basis = 'pair',
+  paired = false,
+  symbol = 'ETH',
+  bundleCount = 0,
+  fundedCount = 0,
+  totalBuy = '',
+  ethTotal = '',
+  quotedPair = null,
+} = {}) {
+  // A native launch has one basis whatever is asked for, and an unknown name
+  // falls back to the same one rather than leaving the control in no state.
+  const mode = paired && FILL_BASES.includes(basis) ? basis : 'pair';
+  const unit = mode === 'pair' ? (paired ? symbol : 'ETH') : 'ETH';
+  const wallets = `${bundleCount} wallet${bundleCount === 1 ? '' : 's'}`;
+  const out = (enabled, why, label) => ({ basis: mode, unit, enabled, why, label });
+
+  if (!bundleCount)
+    return out(false, 'No bundle wallets to fill — generate them above first.', 'Fill the Buy column');
+
+  if (mode === 'held') {
+    const label = 'Price what their ETH would buy';
+    return fundedCount > 0
+      ? out(true, null, label)
+      : out(
+          false,
+          `No bundle wallet is holding any ETH yet, so there is nothing to spend. Fund them first, ` +
+            `or size the buys in ${symbol} instead.`,
+          label
+        );
+  }
+
+  if (mode === 'eth') {
+    const label = quotedPair > 0 ? `Use ${Number(quotedPair).toFixed(6)} ${symbol} as the total` : `Use the quote as the ${symbol} total`;
+    if (!(Number(ethTotal) > 0))
+      return out(false, `Type an ETH figure to see what it buys in ${symbol}.`, label);
+    if (!(Number(quotedPair) > 0))
+      return out(false, `Pricing ${ethTotal} ETH against the live ${symbol} pool…`, label);
+    return out(true, null, label);
+  }
+
+  const label = `Distribute across ${wallets}`;
+  if (!(Number(totalBuy) > 0)) return out(false, `Type a total in ${unit} to split across ${wallets}.`, label);
+  return out(true, null, label);
+}
+
+/**
  * Split `total` across `count` wallets: ±30% jitter around equal, so no two buys
  * are the same and the bundle reads as several buyers rather than one pattern.
  *

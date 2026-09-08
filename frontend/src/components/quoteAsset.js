@@ -25,17 +25,27 @@
 //
 // Reads nothing, writes nothing, fetches nothing, and moves no money.
 
-import { recoverTargets, pairStatus } from './pairBalance.js';
+import { recoverTargets, pairStatus, toUnits, fromUnits } from './pairBalance.js';
 
 /**
  * Every station this console knows about, in the one order they are worked.
  *
- * The two conditional ones are conditional for different reasons. `disperser`
+ * The three conditional ones are conditional for different reasons. `disperser`
  * belongs to a launcher that batches its funding (v1); v2 funds with individual
  * transfers and has no such contract. `quote` belongs to a launcher that can be
- * priced in something other than ETH.
+ * priced in something other than ETH. `swap` belongs to a launch that IS priced
+ * in something other than ETH, and it is the station this file was extended for.
+ *
+ * WHY THE SWAP IS A STATION AND NOT A PARAGRAPH. Relay moves native ETH and
+ * nothing else — backend/src/relay/funding.js pins both ends to NATIVE — and the
+ * funding run sends ETH transfers. So the quote asset can never be SENT to a
+ * bundle wallet: every wallet has to BUY its own, locally, with its own ETH,
+ * between being funded and being armed. That is a third thing to do, in its own
+ * place in the order, and drawing it as a box inside the wallet table left the
+ * console explaining an inversion in prose ("run this AFTER the step below")
+ * instead of stating an order.
  */
-export const ALL_STEPS = ['quote', 'dev', 'disperser', 'wallets', 'fund', 'launch', 'sell'];
+export const ALL_STEPS = ['quote', 'dev', 'disperser', 'wallets', 'fund', 'swap', 'launch', 'sell'];
 
 /**
  * The step keys this launcher actually has, in order.
@@ -48,11 +58,19 @@ export const ALL_STEPS = ['quote', 'dev', 'disperser', 'wallets', 'fund', 'launc
  * @param {object} o
  * @param {boolean} o.dispersers does this launcher batch funding through a contract
  * @param {boolean} o.quote      can this launcher be priced in something other than ETH
+ * @param {boolean} o.paired     is it priced in something other than ETH RIGHT NOW
  * @returns {string[]}
  */
-export function stepOrder({ dispersers = false, quote = false } = {}) {
+export function stepOrder({ dispersers = false, quote = false, paired = false } = {}) {
   return ALL_STEPS.filter(
-    (key) => (key !== 'disperser' || dispersers) && (key !== 'quote' || quote)
+    (key) =>
+      (key !== 'disperser' || dispersers) &&
+      (key !== 'quote' || quote) &&
+      // Both, deliberately: a swap station on a launcher with no quote asset to
+      // swap into would be a station for nothing. `paired` is a live reading of
+      // what the launch is priced in, so this station appears and disappears
+      // with the picker in the first one.
+      (key !== 'swap' || (quote && paired))
   );
 }
 
@@ -214,7 +232,8 @@ export function stepNeed(key, f = {}) {
   if (key === 'quote') {
     return paired
       ? `Nothing has to be true first — this is the launch's first decision. Priced in ${sym}: ` +
-          `every Buy amount, the dev buy and the market cap below are in ${sym}, not ETH.`
+          `every Buy amount, the dev buy and the market cap below are in ${sym}, not ETH — and ${sym} ` +
+          `can only be BOUGHT by a wallet, never sent to it, which is why ${stepName(nums, 'swap')} exists.`
       : 'Nothing has to be true first — this is the launch\'s first decision. Priced in native ETH: ' +
           'the bundle buys with the ETH you fund it with, and there is no second token to hold.';
   }
@@ -238,8 +257,8 @@ export function stepNeed(key, f = {}) {
     if (!f.hasDev) return `Needs a dev wallet first — ${stepName(nums, 'dev')}.`;
     if (!f.bundleCount) return 'Needs bundle wallets. Generate them here — nothing below spends until you fund them.';
     return paired
-      ? `Sized in ${sym}: the Buy column is ${sym}, the Fund column is always ETH. Fund in ` +
-          `${stepName(nums, 'fund')}, then buy ${sym} here, before the launch.`
+      ? `Sized in ${sym}: the Buy column is ${sym}, the Fund column is always ETH. Sized here, ` +
+          `funded with ETH in ${stepName(nums, 'fund')}, swapped into ${sym} in ${stepName(nums, 'swap')}.`
       : 'Sized here: the Buy column is what each wallet spends, the Fund column is the ETH it needs ' +
           'to spend it.';
   }
@@ -251,8 +270,44 @@ export function stepNeed(key, f = {}) {
     if (f.needsDisperser && !f.dispersers)
       return `Needs a disperser contract — ${stepName(nums, 'disperser')} — because this launcher funds through one.`;
     return paired
-      ? `Sends ETH only. It is what each wallet then spends buying ${sym} back in ${stepName(nums, 'wallets')}.`
+      ? `Sends ETH, and only ETH — ${sym} cannot be transferred to a bundle wallet at all. This is the ` +
+          `ETH each wallet then spends buying its own ${sym} in ${stepName(nums, 'swap')}.`
       : 'Sends ETH from the dev wallet to each bundle wallet, using the Fund column above.';
+  }
+
+  // THE STATION THE OPERATOR'S QUESTION IS ABOUT: "it convert to nvdia, but nvida
+  // cant be send tru relay so it needs eth to transfer to bundle right?" — right,
+  // and that is the whole reason this is a station rather than a note inside the
+  // wallet table. Relay moves NATIVE at both ends (backend relay/funding.js) and
+  // the funding run sends ETH transfers, so the quote asset reaches a bundle
+  // wallet by being bought BY it and no other way.
+  //
+  // Its precondition is therefore ETH IN THE WALLETS, which is the step above it —
+  // so that is what this line says, with how many wallets are short and where the
+  // ETH comes from. It is the sentence the dead "Buy NVDA for 0 wallets" button
+  // was hiding in a hint underneath itself.
+  if (key === 'swap') {
+    // A launch that has already run is not still waiting to be swapped into —
+    // the same rule the launch station keeps, and for the same reason: a list of
+    // prerequisites for something that has happened is noise.
+    if (f.launched) return null;
+    if (!f.bundleCount) return `Needs bundle wallets — ${stepName(nums, 'wallets')}.`;
+    if (!f.swapTargets)
+      return `Needs a Buy amount against at least one wallet — size the bundle in ${stepName(nums, 'wallets')}.`;
+    if (f.shortOfEth > 0)
+      return (
+        `${f.shortOfEth} of ${f.swapTargets} wallet${f.swapTargets === 1 ? '' : 's'} ` +
+        `${f.shortOfEth === 1 ? 'has' : 'have'} too little ETH to buy their ${sym}` +
+        (f.missingEth ? `, ${f.missingEth} ETH missing in total` : '') +
+        `. Send it in ${stepName(nums, 'fund')} — each wallet buys its own ${sym} with its own ETH, ` +
+        `because ${sym} cannot be sent to a wallet.`
+      );
+    if (f.shortOfPair === 0) return null;
+    return (
+      `Each wallet buys its own ${sym} here, with the ETH it is already holding — ${sym} cannot be ` +
+      `sent to a wallet, only bought by it. Run this after ${stepName(nums, 'fund')} and before ` +
+      `arming ${stepName(nums, 'launch')}.`
+    );
   }
 
   if (key === 'launch') {
@@ -267,7 +322,7 @@ export function stepNeed(key, f = {}) {
     if (paired && f.shortOfPair > 0)
       return (
         `Needs every buying wallet to already hold its ${sym}: ${f.shortOfPair} do not, and preflight ` +
-        `drops them. Buy it in ${stepName(nums, 'wallets')} — "Pair funding".`
+        `drops them. Buy it in ${stepName(nums, 'swap')}.`
       );
     return null;
   }
@@ -316,6 +371,210 @@ export function fundGate({ targets = 0, needsDisperser = false, dispersers = 0, 
       why: `No disperser contract deployed — this launcher funds through one. Deploy it in ${stepName(nums, 'disperser')}.`,
     };
   return { enabled: true, why: null };
+}
+
+/**
+ * HOW MUCH ETH THE BUNDLE IS SHORT OF BEING ABLE TO BUY ITS QUOTE ASSET.
+ *
+ * The arithmetic behind the operator's own reading of the screen: 31 wallets
+ * holding 0.000478 ETH each, each needing about 0.0107, and a control offering to
+ * buy for "0 wallets". The count and the missing total are one subtraction, and
+ * this is the one place it is done — the station's headline, its gate and the
+ * plan's one-line precondition all read it, so they cannot disagree.
+ *
+ * TWO SOURCES FOR ONE REQUIREMENT, in order of authority:
+ *
+ *   THE DRY RUN. `swapEth` is what that wallet's ETH→pair swap costs, sized and
+ *   quoted by the endpoint that will spend it, and `gasReserveEth` is what it
+ *   must keep on top — the same figure the endpoint's own skipped-short refusal
+ *   is measured against. When the plan is on screen, that is the requirement.
+ *
+ *   THE FUND COLUMN. Before the swap has been priced there is still a number:
+ *   whatever the fill wrote (which came from this same dry run) or the operator
+ *   typed. It is what they intend to send, so it is the honest answer to "have
+ *   these wallets got enough yet".
+ *
+ * A wallet with neither is `unknown`: it is never counted short, because short is
+ * the state that turns a station's headline into a refusal.
+ *
+ * Wallets the plan already settled — holding their ${pair} or swapped this run —
+ * have no swap left to fund and are counted ready. A row on "all − gas" names no
+ * amount at all and is not in this question, exactly as it is not in shortOfPair.
+ *
+ * Scaled integers, not floats, for the same reason pairBalance.js works that way:
+ * "short" gates a control, and a control must not arm or refuse on one part in
+ * 10^17.
+ *
+ * @param {object} o
+ * @param {Array<object>} o.bundle bundle wallets carrying `balanceEth`
+ * @param {object} o.rows          App's per-wallet { mode, buy, fund } map
+ * @param {object|null} o.plan     the swap-to-pair dry run, when there is one
+ * @returns {{ready: number, short: number, unknown: number, targets: number,
+ *            missing: string, need: string}}
+ */
+export function ethShortfall({ bundle = [], rows = {}, plan = null } = {}) {
+  const reserve = toUnits(plan?.gasReserveEth) ?? 0n;
+  const priced = new Map((plan?.results || []).map((r) => [r.walletId, r]));
+
+  let ready = 0;
+  let short = 0;
+  let unknown = 0;
+  let targets = 0;
+  let missingRaw = 0n;
+  let needRaw = 0n;
+
+  for (const w of bundle || []) {
+    const row = rows[w?.id] || {};
+    if ((row.mode ?? 'fixed') === 'all') continue;
+    if (!(Number(row.buy) > 0)) continue;
+    targets += 1;
+
+    const r = priced.get(w?.id);
+    // Nothing left to buy for this wallet, so nothing left to fund it with.
+    if (r && (r.status === 'skipped-already-funded' || r.status === 'swapped')) {
+      ready += 1;
+      continue;
+    }
+
+    const swap = r ? toUnits(r.swapEth) : null;
+    const typed = toUnits(row.fund);
+    const requirement = swap !== null ? swap + reserve : typed !== null && typed > 0n ? typed : null;
+    if (requirement === null) {
+      unknown += 1;
+      continue;
+    }
+
+    needRaw += requirement;
+    const held = toUnits(w?.balanceEth) ?? 0n;
+    if (held >= requirement) ready += 1;
+    else {
+      short += 1;
+      missingRaw += requirement - held;
+    }
+  }
+
+  return {
+    ready,
+    short,
+    unknown,
+    targets,
+    missing: fromUnits(missingRaw),
+    need: fromUnits(needRaw),
+  };
+}
+
+/**
+ * WHETHER THE SWAP STATION CAN BUY ANYTHING, and why not when it cannot.
+ *
+ * The rule this exists to enforce: a control that would do nothing is not offered
+ * as though it would. The station used to draw "Buy NVDA for 0 wallets" as a
+ * button with the blocking reason in small text beneath it; now the reason IS the
+ * station's content and the action is visibly unavailable until it can act.
+ *
+ * The order of the reasons is the order they can be fixed in, nearest first —
+ * the same rule launchGate keeps — so an operator is never told about a thin pool
+ * while no wallet has an amount typed.
+ *
+ * @returns {{enabled: boolean, why: string|null, blocked: string|null}}
+ *   `why` is the sentence; `blocked` is a short key for the headline, or null
+ *   when the station is ready.
+ */
+export function swapGate({
+  symbol = 'the quote asset',
+  bundleCount = 0,
+  targets = 0,
+  allMode = 0,
+  funding = { short: 0, missing: '0' },
+  plan = null,
+  error = '',
+  nums,
+} = {}) {
+  const no = (blocked, why) => ({ enabled: false, why, blocked });
+
+  if (!bundleCount)
+    return no('wallets', `No bundle wallets yet — generate them in ${stepName(nums, 'wallets')}.`);
+
+  if (!targets)
+    return no(
+      'amounts',
+      allMode > 0
+        ? `No wallet names an amount to buy: all ${allMode} are on "all − gas", which spends whatever ` +
+            `${symbol} balance a wallet has and so sizes no swap. Set a Buy amount in ${stepName(nums, 'wallets')}.`
+        : `No wallet has a Buy amount yet — fill the Buy column in ${stepName(nums, 'wallets')}.`
+    );
+
+  // THE SHORTFALL REFUSES ONLY WHEN IT REFUSES EVERYTHING. A bundle where 20 of
+  // 31 wallets can pay is still a run worth making — the other 11 are reported
+  // as skipped, exactly as the endpoint would report them — so this fires when
+  // there is no priced plan yet, or when the plan can buy for nobody. Blocking a
+  // partly-funded bundle outright would be the same defect in the other
+  // direction: a live control made dead.
+  if (funding.short > 0 && (!plan || plan.wouldSwap === 0))
+    return no(
+      'eth',
+      `${funding.short} wallet${funding.short === 1 ? '' : 's'} ${funding.short === 1 ? 'has' : 'have'} ` +
+        `too little ETH to buy ${symbol} — ${Number(funding.missing).toFixed(6)} ETH missing in total. ` +
+        `Send it in ${stepName(nums, 'fund')}: this station spends each wallet's OWN ETH, and ${symbol} ` +
+        'cannot be transferred to a wallet at all.'
+    );
+
+  if (error) return no('price', `Could not price this: ${error}`);
+  if (!plan) return no('pricing', `Pricing ${targets} wallet(s) against the live ${symbol} pool…`);
+
+  if (plan.wouldSwap === 0)
+    return no(
+      'nothing',
+      plan.skippedAlreadyFunded >= targets
+        ? `Every wallet already holds its ${symbol} — there is nothing left to buy.`
+        : `No wallet can be bought for right now. ${refusals(plan, symbol)}`
+    );
+
+  return { enabled: true, why: null, blocked: null };
+}
+
+/** The plan's own refusals, as a sentence rather than as four dangling clauses. */
+function refusals(plan, symbol) {
+  const parts = [];
+  if (plan?.skippedAlreadyFunded > 0) parts.push(`${plan.skippedAlreadyFunded} already hold theirs`);
+  if (plan?.skippedShort > 0) parts.push(`${plan.skippedShort} are short of ETH`);
+  if (plan?.skippedImpact > 0)
+    parts.push(`${plan.skippedImpact} were refused — the ${symbol} pool is too thin for that size`);
+  if (plan?.failed > 0) parts.push(`${plan.failed} could not be priced`);
+  return parts.length ? `${listOf(parts)}.` : 'Nothing was sent.';
+}
+
+/**
+ * WHETHER THE RECOVERY CAN SELL ANYTHING. The mirror of swapGate, and it exists
+ * for the same defect: "Sell NVDA from 0 wallets" is not an offer.
+ */
+export function recoverGate({ symbol = 'the quote asset', holders = 0, plan = null, error = '' } = {}) {
+  if (!holders)
+    return { enabled: false, why: `No bundle wallet holds any ${symbol}.`, blocked: 'empty' };
+  if (error) return { enabled: false, why: `Could not price this: ${error}`, blocked: 'price' };
+  if (!plan)
+    return {
+      enabled: false,
+      why: `Pricing ${holders} wallet(s) against the live ${symbol} pool…`,
+      blocked: 'pricing',
+    };
+  if (plan.wouldSwap === 0)
+    return {
+      enabled: false,
+      why: `Nothing can be sold right now. ${sellRefusals(plan, symbol)}`,
+      blocked: 'nothing',
+    };
+  return { enabled: true, why: null, blocked: null };
+}
+
+function sellRefusals(plan, symbol) {
+  const parts = [];
+  if (plan?.skippedImpact > 0)
+    parts.push(`${plan.skippedImpact} were refused — the ${symbol} pool is too thin for that size`);
+  if (plan?.skippedDust > 0) parts.push(`${plan.skippedDust} hold dust worth less than the gas to sell it`);
+  if (plan?.skippedShort > 0) parts.push(`${plan.skippedShort} are short of gas for the sale`);
+  if (plan?.skippedEmpty > 0) parts.push(`${plan.skippedEmpty} hold none`);
+  if (plan?.failed > 0) parts.push(`${plan.failed} could not be priced`);
+  return parts.length ? `${listOf(parts)}.` : 'Nothing was sent.';
 }
 
 /**

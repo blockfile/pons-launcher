@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 
-import { splitTotal, pairedFunds, pairedReserveEth } from './autoFill.js';
+import { splitTotal, pairedFunds, pairedReserveEth, fillAction, FILL_BASES } from './autoFill.js';
 
 // A deterministic Math.random stand-in, so the split under test and the oracle
 // below are fed the identical sequence.
@@ -140,4 +140,88 @@ test('an unparseable price is unpriced rather than NaN in the Fund column', () =
 
 test('an absent plan is an empty fill, not a crash', () => {
   assert.deepEqual(pairedFunds(null, 0.001), { funds: {}, unpriced: [], totalEth: 0 });
+});
+
+// ── WHICH BASIS IS ACTIVE, AND WHETHER ITS ONE ACTION CAN DO ANYTHING ────────
+// The panel used to stack three controls that all wrote the Buy column: a total
+// in the pair token, a converter with its own "use as total", and a fill from
+// the ETH the wallets already hold. They are one question — WHAT DECIDES THE
+// SIZE OF THE BUYS — and this is the function that answers it.
+
+const paired = { paired: true, symbol: 'NVDA', bundleCount: 31 };
+
+test('a native launch has exactly one basis, whatever is asked for', () => {
+  for (const basis of ['pair', 'eth', 'held', 'nonsense', undefined]) {
+    const act = fillAction({ basis, paired: false, bundleCount: 5, totalBuy: '1' });
+    assert.equal(act.basis, 'pair', `${basis} leaked a paired basis onto a native launch`);
+    assert.equal(act.unit, 'ETH');
+  }
+});
+
+test('an unknown basis on a paired launch falls back rather than leaving no state', () => {
+  const act = fillAction({ ...paired, basis: 'wat', totalBuy: '12' });
+  assert.equal(act.basis, 'pair');
+  assert.equal(act.enabled, true);
+});
+
+test('the pair basis is dead until a total is typed, and says so', () => {
+  const empty = fillAction({ ...paired, basis: 'pair', totalBuy: '' });
+  assert.equal(empty.enabled, false);
+  assert.match(empty.why, /NVDA/);
+  assert.match(empty.label, /31 wallets/);
+
+  const zero = fillAction({ ...paired, basis: 'pair', totalBuy: '0' });
+  assert.equal(zero.enabled, false);
+
+  const typed = fillAction({ ...paired, basis: 'pair', totalBuy: '12' });
+  assert.equal(typed.enabled, true);
+  assert.equal(typed.why, null);
+  assert.equal(typed.unit, 'NVDA');
+});
+
+test('the ETH basis arms only on a quote that is about what is TYPED', () => {
+  const nothing = fillAction({ ...paired, basis: 'eth', ethTotal: '' });
+  assert.equal(nothing.enabled, false);
+
+  // The read is debounced: a figure typed but not yet priced must not arm a
+  // button labelled with the previous answer.
+  const pricing = fillAction({ ...paired, basis: 'eth', ethTotal: '0.5', quotedPair: null });
+  assert.equal(pricing.enabled, false);
+  assert.match(pricing.why, /Pricing 0\.5 ETH/);
+
+  const quoted = fillAction({ ...paired, basis: 'eth', ethTotal: '0.5', quotedPair: 12.345678 });
+  assert.equal(quoted.enabled, true);
+  // The figure it will write is ON the button — a conversion becomes a written
+  // number only by a press, and the press names the number.
+  assert.match(quoted.label, /12\.345678 NVDA/);
+});
+
+test('the held basis is dead when no wallet holds any ETH, and names the fix', () => {
+  const broke = fillAction({ ...paired, basis: 'held', fundedCount: 0 });
+  assert.equal(broke.enabled, false);
+  assert.match(broke.why, /not? bundle wallet is holding any ETH/i);
+
+  const funded = fillAction({ ...paired, basis: 'held', fundedCount: 7 });
+  assert.equal(funded.enabled, true);
+  // It PRICES. The write is a second, separate press.
+  assert.match(funded.label, /Price/);
+});
+
+test('no bundle wallets is the first refusal, before any basis has an opinion', () => {
+  for (const basis of ['pair', 'eth', 'held']) {
+    const act = fillAction({ ...paired, bundleCount: 0, basis, totalBuy: '12', ethTotal: '1', quotedPair: 3, fundedCount: 4 });
+    assert.equal(act.enabled, false, basis);
+    assert.match(act.why, /No bundle wallets/);
+  }
+});
+
+test('the label counts the wallets it will split across, singular and plural', () => {
+  assert.match(fillAction({ paired: false, bundleCount: 1, totalBuy: '1' }).label, /1 wallet$/);
+  assert.match(fillAction({ paired: false, bundleCount: 2, totalBuy: '1' }).label, /2 wallets$/);
+});
+
+test('every basis is one FILL_BASES knows', () => {
+  for (const basis of FILL_BASES) {
+    assert.equal(fillAction({ ...paired, basis, totalBuy: '1', ethTotal: '1', fundedCount: 1 }).basis, basis);
+  }
 });

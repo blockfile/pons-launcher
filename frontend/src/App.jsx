@@ -23,6 +23,7 @@ import {
   stepNeed,
   pairHoldings,
   shortOfPair,
+  ethShortfall,
   pairChangeImpact,
   strandedRecord,
   strandingCleared,
@@ -34,6 +35,11 @@ import Sequence from './components/Sequence.jsx';
 import DevWalletPanel from './components/DevWalletPanel.jsx';
 import WalletsPanel from './components/WalletsPanel.jsx';
 import FundPanel from './components/FundPanel.jsx';
+// The station between funding and launching, on a launch priced in something
+// other than ETH: each bundle wallet buying its own quote asset with its own
+// ETH, because nothing can SEND it that asset. Absent from the plan, and from
+// the page, on a native launch.
+import PairSwapPanel from './components/PairSwapPanel.jsx';
 import DispersersPanel from './components/DispersersPanel.jsx';
 import LaunchForm from './components/LaunchForm.jsx';
 import ResultPanel from './components/ResultPanel.jsx';
@@ -508,6 +514,18 @@ export default function App() {
     const missing = DRAFT_FIELDS.filter(([k]) => !draft?.[k]).map(([, label]) => label);
     const quoteSymbol = pair ? pair.symbol : 'ETH';
 
+    // THE TWO READINGS THE SWAP STATION IS BUILT ON, and the only two the plan
+    // needs. `pairReady` is how many buying wallets already hold what their buy
+    // will demand — the same question preflight asks. `ethShort` is whether they
+    // can pay for the rest: it has no dry run up here (the station itself owns
+    // that), so it reads the Fund column, which is the figure the fill wrote out
+    // of that very dry run. The station states the exact number; the plan states
+    // the shape.
+    const pairReady = pair ? shortOfPair(bundle, rows) : { short: 0, ready: 0, unknown: 0, buying: 0 };
+    const ethShort = pair
+      ? ethShortfall({ bundle, rows })
+      : { short: 0, ready: 0, unknown: 0, targets: 0, missing: '0', need: '0' };
+
     const fullPlan = [
       {
         key: 'quote',
@@ -568,8 +586,37 @@ export default function App() {
           : 'ETH out of the dev wallet, one row each',
       },
       {
-        key: 'launch',
+        key: 'swap',
         n: 5,
+        // THE STATION THE ORDER WAS MISSING. It exists only while the launch is
+        // priced in something other than ETH, and it is where each bundle wallet
+        // buys its own quote asset with its own ETH — because no path in this
+        // console can SEND that asset to a wallet: the funding run is ETH
+        // transfers and the bridge quotes native at both ends.
+        //
+        // `done` is deliberately strict. Every buying wallet must be CONFIRMED
+        // holding enough — a wallet whose pair balance was never read is counted
+        // in `unknown` and keeps the station open, because "done" here means
+        // preflight will not drop anybody, and an unread balance is a question
+        // rather than a yes.
+        //
+        // `launched` outranks it, exactly as it does on every other station: the
+        // buys have spent the quote asset, so the pair column empties and this
+        // step would otherwise flip from done back to NOW after a successful
+        // launch and claim the caret off the readout.
+        title: `Buy ${quoteSymbol} for the bundle`,
+        done: launched || (pairReady.buying > 0 && pairReady.ready === pairReady.buying),
+        detail: launched
+          ? `the bundle bought its ${quoteSymbol} before the launch`
+          : pairReady.buying
+          ? `${pairReady.ready} of ${pairReady.buying} hold their ${quoteSymbol}`
+          : ethShort.short > 0
+            ? `${ethShort.short} wallet${ethShort.short === 1 ? '' : 's'} short of ETH — fund them first`
+            : `each wallet buys its own ${quoteSymbol} with its own ETH`,
+      },
+      {
+        key: 'launch',
+        n: 6,
         title: 'Launch + bundle',
         done: launched,
         detail: last
@@ -602,7 +649,15 @@ export default function App() {
     // remaining steps renumber to close the gap rather than skipping a number.
     // The ORDER and the membership are decided in one place, and tested there —
     // see components/quoteAsset.js.
-    const keys = stepOrder({ dispersers: roles.dispersers, quote: tab === 'v2' });
+    const keys = stepOrder({
+      dispersers: roles.dispersers,
+      quote: tab === 'v2',
+      // LIVE, not a launcher capability: the swap station appears the moment the
+      // launch is priced in something other than ETH and disappears the moment it
+      // is not. There is nothing to swap into on a native launch, so there is no
+      // station, no number and no panel.
+      paired: Boolean(pair),
+    });
     const plan = fullPlan.filter((s) => keys.includes(s.key));
     plan.forEach((s, i) => {
       s.n = i + 1;
@@ -629,7 +684,13 @@ export default function App() {
       buyTargets: bundle.filter(
         (w) => (rows[w.id]?.mode === 'all' && Number(w.balanceEth) > 0) || Number(rows[w.id]?.buy) > 0
       ).length,
-      shortOfPair: pair ? shortOfPair(bundle, rows).short : 0,
+      shortOfPair: pairReady.short,
+      // The swap station's own facts. `swapTargets` is NOT `buyTargets`: a row on
+      // "all − gas" names no amount to size a swap against, so it counts for the
+      // launch and not for the swap.
+      swapTargets: pairReady.buying,
+      shortOfEth: ethShort.short,
+      missingEth: Number(ethShort.missing) > 0 ? Number(ethShort.missing).toFixed(6) : '',
       draftMissing: missing,
       launched,
       sellCount,
@@ -1163,6 +1224,30 @@ export default function App() {
               wallet funded — for the case where this console did not send it. */}
           {tab === 'v2' && (
             <ExternalFundPanel wallets={wallets} rows={rows} reload={loadWallets} variant={tab} />
+          )}
+
+          {/* THE SWAP, AS A STATION. It sits here — after the ETH arrives, before
+              the launch is armed — because that is the only place it can run: each
+              bundle wallet buys its own quote asset with its OWN ETH, since no
+              path in this console can send that asset to a wallet.
+
+              It used to be two boxes inside the wallet table, four hundred lines
+              above the step that funds them, explaining in prose that it ran AFTER
+              that step. The order is now the order of the page. Absent entirely on
+              a native launch: `pair` is null, the station is not in the plan, and
+              `step('swap')` returns nothing to draw. */}
+          {pair && step('swap') && (
+            <PairSwapPanel
+              variant={tab}
+              step={step('swap')}
+              wallets={wallets}
+              rows={rows}
+              pair={pair}
+              live={live}
+              reload={loadWallets}
+              report={report}
+              nums={nums}
+            />
           )}
 
           {/* The form READS the quote asset now; it does not own it. `pair` is

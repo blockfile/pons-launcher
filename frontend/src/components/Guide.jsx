@@ -71,11 +71,14 @@ export default function Guide({ steps = [] }) {
               quote assets (NVDA, SPCX, AMD …). That is the <b>first</b> decision, and it is the
               first station on this page, because everything below it is denominated in it: the Buy
               column, the dev buy, the market cap and the graduation threshold. On a paired launch
-              every bundle wallet has to be holding that asset before the launch is armed —
-              <b> fund them with ETH</b>, then <b>buy the asset with it</b>, then launch. Changing
-              it later is allowed and says what it costs first: whatever the wallets already bought
-              stays with them, and the way back is <b>Recover ETH · sell it back</b> beside the
-              wallet table.
+              every bundle wallet has to be HOLDING that asset before the launch is armed, and{' '}
+              <b>it cannot be sent to them</b> — every path this console has for moving funds carries
+              native ETH, at both ends. So each wallet buys its own: <b>fund them with ETH</b>, then
+              they <b>each buy the asset with it</b>, then launch. That middle one is a station of
+              its own on a paired launch, between funding and launching, and it is not there at all
+              on a native one. Changing the quote asset later is allowed and says what it costs
+              first: whatever the wallets already bought stays with them, and the way back is{' '}
+              <b>Recover ETH · sell it back</b>, in that same station.
             </dd>
           </div>
           <div>

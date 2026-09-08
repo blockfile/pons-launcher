@@ -52,6 +52,7 @@ export default function QuotePanel({
 }) {
   const walletsStep = nums.wallets ? `step ${nums.wallets}` : 'the bundle wallets step';
   const fundStep = nums.fund ? `step ${nums.fund}` : 'the funding step';
+  const swapStep = nums.swap ? `step ${nums.swap}` : 'the pair-buying step';
   const launchStep = nums.launch ? `step ${nums.launch}` : 'the launch step';
 
   return (
@@ -123,8 +124,14 @@ export default function QuotePanel({
             <li>
               every bundle wallet must <b className="crux">already hold its {symbol}</b> when the
               launch is armed: the buys are signed before the token exists, and a wallet holding
-              none is dropped by preflight. Fund with ETH in {fundStep}, then buy {symbol} with it
-              back in {walletsStep}.
+              none is dropped by preflight
+            </li>
+            <li>
+              {symbol} <b className="crux">cannot be sent to a bundle wallet</b> — every transfer
+              path here moves native ETH, at both ends. So each wallet BUYS its own, out of its own
+              balance, which is why the ETH has to arrive first. Straight down the page: size the
+              bundle in {walletsStep} → fund it with ETH in {fundStep} → each wallet buys {symbol} in{' '}
+              {swapStep} → launch.
             </li>
             <li>
               the dev wallet needs its own <b>{symbol}</b> balance for the dev buy — this console
@@ -146,7 +153,7 @@ export default function QuotePanel({
           {holdings.wallets > 0
             ? `${holdings.wallets} of ${bundleCount} bundle wallet${bundleCount === 1 ? '' : 's'} ` +
               `already hold ${Number(holdings.total).toFixed(6)} ${symbol}. Changing the quote asset ` +
-              `now leaves it with them — sell it back first, in ${walletsStep}.`
+              `now leaves it with them — sell it back first, in ${swapStep}.`
             : `No bundle wallet holds ${symbol} yet, so changing the quote asset is still free.`}
           {holdings.unknown > 0 &&
             ` ${holdings.unknown} wallet${holdings.unknown === 1 ? ' has' : 's have'} no ${symbol} balance read yet — refresh balances in ${walletsStep}.`}
@@ -173,7 +180,7 @@ export default function QuotePanel({
             </li>
             <li>
               to get the ETH back: price the launch in {stranded.symbol} again, then use{' '}
-              <b>Recover ETH · sell {stranded.symbol} back</b> in {walletsStep}. It sells each
+              <b>Recover ETH · sell {stranded.symbol} back</b> in {swapStep}. It sells each
               wallet's whole balance and keeps the ETH in the wallet.
             </li>
           </ul>

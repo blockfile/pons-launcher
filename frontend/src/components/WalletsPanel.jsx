@@ -6,8 +6,8 @@ import Address from './Address.jsx';
 import Modal, { Fact } from './Modal.jsx';
 import Share, { pct, tokens } from './Share.jsx';
 import BackupControls from './BackupControls.jsx';
-import { splitTotal, pairedFunds, pairedReserveEth } from './autoFill.js';
-import { pairStatus, pairShortfall, balanceFill, recoverTargets } from './pairBalance.js';
+import { splitTotal, pairedFunds, pairedReserveEth, fillAction } from './autoFill.js';
+import { pairStatus, pairShortfall, balanceFill } from './pairBalance.js';
 import { rolesFor } from '../variant.js';
 // Which curve a paired launch is priced against, and the one place a pair-token
 // figure becomes an ETH one — for display, at the very end. See pairCurve.js.
@@ -121,42 +121,30 @@ export default function WalletsPanel({
   // total or the quote asset changes and it would be answering a stale question.
   const [fill, setFill] = useState(null);
 
-  // ── PAIRED LAUNCH: the bundle must HOLD the pair token BEFORE the launch ────
-  // A paired launch denominates every bundle buy in the pair token, and those buys
-  // are signed before the token exists — so a wallet that is not already holding it
-  // is dropped by the preflight ("holds 0.0 NVDA, needs 0.029125 NVDA — skipped")
-  // and the bundle fires empty. These four hold the priced plan, the last real run,
-  // and the dialog between them. All of it is dead weight on a native launch, where
-  // `pair` is null and none of it renders.
-  const [pairPlan, setPairPlan] = useState(null); // the priced dry run
-  const [pairErr, setPairErr] = useState('');
-  // The plan the dialog is asking about, FROZEN with the targets it was priced
-  // against — so what the operator reads is what is broadcast, even if the Buy
-  // column is edited while the dialog is open. Same rule the launch dialog keeps.
-  const [pairAsk, setPairAsk] = useState(null);
-  const [pairOut, setPairOut] = useState(null); // what the last real run did, per wallet
+  // ── ONE FILL CONTROL, THREE BASES ───────────────────────────────────────────
+  // This box used to be three stacked ones: "Auto-fill buys" with a pair-token
+  // total, a "CONVERTER" with its own "use as total", and "OR FILL FROM THE ETH
+  // THE WALLETS ALREADY HOLD". Three mechanisms writing one column, each with a
+  // heading, a field and a button of its own — which is the "Distributions and
+  // converts etc." an operator called confusing, and they were right: they are not
+  // three tools, they are three answers to WHAT DECIDES THE SIZE OF THE BUYS.
+  //
+  // So the basis is now a choice, and everything below it — which field is drawn,
+  // which quote is shown, what the button is called and whether it can be pressed
+  // at all — follows from it. See fillAction in autoFill.js, which is pure and
+  // tested; the WRITES are untouched, and each keeps its own safeguard: the
+  // converter still writes nothing without a deliberate press, and the balance
+  // fill is still price-then-write in two.
+  //
+  // Native launches have exactly one basis (there is one asset), so the chooser is
+  // absent there and this is the control it has always been.
+  const [basis, setBasis] = useState('pair');
 
-  // ── AND THE WAY BACK OUT OF IT ──────────────────────────────────────────────
-  // Buying the pair token used to be a one-way door: a wallet holding NVDA had no
-  // console path back to ETH, so a changed quote asset, an abandoned launch or a
-  // mis-sized bundle stranded the token in up to 31 wallets. These four are the
-  // mirror of the four above — the priced dry run, its error, the frozen dialog and
-  // the last real run — and the whole control is absent unless a bundle wallet is
-  // actually holding some of the pair token, which the pair column already knows.
-  const [backPlan, setBackPlan] = useState(null); // the priced dry run
-  const [backErr, setBackErr] = useState('');
-  const [backAsk, setBackAsk] = useState(null); // frozen with the targets it was priced against
-  const [backOut, setBackOut] = useState(null); // what the last real sell did, per wallet
-
-  // ── THE CONVERTER ───────────────────────────────────────────────────────────
-  // The Total buy field is, and stays, in the pair token: it is the number that
-  // becomes the Buy column, which is the number prepareV2 parses and then demands
-  // the wallet hold. What was missing is the other half of the operator's own
-  // question — "I have 0.5 ETH, how much NVDA is that?" — so this is a second,
-  // separately-labelled ETH field whose answer has to be TAKEN before it is
-  // written. Two fields, each permanently named with its own unit, and a quote
-  // between them that is drawn as a quote. Nothing here writes anything on its
-  // own, and no figure on screen is ever computed from the other unit.
+  // The ETH field of the 'eth' basis. Kept as its own state, never as a
+  // reinterpretation of the total: the Total buy field is, and stays, in the pair
+  // token — it is the number that becomes the Buy column, which is the number
+  // prepareV2 parses and then demands the wallet hold. The two units never share
+  // a field, and no figure on screen is ever computed from the other unit.
   const [ethTotal, setEthTotal] = useState('');
   const [rate, setRate] = useState(null); // the live two-way quote
   const [rateErr, setRateErr] = useState('');
@@ -230,10 +218,6 @@ export default function WalletsPanel({
     setRateErr('');
     setBalPlan(null);
     setBalErr('');
-    // And the recovery preview: a sell priced against the NVDA pool is not an
-    // account of what the SPCX one would pay for anything.
-    setBackPlan(null);
-    setBackErr('');
     // Same for the market-cap rate. Its effect re-takes it immediately; clearing
     // it here is what stops NVDA's rate from pricing an SPCX cap for one render.
     setMcRate(null);
@@ -442,6 +426,26 @@ export default function WalletsPanel({
   // assumed unit is the bug this control had.
   const buyUnit = pair ? pair.symbol : 'ETH';
 
+  // WHICH BASIS IS ACTUALLY IN FORCE, and whether its one action can do anything.
+  //
+  // `quotedPair` is deliberately null unless the live quote is about the figure
+  // that is TYPED. The read is debounced, so between a keystroke and the answer
+  // the field says one number and the last quote priced another — arming a button
+  // labelled with the stale answer is exactly how a converted figure becomes a
+  // written one nobody agreed to.
+  const quotedPair =
+    rate?.pairOut && Number(rate.ethIn) === Number(ethTotal) ? Number(rate.pairOut) : null;
+  const filler = fillAction({
+    basis,
+    paired: Boolean(pair),
+    symbol: buyUnit,
+    bundleCount: bundle.length,
+    fundedCount: fundedBundle,
+    totalBuy,
+    ethTotal,
+    quotedPair,
+  });
+
   // Split the typed total across the bundle wallets into a random, jittered
   // spread — no two the same, so the buys read as organic rather than a pattern
   // — and fill each row's Buy and Fund. Moves NO ETH: it only writes the table
@@ -560,7 +564,8 @@ export default function WalletsPanel({
         `${pair.symbol}; each Fund is the ETH to SWAP for that ${pair.symbol} plus gas for the swap, the ` +
         `launch's approve + buy and ${SELL_RESERVE} sells, ≈${filled.totalEth.toFixed(6)} ETH in total` +
         (unpriced > 0 ? `. ${unpriced} wallet(s) could not be priced and were left blank` : '') +
-        `. Nothing was sent; edit any row, Fund in step ${nums.fund ?? 4}, then buy ${pair.symbol} above.`
+        `. Nothing was sent; edit any row, fund the ETH in step ${nums.fund ?? 4}, then let each wallet ` +
+        `buy its own ${pair.symbol} in step ${nums.swap ?? 5}.`
     );
     notify(
       `Filled ${bundle.length} wallets for ${total} ${pair.symbol} ≈ ${filled.totalEth.toFixed(4)} ETH. ` +
@@ -593,6 +598,12 @@ export default function WalletsPanel({
     // The previous fill priced a different total and is no longer an account of
     // anything on screen.
     setFill(null);
+    // AND THE CONTROL FOLLOWS THE NUMBER. The conversion has happened; what is on
+    // the table now is a total in the pair token, so the basis becomes the one
+    // that reads it. Leaving it on 'eth' would hide the figure that was just
+    // accepted behind the field it was converted from — which is the ambiguity
+    // this press exists to resolve.
+    setBasis('pair');
     notify(
       `Total buy set to ${taken} ${pair.symbol} — converted from ${rate.ethIn} ETH at the quote shown. ` +
         'Nothing was sent; press Distribute to split it.',
@@ -669,201 +680,24 @@ export default function WalletsPanel({
           ? `. ${skipped.length} wallet(s) were left alone: ` +
             skipped.map((sk) => `${sk.address} (${sk.status})`).join(', ')
           : '') +
-        '. Nothing was sent; edit any row, then buy ' +
-        `${plan.pairSymbol} above.`
+        `. Nothing was sent; edit any row, then let each wallet buy its own ${plan.pairSymbol} in ` +
+        `step ${nums.swap ?? 5}.`
     );
     notify(
       `Filled ${filled} wallet(s) for ${Number(plan.totalBuyPair).toFixed(6)} ${plan.pairSymbol}. ` +
-        'No ETH moved — edit, then buy the pair token.',
+        `No ETH moved — edit, then buy the pair token in step ${nums.swap ?? 5}.`,
       skipped.length ? 'error' : 'ok'
     );
   }
 
-  // ── the pair funding plan ───────────────────────────────────────────────────
-  // WHICH WALLETS. Every bundle wallet with a Buy amount typed — that amount IS
-  // the requirement, in the pair token's own units, because it is the same number
-  // prepareV2 parses and then demands the wallet hold. A wallet on "all − gas" is
-  // deliberately excluded: on a paired launch that mode means "spend whatever pair
-  // balance you have", which names no amount to buy, so there is nothing to size a
-  // swap against. It is stated below rather than silently dropped.
-  const pairTargets = pair
-    ? bundle
-        .filter((w) => (rows[w.id]?.mode ?? 'fixed') !== 'all' && Number(rows[w.id]?.buy) > 0)
-        .map((w) => ({ walletId: w.id, amountPair: String(rows[w.id].buy) }))
-    : [];
-  const pairAllMode = pair ? bundle.filter((w) => rows[w.id]?.mode === 'all').length : 0;
-  const pairTotal = pairTargets.reduce((sum, t) => sum + Number(t.amountPair), 0);
-  // Serialised so the preview below re-runs when the AMOUNTS change and not merely
-  // when the array identity does (it is rebuilt every render).
-  const pairKey = JSON.stringify(pairTargets);
-
-  // The ETH this will cost, priced server-side against live quotes — the operator
-  // must not be asked to approve a spend whose size is a guess. It is a dry run of
-  // the real endpoint, so the figure on screen is produced by the code that will
-  // spend it, including its skips and its refusals. Debounced, because it is a
-  // chain read per wallet and the Buy column is typed in.
-  useEffect(() => {
-    if (!pair || pairTargets.length === 0) {
-      setPairPlan(null);
-      setPairErr('');
-      return undefined;
-    }
-    let alive = true;
-    const t = setTimeout(async () => {
-      try {
-        const out = await api('/wallets/swap-to-pair', 'POST', {
-          variant,
-          pairToken: pair.address,
-          targets: JSON.parse(pairKey),
-          dryRun: true,
-        });
-        if (!alive) return;
-        setPairPlan(out);
-        setPairErr('');
-      } catch (err) {
-        if (!alive) return;
-        setPairPlan(null);
-        setPairErr(err.message);
-      }
-    }, 1200);
-    return () => {
-      alive = false;
-      clearTimeout(t);
-    };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [pair?.address, pairKey, variant]);
-
-  /**
-   * Buy the pair token, one wallet at a time, each with its own ETH.
-   *
-   * The dev wallet never sends the token on: distributing it would write
-   * dev → 20 wallets → they all buy the launch onto the chain, which is the
-   * coordination a bundle is trying not to advertise.
-   *
-   * The result is kept on the panel as well as sent to the readout, because a run
-   * where some wallets swapped, some were already funded and some were refused for
-   * gas must not be reduced to one line somebody scrolls past.
-   */
-  async function runPairSwap() {
-    setBusy('pair-swap');
-    setPairOut(null);
-    try {
-      const out = await api('/wallets/swap-to-pair', 'POST', {
-        variant,
-        pairToken: pairAsk.pairToken,
-        targets: pairAsk.targets,
-      });
-      setPairOut(out);
-      report(out);
-      const stuck = out.count - out.swapped - out.skippedAlreadyFunded;
-      notify(
-        stuck === 0
-          ? `All ${out.count} wallet(s) hold their ${out.pairSymbol}. Spent ${out.totalEth} ETH.`
-          : `${out.swapped} swapped, ${stuck} not funded — read the list under the table.`,
-        stuck === 0 ? 'ok' : 'error'
-      );
-      await reload();
-    } catch (err) {
-      report(`ERROR: ${err.message}`);
-      notify(`Pair funding failed — ${err.message}`, 'error');
-    } finally {
-      setBusy('');
-      setPairAsk(null);
-    }
-  }
-
-  // ── the recovery plan: which wallets are HOLDING the pair token ─────────────
-  // Not "which wallets have a Buy amount" — that is the funding question, and it is
-  // asked of the table's fields. This one is asked of the CHAIN: the listing already
-  // carries each wallet's real pair balance (the column beside Balance), so the
-  // wallets with something to recover are the wallets holding some, whatever the Buy
-  // column says. A balance that was not read is left out rather than assumed empty —
-  // see recoverTargets in pairBalance.js.
-  const recover = pair ? recoverTargets(bundle) : { targets: [], total: '0', unknown: 0 };
-  // Serialised with the BALANCES, not just the ids, so the preview re-prices when a
-  // wallet's holding changes rather than only when the set of holders does.
-  const recoverKey = JSON.stringify(recover.targets.map((t) => ({ walletId: t.walletId, heldPair: t.heldPair })));
-  // The endpoint's own shape: no amountPair at all, which is what "sell the whole
-  // balance" means. The amount is read on chain per wallet by the code that sells it,
-  // so nothing here has to be right about a number.
-  const recoverTargetsSent = () => JSON.parse(recoverKey).map(({ walletId }) => ({ walletId }));
-
-  // WHAT THE RECOVERY WOULD RETURN, priced server-side against live quotes — the
-  // operator must not be asked to approve a sale whose proceeds are a guess. It is a
-  // dry run of the real endpoint, so the figure is produced by the code that will
-  // sell, including its impact refusals and its dust skips. Debounced, because it is
-  // a chain read per wallet and the listing refreshes between funding steps.
-  useEffect(() => {
-    if (!pair || recover.targets.length === 0) {
-      setBackPlan(null);
-      setBackErr('');
-      return undefined;
-    }
-    let alive = true;
-    const t = setTimeout(async () => {
-      try {
-        const out = await api('/wallets/swap-from-pair', 'POST', {
-          variant,
-          pairToken: pair.address,
-          targets: recoverTargetsSent(),
-          dryRun: true,
-        });
-        if (!alive) return;
-        setBackPlan(out);
-        setBackErr('');
-      } catch (err) {
-        if (!alive) return;
-        setBackPlan(null);
-        setBackErr(err.message);
-      }
-    }, 1200);
-    return () => {
-      alive = false;
-      clearTimeout(t);
-    };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [pair?.address, recoverKey, variant]);
-
-  /**
-   * Sell the pair token back to ETH, one wallet at a time, each keeping its own
-   * proceeds.
-   *
-   * The ETH lands back in the wallet that held the token — there is no sweep to the
-   * dev wallet here, for the same reason the funding direction does not distribute
-   * from it: an on-chain line between the dev wallet and the buyers is exactly what
-   * a bundle is trying not to draw. Step 6's sweep is a separate, deliberate act.
-   *
-   * The result is kept on the panel as well as sent to the readout: a run where some
-   * wallets sold, some were refused for price impact and some held only dust must not
-   * be reduced to one line somebody scrolls past.
-   */
-  async function runPairSell() {
-    setBusy('pair-sell');
-    setBackOut(null);
-    try {
-      const out = await api('/wallets/swap-from-pair', 'POST', {
-        variant,
-        pairToken: backAsk.pairToken,
-        targets: backAsk.targets,
-      });
-      setBackOut(out);
-      report(out);
-      const left = out.count - out.swapped;
-      notify(
-        left === 0
-          ? `All ${out.count} wallet(s) sold their ${out.pairSymbol}. Recovered ${Number(out.totalEthOut).toFixed(6)} ETH.`
-          : `${out.swapped} sold, ${left} still holding — read the list under the table.`,
-        left === 0 ? 'ok' : 'error'
-      );
-      await reload();
-    } catch (err) {
-      report(`ERROR: ${err.message}`);
-      notify(`Selling ${pair?.symbol} back failed — ${err.message}`, 'error');
-    } finally {
-      setBusy('');
-      setBackAsk(null);
-    }
-  }
+  // WHERE THE SWAP WENT. Buying the quote asset — and selling it back — used to be
+  // two boxes on this panel, with a line of copy explaining that they ran AFTER the
+  // funding step below them. They are their own numbered station now, between Fund
+  // and Launch, because that is what they are: the quote asset cannot be SENT to a
+  // bundle wallet (every transfer path this console has moves native ETH), so each
+  // wallet buys its own with its own ETH, after the ETH arrives and before the
+  // launch is armed. See PairSwapPanel.jsx. This panel keeps what it always was:
+  // where the bundle is SIZED.
 
   // The delete list is derived from the bundle wallets and intersected with the
   // ticks, never read out of the tick set directly. The dev wallet signs every
@@ -1007,16 +841,18 @@ export default function WalletsPanel({
 
       {/* WHICH TABLE THIS IS, IN ONE LINE — and the two shapes it takes. Native
           is one asset and one column: the ETH you fund a wallet with is the ETH
-          it buys with. Paired is two, and the ORDER between them runs back up the
-          page — fund in ETH below, then come back here and buy the quote asset —
-          which is exactly the trip nothing on screen used to mention. */}
+          it buys with. Paired is two — and the order between them no longer runs
+          BACK UP the page. It used to read "fund in the step below, then come back
+          here and buy the quote asset", which is an inversion no amount of copy
+          makes readable; the swap is its own station now and this line simply
+          states the order the page is already in. */}
       <p className="hint">
         {pair ? (
           <>
             Priced in <b>{pair.symbol}</b> (step {nums.quote ?? 1}). <b>Buy</b> is {pair.symbol};{' '}
-            <b>Fund</b> is always ETH. The order is: size the bundle here → fund the ETH in step{' '}
-            {nums.fund ?? 4} → come back here and buy {pair.symbol} with it → launch in step{' '}
-            {nums.launch ?? 5}.
+            <b>Fund</b> is always ETH — {pair.symbol} cannot be sent to a wallet, only bought by it.
+            Straight down the page: size here → fund the ETH in step {nums.fund ?? 4} → each wallet
+            buys its own {pair.symbol} in step {nums.swap ?? 5} → launch in step {nums.launch ?? 6}.
           </>
         ) : (
           <>
@@ -1210,7 +1046,15 @@ export default function WalletsPanel({
             value={keys}
             onChange={(e) => setKeys(e.target.value)}
           />
+          {/* Indigo, not the bare amber default. This panel's amber used to be
+              the auto-fill stripe, so this button was a SECOND amber object — the
+              defect the console keeps re-growing. With the spend that justified
+              any amber here now living in its own station, the law leaves this
+              panel none: importing keys is a neutral forward action that moves no
+              money, which is exactly what indigo says, and it is what Generate
+              beside it already wears. */}
           <Busy
+            className="btn-primary"
             busy={busy === 'import'}
             onClick={() =>
               act('import', async () => {
@@ -1228,67 +1072,150 @@ export default function WalletsPanel({
         </div>
       )}
 
+      {/* ── ONE CONTROL, ONE DECISION ─────────────────────────────────────────
+          This was three boxes stacked on top of each other, all writing the same
+          column: "Auto-fill buys · Distribute across 31 wallets" (a total in the
+          pair token), "CONVERTER — READS THE LIVE POOL — WRITES NOTHING" with a
+          "use as total" of its own, and "OR FILL FROM THE ETH THE WALLETS ALREADY
+          HOLD · Use available ETH". Three headings, three fields and three buttons
+          for one outcome is the "Distributions and converts etc." an operator
+          called confusing — and they were not three tools. They were three answers
+          to WHAT DECIDES THE SIZE OF THE BUYS, which is one question.
+
+          So the basis is the decision, and the field, the quote, the button's
+          label and whether it can be pressed all follow from it — out of one pure
+          function (fillAction), not out of three boxes' worth of conditions.
+
+          EVERY SAFEGUARD IS THE ONE IT ALWAYS WAS, because the writes did not
+          move: `distribute` still splits with splitTotal at the pair's own
+          decimals; `takeConverted` is still the ONE press that turns a quote into
+          a written number; `priceFromBalance` still only prices, and
+          `applyBalancePlan` is still a second, separate press.
+
+          NOT .distribute. That box wears an amber stripe, and amber belongs to the
+          one SPENDING action of a panel. Filling a column moves nothing, and the
+          spend that used to sit under this box — buying the quote asset — is its
+          own station now. So this takes the same plain strong hairline every
+          non-spending box in the console takes. Existing classes throughout; no
+          CSS was added. */}
       {bundle.length > 0 && (
-        <div className="distribute">
-          {/* The unit is in the eyebrow as well as beside the field. This box
-              writes the Buy column, the Buy column is in the launch's quote
-              asset, and on a paired launch that is not ETH — the whole defect
-              being fixed here was a number whose unit had to be inferred. */}
-          <b className="distribute-title">Auto-fill buys{pair ? ` · in ${pair.symbol}` : ''}</b>
-          <label style={{ display: 'flex', flexDirection: 'row', alignItems: 'center', gap: 6 }}>
-            Total buy
-            <input
-              type="number"
-              min="0"
-              step="0.01"
-              placeholder="0.5"
-              value={totalBuy}
-              // WHY THE TOTAL IS IN THE PAIR TOKEN, NOT ETH CONVERTED AT THE
-              // QUOTE. The alternative — an ETH total converted to pair amounts
-              // at the live rate — was rejected for three reasons. (1) The Buy
-              // column IS the pair token: it is the number prepareV2 parses and
-              // then demands the wallet hold, so a pair-token total is the only
-              // one whose exact-sum guarantee is a guarantee about anything the
-              // launch reads. Converting would make the typed number equal to no
-              // number in the table. (2) The rate moves between the conversion
-              // and the launch, so an "ETH total" would silently stop being that
-              // total the moment it was typed — a second unit ambiguity dressed
-              // as a convenience, and this control's bug was a unit ambiguity.
-              // (3) The ETH question is still answered, and answered better:
-              // priced per wallet by the swap endpoint below and stated as its
-              // own figure. So the operator types what the bundle BUYS and reads
-              // what it COSTS, with neither pretending to be the other.
-              title={
-                pair
-                  ? `the total in ${pair.symbol} — the asset every bundle buy is denominated in on this ` +
-                    'launch. The ETH each wallet needs is priced against the live pool and written to Fund.'
-                  : undefined
-              }
-              onChange={(e) => {
-                setTotalBuy(e.target.value);
-                // The last fill priced a different total. It is no longer an
-                // account of anything on screen.
-                setFill(null);
-              }}
-              style={{ width: 90 }}
-            />
-            {buyUnit}
-          </label>
-          {/* Deliberately NOT the amber default: amber in this console means a
-              spend, and this only writes fields. Ghost, like Generate/Import. */}
+        <div className="pair-fund">
+          <b className="pair-fund-title">Fill the Buy column{pair ? ` · in ${pair.symbol}` : ''}</b>
+
+          {/* Absent on a native launch: there is one asset, so there is nothing to
+              convert from and no pool to price against. That launch keeps exactly
+              the control it has always had. */}
+          {pair && (
+            <label className="convert-field">
+              Size from
+              <select
+                value={filler.basis}
+                onChange={(e) => setBasis(e.target.value)}
+                title="what decides how big each wallet's buy is"
+              >
+                <option value="pair">a total in {pair.symbol}</option>
+                <option value="eth">a total in ETH, converted</option>
+                <option value="held">the ETH the wallets already hold</option>
+              </select>
+            </label>
+          )}
+
+          {/* THE FIELD FOR THAT BASIS, and only that one. Two fields side by side,
+              each with a unit, was how the unit ambiguity kept getting back in. */}
+          {filler.basis === 'pair' && (
+            <label className="convert-field">
+              Total buy
+              <input
+                type="number"
+                min="0"
+                step="0.01"
+                placeholder="0.5"
+                value={totalBuy}
+                // WHY THIS TOTAL IS IN THE PAIR TOKEN AND NEVER IN ETH. (1) The Buy
+                // column IS the pair token: it is the number prepareV2 parses and
+                // then demands the wallet hold, so a pair-token total is the only
+                // one whose exact-sum guarantee is a guarantee about anything the
+                // launch reads. (2) A rate moves between a conversion and a launch,
+                // so an "ETH total" would stop being that total the moment it was
+                // typed. (3) The ETH question is answered better elsewhere: priced
+                // per wallet by the endpoint that spends it. The 'eth' basis above
+                // does not change any of that — it converts ONCE, visibly, into
+                // this field, on a press.
+                title={
+                  pair
+                    ? `the total in ${pair.symbol} — the asset every bundle buy is denominated in on this ` +
+                      'launch. The ETH each wallet needs is priced against the live pool and written to Fund.'
+                    : undefined
+                }
+                onChange={(e) => {
+                  setTotalBuy(e.target.value);
+                  // The last fill priced a different total. It is no longer an
+                  // account of anything on screen.
+                  setFill(null);
+                }}
+                style={{ width: 90 }}
+              />
+              {buyUnit}
+            </label>
+          )}
+
+          {filler.basis === 'eth' && (
+            <label className="convert-field">
+              I have
+              <input
+                type="number"
+                min="0"
+                step="0.01"
+                placeholder="0.5"
+                value={ethTotal}
+                title={
+                  `an ETH figure, converted to ${pair?.symbol} at the live quote. It is NOT written ` +
+                  'anywhere until you press the button beside it — the Total buy field, and the Buy ' +
+                  `column it fills, are always ${pair?.symbol}.`
+                }
+                onChange={(e) => setEthTotal(e.target.value)}
+                style={{ width: 90 }}
+              />
+              ETH
+            </label>
+          )}
+
+          {/* THE ONE ACTION. Ghost, not amber: it writes form fields and moves no
+              ETH. Dead when it would do nothing, with the reason beside it rather
+              than only in a tooltip. */}
           <Busy
             className="ghost"
-            busy={busy === 'auto-fill'}
-            disabled={!(Number(totalBuy) > 0)}
-            onClick={distribute}
+            busy={busy === (filler.basis === 'held' ? 'from-balance' : 'auto-fill')}
+            disabled={!filler.enabled}
+            title={filler.why || ''}
+            onClick={
+              filler.basis === 'held'
+                ? priceFromBalance
+                : filler.basis === 'eth'
+                  ? takeConverted
+                  : distribute
+            }
           >
-            Distribute across {bundle.length} wallet{bundle.length === 1 ? '' : 's'}
+            {filler.label}
           </Busy>
+
           <span className="hint">
-            {pair ? (
+            {filler.why ? (
+              filler.why
+            ) : filler.basis === 'held' ? (
               <>
-                random split in {pair.symbol} · each Fund is the ETH to swap for its {pair.symbol} + gas ·
-                fields stay editable · moves no ETH
+                each wallet spends its OWN ETH, keeping back gas for the swap, the launch's approve +
+                buy and {SELL_RESERVE} sells · prices only — nothing is written until you say so
+              </>
+            ) : filler.basis === 'eth' ? (
+              <>
+                converts once, into the {pair?.symbol} total, on this press · the rate moves and the
+                number you accept does not
+              </>
+            ) : pair ? (
+              <>
+                random split in {pair.symbol} · each Fund is the ETH to swap for its {pair.symbol} +
+                gas · fields stay editable · moves no ETH
               </>
             ) : (
               <>
@@ -1297,522 +1224,252 @@ export default function WalletsPanel({
               </>
             )}
           </span>
-          {fundNeeded > 0 && (
-            <div className="distribute-fund">
-              Dev wallet needs ≈ <b>{fundNeeded.toFixed(4)} ETH</b> to fund all {bundle.length} buys
-              <span className="hint">
-                {' '}
-                ({Number(totalBuy).toFixed(4)} buys + {(bundle.length * reservePerWallet).toFixed(4)} gas
-                reserve) — your dev buy and the launch fee are on top. Underfunded wallets are skipped.
-              </span>
-            </div>
-          )}
 
-          {/* THE PAIRED READOUT. The same slot, the same class, and deliberately
-              not a second box: this is still the auto-fill's own figure. What it
-              may never be is the native line with a pair symbol swapped in — that
-              line adds the typed total to a gas figure, and here the typed total
-              is NVDA. So it states nothing until Distribute has priced the ETH,
-              and then states what the pricing found, including what it could not
-              price. */}
-          {pair && Number(totalBuy) > 0 && (
-            <div className="distribute-fund">
-              {!fill ? (
-                <span className="hint">
-                  Buy is in {pair.symbol}; Fund is always ETH. Distribute prices that ETH per wallet
-                  against the live {pair.symbol} pool — it is not this total converted, and no{' '}
-                  {pair.symbol} figure is ever written into an ETH field.
-                </span>
-              ) : fill.priced === 0 ? (
-                // No <b> here on purpose: .distribute-fund b is amber, amber is
-                // this panel's money colour, and "nothing could be priced" is the
-                // absence of a figure rather than one.
-                <>
-                  Fund column left blank — the ETH could not be priced
-                  <span className="hint">
-                    {' '}
-                    {fill.error || `no wallet could be priced against the ${pair.symbol} pool`}. The Buy
-                    column is filled, in {pair.symbol}. Type the Fund amounts, or fix the pair and run
-                    this again — a wrong ETH figure was not written.
-                  </span>
-                </>
-              ) : (
-                <>
-                  Dev wallet needs ≈ <b>{fill.ethTotal.toFixed(4)} ETH</b> to fund{' '}
-                  {fill.priced === bundle.length ? `all ${bundle.length}` : `${fill.priced} of ${bundle.length}`}{' '}
-                  wallets
-                  <span className="hint">
-                    {' '}
-                    ({fill.total} {fill.unit} of buys, priced against the live pool, plus the gas each
-                    wallet keeps for the swap, the launch's approve + buy and {SELL_RESERVE} sells) — your
-                    dev buy and the launch fee are on top.
-                    {fill.unpriced > 0 &&
-                      ` ${fill.unpriced} wallet${fill.unpriced === 1 ? '' : 's'} could not be priced — ` +
-                        `${fill.unpriced === 1 ? 'its Fund was' : 'their Funds were'} left blank.`}
-                  </span>
-                </>
-              )}
-            </div>
-          )}
-
-          {/* ── THE CONVERTER ──────────────────────────────────────────────────
-              A calculator, not a second denomination. It carries NO money colour
-              — this panel spends its single amber on the stripe around this whole
-              box, and a converter moves nothing — so it is a hairline sub-row in
-              grey with the figures at --ink.
-
-              Every number in here states its unit next to itself, and the two
-              units never meet in one sum: the left half asks what the pair-token
-              total costs in ETH, the right half asks what an ETH figure buys in
-              the pair token, and each is answered by a server-side quote against
-              the live pool rather than by dividing one of these fields by a rate.
-
-              The ETH box is a SEPARATE field on purpose. The Total buy field
-              above is the pair token, always, and it is the only thing Distribute
-              reads — so a converted figure can only become a written one by being
-              taken into that field, visibly, by hand. */}
-          {pair && (
+          {/* ── WHAT THE ACTIVE BASIS HAS TO SAY ─────────────────────────────
+              A hairline sub-row, the same one the converter drew, carrying only
+              the readout of the basis in force. Every number states its unit next
+              to itself and the two units never meet in one sum. */}
+          {(pair || fundNeeded > 0) && (
             <div className="convert">
-              <span className="convert-eyebrow">
-                Converter · reads the live pool · writes nothing
-              </span>
+              {/* NATIVE. One asset, so the requirement is arithmetic: the typed
+                  total plus each wallet's gas reserve. */}
+              {!pair && fundNeeded > 0 && (
+                <span className="convert-line">
+                  Dev wallet needs ≈ <b>{fundNeeded.toFixed(4)} ETH</b> to fund all {bundle.length}{' '}
+                  buys
+                  <span className="hint">
+                    {' '}
+                    ({Number(totalBuy).toFixed(4)} buys + {(bundle.length * reservePerWallet).toFixed(4)}{' '}
+                    gas reserve) — your dev buy and the launch fee are on top. Underfunded wallets are
+                    skipped.
+                  </span>
+                </span>
+              )}
 
-              {/* THE QUOTE STATES ITS OWN INPUT, NOT THE FIELD'S CURRENT VALUE.
+              {/* PAIRED, SIZED IN THE PAIR TOKEN. What that total costs in ETH,
+                  quoted server-side against the live pool by the same route the
+                  funding swap uses — never this figure divided by a rate.
+
+                  THE QUOTE STATES ITS OWN INPUT, NOT THE FIELD'S CURRENT VALUE.
                   The read is debounced, so between a keystroke and the answer the
-                  field says one number and the last quote priced another —
-                  printing the field's value beside the old quote's answer would
-                  put a sentence on screen that was never true of anything. So the
-                  line is drawn only while the quote is about what is typed; the
-                  moment they diverge it says it is re-pricing. */}
-              <span className="convert-line">
-                {Number(totalBuy) > 0 ? (
-                  rateErr ? (
-                    <span className="hint">could not price this: {rateErr}</span>
-                  ) : rate?.ethCost && Number(rate.pairIn) === Number(totalBuy) ? (
-                    <>
-                      {Number(rate.pairIn)} {pair.symbol} costs ≈{' '}
-                      <b>{Number(rate.ethCost).toFixed(6)} ETH</b> to buy
-                      {rate.ethCostConverged === false && (
-                        <span className="hint">
-                          {' '}
-                          — and that is a FLOOR, not a price: the pool is too thin to quote this size
-                          properly
-                        </span>
-                      )}
-                    </>
+                  field says one number and the last quote priced another. The line
+                  is drawn only while the quote is about what is typed; the moment
+                  they diverge it says it is re-pricing. */}
+              {pair && filler.basis === 'pair' && (
+                <span className="convert-line">
+                  {Number(totalBuy) > 0 ? (
+                    rateErr ? (
+                      <span className="hint">could not price this: {rateErr}</span>
+                    ) : rate?.ethCost && Number(rate.pairIn) === Number(totalBuy) ? (
+                      <>
+                        {Number(rate.pairIn)} {pair.symbol} costs ≈{' '}
+                        <b>{Number(rate.ethCost).toFixed(6)} ETH</b> to buy
+                        {rate.ethCostConverged === false && (
+                          <span className="hint">
+                            {' '}
+                            — and that is a FLOOR, not a price: the pool is too thin to quote this
+                            size properly
+                          </span>
+                        )}
+                      </>
+                    ) : (
+                      <span className="hint">
+                        pricing {totalBuy} {pair.symbol} against the live pool…
+                      </span>
+                    )
                   ) : (
                     <span className="hint">
-                      pricing {totalBuy} {pair.symbol} against the live pool…
+                      a total in {pair.symbol}, split at random across the bundle — the ETH each wallet
+                      needs is priced per wallet and written to Fund
                     </span>
-                  )
-                ) : (
-                  <span className="hint">
-                    type a {pair.symbol} total above to see what it costs in ETH
-                  </span>
-                )}
-              </span>
+                  )}
+                </span>
+              )}
 
-              <label className="convert-field">
-                or I have
-                <input
-                  type="number"
-                  min="0"
-                  step="0.01"
-                  placeholder="0.5"
-                  value={ethTotal}
-                  title={
-                    `an ETH figure, converted to ${pair.symbol} at the live quote. It is NOT written ` +
-                    'anywhere until you take it into the Total buy field above — that field, and the ' +
-                    `Buy column it fills, are always ${pair.symbol}.`
-                  }
-                  onChange={(e) => setEthTotal(e.target.value)}
-                  style={{ width: 90 }}
-                />
-                ETH
-              </label>
+              {/* PAIRED, SIZED IN ETH. The other half of the operator's own
+                  question — "I have 0.5 ETH, how much NVDA is that?" — answered by
+                  the same server-side quote. It is a calculator: the answer lands
+                  in the pair-token total only when the button above is pressed. */}
+              {pair && filler.basis === 'eth' && (
+                <span className="convert-line">
+                  {Number(ethTotal) > 0 ? (
+                    rateErr ? (
+                      <span className="hint">could not price this: {rateErr}</span>
+                    ) : rate?.pairOut && Number(rate.ethIn) === Number(ethTotal) ? (
+                      <>
+                        {Number(rate.ethIn)} ETH buys ≈{' '}
+                        <b>
+                          {Number(rate.pairOut).toFixed(6)} {pair.symbol}
+                        </b>
+                      </>
+                    ) : (
+                      <span className="hint">pricing {ethTotal} ETH against the live pool…</span>
+                    )
+                  ) : (
+                    <span className="hint">
+                      type an ETH figure and this says what it buys in {pair.symbol} — nothing is
+                      written until you take it
+                    </span>
+                  )}
+                </span>
+              )}
 
-              <span className="convert-line">
-                {Number(ethTotal) > 0 ? (
-                  rateErr ? (
-                    <span className="hint">could not price this: {rateErr}</span>
-                  ) : rate?.pairOut && Number(rate.ethIn) === Number(ethTotal) ? (
+              {/* THE ACCOUNT OF THE LAST FILL, on a paired launch. Never the native
+                  line with a pair symbol swapped in — that line adds the typed
+                  total to a gas figure, and here the typed total is NVDA. So it
+                  states nothing until Distribute has priced the ETH, and then
+                  states what the pricing found, including what it could not
+                  price. */}
+              {pair && filler.basis === 'pair' && Number(totalBuy) > 0 && (
+                <div className="convert-note">
+                  {!fill ? (
+                    <span className="hint">
+                      Buy is in {pair.symbol}; Fund is always ETH. Distribute prices that ETH per
+                      wallet against the live {pair.symbol} pool — it is not this total converted, and
+                      no {pair.symbol} figure is ever written into an ETH field.
+                    </span>
+                  ) : fill.priced === 0 ? (
                     <>
-                      buys ≈{' '}
-                      <b>
-                        {Number(rate.pairOut).toFixed(6)} {pair.symbol}
-                      </b>
-                      {/* The ONE path from a quote to a field, and it is a press. */}
-                      <button
-                        type="button"
-                        className="quiet"
-                        onClick={takeConverted}
-                        title={`put ${Number(rate.pairOut).toFixed(6)} ${pair.symbol} into the Total buy field`}
-                      >
-                        use as total
-                      </button>
+                      Fund column left blank — the ETH could not be priced
+                      <span className="hint">
+                        {' '}
+                        {fill.error || `no wallet could be priced against the ${pair.symbol} pool`}. The
+                        Buy column is filled, in {pair.symbol}. Type the Fund amounts, or fix the pair
+                        and run this again — a wrong ETH figure was not written.
+                      </span>
                     </>
                   ) : (
-                    <span className="hint">pricing {ethTotal} ETH against the live pool…</span>
-                  )
-                ) : (
-                  <span className="hint">…and see what it buys</span>
-                )}
-              </span>
+                    <>
+                      Dev wallet needs ≈ <b>{fill.ethTotal.toFixed(4)} ETH</b> to fund{' '}
+                      {fill.priced === bundle.length
+                        ? `all ${bundle.length}`
+                        : `${fill.priced} of ${bundle.length}`}{' '}
+                      wallets
+                      <span className="hint">
+                        {' '}
+                        ({fill.total} {fill.unit} of buys, priced against the live pool, plus the gas
+                        each wallet keeps for the swap, the launch's approve + buy and {SELL_RESERVE}{' '}
+                        sells) — your dev buy and the launch fee are on top.
+                        {fill.unpriced > 0 &&
+                          ` ${fill.unpriced} wallet${fill.unpriced === 1 ? '' : 's'} could not be priced — ` +
+                            `${fill.unpriced === 1 ? 'its Fund was' : 'their Funds were'} left blank.`}
+                      </span>
+                    </>
+                  )}
+                </div>
+              )}
 
               {/* A rate is a quote and it moves. Said plainly, with the moment it
                   was taken, so no figure above can be mistaken for a fact. */}
-              <span className="convert-note hint">
-                {rate?.quotedAt
-                  ? `live quote, taken ${new Date(rate.quotedAt).toLocaleTimeString()} — it moves. ` +
-                    'Neither figure is written anywhere; the Buy column stays in ' +
-                    `${pair.symbol}, and the ETH each wallet needs is priced per wallet below.`
-                  : 'both figures are quotes against the live pool and move with it. The Buy column ' +
-                    `is always ${pair.symbol}; the ETH is only ever a conversion.`}
-              </span>
-            </div>
-          )}
+              {pair && filler.basis !== 'held' && (
+                <span className="convert-note hint">
+                  {rate?.quotedAt
+                    ? `live quote, taken ${new Date(rate.quotedAt).toLocaleTimeString()} — it moves. ` +
+                      `The Buy column stays in ${pair.symbol}, and the ETH each wallet needs is priced ` +
+                      'per wallet by the endpoint that will spend it.'
+                    : `both figures are quotes against the live pool and move with it. The Buy column ` +
+                      `is always ${pair.symbol}; the ETH is only ever a conversion.`}
+                </span>
+              )}
 
-          {/* ── FILL FROM WHAT THE WALLETS ALREADY HOLD ─────────────────────────
-              The third auto-fill mode, and the one that matches how a bundle is
-              actually funded: the ETH is already sitting in the wallets, so the
-              question is not "pick a total" but "spend what is there, keep the
-              gas, and let the result be the Buy amount".
+              {/* ── FILLED FROM WHAT THE WALLETS ALREADY HOLD ─────────────────
+                  The basis that matches how a bundle is actually funded: the ETH
+                  is already in the wallets, so the question is not "pick a total"
+                  but "spend what is there, keep the gas, and let the result be the
+                  Buy amount". Two presses, on purpose — the first only PRICES. */}
+              {pair && filler.basis === 'held' && (
+                <>
+                  {balErr && <span className="convert-note hint">could not price this: {balErr}</span>}
 
-              Two presses, on purpose. The first only PRICES — it shows the ETH it
-              would put to work, the pair token that yields and every wallet it is
-              skipping — and the second writes the fields. Neither sends anything.
-              Both are .ghost: this box's one amber object is its own stripe, and
-              writing a field is not a spend. */}
-          {pair && bundle.length > 0 && (
-            <div className="convert from-balance">
-              <span className="convert-eyebrow">Or fill from the ETH the wallets already hold</span>
-              <Busy className="ghost" busy={busy === 'from-balance'} onClick={priceFromBalance}>
-                Use available ETH
-              </Busy>
-              <span className="hint">
-                each wallet spends its OWN ETH, keeping back gas for the swap, the launch's approve +
-                buy and {SELL_RESERVE} sells · prices only — nothing is written until you say so
-              </span>
-
-              {balErr && <span className="convert-note hint">could not price this: {balErr}</span>}
-
-              {balPlan && (
-                <div className="from-balance-plan">
-                  <div className="from-balance-head">
-                    Would put at most <b>{Number(balPlan.totalSwapEth).toFixed(6)} ETH</b> to work
-                    across {balPlan.usable} of {balPlan.count} wallet
-                    {balPlan.count === 1 ? '' : 's'}, buying ≈{' '}
-                    <b>
-                      {Number(balPlan.totalBuyPair).toFixed(6)} {balPlan.pairSymbol}
-                    </b>
-                  </div>
-                  {/* Two totals, two assets, never one sum. The ETH figure is a
-                      CEILING: the funding swap re-sizes its own input from the
-                      smaller Buy amounts and so spends less than this. */}
-                  <span className="hint">
-                    at most, because each swap is re-sized from its own Buy amount · each wallet keeps{' '}
-                    {Number(balPlan.reserveEth).toFixed(6)} ETH back (
-                    {Number(balPlan.gasReserveEth).toFixed(6)} for the swap and the launch's approve +
-                    buy, {Number(balPlan.sellReserveEth).toFixed(6)} for {balPlan.sells} sells) · each
-                    Buy amount is the live quote less {balPlan.overshootBps / 100}%, so it is one the
-                    wallet can actually satisfy
-                    {balPlan.skippedNoEth > 0 &&
-                      ` · ${balPlan.skippedNoEth} skipped, not enough ETH for the gas reserve`}
-                    {balPlan.skippedImpact > 0 &&
-                      ` · ${balPlan.skippedImpact} refused, the pool is too thin for that size`}
-                    {balPlan.skippedDust > 0 &&
-                      ` · ${balPlan.skippedDust} skipped, what their ETH buys rounds to nothing`}
-                    {balPlan.failed > 0 && ` · ${balPlan.failed} could not be priced`}
-                  </span>
-
-                  {/* The skipped wallets BY NAME. A wallet silently left out is
-                      the failure this whole feature exists to end. */}
-                  {balPlan.results.some((r) => r.status !== 'ok') && (
-                    <ul className="from-balance-skips">
-                      {balPlan.results
-                        .filter((r) => r.status !== 'ok')
-                        .slice(0, 8)
-                        .map((r) => (
-                          <li key={r.walletId}>
-                            <code>
-                              {r.address.slice(0, 6)}…{r.address.slice(-4)}
-                            </code>{' '}
-                            {r.status}
-                            {r.reason ? ` — ${r.reason}` : ''}
-                          </li>
-                        ))}
-                      {balPlan.results.filter((r) => r.status !== 'ok').length > 8 && (
-                        <li>
-                          …and {balPlan.results.filter((r) => r.status !== 'ok').length - 8} more, all
-                          in the readout once you fill.
-                        </li>
-                      )}
-                    </ul>
+                  {!balPlan && !balErr && (
+                    <span className="convert-line hint">
+                      {fundedBundle} of {bundle.length} bundle wallet{bundle.length === 1 ? '' : 's'}{' '}
+                      hold ETH · pressing above prices what they could buy and writes nothing
+                    </span>
                   )}
 
-                  <div className="row">
-                    <Busy
-                      className="ghost"
-                      busy={false}
-                      disabled={balPlan.usable === 0}
-                      title={
-                        balPlan.usable === 0
-                          ? 'no wallet has ETH to spare after gas'
-                          : `write ${balPlan.usable} Buy amount(s) — no ETH moves`
-                      }
-                      onClick={applyBalancePlan}
-                    >
-                      Write {balPlan.usable} Buy amount{balPlan.usable === 1 ? '' : 's'}
-                    </Busy>
-                    <button type="button" className="link" onClick={() => setBalPlan(null)}>
-                      discard
-                    </button>
-                    <span className="hint">
-                      priced {new Date(balPlan.quotedAt).toLocaleTimeString()} · balances and quotes
-                      move — price again if this has been sitting
-                    </span>
-                  </div>
-                </div>
-              )}
-            </div>
-          )}
-        </div>
-      )}
+                  {balPlan && (
+                    <div className="from-balance-plan">
+                      <div className="from-balance-head">
+                        Would put at most <b>{Number(balPlan.totalSwapEth).toFixed(6)} ETH</b> to work
+                        across {balPlan.usable} of {balPlan.count} wallet
+                        {balPlan.count === 1 ? '' : 's'}, buying ≈{' '}
+                        <b>
+                          {Number(balPlan.totalBuyPair).toFixed(6)} {balPlan.pairSymbol}
+                        </b>
+                      </div>
+                      {/* Two totals, two assets, never one sum. The ETH figure is a
+                          CEILING: the funding swap re-sizes its own input from the
+                          smaller Buy amounts and so spends less than this. */}
+                      <span className="hint">
+                        at most, because each swap is re-sized from its own Buy amount · each wallet
+                        keeps {Number(balPlan.reserveEth).toFixed(6)} ETH back (
+                        {Number(balPlan.gasReserveEth).toFixed(6)} for the swap and the launch's
+                        approve + buy, {Number(balPlan.sellReserveEth).toFixed(6)} for {balPlan.sells}{' '}
+                        sells) · each Buy amount is the live quote less {balPlan.overshootBps / 100}%,
+                        so it is one the wallet can actually satisfy
+                        {balPlan.skippedNoEth > 0 &&
+                          ` · ${balPlan.skippedNoEth} skipped, not enough ETH for the gas reserve`}
+                        {balPlan.skippedImpact > 0 &&
+                          ` · ${balPlan.skippedImpact} refused, the pool is too thin for that size`}
+                        {balPlan.skippedDust > 0 &&
+                          ` · ${balPlan.skippedDust} skipped, what their ETH buys rounds to nothing`}
+                        {balPlan.failed > 0 && ` · ${balPlan.failed} could not be priced`}
+                      </span>
 
-      {/* PAIR FUNDING — only on a paired launch, and only when there are wallets to
-          fund. On a native launch `pair` is null and this whole block is absent, which
-          is why nothing here has to reason about ETH-quoted curves.
+                      {/* The skipped wallets BY NAME. A wallet silently left out is
+                          the failure this whole feature exists to end. */}
+                      {balPlan.results.some((r) => r.status !== 'ok') && (
+                        <ul className="from-balance-skips">
+                          {balPlan.results
+                            .filter((r) => r.status !== 'ok')
+                            .slice(0, 8)
+                            .map((r) => (
+                              <li key={r.walletId}>
+                                <code>
+                                  {r.address.slice(0, 6)}…{r.address.slice(-4)}
+                                </code>{' '}
+                                {r.status}
+                                {r.reason ? ` — ${r.reason}` : ''}
+                              </li>
+                            ))}
+                          {balPlan.results.filter((r) => r.status !== 'ok').length > 8 && (
+                            <li>
+                              …and {balPlan.results.filter((r) => r.status !== 'ok').length - 8} more,
+                              all in the readout once you fill.
+                            </li>
+                          )}
+                        </ul>
+                      )}
 
-          Deliberately NOT a second amber box. The step's one amber object is the
-          auto-fill stripe above; the money signal for this control belongs on the
-          action, and the action is a .ghost because a dialog stands behind it. */}
-      {pair && bundle.length > 0 && (
-        <div className="pair-fund">
-          <b className="pair-fund-title">Pair funding · {pair.symbol}</b>
-          <span>
-            {pairTargets.length} wallet{pairTargets.length === 1 ? '' : 's'} need{' '}
-            <b>
-              {pairTotal.toFixed(6)} {pair.symbol}
-            </b>
-          </span>
-          <Busy
-            className="ghost"
-            busy={busy === 'pair-swap'}
-            disabled={busy === 'pair-swap' || !pairPlan || pairPlan.wouldSwap === 0}
-            onClick={() => setPairAsk({ ...pairPlan, targets: JSON.parse(pairKey) })}
-          >
-            Buy {pair.symbol} for {pairPlan ? pairPlan.wouldSwap : pairTargets.length} wallet
-            {(pairPlan ? pairPlan.wouldSwap : pairTargets.length) === 1 ? '' : 's'}
-          </Busy>
-          {/* WHERE THIS SITS IN THE ORDER, because it is the one control on the
-              page that runs AFTER a step below it. Each wallet buys its own
-              {pair.symbol} with its OWN ETH, so it has to be funded first — and
-              the funding step is the next one down. Saying so is the whole fix:
-              nothing here moved, it just stopped being a trip the operator had
-              to work out for themselves. */}
-          <span className="hint">
-            each wallet buys its own {pair.symbol} with its own ETH · run this AFTER step{' '}
-            {nums.fund ?? 4} has funded them with ETH, and BEFORE arming the launch in step{' '}
-            {nums.launch ?? 5}
-          </span>
-
-          {/* THE PRICE. A spend is never offered without its size: this is the real
-              endpoint's own dry run, so the number is produced by the code that will
-              spend it, and its skips are the skips the real run will make. */}
-          <div className="pair-fund-cost">
-            {pairTargets.length === 0 ? (
-              <span className="hint">
-                No bundle wallet has a Buy amount yet — type one (or use Auto-fill above). On a
-                paired launch that column is in {pair.symbol}, not ETH.
-              </span>
-            ) : pairErr ? (
-              <span className="hint">could not price this: {pairErr}</span>
-            ) : !pairPlan ? (
-              <span className="hint">pricing {pairTargets.length} wallet(s) against the live pool…</span>
-            ) : (
-              <>
-                Spends ≈ <b>{Number(pairPlan.totalEth).toFixed(6)} ETH</b> to buy {pairPlan.wouldSwap}{' '}
-                wallet{pairPlan.wouldSwap === 1 ? '' : 's'} their {pair.symbol}
-                <span className="hint">
-                  {pairPlan.skippedAlreadyFunded > 0 && ` · ${pairPlan.skippedAlreadyFunded} already funded`}
-                  {pairPlan.skippedShort > 0 && ` · ${pairPlan.skippedShort} short of ETH`}
-                  {pairPlan.skippedImpact > 0 &&
-                    ` · ${pairPlan.skippedImpact} refused, the pool is too thin for that size`}
-                  {pairPlan.failed > 0 && ` · ${pairPlan.failed} could not be priced`}
-                  {pairAllMode > 0 &&
-                    ` · ${pairAllMode} on "all − gas" are not funded here: that mode spends whatever ` +
-                      `${pair.symbol} balance a wallet has, so there is no amount to buy`}
-                </span>
-              </>
-            )}
-          </div>
-
-          {/* What the last real run actually did, per wallet — the console's own
-              refusal instrument, the same one the delete run reports through. A run
-              where some swapped, some were already funded and some were refused for
-              gas must never be reduced to a single count. */}
-          {pairOut && (
-            <div
-              // `danger`, not `warn`, exactly as the delete run's outcome above:
-              // amber is this step's spending action and there is only one of it.
-              className={`notice ${
-                pairOut.swapped + pairOut.skippedAlreadyFunded === pairOut.count ? '' : 'danger'
-              }`}
-            >
-              <h3>
-                {pairOut.swapped} of {pairOut.count} swapped · {pairOut.totalEth} ETH spent
-                {pairOut.skippedAlreadyFunded ? ` · ${pairOut.skippedAlreadyFunded} already funded` : ''}
-              </h3>
-              <ul>
-                {pairOut.results
-                  .filter((r) => r.status !== 'skipped-already-funded')
-                  .map((r) => (
-                    <li key={r.walletId}>
-                      <code>
-                        {r.address.slice(0, 6)}…{r.address.slice(-4)}
-                      </code>{' '}
-                      {r.status} — holds {r.holdingPair} {pairOut.pairSymbol} of {r.needPair}
-                      {r.reason ? `. ${r.reason}` : ''}
-                    </li>
-                  ))}
-              </ul>
-            </div>
-          )}
-        </div>
-      )}
-
-      {/* THE WAY BACK — the exact reverse of the box above, and the box above is why
-          it exists: buying the pair token was a one-way door, so a changed quote
-          asset, an abandoned launch or a bundle sized wrong left NVDA sitting in up
-          to 31 wallets with no console path to the ETH inside it.
-
-          IT IS DRAWN ONLY WHEN THERE IS SOMETHING TO RECOVER. Not "on a paired
-          launch", not "when there are wallets" — only when a bundle wallet is
-          actually HOLDING some of the pair token, which the column beside Balance
-          already knows. A recovery control on an empty bundle is an invitation to
-          press a spending button that would do nothing.
-
-          Same tier as the funding trigger beside it: a .ghost button with a dialog
-          standing behind it, because this spends real gas and sells a real position
-          and the confirm belongs in the dialog. NOT a second amber object — this
-          step's one amber is still the auto-fill stripe, and this box reuses the
-          same .pair-fund classes as the funding one, which carry no money colour. */}
-      {/* `|| backOut` is not decoration. A run that empties every wallet also empties
-          `recover.targets`, so without it the box — and the per-wallet account of what
-          just happened — would unmount at the exact moment it is most needed, leaving
-          a completed spend reported only in the readout a page below. A run stays on
-          screen until the operator navigates away from it. */}
-      {pair && (recover.targets.length > 0 || backOut) && (
-        <div className="pair-fund">
-          <b className="pair-fund-title">Recover ETH · sell {pair.symbol} back</b>
-          {recover.targets.length === 0 ? (
-            <span className="hint">
-              No bundle wallet holds {pair.symbol} any more — what the last run did is below.
-            </span>
-          ) : (
-            <>
-            <span>
-              {recover.targets.length} wallet{recover.targets.length === 1 ? '' : 's'} hold{' '}
-              <b>
-                {Number(recover.total).toFixed(6)} {pair.symbol}
-              </b>
-            </span>
-            <Busy
-              className="ghost"
-              busy={busy === 'pair-sell'}
-              disabled={busy === 'pair-sell' || !backPlan || backPlan.wouldSwap === 0}
-              onClick={() => setBackAsk({ ...backPlan, targets: recoverTargetsSent() })}
-            >
-              Sell {pair.symbol} from {backPlan ? backPlan.wouldSwap : recover.targets.length} wallet
-              {(backPlan ? backPlan.wouldSwap : recover.targets.length) === 1 ? '' : 's'}
-            </Busy>
-            {/* THE WAY OUT OF A CHANGED MIND, named as such. This is the
-                recovery the quote-asset station points at: change what the
-                launch is priced in and whatever the wallets already bought stays
-                with them, and this is what turns it back into ETH. It has to be
-                run while the launch is still priced in that asset — the listing
-                carries one quote asset's balances at a time. */}
-            <span className="hint">
-              each wallet sells its WHOLE {pair.symbol} balance and keeps the ETH · run this before
-              arming a launch, never against one already armed · this is also the way back if you
-              change the quote asset in step {nums.quote ?? 1} — sell first, while the launch is
-              still priced in {pair.symbol}
-            </span>
-
-            {/* THE PROCEEDS. A sale is never offered without what it returns: this is the
-                real endpoint's own dry run, so the figure is produced by the code that
-                will sell it, and its refusals are the refusals the real run will make. */}
-            <div className="pair-fund-cost">
-              {backErr ? (
-                <span className="hint">could not price this: {backErr}</span>
-              ) : !backPlan ? (
-                <span className="hint">
-                  pricing {recover.targets.length} wallet(s) against the live pool…
-                </span>
-              ) : backPlan.wouldSwap === 0 ? (
-                // No <b> here on purpose: .pair-fund-cost b is the headline figure, and
-                // "nothing can be sold" is the absence of one rather than one.
-                <>
-                  Nothing can be sold right now
-                  <span className="hint">
-                    {backPlan.skippedImpact > 0 &&
-                      ` · ${backPlan.skippedImpact} refused, the pool is too thin for that size`}
-                    {backPlan.skippedDust > 0 &&
-                      ` · ${backPlan.skippedDust} hold dust worth less than the gas to sell it`}
-                    {backPlan.skippedShort > 0 && ` · ${backPlan.skippedShort} short of gas for the sale`}
-                    {backPlan.skippedEmpty > 0 && ` · ${backPlan.skippedEmpty} hold none`}
-                    {backPlan.failed > 0 && ` · ${backPlan.failed} could not be priced`}
-                    {' · '}nothing was sent.
-                  </span>
-                </>
-              ) : (
-                <>
-                  Sells{' '}
-                  <b>
-                    {Number(backPlan.totalPairSold).toFixed(6)} {pair.symbol}
-                  </b>{' '}
-                  for ≈ <b>{Number(backPlan.totalQuotedEth).toFixed(6)} ETH</b> back into{' '}
-                  {backPlan.wouldSwap} wallet{backPlan.wouldSwap === 1 ? '' : 's'}
-                  <span className="hint">
-                    {' '}
-                    — a live quote, floored at {(backPlan.overshootBps / 100).toFixed(1)}% below it, so a
-                    worse fill reverts with the {pair.symbol} intact
-                    {backPlan.skippedImpact > 0 &&
-                      ` · ${backPlan.skippedImpact} refused, the pool is too thin for that size`}
-                    {backPlan.skippedDust > 0 &&
-                      ` · ${backPlan.skippedDust} hold dust worth less than the gas to sell it`}
-                    {backPlan.skippedShort > 0 && ` · ${backPlan.skippedShort} short of gas for the sale`}
-                    {backPlan.failed > 0 && ` · ${backPlan.failed} could not be priced`}
-                    {recover.unknown > 0 &&
-                      ` · ${recover.unknown} wallet(s) have no ${pair.symbol} balance read yet and are not ` +
-                        'included — refresh balances'}
-                  </span>
+                      <div className="row">
+                        <Busy
+                          className="ghost"
+                          busy={false}
+                          disabled={balPlan.usable === 0}
+                          title={
+                            balPlan.usable === 0
+                              ? 'no wallet has ETH to spare after gas — there is nothing to write'
+                              : `write ${balPlan.usable} Buy amount(s) — no ETH moves`
+                          }
+                          onClick={applyBalancePlan}
+                        >
+                          {balPlan.usable === 0
+                            ? 'Nothing to write'
+                            : `Write ${balPlan.usable} Buy amount${balPlan.usable === 1 ? '' : 's'}`}
+                        </Busy>
+                        <button type="button" className="link" onClick={() => setBalPlan(null)}>
+                          discard
+                        </button>
+                        <span className="hint">
+                          priced {new Date(balPlan.quotedAt).toLocaleTimeString()} · balances and
+                          quotes move — price again if this has been sitting
+                        </span>
+                      </div>
+                    </div>
+                  )}
                 </>
               )}
-            </div>
-            </>
-          )}
-
-          {/* What the last real sale actually did, per wallet — the same refusal
-              instrument the funding run and the delete run report through. */}
-          {backOut && (
-            <div className={`notice ${backOut.swapped === backOut.count ? '' : 'danger'}`}>
-              <h3>
-                {backOut.swapped} of {backOut.count} sold · {backOut.totalPairSold} {backOut.pairSymbol}{' '}
-                for {backOut.totalEthOut} ETH
-              </h3>
-              <ul>
-                {backOut.results.map((r) => (
-                  <li key={r.walletId}>
-                    <code>
-                      {r.address.slice(0, 6)}…{r.address.slice(-4)}
-                    </code>{' '}
-                    {r.status} — sold {r.soldPair ?? '0'} {backOut.pairSymbol}
-                    {r.receivedEth ? ` for ${r.receivedEth} ETH` : ''}, still holds {r.holdingPair}
-                    {r.reason ? `. ${r.reason}` : ''}
-                  </li>
-                ))}
-              </ul>
             </div>
           )}
         </div>
@@ -2384,80 +2041,6 @@ export default function WalletsPanel({
           test for dropping the colour, and the way back is now a shell command
           on the server — the opposite of a second click. One dialog for one
           wallet and for twelve. */}
-      {/* The pair funding confirm. Vermilion when the console is live, exactly as the
-          launch dialog is: this buys a token with real ETH from up to 31 wallets and
-          there is no undo. One amber object in here — the confirm button — and no
-          amber band, which is the defect this console keeps re-growing. */}
-      <Modal
-        open={Boolean(pairAsk)}
-        danger={live}
-        title={live ? `Buy ${pair?.symbol} with ${pairAsk?.totalEth} ETH?` : `Dry run: buy ${pair?.symbol}`}
-        question={null}
-        confirmLabel={live ? `Buy ${pair?.symbol} for ${pairAsk?.wouldSwap} wallet(s)` : 'Run (dry run)'}
-        onConfirm={runPairSwap}
-        onCancel={() => setPairAsk(null)}
-      >
-        <div className="modal-facts">
-          <Fact label="Pair token" mono>
-            {pair?.symbol} · {pair?.address}
-          </Fact>
-          <Fact label="Wallets">
-            {pairAsk?.wouldSwap} of {pairAsk?.count} (the rest are already funded or refused)
-          </Fact>
-          <Fact label="Total to spend">{pairAsk?.totalEth} ETH</Fact>
-          <Fact label="Each wallet buys">its own {pair?.symbol}, with its own ETH</Fact>
-        </div>
-        <p>
-          Every wallet keeps enough ETH for the launch's own approve and buy. A wallet that cannot
-          cover both is refused rather than part-funded, and every wallet is reported either way.
-          Run this BEFORE arming the launch — arming signs against each wallet's current nonce.
-        </p>
-      </Modal>
-
-      {/* The recovery confirm. Vermilion when the console is live, exactly as the
-          funding dialog beside it: this sells a real position from up to 31 wallets at
-          a public pool's price and there is no undo — the ETH comes back, but the
-          tokens are gone at whatever the pool paid. One amber object in here, the
-          confirm button, and no amber band. */}
-      <Modal
-        open={Boolean(backAsk)}
-        danger={live}
-        title={
-          live
-            ? `Sell ${Number(backAsk?.totalPairSold || 0).toFixed(6)} ${pair?.symbol} back to ETH?`
-            : `Dry run: sell ${pair?.symbol} back`
-        }
-        question={null}
-        confirmLabel={live ? `Sell from ${backAsk?.wouldSwap} wallet(s)` : 'Run (dry run)'}
-        onConfirm={runPairSell}
-        onCancel={() => setBackAsk(null)}
-      >
-        <div className="modal-facts">
-          <Fact label="Pair token" mono>
-            {pair?.symbol} · {pair?.address}
-          </Fact>
-          <Fact label="Wallets">
-            {backAsk?.wouldSwap} of {backAsk?.count} (the rest hold none, hold dust, or were refused)
-          </Fact>
-          <Fact label="Total to sell">
-            {backAsk?.totalPairSold} {pair?.symbol}
-          </Fact>
-          <Fact label="Expected back">≈ {backAsk?.totalQuotedEth} ETH, at the quote just taken</Fact>
-          <Fact label="Each wallet keeps">its own proceeds — nothing is swept anywhere</Fact>
-        </div>
-        <p>
-          Each sale is floored at {((backAsk?.overshootBps ?? 300) / 100).toFixed(1)}% below the live
-          quote, so a worse fill reverts and that wallet keeps its {pair?.symbol} rather than dumping
-          it. A wallet whose whole balance would move the pool too far is refused outright, and one
-          holding less than the gas costs to sell is left alone. Every wallet is reported either way.
-        </p>
-        <p className="hint">
-          The quote moves between this dialog and the block that mines it. Run this BEFORE arming a
-          launch — each wallet spends two nonces here (an approve and the swap), and arming signs
-          against the nonce it reads.
-        </p>
-      </Modal>
-
       <Modal
         open={pending.length > 0}
         danger

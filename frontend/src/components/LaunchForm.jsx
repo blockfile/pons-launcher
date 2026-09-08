@@ -515,7 +515,7 @@ export default function LaunchForm({
                 {' '}
                 <b>Spent in {pair.symbol}, not ETH</b> — the dev wallet needs its own{' '}
                 {pair.symbol} balance. This console funds BUNDLE wallets into {pair.symbol} (step{' '}
-                {nums.wallets ?? 3}); it has no path that buys {pair.symbol} for the dev wallet.
+                {nums.swap ?? 5}); it has no path that buys {pair.symbol} for the dev wallet.
               </>
             )}
           </span>
@@ -604,8 +604,9 @@ export default function LaunchForm({
               spend
             </li>
             <li>
-              buy it in step {nums.wallets ?? 3} — <b>Pair funding · {pair.symbol}</b> — where each
-              wallet buys its own {pair.symbol} with its own ETH. Run it before arming.
+              buy it in step {nums.swap ?? 5} — <b>Buy {pair.symbol} for the bundle</b> — where each
+              wallet buys its own {pair.symbol} with its own ETH, out of the ETH it was funded with.
+              Run it before arming.
             </li>
           </ul>
         </div>
