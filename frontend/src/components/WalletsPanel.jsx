@@ -12,6 +12,10 @@ import { rolesFor } from '../variant.js';
 // Which curve a paired launch is priced against, and the one place a pair-token
 // figure becomes an ETH one — for display, at the very end. See pairCurve.js.
 import { ethEquivalent, isNativeLaunch, pairPerEthFrom } from './pairCurve.js';
+// What each bundle wallet is STILL missing, and the Fund column that would send
+// exactly that. Pure and tested; the same reading the "Funding from outside"
+// bench draws, so the two can never disagree about what "short" means.
+import { topUpPlan } from './fundShortfall.js';
 
 // Balances arrive as decimal strings. Six places everywhere, so the column and
 // the dialog show the same number.
@@ -46,6 +50,13 @@ const eth = (v) => Number(v || 0).toFixed(6);
 // cap would fill at — quoting the cap itself would price BUYING that much of the
 // pair token, impact and all, which is a different question.
 const MC_PROBE_ETH = '0.001';
+
+// How long a balance reading may arm the remaining-shortfall write. A shortfall
+// is a subtraction from a balance, and a balance a minute old is a balance that
+// may have been paid into since — so the arm expires rather than sitting there
+// looking current. Sixty seconds is long enough to read the preview and short
+// enough that a distracted operator has to look again.
+const READING_STALE_MS = 60_000;
 
 // A market cap in USD from its ETH figure and a hand-entered ETH price.
 //
@@ -179,6 +190,35 @@ export default function WalletsPanel({
   // dismissed, because it is an account of balances read at one moment.
   const [balPlan, setBalPlan] = useState(null);
   const [balErr, setBalErr] = useState('');
+
+  // ── "SEND ONLY WHAT IS MISSING" ─────────────────────────────────────────────
+  // Resuming a funding run that died partway. The routes send the Fund column as
+  // a raw value and nothing anywhere reads the destination's balance first, so
+  // re-running a list where seven of thirty-one transfers already landed pays
+  // those seven twice; the only defence today is hand-editing thirty-one fields.
+  // This rewrites the column to each wallet's REMAINING shortfall instead.
+  //
+  // TWO PRESSES, and the first one is a balance read. A shortfall is only as good
+  // as the reading it was subtracted from, and this figure is spent — so the
+  // control refuses to write against balances nobody has just looked at, the same
+  // shape as "price, then apply" above. `reading` is that look; it expires.
+  const [reading, setReading] = useState(null); // { at, label }
+  // WHAT EACH WRITTEN FIGURE WAS COMPUTED AGAINST. Once the column holds the
+  // remainder it no longer holds the target, and subtracting the balance from the
+  // remainder a second time under-funds by whatever the wallet already held. So
+  // the target is remembered here — never in `rows`, because it is this control's
+  // memory and not a property of the row — and dropped the moment anything else
+  // writes that Fund field. See topUpPlan's `nextTarget`.
+  const [fundTarget, setFundTarget] = useState({});
+
+  // The arm expires by itself. A balance read that has been sitting on screen for
+  // a minute is not a reading any more, and a control that still looks armed on
+  // one is worse than a control that asks to be pressed again.
+  useEffect(() => {
+    if (!reading) return undefined;
+    const t = setTimeout(() => setReading(null), READING_STALE_MS);
+    return () => clearTimeout(t);
+  }, [reading]);
 
   useEffect(() => {
     let alive = true;
@@ -456,6 +496,15 @@ export default function WalletsPanel({
   // Costs one BigInt per row and reads the same `pairBalance` the table draws.
   const heldPairPlan = pair ? heldPairFill(bundle, { places: pairPlaces }) : null;
 
+  // WHAT A RESUMED FUNDING RUN WOULD SEND, and what it sends today. Derived on
+  // render from the Fund column AS IT STANDS — for the same reason as the plan
+  // above: the preview the operator approves and the patch map the press writes
+  // have to be the same object, or the readout is describing a different write.
+  const topUp = bundle.length ? topUpPlan(bundle, rows, { targetFund: fundTarget }) : null;
+  // Nothing to resume: no wallet is short of what its Fund amount asks for, so
+  // the rewrite would change nothing.
+  const topUpIdle = !topUp || topUp.changed === 0;
+
   const filler = fillAction({
     basis,
     paired: Boolean(pair),
@@ -532,6 +581,9 @@ export default function WalletsPanel({
         const buy = amounts[i];
         setRow(w.id, { mode: 'fixed', buy: String(buy), fund: (buy + reserve).toFixed(6) });
       });
+      // A fresh statement of what every wallet is owed, so the shortfall
+      // control's memory of the old one is void.
+      forgetFundTargets(bundle.map((w) => w.id));
       report(
         `distributed ${total} ETH across ${bundle.length} wallets — each funded for its buy plus gas for ` +
           `${SELL_RESERVE} sells. Nothing was sent; edit any row, then Fund and launch as usual.`
@@ -584,6 +636,9 @@ export default function WalletsPanel({
     bundle.forEach((w, i) => {
       setRow(w.id, { mode: 'fixed', buy: String(amounts[i]), fund: filled.funds[w.id] ?? '' });
     });
+    // Same reason as the native branch: these are new Fund figures, so no older
+    // target may outrank them the next time the shortfall control is pressed.
+    forgetFundTargets(bundle.map((w) => w.id));
 
     const priced = Object.keys(filled.funds).length;
     const unpriced = bundle.length - priced;
@@ -762,6 +817,9 @@ export default function WalletsPanel({
     // going to be made.
     setFill(null);
     setBalPlan(null);
+    // This writes Fund: 0 for every wallet it fills, which is a new statement of
+    // what they are owed — nothing, they hold their quote asset already.
+    forgetFundTargets(Object.keys(patches));
 
     report(
       `filled the Buy column for ${filled} wallet(s) from the ${pair.symbol} they are ALREADY holding — ` +
@@ -792,6 +850,101 @@ export default function WalletsPanel({
       `Filled ${filled} wallet(s) with the ${Number(total).toFixed(6)} ${pair.symbol} they already hold. ` +
         'Nothing moved, nothing was priced — Fund is 0, there is no swap left to make.',
       unread.length ? 'error' : 'ok'
+    );
+  }
+
+  /**
+   * Forget the remembered target for one wallet.
+   *
+   * Called wherever a Fund figure is written by something OTHER than the
+   * shortfall control — the field itself, a Distribute, a held-pair fill. Those
+   * are new intentions about what the wallet is owed, and a remembered target
+   * would silently outrank them on the next press.
+   */
+  function forgetFundTargets(ids) {
+    setFundTarget((t) => {
+      const drop = new Set(ids);
+      const kept = Object.fromEntries(Object.entries(t).filter(([id]) => !drop.has(id)));
+      return Object.keys(kept).length === Object.keys(t).length ? t : kept;
+    });
+  }
+
+  /**
+   * ARM THE SHORTFALL WRITE BY READING THE BALANCES.
+   *
+   * The first of two presses, and it is the freshness guarantee: this is the same
+   * wallet GET behind "Refresh balances", and the write is not offered until it
+   * has just returned. Nothing is computed here — the plan is derived on render
+   * from whatever the read brought back, so the figures the operator approves are
+   * the figures the second press writes.
+   */
+  async function readForTopUp() {
+    setBusy('top-up-read');
+    try {
+      await reload();
+      setReading({ at: Date.now(), label: new Date().toLocaleTimeString() });
+    } catch (err) {
+      // No reading, so no arm. A shortfall subtracted from balances that failed
+      // to load is not a conservative guess, it is a wrong number that gets sent.
+      setReading(null);
+      report(`ERROR: ${err.message}`);
+    } finally {
+      setBusy('');
+    }
+  }
+
+  /**
+   * REWRITE THE FUND COLUMN TO WHAT IS STILL MISSING. Writes fields; moves no ETH.
+   *
+   * ONE SNAPSHOT, ONE STEP. `topUp` was computed from the Fund column as it
+   * stands, before any of this runs, and every wallet's figure is already in
+   * `patches`. The loop below only applies them — it never re-reads a column it
+   * is in the middle of mutating, which is the trap here: `short` is measured
+   * AGAINST Fund, so the first write destroys the reading the rest would need.
+   *
+   * Each figure is that wallet's own shortfall rounded UP (fundShortfall.js), so
+   * the resumed run can only over-send by a millionth of an ETH and can never
+   * leave a wallet short — a short wallet is one preflight drops without failing
+   * the run, which is the whole reason this control exists.
+   *
+   * The reading is SPENT by the write. A second application needs a second look
+   * at the balances, and `nextTarget` makes that second application land the same
+   * column rather than subtracting the same balance twice.
+   */
+  function applyTopUp() {
+    if (!topUp || !reading) return;
+    const plan = topUp;
+    const before = plan.sendBefore;
+    Object.entries(plan.patches).forEach(([id, patch]) => setRow(id, patch));
+    setFundTarget((t) => ({ ...t, ...plan.nextTarget }));
+    setReading(null);
+
+    report(
+      `set the Fund column to what each bundle wallet is STILL missing, read at ${reading.label}. ` +
+        `${plan.zeroed} wallet(s) already hold their full amount and are now 0 — a funding run skips a ` +
+        `wallet with no amount, so they cannot be paid twice. ${plan.carrying} wallet(s) carry a remaining ` +
+        `amount. The run now sends ${plan.sendAfter} ETH instead of ${before} ETH` +
+        (Number(plan.saved) > 0
+          ? `, which is ${plan.saved} ETH less`
+          : Number(plan.saved) < 0
+            ? `, which is ${plan.saved.replace('-', '')} ETH MORE — a wallet has less than it did when the ` +
+              'amounts were typed'
+            : ' — nothing changed') +
+        `. Each figure is that wallet's shortfall rounded UP to six places, so it is never below what is ` +
+        'missing: an underfunded wallet is dropped by preflight without failing the run' +
+        (plan.unread.length
+          ? `. ${plan.unread.length} wallet(s) were LEFT ALONE because their ETH balance could not be read ` +
+            `(a dash is not a zero, and a zero here would double-send): ${plan.unread
+              .map((u) => u.address)
+              .join(', ')} — refresh and run this again`
+          : '') +
+        `. Nothing was sent: this wrote the table only. Check the column, then send in step ${nums.fund ?? 4}.`
+    );
+    notify(
+      `Fund column is now the remaining shortfall — ${plan.zeroed} already funded, ${plan.carrying} still ` +
+        `owed. The run sends ${Number(plan.sendAfter).toFixed(6)} ETH instead of ${Number(before).toFixed(6)}. ` +
+        'No ETH moved.',
+      plan.unread.length ? 'error' : 'ok'
     );
   }
 
@@ -1682,6 +1835,102 @@ export default function WalletsPanel({
         </div>
       )}
 
+      {/* ── RESUMING A FUNDING RUN THAT DIED PARTWAY ─────────────────────────
+          The funding routes send this column as a raw value and read no
+          destination balance first, so re-running a list where seven of
+          thirty-one transfers already landed pays those seven a second time. The
+          only defence until now was hand-editing thirty-one fields, and one
+          mistyped row over-funds a wallet.
+
+          So the column is rewritten to each wallet's REMAINING shortfall — 0 for
+          the ones already holding their amount, and a funding run skips a wallet
+          with no amount. Resuming becomes safe by construction rather than by the
+          operator's care.
+
+          TWO PRESSES, AND THE FIRST ONE IS THE BALANCE READ. This subtracts from a
+          balance and what comes out is spent, so the figures are not even DRAWN
+          until a read has just returned, and the arm expires after a minute. The
+          same shape as "price, then apply" above, for the same reason.
+
+          NO AMBER, AND NOT .spend. It writes form fields and moves no ETH; the
+          money colour belongs to the one action of a panel that spends, and this
+          panel still has none. A .quiet read, a .ghost write, the same plain
+          strong hairline as the fill box above it. No CSS was added. */}
+      {topUp && topUp.reading.targets > 0 && (
+        <div className="pair-fund">
+          <b className="pair-fund-title">Fund column · send only what is missing</b>
+
+          {/* .quiet: it is the wallet GET behind "Refresh balances" and changes
+              nothing anywhere. It is here rather than only in Utility because the
+              reading is what ARMS the write beside it — the freshness is the
+              feature, so it is a press in this box. */}
+          <Busy busy={busy === 'top-up-read'} className="quiet" onClick={readForTopUp}>
+            {reading ? 'Read balances again' : 'Read balances'}
+          </Busy>
+
+          <Busy
+            className="ghost"
+            disabled={!reading || topUpIdle}
+            title={
+              !reading
+                ? 'read the balances first — this figure gets sent, so it is only computed from a balance just read'
+                : topUpIdle
+                  ? 'every Fund amount already IS what that wallet is missing — nothing to rewrite'
+                  : ''
+            }
+            onClick={applyTopUp}
+          >
+            {reading && !topUpIdle
+              ? `Write ${topUp.changed} Fund amount${topUp.changed === 1 ? '' : 's'}`
+              : 'Set Fund to the shortfall'}
+          </Busy>
+
+          <span className="hint">
+            {!reading ? (
+              <>
+                <b>Use this to resume a funding run that stopped partway</b> — it rewrites Fund to
+                what each wallet is STILL missing, and 0 for the ones already holding theirs, so the
+                run cannot pay a funded wallet twice · read the balances first: the figures are not
+                shown, let alone written, until they come from a balance just read
+              </>
+            ) : topUpIdle ? (
+              <>
+                Read at {reading.label} · <b>nothing to change</b> — every Fund amount already IS
+                what that wallet is missing, so the column is the amount to send
+              </>
+            ) : (
+              <>
+                Read at {reading.label}, expires after {READING_STALE_MS / 1000}s · each figure is
+                that wallet&apos;s shortfall rounded <b>up</b> to six places, so it can never land
+                below what is missing · writes the table only, nothing is sent
+              </>
+            )}
+          </span>
+
+          {/* WHAT IT WOULD DO, IN THE FIGURES THE OPERATOR IS RESUMING ON. Only
+              once a reading exists: a shortfall drawn from balances nobody has
+              just read is the stale number this control was built to replace. */}
+          {reading && (
+            <div className="pair-fund-cost">
+              <b>{topUp.zeroed}</b> already funded → 0 · <b>{topUp.carrying}</b> still owed ·{' '}
+              <b>
+                {eth(topUp.sendBefore)} → {eth(topUp.sendAfter)} ETH
+              </b>{' '}
+              <span className="hint">
+                to send
+                {Number(topUp.saved) > 0
+                  ? ` — ${eth(topUp.saved)} ETH less than the column asks for now`
+                  : Number(topUp.saved) < 0
+                    ? ` — ${eth(topUp.saved.replace('-', ''))} ETH MORE: a wallet holds less than it did when the amounts were typed`
+                    : ' — unchanged'}
+                {topUp.unread.length > 0 &&
+                  ` · ${topUp.unread.length} wallet${topUp.unread.length === 1 ? '' : 's'} left alone, ETH balance not read — a dash is not a zero, and a zero here would double-send`}
+              </span>
+            </div>
+          )}
+        </div>
+      )}
+
       <div className="table-scroll">
         <table className="wallet-list">
           <thead>
@@ -1876,7 +2125,13 @@ export default function WalletsPanel({
                         step="0.0001"
                         placeholder="0.0"
                         value={row.fund ?? ''}
-                        onChange={(e) => setRow(w.id, { fund: e.target.value })}
+                        onChange={(e) => {
+                          setRow(w.id, { fund: e.target.value });
+                          // Typing here restates what this wallet is owed, so the
+                          // shortfall control forgets the target it last wrote
+                          // against and computes from the new figure.
+                          forgetFundTargets([w.id]);
+                        }}
                       />
                     )}
                   </td>

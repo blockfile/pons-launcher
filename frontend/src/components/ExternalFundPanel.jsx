@@ -4,6 +4,13 @@ import { notify } from '../api.js';
 import Section from './Section.jsx';
 import Address, { copyToClipboard } from './Address.jsx';
 import { rolesFor } from '../variant.js';
+// THE ONE IMPLEMENTATION OF `short` IN THIS CONSOLE'S FUNDING COLUMN. It used to
+// live in this file as three lines of float arithmetic, which is fine for a
+// readout and not fine for the control in step 3 that WRITES the column from the
+// same subtraction. Two implementations of the number that decides whether a
+// wallet gets paid twice is one too many, so the arithmetic moved out to a pure,
+// tested module and both read it. See fundShortfall.js.
+import { fundShortfall } from './fundShortfall.js';
 
 const eth = (v) => Number(v || 0).toFixed(6);
 
@@ -28,7 +35,11 @@ const eth = (v) => Number(v || 0).toFixed(6);
  * It moves NOTHING. There is no send, no sweep, no signer and no POST in this
  * file. The only network call is the same wallet refresh the console already
  * makes on a timer, so the worst this panel can do is be out of date by five
- * seconds.
+ * seconds. That is still true: the arithmetic below moved out to fundShortfall.js
+ * so the control in step 3 that REWRITES the Fund column from it — resuming a
+ * half-finished funding run — reads the same subtraction rather than a second
+ * copy of it. The write lives there, where the column and the writes live. This
+ * file gained an import and lost three lines of float arithmetic.
  */
 export default function ExternalFundPanel({ wallets, rows, reload, variant = 'v1' }) {
   const roles = rolesFor(variant);
@@ -38,19 +49,28 @@ export default function ExternalFundPanel({ wallets, rows, reload, variant = 'v1
   // What each bundle wallet is owed, and what has actually landed. The target
   // is the same Fund column typed in step 3 — deliberately not a second set of
   // amounts, because two places to type the same number is how they diverge.
-  const owed = wallets
-    .filter((w) => w.role === roles.bundle)
-    .map((w) => {
-      const need = Number(rows[w.id]?.fund) || 0;
-      const have = Number(w.balanceEth) || 0;
-      return { w, need, have, short: need > 0 ? Math.max(0, need - have) : 0 };
-    })
-    .filter((r) => r.need > 0);
+  //
+  // Scaled integers now, out of fundShortfall.js, rather than the float
+  // subtraction this file used to do: a balance formatted from wei against an
+  // amount typed by hand is exactly the comparison that decides "short" by one
+  // part in 10^17, and short is the state that gets a wallet dropped.
+  //
+  // And a balance that was NOT READ is its own state here. It used to fall
+  // through `Number(w.balanceEth) || 0` and be drawn as a wallet waiting on an
+  // empty balance, which is a claim nobody made — and the same claim, made in
+  // step 3, would send that wallet a second full transfer.
+  const reading = fundShortfall(
+    wallets.filter((w) => w.role === roles.bundle),
+    rows
+  );
+  const owed = reading.rows;
 
-  const arrived = owed.filter((r) => r.short === 0).length;
-  const stillNeeded = owed.reduce((s, r) => s + r.short, 0);
-  const totalNeed = owed.reduce((s, r) => s + r.need, 0);
-  const totalHave = owed.reduce((s, r) => s + r.have, 0);
+  const arrived = reading.funded;
+  const stillNeeded = Number(reading.shortTotal);
+  const totalNeed = Number(reading.needTotal);
+  const totalHave = Number(reading.haveTotal);
+  // Never "all in" while a balance is unknown: an unread wallet is not a funded
+  // one, and this is the announcement an operator stops watching on.
   const allIn = owed.length > 0 && arrived === owed.length;
 
   // Poll while watching. reload() is the wallet GET the console already makes;
@@ -98,7 +118,7 @@ export default function ExternalFundPanel({ wallets, rows, reload, variant = 'v1
     if (!owed.length) {
       return notify('No wallet has a Fund amount yet — set them in step 3 first.', 'error');
     }
-    const text = owed.map((r) => (withAmounts ? `${r.w.address},${r.need}` : r.w.address)).join('\n');
+    const text = owed.map((r) => (withAmounts ? `${r.address},${r.need}` : r.address)).join('\n');
     const ok = await copyToClipboard(text);
     return notify(
       ok
@@ -171,7 +191,7 @@ export default function ExternalFundPanel({ wallets, rows, reload, variant = 'v1
           <h3>
             <LuTriangleAlert aria-hidden="true" />
             <span>
-              {owed.length - arrived} of {owed.length} wallets still short —{' '}
+              {reading.short} of {owed.length} wallets still short —{' '}
               <b className="crux">{stillNeeded.toFixed(6)} ETH</b> outstanding
             </span>
           </h3>
@@ -185,6 +205,24 @@ export default function ExternalFundPanel({ wallets, rows, reload, variant = 'v1
               Each wallet also pays its own gas, so the Fund column is a floor and not a target —
               landing exactly the amount owed leaves nothing for the buy&apos;s gas.
             </li>
+            {/* WHERE THE SAME ARITHMETIC IS ACTED ON. This panel reads; step 3
+                owns the Fund column and can rewrite it to exactly these
+                remainders, which is what makes re-running a half-finished run
+                safe. Named here because this is the screen the shortfall is
+                discovered on. */}
+            <li>
+              If a funding run stopped partway, do not re-send this column: it still asks for the
+              full amount and the routes do not check what a wallet already holds. Step 3 has{' '}
+              <b>Fund column · send only what is missing</b>, which rewrites it to these remainders
+              and 0 for the wallets already funded.
+            </li>
+            {reading.unread > 0 && (
+              <li>
+                {reading.unread} wallet{reading.unread === 1 ? "'s" : "s'"} ETH balance could not be
+                read at all and {reading.unread === 1 ? 'is' : 'are'} counted in neither figure — a
+                dash is not a zero. Refresh before acting on this.
+              </li>
+            )}
           </ul>
         </div>
       )}
@@ -215,24 +253,38 @@ export default function ExternalFundPanel({ wallets, rows, reload, variant = 'v1
               </tr>
             </thead>
             <tbody>
-              {owed.map(({ w, need, have, short }) => (
-                <tr key={w.id}>
+              {owed.map(({ walletId, address, need, have, short, state }) => (
+                <tr key={walletId}>
                   <td className="addr">
-                    <Address value={w.address} />
+                    <Address value={address} />
                   </td>
                   <td className="bal">{eth(need)}</td>
-                  <td className={`bal ${have === 0 ? 'zero' : ''}`}>{eth(have)}</td>
-                  <td className={`bal ${short > 0 ? 'short' : ''}`}>{short > 0 ? eth(short) : '—'}</td>
+                  {/* A dash, not a 0. An unread balance is a question about this
+                      wallet, and drawing it as an empty one is the claim that
+                      would have it funded twice. */}
+                  <td className={`bal ${have === null || Number(have) === 0 ? 'zero' : ''}`}>
+                    {have === null ? '—' : eth(have)}
+                  </td>
+                  <td className={`bal ${Number(short) > 0 ? 'short' : ''}`}>
+                    {Number(short) > 0 ? eth(short) : '—'}
+                  </td>
                   <td>
-                    {short === 0 ? (
+                    {state === 'funded' ? (
                       <span className="fund-state is-in">
                         <LuCircleCheck aria-hidden="true" />
                         funded
                       </span>
-                    ) : have > 0 ? (
+                    ) : state === 'partial' ? (
                       <span className="fund-state is-part">
                         <LuTriangleAlert aria-hidden="true" />
                         partial
+                      </span>
+                    ) : state === 'unread' ? (
+                      // The outline with no fill — waiting is an absence and so
+                      // is this, but this one is an absence of information.
+                      <span className="fund-state is-wait">
+                        <LuTriangleAlert aria-hidden="true" />
+                        not read
                       </span>
                     ) : (
                       <span className="fund-state is-wait">
