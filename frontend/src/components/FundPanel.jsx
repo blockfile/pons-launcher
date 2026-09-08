@@ -5,6 +5,16 @@ import { Busy } from './Section.jsx';
 import { rolesFor } from '../variant.js';
 import Address from './Address.jsx';
 import { runPacedFunding, PACE_MIN_MS, PACE_MAX_MS } from './pacedFunding.js';
+// The two knobs of the server-held timed run, and the sentence they add up to.
+// Pure and tested; see timedRate.js.
+import {
+  TIMED_INTERVALS,
+  WALLETS_PER_TICK_OPTIONS,
+  MAX_WALLETS_PER_TICK,
+  capReason,
+  intervalLabel,
+  timedRate,
+} from './timedRate.js';
 // Whether the run can run at all, and why not — one expression, drawn on the
 // page as well as used to disable the button. Pure and tested; see quoteAsset.js.
 import { fundGate } from './quoteAsset.js';
@@ -21,28 +31,6 @@ import { fundGate } from './quoteAsset.js';
  * "why did this fund run get rate limited" is the question step 2 exists to
  * answer and the answer is only visible at this moment.
  */
-const TIMED_INTERVALS = [
-  // Short intervals for pacing under Relay's per-IP quote limit — one wallet per
-  // minute is ~1 quote/min, far under it, and funds a bundle in minutes rather
-  // than the hours the seasoning-style intervals below take. The backend floor is
-  // 1 minute (timedFunding MIN_INTERVAL_MS).
-  { minutes: 1, label: '1 min' },
-  { minutes: 2, label: '2 min' },
-  { minutes: 5, label: '5 min' },
-  { minutes: 15, label: '15 min' },
-  { minutes: 30, label: '30 min' },
-  { minutes: 60, label: '1 hr' },
-  { minutes: 120, label: '2 hrs' },
-  { minutes: 180, label: '3 hrs' },
-  { minutes: 360, label: '6 hrs' },
-  { minutes: 720, label: '12 hrs' },
-  { minutes: 1440, label: '24 hrs' },
-];
-
-function intervalLabel(minutes) {
-  return TIMED_INTERVALS.find((i) => i.minutes === Number(minutes))?.label || `${minutes} min`;
-}
-
 function when(value) {
   if (!value) return '—';
   const d = new Date(value);
@@ -50,13 +38,21 @@ function when(value) {
   return d.toLocaleString();
 }
 
+// The rate a RUNNING job is actually going at, which is the one it was started
+// with — not whatever the field says now. A resumed job keeps its own cadence,
+// so the summary is where that number belongs.
+function jobRate(job) {
+  const per = Number(job?.walletsPerTick) || 1;
+  return per > 1 ? `${per}/tick, ` : '';
+}
+
 function timedSummary(job) {
   if (!job || job.status === 'idle') return 'no timed funding job';
   if (job.status === 'running') {
-    return `${job.completed}/${job.total} done, next ${when(job.nextRunAt)}`;
+    return `${job.completed}/${job.total} done, ${jobRate(job)}next ${when(job.nextRunAt)}`;
   }
   if (job.status === 'stopped') {
-    return `stopped at ${job.completed}/${job.total}; next was ${when(job.nextRunAt)}`;
+    return `stopped at ${job.completed}/${job.total}; ${jobRate(job)}next was ${when(job.nextRunAt)}`;
   }
   if (job.status === 'complete') {
     return `complete: ${job.sent}/${job.total} sent${job.failed ? `, ${job.failed} failed` : ''}`;
@@ -89,6 +85,9 @@ export default function FundPanel({
   const [busy, setBusy] = useState('');
   const [relayRuns, setRelayRuns] = useState([]);
   const [timedInterval, setTimedInterval] = useState(30);
+  // How many wallets one tick funds. ONE by default, which is the cadence this
+  // scheduler has always had; the ceiling is Relay's quote budget, not taste.
+  const [timedPerTick, setTimedPerTick] = useState(1);
   const [timedStatus, setTimedStatus] = useState(null);
 
   // V1 paced run. The Stop flag is a ref, not state: the loop reads it between
@@ -218,6 +217,25 @@ export default function FundPanel({
   const fundBody = isV2 ? { targets } : { targets, variant };
   const canResumeTimed = timedStatus?.status === 'stopped' && Number(timedStatus.remaining) > 0;
   const timedRunning = timedStatus?.status === 'running';
+  // The cap comes from the server when a job has been seen, so the console can
+  // never offer a rate the scheduler would refuse.
+  const perTickCap = Number(timedStatus?.maxWalletsPerTick) || MAX_WALLETS_PER_TICK;
+  // What pressing Start would do, in words: the rate, and how long the wallets
+  // in the table above would take at it. A resume is the JOB's cadence, not the
+  // field's, so it is quoted from the job.
+  const rate = canResumeTimed
+    ? timedRate({
+        wallets: Number(timedStatus.remaining) || 0,
+        perTick: Number(timedStatus.walletsPerTick) || 1,
+        intervalMinutes: Number(timedStatus.intervalMinutes) || timedInterval,
+        max: perTickCap,
+      })
+    : timedRate({
+        wallets: targets.length,
+        perTick: timedPerTick,
+        intervalMinutes: timedInterval,
+        max: perTickCap,
+      });
 
   return (
     <Step {...step}>
@@ -369,6 +387,29 @@ export default function FundPanel({
             </select>
           </label>
 
+          {/* HOW MANY WALLETS ONE TICK FUNDS. Not amber and never will be: the
+              spending action of this panel is the button beside it, and a panel
+              gets exactly one. This only sets the rate that button then runs at.
+              The list stops at the cap because the cap is Relay's, not ours. */}
+          <label
+            className="hint"
+            style={{ flexDirection: 'row', alignItems: 'center', gap: 7 }}
+            title={capReason(perTickCap)}
+          >
+            wallets per tick
+            <select
+              value={timedPerTick}
+              disabled={timedRunning}
+              onChange={(e) => setTimedPerTick(Number(e.target.value))}
+            >
+              {WALLETS_PER_TICK_OPTIONS.filter((n) => n <= perTickCap).map((n) => (
+                <option key={n} value={n}>
+                  {n}
+                </option>
+              ))}
+            </select>
+          </label>
+
           <Busy
             busy={busy === 'timed-start'}
             disabled={timedRunning || (!canResumeTimed && !targets.length)}
@@ -388,13 +429,16 @@ export default function FundPanel({
                   : api('/v2/relay/timed-fund/start', 'POST', {
                       targets,
                       intervalMinutes: Number(timedInterval),
+                      walletsPerTick: Number(timedPerTick),
                     })
               )
             }
           >
             {canResumeTimed
               ? 'Resume timed funding'
-              : `Start timed (${intervalLabel(timedInterval)} apart)`}
+              : timedPerTick > 1
+                ? `Start timed (${timedPerTick} per ${intervalLabel(timedInterval)})`
+                : `Start timed (${intervalLabel(timedInterval)} apart)`}
           </Busy>
 
           {timedRunning && (
@@ -411,6 +455,21 @@ export default function FundPanel({
           <span className="hint">
             {timedSummary(timedStatus)} — server keeps running if this tab closes
           </span>
+        </div>
+      )}
+
+      {/* THE RATE, AND THE CEILING ON IT, IN WORDS. "31 wallets" and "1 min
+          apart" is 31 minutes, and the operator used to find that out by
+          watching. The second half names the cap and why it exists, so four is
+          read as Relay's limit rather than an arbitrary short list. */}
+      {isV2 && (
+        <div className="row">
+          <span className="hint">
+            {canResumeTimed ? 'resume continues at ' : ''}
+            {rate.sentence}
+            {canResumeTimed ? ' still to fund' : ''}
+          </span>
+          <span className="hint">{capReason(perTickCap)}</span>
         </div>
       )}
 

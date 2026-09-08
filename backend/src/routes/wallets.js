@@ -664,8 +664,12 @@ router.get('/v2/relay/timed-fund', requireApiKey, (req, res, next) => {
 
 router.post('/v2/relay/timed-fund/start', requireApiKey, (req, res, next) => {
   try {
-    const { targets, intervalMinutes } = req.body || {};
-    res.json(timedRelayFunding.start(req.user.id, targets, { intervalMinutes }));
+    // walletsPerTick > 1 lets one tick fund several wallets — still one Relay
+    // order per wallet, sequentially. Capped in the scheduler at Relay's
+    // measured per-IP quote budget; an over-large value is refused with that
+    // reason rather than discovered against the live limiter.
+    const { targets, intervalMinutes, walletsPerTick } = req.body || {};
+    res.json(timedRelayFunding.start(req.user.id, targets, { intervalMinutes, walletsPerTick }));
   } catch (err) {
     next(err);
   }
