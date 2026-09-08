@@ -69,6 +69,14 @@ export default function Step({
   chip,
   wait,
   last = false,
+  // ONE LINE, IN PLAIN LANGUAGE: what this station is for and what has to be
+  // true before its controls do anything — and, where something is missing, the
+  // step that supplies it. Drawn in the same place for every station, which is
+  // the point: consistency is what lets an operator stop hunting for the reason
+  // a control is dead. `wait` outranks it, because a step that cannot be reached
+  // at all has a shorter answer than a step that can. Optional and unset
+  // everywhere it is not wanted, so every panel that predates it is unchanged.
+  need,
   // Which step the connector BELOW this one belongs to. It is the node's own
   // state everywhere except the readout, which is threaded onto the launch's
   // spine without ever claiming to have succeeded itself.
@@ -121,7 +129,7 @@ export default function Step({
         )}
       </h2>
 
-      {wait && <p className="stage-wait">{wait}</p>}
+      {(wait || need) && <p className="stage-wait">{wait || need}</p>}
 
       {children}
     </section>

@@ -7,6 +7,9 @@ import Modal, { Fact } from './Modal.jsx';
 import { pct } from './Share.jsx';
 import { rolesFor } from '../variant.js';
 import { NATIVE_PAIR, isNativePair, pairOptions, selectedPair, bodyPairToken } from '../pairAssets.js';
+// Which of the two buttons may run and why not, and which buying wallets the
+// preflight would drop for not holding the quote asset yet. Pure and tested.
+import { launchGate, shortOfPair } from './quoteAsset.js';
 
 // The chain makes a block every ~100ms, but the restriction window is counted
 // in the EVM's own block number, which advances roughly every 16 seconds. So
@@ -57,13 +60,34 @@ export default function LaunchForm({
   report,
   onDraft,
   onSizing,
-  // The v2 quote asset. The SELECTION lives in App now, because two panels need
-  // it: this form prices the launch in it, and step 3 funds the bundle with it.
-  // Everything below still reads `pairToken` and derives `pair` exactly as it did
-  // when the useState was here.
+  // THE QUOTE ASSET, READ AND NOT OWNED.
+  //
+  // This form used to hold the selection AND the /v2/configs read it is resolved
+  // against, which put the launch's first decision inside its last step: the
+  // operator jumped here to pick an asset and walked back up to size, fund and
+  // swap the bundle in it. Both now live in App — `configV2` is the factory
+  // read, `quoteOptions` the approved list, `pairToken` the selection and `pair`
+  // the resolved asset (null on native).
+  //
+  // The picker below stays: this is where the launch is priced, and an operator
+  // at the bottom of the page must be able to see what it is priced in and
+  // change their mind. It writes through `onPairToken`, which is App's GUARDED
+  // setter — it states what a change costs before it strands anything.
+  configV2 = null,
+  quoteOptions = null,
   pairToken = NATIVE_PAIR,
+  pair: resolvedPair = null,
   onPairToken = () => {},
-  onPair = () => {},
+  // The one unguarded write, and it is not the operator's: switching protocol
+  // puts a pons-v1 launch back on native, and an effect must never raise a
+  // dialog.
+  onPairReset = () => {},
+  // Does this launcher have a quote-asset station of its own? v2 does, so the
+  // picker here says where the decision lives; v1 does not, so it reads as the
+  // place it is made.
+  ownsPair = true,
+  // Step key -> live number, for naming another station.
+  nums = {},
   variant = 'v1',
 }) {
   const roles = rolesFor(variant);
@@ -75,7 +99,9 @@ export default function LaunchForm({
   // sharing live). Flip SHOW_PONS_V1 back to true if pons ever reopens v1.
   const SHOW_PONS_V1 = false;
   const [protocol, setProtocol] = useState(SHOW_PONS_V1 ? 'v1' : 'v2');
-  const [v2, setV2] = useState(null);
+  // The v2 factory read, handed down rather than fetched here — see the note on
+  // the props above. Named `v2` so every expression below reads as it did.
+  const v2 = configV2;
   const [launchConfigId, setLaunchConfigId] = useState(0);
   // Native ETH (the zero-address sentinel) by default, which is byte-for-byte the
   // backend's own default — a native launch is unchanged.
@@ -105,64 +131,28 @@ export default function LaunchForm({
   // always has something valid and the form never crashes. The selection is
   // resolved against this same list, so a token un-approved between reads falls
   // back to native rather than pointing at nothing.
-  const pairTokens = pairOptions(v2);
+  //
+  // Both come from App now, which owns the factory read — the list because the
+  // station at the front of the plan needs it too, and the resolved selection
+  // because the wallet table two steps up prices against its CURVE CONSTANTS.
+  // The local fallbacks keep this form standing on its own if it is ever handed
+  // neither.
+  const pairTokens = quoteOptions || pairOptions(v2);
   const pair = selectedPair(v2, pairToken);
   const nativePair = isNativePair(pair.address);
-
-  // The resolved selection, handed to App for step 3's pair funding AND for what
-  // the bundle amounts BUY. Only this form knows it: the symbol, the DECIMALS and
-  // the pair's own CURVE CONSTANTS come from the /v2/configs read it owns. Null on
-  // a native launch, which is what makes the funding control invisible there.
-  //
-  // phantomQuote and graduationThreshold are the factory's pairTokenEconomics for
-  // this quote asset, already on every entry of the pairTokens list (see
-  // evm/v2/pairTokens.js, which reads them in the same multicall as the symbol).
-  // They used to be dropped here, and dropping them is the bug: the wallet table
-  // then had nothing to price a paired bundle against and silently used the launch
-  // config's own constants, which are the NATIVE curve — 1.68 ETH against NVDA's
-  // real 16.64 NVDA. It reported 61.20% of supply for a bundle that takes 14.95%.
-  //
-  // The deps are the resolved fields rather than `pair` itself: selectedPair
-  // returns a fresh object every render, so depending on it would re-fire this on
-  // every render and loop against App's setState.
-  useEffect(() => {
-    onPair(
-      isV2 && !nativePair
-        ? {
-            address: pair.address,
-            symbol: pair.symbol,
-            decimals: pair.decimals,
-            phantomQuote: pair.phantomQuote,
-            graduationThreshold: pair.graduationThreshold,
-          }
-        : null
-    );
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [
-    isV2,
-    nativePair,
-    pair.address,
-    pair.symbol,
-    pair.decimals,
-    pair.phantomQuote,
-    pair.graduationThreshold,
-  ]);
-
-  // v2's factory is a different contract with its own configs and its own
-  // gating, so they are read separately and only when the operator asks for it.
-  useEffect(() => {
-    if (!isV2 || v2) return;
-    api('/v2/configs')
-      .then(setV2)
-      .catch((err) => report(`ERROR: v2 configs — ${err.message}`));
-  }, [isV2, v2]);
+  // On a pons v1 launch there is no quote asset at all — the pool is priced in
+  // ETH — so a selection carried over from v2 must not colour this form.
+  const paired = Boolean(isV2 && resolvedPair);
 
   // Config ids are per-factory; carrying v1's selection into v2 would silently
   // pick a different set of terms. The quote asset resets the same way, so
   // toggling v2→v1→v2 always returns to native rather than a stale RWA pick.
+  // Through the UNGUARDED setter: a dialog raised by an effect is a dialog
+  // nobody asked for.
   useEffect(() => {
     setLaunchConfigId(0);
-    setPairToken(NATIVE_PAIR);
+    onPairReset(NATIVE_PAIR);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [protocol]);
 
   // The amounts are typed two panels up, but what they BUY is decided here: the
@@ -186,9 +176,9 @@ export default function LaunchForm({
    * They are also the three the sequence header states about step 5, and the
    * only ones a step drawn a page above the form has any way of knowing. It is
    * the same arrangement as onSizing above: the panel that owns a value hands
-   * it up rather than App reaching down for it. `ready` below is these three
-   * plus "no upload still in flight", which is this panel's business and not
-   * the header's.
+   * it up rather than App reaching down for it. `launchGate` below is these
+   * three plus "no upload still in flight", which is this panel's business and
+   * not the header's.
    */
   useEffect(() => {
     onDraft?.({ name: f.name.trim(), symbol: f.symbol.trim(), logo: f.logo });
@@ -316,8 +306,38 @@ export default function LaunchForm({
     : active?.maxExemptions ?? MAX_EXEMPTIONS;
   const overExempt = isV2 && buying > exemptionLimit;
 
-  const ready = Boolean(f.name.trim() && f.symbol.trim() && f.logo) && !uploading;
-  const blocked = live && !armed;
+  // WHY EITHER BUTTON IS DEAD, in words, on the page. Both refusals were only
+  // ever `title` attributes — invisible without a mouse and invisible on the
+  // step's own header — and they refuse for overlapping but different reasons:
+  // preflight signs nothing, so neither the arm switch nor the exemption cap
+  // stops it. The expression is pure and pinned by a test; see quoteAsset.js.
+  const draftMissing = [
+    f.name.trim() ? null : 'a name',
+    f.symbol.trim() ? null : 'a symbol',
+    f.logo ? null : 'a logo',
+  ].filter(Boolean);
+  const gate = launchGate({
+    draftMissing,
+    uploading,
+    overExempt: overExempt ? buying - exemptionLimit : 0,
+    live,
+    armed,
+  });
+
+  // WHICH BUYING WALLETS PREFLIGHT WOULD DROP, asked at the moment of arming.
+  //
+  // On a paired launch every bundle buy is signed in the quote asset before the
+  // token exists, so a wallet that is not already holding it is skipped and the
+  // bundle fires that much smaller. That is knowable here, from the pair column
+  // the listing already carries, and it used to be discovered only in the
+  // preflight report — which an operator is allowed to skip. Null on a native
+  // launch, where a wallet buys with the ETH it was funded with.
+  const pairShort = paired
+    ? shortOfPair(
+        wallets.filter((w) => w.role === roles.bundle),
+        rows
+      )
+    : null;
 
   return (
     <Step {...step}>
@@ -408,7 +428,7 @@ export default function LaunchForm({
         </label>
         {isV2 && (
           <label>
-            Paired asset
+            Priced in
             <select value={pair.address} onChange={(e) => setPairToken(e.target.value)}>
               {pairTokens.map((t) => (
                 <option key={t.address} value={t.address}>
@@ -419,9 +439,29 @@ export default function LaunchForm({
                 </option>
               ))}
             </select>
+            {/* IT SAYS WHERE THE DECISION LIVES. The picker is here so an
+                operator at the point of arming can see what the launch is priced
+                in — but the choice belongs at the front of the plan, because
+                everything between there and here is denominated in it. Changing
+                it from this field is allowed and states its cost first: the
+                onChange goes through the same guarded setter the first station
+                uses, which asks before it strands a wallet holding the old
+                asset. */}
             <span className="hint">
-              What the curve is priced in. <b>ETH (native)</b> keeps today's behaviour; any other
-              asset means the dev buy and every bundle buy are spent in that token.
+              What the curve is priced in.{' '}
+              {ownsPair ? (
+                <>
+                  <b>ETH (native)</b> keeps today's behaviour; any other asset means the dev buy and
+                  every bundle buy are spent in that token.
+                </>
+              ) : (
+                <>
+                  Chosen in <b>step {nums.quote ?? 1}</b> — everything between there and here is
+                  denominated in it. Changing it now says what it costs first: the amounts above are
+                  re-stated in the new asset and any wallet already holding{' '}
+                  {nativePair ? 'the old one' : pair.symbol} keeps it.
+                </>
+              )}
             </span>
           </label>
         )}
@@ -473,7 +513,9 @@ export default function LaunchForm({
             {!nativePair && (
               <>
                 {' '}
-                <b>Spent in {pair.symbol}, not ETH</b> — the dev wallet needs a {pair.symbol} balance.
+                <b>Spent in {pair.symbol}, not ETH</b> — the dev wallet needs its own{' '}
+                {pair.symbol} balance. This console funds BUNDLE wallets into {pair.symbol} (step{' '}
+                {nums.wallets ?? 3}); it has no path that buys {pair.symbol} for the dev wallet.
               </>
             )}
           </span>
@@ -541,12 +583,40 @@ export default function LaunchForm({
         </div>
       )}
 
+      {/* THE WALLETS THIS LAUNCH WOULD FIRE WITHOUT, named before the arm rather
+          than in a report afterwards. A paired bundle's buys are signed in the
+          quote asset before the token exists, so a wallet that is not already
+          holding it is dropped by preflight and the bundle lands that much
+          smaller. Grey: this is not a spend and not irreversible, and this panel
+          already has its one amber. Absent on a native launch and absent the
+          moment every buying wallet holds enough. */}
+      {pairShort && pairShort.short > 0 && (
+        <div className="notice">
+          <h3>
+            {pairShort.short} of {pairShort.buying} buying wallet
+            {pairShort.buying === 1 ? '' : 's'} {pairShort.short === 1 ? 'does' : 'do'} not hold{' '}
+            {pair.symbol} yet
+          </h3>
+          <ul>
+            <li>
+              preflight <b className="crux">drops a wallet that holds less than its Buy amount</b> —
+              the buy is signed in {pair.symbol} before the token exists, so there is nothing to
+              spend
+            </li>
+            <li>
+              buy it in step {nums.wallets ?? 3} — <b>Pair funding · {pair.symbol}</b> — where each
+              wallet buys its own {pair.symbol} with its own ETH. Run it before arming.
+            </li>
+          </ul>
+        </div>
+      )}
+
       <div className={`arm ${live ? 'is-live' : ''}`}>
         <Busy
           busy={busy === 'preflight'}
           className="btn-primary"
-          disabled={!ready}
-          title={ready ? 'signs everything, broadcasts nothing' : 'fill in name, symbol and a logo'}
+          disabled={!gate.preflight.enabled}
+          title={gate.preflight.why || 'signs everything, broadcasts nothing'}
           onClick={() => act('preflight', () => api(isV2 ? '/v2/preflight' : '/preflight', 'POST', body()))}
         >
           Preflight — signs, sends nothing
@@ -564,20 +634,18 @@ export default function LaunchForm({
           // Vermilion means irreversible. A dry run is not, and colouring it
           // the same would teach the operator to ignore the colour that matters.
           className={live ? 'danger' : ''}
-          disabled={!ready || blocked || overExempt}
-          title={
-            !ready
-              ? 'fill in name, symbol and a logo'
-              : overExempt
-                ? `${buying} exempt wallets exceeds the ${exemptionLimit} limit for this path — remove ${buying - exemptionLimit}`
-                : blocked
-                  ? 'flip Arm first — this spends real funds'
-                  : ''
-          }
+          disabled={!gate.fire.enabled}
+          title={gate.fire.why || ''}
           onClick={launch}
         >
           {live ? 'Launch + bundle' : 'Launch + bundle (dry run)'}
         </Busy>
+
+        {/* THE REFUSAL, ON THE PAGE. It was a `title` on a disabled button —
+            unreadable without a mouse, and unreadable at all on the header the
+            operator is actually looking at. It says the same thing the step's
+            own line says, in the place the click was aimed. */}
+        {gate.fire.why && <span className="hint">{gate.fire.why}</span>}
 
         <div className="cost">
           <b>

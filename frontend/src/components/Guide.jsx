@@ -11,7 +11,12 @@ import { useState } from 'react';
 // it again, which is the one person the prose is for.
 const KEY = 'pons-guide-open';
 
-export default function Guide() {
+// `steps` is the live plan, not a copy of it. The order of work used to be a
+// hardcoded list of six — which was wrong on v2 the moment it stopped having a
+// disperser step, and wrong again the moment the quote asset became a station of
+// its own. A guide that disagrees with the page it is explaining is worse than
+// no guide, so it reads the same array the strip above it draws.
+export default function Guide({ steps = [] }) {
   const [open, setOpen] = useState(() => localStorage.getItem(KEY) === 'yes');
 
   function toggle() {
@@ -44,13 +49,33 @@ export default function Guide() {
           <div>
             <dt>The order of work</dt>
             <dd>
-              Six steps, in the order they are laid out down this page:{' '}
-              <b>create the dev wallet</b> and send it ETH, <b>deploy a disperser contract</b> if the
-              bundle is large enough to want batched funding, <b>generate the bundle wallets</b>,{' '}
-              <b>fund them</b> from the dev wallet, <b>launch and bundle</b>, and later{' '}
-              <b>sell everything</b>. The strip at the top says which one you are on. Before the
-              launch, run <b>Preflight</b> — it signs everything and sends nothing, so it is safe to
-              run as often as you like.
+              {steps.length} steps, in the order they are laid out down this page:{' '}
+              {steps.map((s, i) => (
+                <span key={s.key}>
+                  {i > 0 ? (i === steps.length - 1 ? ' and ' : ', ') : ''}
+                  <b>
+                    {s.n}. {s.title.toLowerCase()}
+                  </b>
+                </span>
+              ))}
+              . The strip at the top says which one you are on, and each step states in one line
+              what it is for and what has to be true before it can run. Before the launch, run{' '}
+              <b>Preflight</b> — it signs everything and sends nothing, so it is safe to run as
+              often as you like.
+            </dd>
+          </div>
+          <div>
+            <dt>What the launch is priced in</dt>
+            <dd>
+              A v2 launch can be priced in native <b>ETH</b> or in one of the factory's approved
+              quote assets (NVDA, SPCX, AMD …). That is the <b>first</b> decision, and it is the
+              first station on this page, because everything below it is denominated in it: the Buy
+              column, the dev buy, the market cap and the graduation threshold. On a paired launch
+              every bundle wallet has to be holding that asset before the launch is armed —
+              <b> fund them with ETH</b>, then <b>buy the asset with it</b>, then launch. Changing
+              it later is allowed and says what it costs first: whatever the wallets already bought
+              stays with them, and the way back is <b>Recover ETH · sell it back</b> beside the
+              wallet table.
             </dd>
           </div>
           <div>

@@ -186,8 +186,14 @@ export default function DevWalletPanel({ step, wallets, explorer, reload, report
       {/* Backing up and deleting, on one row and in that order. Both delete
           dialogs in this console name a backup as the thing that makes the
           delete survivable, and until now the control that takes one lived two
-          steps away, beside the bundle wallets. The file is the whole keystore
-          either way — the dialog counts what is in it.
+          steps away, beside the bundle wallets.
+
+          TWO EXPORTS, because the delete beside them takes ONE wallet. The file
+          used to be the whole keystore — every tab's keys, from a button in step
+          1 of one launcher — and it is this tab's own wallets now: the left
+          button takes the tab (this dev wallet and its bundle), the right one
+          takes THIS WALLET and nothing else, which is the file the delete below
+          actually needs. Each dialog counts what is in it.
 
           Delete is pushed to the far edge and left as a ghost: making the dev
           wallet is what this step is for, and removing it is the thing you do
@@ -197,7 +203,14 @@ export default function DevWalletPanel({ step, wallets, explorer, reload, report
           path: this wallet is deleted one at a time, deliberately. */}
       {dev && (
         <div className="row">
-          <BackupControls wallets={wallets} report={report} />
+          <BackupControls variant={variant} wallets={wallets} report={report} />
+          <BackupControls
+            variant={variant}
+            wallets={wallets}
+            role={roles.dev}
+            label="Export dev wallet"
+            report={report}
+          />
           <span className="spacer" />
           <Busy
             busy={busy === 'delete'}

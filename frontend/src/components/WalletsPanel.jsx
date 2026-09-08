@@ -75,11 +75,18 @@ export default function WalletsPanel({
   shareBlocked = null,
   reload,
   report,
-  // The launch's quote asset, resolved by step 5 and lifted through App. NULL on a
-  // native launch — and that is the whole visibility rule for the pair funding
-  // control below: a native bundle buys with the ETH it already holds.
+  // The launch's quote asset, CHOSEN AT THE FRONT OF THE PLAN and read here. It
+  // used to be picked in the launch form, which is the last step, so this table
+  // — where the bundle is sized IN that asset — had to be filled in after a trip
+  // to the bottom of the page and back. NULL on a native launch, and that is the
+  // whole visibility rule for the pair funding control below: a native bundle
+  // buys with the ETH it already holds.
   pair = null,
   live = false,
+  // Step key -> live number, so this panel can name another station without
+  // knowing where it sits. The numbering closes by KEY, not by position: this
+  // panel is step 3 on one launcher and step 2 on the other.
+  nums = {},
   variant = 'v1',
 }) {
   const roles = rolesFor(variant);
@@ -553,7 +560,7 @@ export default function WalletsPanel({
         `${pair.symbol}; each Fund is the ETH to SWAP for that ${pair.symbol} plus gas for the swap, the ` +
         `launch's approve + buy and ${SELL_RESERVE} sells, ≈${filled.totalEth.toFixed(6)} ETH in total` +
         (unpriced > 0 ? `. ${unpriced} wallet(s) could not be priced and were left blank` : '') +
-        `. Nothing was sent; edit any row, Fund in step 4, then buy ${pair.symbol} above.`
+        `. Nothing was sent; edit any row, Fund in step ${nums.fund ?? 4}, then buy ${pair.symbol} above.`
     );
     notify(
       `Filled ${bundle.length} wallets for ${total} ${pair.symbol} ≈ ${filled.totalEth.toFixed(4)} ETH. ` +
@@ -994,7 +1001,30 @@ export default function WalletsPanel({
         Each bundle wallet buys behind the dev buy, and each is capped at 5% of supply inside the
         restriction window. More wallets is how a bundle gets bigger without any one of them
         breaching that cap. The table below is where the whole run is sized: what each wallet is
-        funded with in step 4, what it buys in step 5, and what that comes to as a share of supply.
+        funded with in step {nums.fund ?? 4}, what it buys in step {nums.launch ?? 5}, and what that
+        comes to as a share of supply.
+      </p>
+
+      {/* WHICH TABLE THIS IS, IN ONE LINE — and the two shapes it takes. Native
+          is one asset and one column: the ETH you fund a wallet with is the ETH
+          it buys with. Paired is two, and the ORDER between them runs back up the
+          page — fund in ETH below, then come back here and buy the quote asset —
+          which is exactly the trip nothing on screen used to mention. */}
+      <p className="hint">
+        {pair ? (
+          <>
+            Priced in <b>{pair.symbol}</b> (step {nums.quote ?? 1}). <b>Buy</b> is {pair.symbol};{' '}
+            <b>Fund</b> is always ETH. The order is: size the bundle here → fund the ETH in step{' '}
+            {nums.fund ?? 4} → come back here and buy {pair.symbol} with it → launch in step{' '}
+            {nums.launch ?? 5}.
+          </>
+        ) : (
+          <>
+            Priced in <b>native ETH</b>. One asset: the ETH you fund a wallet with in step{' '}
+            {nums.fund ?? 4} is the ETH it buys with — there is no second token to hold and no swap
+            to run.
+          </>
+        )}
       </p>
 
       {/* The run at a glance, across the top of the step: the two counts and the
@@ -1141,8 +1171,33 @@ export default function WalletsPanel({
         {/* The same control, and the same typed confirmation, as the one beside
             the dev wallet's delete in step 1 — one component, drawn in both
             places, because both delete dialogs name a backup as the thing that
-            makes the delete survivable. */}
-        <BackupControls wallets={wallets} report={report} />
+            makes the delete survivable.
+
+            SCOPED, in three widths. This file used to be the WHOLE KEYSTORE —
+            every tab's keys, V3 through V8, from a button that sits beside this
+            launcher's bundle — so a backup taken to move one bundle carried
+            everything. Left to right it narrows: the tab (this dev wallet and
+            its bundle), the bundle alone, and — only once rows are ticked — the
+            ticked rows alone. The third reads the SAME selection the bulk delete
+            below reads, so "export selected" and "delete selected" can never
+            disagree about which wallets they mean. */}
+        <BackupControls variant={variant} wallets={wallets} report={report} />
+        <BackupControls
+          variant={variant}
+          wallets={wallets}
+          role={roles.bundle}
+          label="Export bundle"
+          report={report}
+        />
+        {chosen.length > 0 && (
+          <BackupControls
+            variant={variant}
+            wallets={wallets}
+            walletIds={chosen.map((w) => w.id)}
+            label={`Export ${chosen.length} selected`}
+            report={report}
+          />
+        )}
       </div>
 
       {/* No role here. These are bundle keys: the dev key is imported in step 1,
@@ -1549,9 +1604,16 @@ export default function WalletsPanel({
             Buy {pair.symbol} for {pairPlan ? pairPlan.wouldSwap : pairTargets.length} wallet
             {(pairPlan ? pairPlan.wouldSwap : pairTargets.length) === 1 ? '' : 's'}
           </Busy>
+          {/* WHERE THIS SITS IN THE ORDER, because it is the one control on the
+              page that runs AFTER a step below it. Each wallet buys its own
+              {pair.symbol} with its OWN ETH, so it has to be funded first — and
+              the funding step is the next one down. Saying so is the whole fix:
+              nothing here moved, it just stopped being a trip the operator had
+              to work out for themselves. */}
           <span className="hint">
-            each wallet buys its own {pair.symbol} with its own ETH · run this BEFORE arming the
-            launch
+            each wallet buys its own {pair.symbol} with its own ETH · run this AFTER step{' '}
+            {nums.fund ?? 4} has funded them with ETH, and BEFORE arming the launch in step{' '}
+            {nums.launch ?? 5}
           </span>
 
           {/* THE PRICE. A spend is never offered without its size: this is the real
@@ -1664,9 +1726,17 @@ export default function WalletsPanel({
               Sell {pair.symbol} from {backPlan ? backPlan.wouldSwap : recover.targets.length} wallet
               {(backPlan ? backPlan.wouldSwap : recover.targets.length) === 1 ? '' : 's'}
             </Busy>
+            {/* THE WAY OUT OF A CHANGED MIND, named as such. This is the
+                recovery the quote-asset station points at: change what the
+                launch is priced in and whatever the wallets already bought stays
+                with them, and this is what turns it back into ETH. It has to be
+                run while the launch is still priced in that asset — the listing
+                carries one quote asset's balances at a time. */}
             <span className="hint">
               each wallet sells its WHOLE {pair.symbol} balance and keeps the ETH · run this before
-              arming a launch, never against one already armed
+              arming a launch, never against one already armed · this is also the way back if you
+              change the quote asset in step {nums.quote ?? 1} — sell first, while the launch is
+              still priced in {pair.symbol}
             </span>
 
             {/* THE PROCEEDS. A sale is never offered without what it returns: this is the

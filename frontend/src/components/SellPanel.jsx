@@ -346,6 +346,19 @@ export default function SellPanel({
             {live ? 'Sell all' : 'Sell all (dry run)'}
           </Busy>
 
+          {/* THE REFUSAL, ON THE PAGE — the same fix the launch and funding
+              steps got. Both reasons lived only in a `title`, which is invisible
+              without a mouse and invisible on the step header an operator is
+              actually reading. Grey: this states why a control is dead, and it
+              is neither a spend nor a state. */}
+          {(!token || blocked) && (
+            <span className="hint">
+              {!token
+                ? 'Pick a token in the table above — this sells one launch, from every wallet holding it.'
+                : 'Flip Arm first — selling is irreversible.'}
+            </span>
+          )}
+
           <div className="cost">
             <b>
               {selected ? walletCount(selected) : 0} wallet

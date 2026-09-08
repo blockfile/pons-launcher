@@ -10,11 +10,26 @@ import { shortAddress } from './format.js';
 // import because that file is CommonJS: the backend requires it directly.
 import bundleShareModule from '../../shared/bundleShare.js';
 import { rolesFor } from './variant.js';
-import { NATIVE_PAIR } from './pairAssets.js';
+import { NATIVE_PAIR, isNativePair, pairOptions, selectedPair } from './pairAssets.js';
 // Which curve a paired launch is priced against, and the one place a pair-token
 // figure becomes an ETH one. See components/pairCurve.js.
 import { shareInputs } from './components/pairCurve.js';
+// The quote asset AS AN ORDER OF WORK: which stations this launcher has and in
+// what order, the one line each of them states about what it needs, and what
+// changing the quote asset after the wallets are into it would cost. Pure and
+// tested beside itself — see components/quoteAsset.js.
+import {
+  stepOrder,
+  stepNeed,
+  pairHoldings,
+  shortOfPair,
+  pairChangeImpact,
+  strandedRecord,
+  strandingCleared,
+} from './components/quoteAsset.js';
+import Modal, { Fact } from './components/Modal.jsx';
 import Guide from './components/Guide.jsx';
+import QuotePanel from './components/QuotePanel.jsx';
 import Sequence from './components/Sequence.jsx';
 import DevWalletPanel from './components/DevWalletPanel.jsx';
 import WalletsPanel from './components/WalletsPanel.jsx';
@@ -135,16 +150,32 @@ export default function App() {
   // amounts BUY, so LaunchForm pushes it up here the way it already pushes the
   // logo up for the sequence.
   const [sizing, setSizing] = useState(null);
-  // THE QUOTE ASSET, lifted out of LaunchForm because two panels need it now.
-  // Step 5 prices the launch in it; step 3 has to make every bundle wallet HOLD
-  // it before the launch is armed, because a paired launch's bundle buys are
-  // pre-signed in the pair token and a wallet without it is dropped by the
-  // preflight. `pairToken` is the picker's own value, owned here and handed back
-  // down; `pair` is what LaunchForm resolved it to against the live /v2/configs
-  // read it owns — symbol and decimals included — and is null on a native launch,
-  // which is what keeps the pair funding control off a native launcher entirely.
+  // THE QUOTE ASSET — the launch's FIRST decision, and now the first station.
+  //
+  // It used to be a dropdown inside the launch form, which is the last step, and
+  // it decides what nearly every control above it means: the unit the Buy column
+  // is typed in, the ETH each wallet has to be funded with to buy that much of
+  // it, whether there is a swap to run at all, and which curve the supply share
+  // and the market cap are computed against. So the operator picked it at the
+  // bottom and walked back up to fund and swap. It is picked at the top now, and
+  // every step below READS it.
+  //
+  // `pairToken` is the picker's value. `configV2` is the factory read the option
+  // list and each asset's curve constants come from — owned here rather than
+  // inside the launch form for the same reason: two stations depend on it, and a
+  // value a panel fetches for itself is a value the step above it cannot see.
+  // `pair` is the resolved selection and is NULL on a native launch, which is
+  // what keeps every pair control off a native launcher entirely.
   const [pairToken, setPairToken] = useState(NATIVE_PAIR);
-  const [pair, setPair] = useState(null);
+  const [configV2, setConfigV2] = useState(null);
+  // The change the confirmation dialog is asking about, frozen with the impact
+  // it was priced against. Null means no dialog, and no dialog means nothing
+  // changes — the same rule every spending dialog in this console keeps.
+  const [pendingPair, setPendingPair] = useState(null);
+  // An asset the console has walked away from while wallets were still holding
+  // it. REMEMBERED, because the listing carries the balance of exactly one quote
+  // asset and the abandoned one is not visible anywhere once the pair changes.
+  const [stranded, setStranded] = useState(null);
   // What steps 2 and 6 found, handed up by the panels that already fetched it.
   // The strip at the top of the page states every step's state, and it must not
   // do that by making the same two requests a second time.
@@ -152,6 +183,49 @@ export default function App() {
   const [sellable, setSellable] = useState(null);
 
   const setRow = (id, patch) => setRows((r) => ({ ...r, [id]: { ...r[id], ...patch } }));
+
+  // ── THE QUOTE ASSET, RESOLVED ───────────────────────────────────────────────
+  //
+  // Which protocol the form is on decides whether there is a quote asset at all:
+  // pons v1 is a Uniswap pool priced in ETH and has no such thing. It arrives
+  // with `sizing`, which the launch form pushes up as soon as it mounts; before
+  // then the selection is still the native default, so this window is inert.
+  const launchProtocol = sizing?.protocol || 'v2';
+  const canPair = launchProtocol === 'v2';
+  const quoteOptions = useMemo(() => pairOptions(configV2), [configV2]);
+  // Resolved against the LIVE list, so a token un-approved between reads falls
+  // back to native rather than pointing at nothing.
+  const quote = useMemo(() => selectedPair(configV2, pairToken), [configV2, pairToken]);
+  const nativeQuote = !canPair || isNativePair(quote.address);
+  // Memoised on the resolved FIELDS rather than on the option object, which
+  // selectedPair rebuilds every call: `pair` is a dependency of the share memo
+  // and of three effects a page down, and a fresh identity per render would
+  // re-fire all of them for nothing.
+  //
+  // phantomQuote and graduationThreshold are the factory's pairTokenEconomics
+  // for this asset — the PAIRED curve. Dropping them is the bug that walked NVDA
+  // amounts through native's curve and reported 61.20% of supply for a bundle
+  // that takes 14.95%.
+  const pair = useMemo(
+    () =>
+      nativeQuote
+        ? null
+        : {
+            address: quote.address,
+            symbol: quote.symbol,
+            decimals: quote.decimals,
+            phantomQuote: quote.phantomQuote,
+            graduationThreshold: quote.graduationThreshold,
+          },
+    [
+      nativeQuote,
+      quote.address,
+      quote.symbol,
+      quote.decimals,
+      quote.phantomQuote,
+      quote.graduationThreshold,
+    ]
+  );
 
   // Drop what belongs to the launcher being left. Both of these are answers
   // about a specific set of wallets, and v2 has no disperser panel to overwrite
@@ -161,6 +235,11 @@ export default function App() {
   useEffect(() => {
     setDispersers(null);
     setSellable(null);
+    // And the abandoned-quote-asset warning, for the same reason: it names a
+    // COUNT OF WALLETS, and the wallets it counted belong to the launcher being
+    // left. Carried across, it would report v1's stranded NVDA against v2's
+    // bundle — a number about a set of keys that is no longer on screen.
+    setStranded(null);
   }, [tab]);
 
   /**
@@ -321,6 +400,73 @@ export default function App() {
     loadWallets().catch(() => {});
   }, [pairAddress, credential, loadWallets]);
 
+  // THE V2 FACTORY READ, owned here rather than inside the launch form.
+  //
+  // It carries the approved quote assets and each one's curve constants, which
+  // the FIRST station now needs — a picker that has to wait for the last panel
+  // to mount before it has a list is not a picker at the front. Read once per
+  // console, only for the two tabs that launch, and only when this console is
+  // entitled to read at all. Its own effect and its own catch: a failure here
+  // must not take out loadAll's "Ready" line, and the picker still has native.
+  useEffect(() => {
+    if (tab !== 'v1' && tab !== 'v2') return undefined;
+    if (!credential || configV2) return undefined;
+    let alive = true;
+    api('/v2/configs')
+      .then((c) => alive && setConfigV2(c))
+      .catch((err) => alive && report(`ERROR: v2 configs — ${err.message}`));
+    return () => {
+      alive = false;
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [tab, credential, configV2]);
+
+  // ── CHANGING THE QUOTE ASSET, WHICH IS THE ONE DANGEROUS EDGE ──────────────
+  //
+  // Both pickers — the station at the front and the launch form's own — call
+  // this and neither applies a change itself. It is free before any work has
+  // been done, and it is not free afterwards: the Buy column keeps its digits
+  // and they start meaning a different token, the Fund column was priced against
+  // the old pool, and any wallet that already bought the old asset keeps holding
+  // it somewhere this console can no longer see (the listing carries exactly one
+  // quote asset). So the cost is priced first and stated in a dialog, and the
+  // asset walked away from is REMEMBERED so the way back can be pointed at.
+  const bundleWallets = wallets.filter((w) => w.role === roles.bundle);
+  const holdings = pairHoldings(bundleWallets);
+  const typedBuys = bundleWallets.filter((w) => Number(rows[w.id]?.buy) > 0).length;
+  const typedFunds = bundleWallets.filter((w) => Number(rows[w.id]?.fund) > 0).length;
+
+  function applyPair(next, impact) {
+    setPairToken(next);
+    const record = strandedRecord(impact);
+    if (record) setStranded(record);
+  }
+
+  // The guarded request. Same address is a no-op — a select re-emitting its own
+  // value must never raise a dialog — and a change that costs nothing is applied
+  // without one, because an operator who changes their mind before doing any
+  // work should not be made to read about it.
+  function askPair(next) {
+    const to = quoteOptions.find((t) => t.address.toLowerCase() === String(next).toLowerCase());
+    const impact = pairChangeImpact({
+      from: { address: quote.address, symbol: quote.symbol, native: nativeQuote },
+      to: { address: to?.address || next, symbol: to?.symbol || '' },
+      holders: holdings,
+      restated: typedBuys,
+      repriced: typedFunds,
+    });
+    if (impact.same) return;
+    if (!impact.needsConfirm) return applyPair(to?.address || next, impact);
+    setPendingPair({ address: to?.address || next, symbol: to?.symbol || '—', impact });
+  }
+
+  // The remembered stranding retires only when the launch is priced in that
+  // asset again AND nothing is holding it — two live readings, never a guess.
+  useEffect(() => {
+    if (strandingCleared(stranded, quote.address, holdings)) setStranded(null);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [stranded, quote.address, holdings.wallets]);
+
   // Only ask for a key when one is actually missing. If nginx supplies it, or
   // the deployment has none, the field is not a prompt — it is a lie.
   const needsKey = Boolean(health && health.apiKeyRequired && !health.user);
@@ -360,8 +506,29 @@ export default function App() {
     // on the detail line, which is where every other step says what it is
     // waiting for.
     const missing = DRAFT_FIELDS.filter(([k]) => !draft?.[k]).map(([, label]) => label);
+    const quoteSymbol = pair ? pair.symbol : 'ETH';
 
     const fullPlan = [
+      {
+        key: 'quote',
+        n: 1,
+        title: 'Choose the quote asset',
+        // A choice with a default is a choice that has always been made: the
+        // launch IS priced in something from the first paint, so this station is
+        // never a thing to go and do. It is jade and it states the answer, which
+        // is exactly what the strip at the top exists for — a first-time
+        // operator learns what the run is denominated in before reading a single
+        // control below it.
+        //
+        // `needs: 0` because nothing can precede the first decision, and because
+        // a done step clears the waiting chain: without it, "waits on step 2 —
+        // create dev wallet first" would vanish off the station below.
+        done: true,
+        needs: 0,
+        detail: pair
+          ? `${pair.symbol} — the dev buy and every bundle buy are spent in ${pair.symbol}, not ETH`
+          : 'ETH (native) — the bundle buys with the ETH you fund it with',
+      },
       {
         key: 'dev',
         n: 1,
@@ -430,11 +597,45 @@ export default function App() {
     ];
 
     // Steps this launcher does not have simply are not in its plan — v2 funds
-    // with individual transfers, so it has no disperser step and its remaining
-    // steps renumber to close the gap rather than skipping a number.
-    const plan = fullPlan.filter((s) => s.key !== 'disperser' || roles.dispersers);
+    // with individual transfers, so it has no disperser step; v1 launches into a
+    // Uniswap pool priced in ETH, so it has no quote asset to choose. The
+    // remaining steps renumber to close the gap rather than skipping a number.
+    // The ORDER and the membership are decided in one place, and tested there —
+    // see components/quoteAsset.js.
+    const keys = stepOrder({ dispersers: roles.dispersers, quote: tab === 'v2' });
+    const plan = fullPlan.filter((s) => keys.includes(s.key));
     plan.forEach((s, i) => {
       s.n = i + 1;
+    });
+
+    // Every station's live number, so a panel can name another one without
+    // knowing where it sits — the numbering closes by KEY, not by position, and
+    // "fund in step 4" is wrong on one of the two launchers at any time.
+    const nums = Object.fromEntries(plan.map((s) => [s.key, s.n]));
+
+    // ONE LINE PER STATION: what it is for, and what has to be true before its
+    // controls do anything. Written in one place, in one voice, so the answer to
+    // "why is this button dead" is on the page rather than in a title attribute
+    // — see stepNeed in components/quoteAsset.js.
+    const facts = {
+      nums,
+      paired: Boolean(pair),
+      pairSymbol: quoteSymbol,
+      hasDev: Boolean(dev),
+      bundleCount: bundle.length,
+      dispersers: activeDispersers,
+      needsDisperser: roles.dispersers,
+      fundTargets: bundle.filter((w) => Number(rows[w.id]?.fund) > 0).length,
+      buyTargets: bundle.filter(
+        (w) => (rows[w.id]?.mode === 'all' && Number(w.balanceEth) > 0) || Number(rows[w.id]?.buy) > 0
+      ).length,
+      shortOfPair: pair ? shortOfPair(bundle, rows).short : 0,
+      draftMissing: missing,
+      launched,
+      sellCount,
+    };
+    plan.forEach((s) => {
+      s.need = stepNeed(s.key, facts);
     });
 
     // The chain of required steps. A step waits on the last required one before
@@ -471,6 +672,11 @@ export default function App() {
               : s.optional && !blocked
                 ? 'optional'
                 : 'later',
+        // WHY THIS STEP CANNOT RUN YET, and the step that fixes it — followed by
+        // the plain-language line every station states about itself. A blocked
+        // step used to say only which number it was waiting on; now it says what
+        // it is for as well, so a dead control is never presented without its
+        // reason beside it.
         wait:
           state === 'later' && blocked
             ? `Waits on step ${waitsOn} — ${plan[waitsOn - 1].title.toLowerCase()} first.`
@@ -479,13 +685,18 @@ export default function App() {
               : null,
       };
     });
-  }, [wallets, funded, dispersers, sellable, history, draft, roles]);
+    // `rows` and `pair` are in here because the per-step line states what has
+    // been typed and what the launch is priced in. Both change often; the memo
+    // only builds strings.
+  }, [wallets, funded, rows, pair, tab, dispersers, sellable, history, draft, roles]);
 
   // The step whose panel is drawn where, so a panel never has to know its own
   // number and the order lives in one place — this file, in render order below.
   // By KEY, not by position. v2 has no disperser step, so its numbering closes
   // the gap and a panel asking for "step 2" would get the wrong one.
   const step = (key) => steps.find((s) => s.key === key) || null;
+  // The same map the plan built, for the panels that name another station.
+  const nums = useMemo(() => Object.fromEntries(steps.map((s) => [s.key, s.n])), [steps]);
 
   return (
     // reducedMotion="user" hands the whole question to the operating system:
@@ -806,7 +1017,103 @@ export default function App() {
                   : null
             }
           />
-          <Guide />
+          <Guide steps={steps} />
+
+          {/* THE FIRST STATION, on the launcher that has one. Everything below
+              it is denominated in what is picked here, which is why it is here
+              and not two thirds of the way down the launch form. Choosing moves
+              no money, so this panel carries none of the money colours. */}
+          {tab === 'v2' && (
+            <QuotePanel
+              step={step('quote')}
+              options={quoteOptions}
+              value={quote.address}
+              symbol={quote.symbol}
+              native={nativeQuote}
+              loading={!configV2}
+              bundleCount={bundleWallets.length}
+              holdings={holdings}
+              stranded={stranded}
+              onStrandedDismiss={() => setStranded(null)}
+              onRequest={askPair}
+              nums={nums}
+            />
+          )}
+
+          {/* CHANGING WHAT THE LAUNCH IS PRICED IN — the one edge that can
+              quietly cost money, so it is the one thing here that asks first.
+              Rendered once, from the owner of the value, and reached from BOTH
+              pickers: the station above and the launch form's own.
+
+              Not `danger`. Vermilion is reserved for what cannot be taken back,
+              and this can: the tokens do not move, and pricing the launch in the
+              old asset again brings them back into view. The confirm is indigo —
+              a neutral forward action that spends nothing — which also leaves
+              this dialog with exactly one non-grey object in it. */}
+          <Modal
+            open={Boolean(pendingPair)}
+            title={`Price this launch in ${pendingPair?.symbol || ''}?`}
+            question="Change the quote asset?"
+            confirmLabel={`Price it in ${pendingPair?.symbol || ''}`}
+            confirmClass="btn-primary"
+            onConfirm={() => {
+              const p = pendingPair;
+              setPendingPair(null);
+              if (p) applyPair(p.address, p.impact);
+            }}
+            onCancel={() => setPendingPair(null)}
+          >
+            <div className="modal-facts">
+              <Fact label="Priced in now">{quote.symbol}</Fact>
+              <Fact label="Change to">{pendingPair?.symbol || '—'}</Fact>
+              <Fact label="Buy amounts typed">{pendingPair?.impact.restated ?? 0}</Fact>
+              <Fact label="Fund amounts typed">{pendingPair?.impact.repriced ?? 0}</Fact>
+              {pendingPair?.impact.strands && (
+                <Fact label={`Wallets holding ${pendingPair.impact.strands.symbol}`}>
+                  {pendingPair.impact.strands.wallets} ·{' '}
+                  {Number(pendingPair.impact.strands.total).toFixed(6)}{' '}
+                  {pendingPair.impact.strands.symbol}
+                </Fact>
+              )}
+            </div>
+            {/* The same grey ticket the panels use for a list of consequences —
+                no new class, no second colour in the dialog. */}
+            <div className="notice">
+            <ul>
+              {(pendingPair?.impact.restated ?? 0) > 0 && (
+                <li>
+                  The <b>Buy</b> column keeps its numbers and they start meaning{' '}
+                  {pendingPair?.symbol}, not {quote.symbol}. Re-size the bundle before you launch.
+                </li>
+              )}
+              {(pendingPair?.impact.repriced ?? 0) > 0 && (
+                <li>
+                  The <b>Fund</b> column was priced against the {quote.symbol} pool by the endpoint
+                  that would have spent it. It is not that price against {pendingPair?.symbol}.
+                </li>
+              )}
+              {pendingPair?.impact.strands && (
+                <li>
+                  {pendingPair.impact.strands.wallets} wallet
+                  {pendingPair.impact.strands.wallets === 1 ? '' : 's'} already hold{' '}
+                  {Number(pendingPair.impact.strands.total).toFixed(6)}{' '}
+                  {pendingPair.impact.strands.symbol}. Nothing spends it and nothing is lost, but
+                  this console reads the balance of one quote asset at a time — so it goes{' '}
+                  <b className="crux">invisible here</b> until the launch is priced in{' '}
+                  {pendingPair.impact.strands.symbol} again.
+                </li>
+              )}
+              {pendingPair?.impact.strands && (
+                <li>
+                  To turn it back into ETH first: cancel, and use{' '}
+                  <b>Recover ETH · sell {pendingPair.impact.strands.symbol} back</b> in step{' '}
+                  {nums.wallets}. It sells each wallet's whole balance and leaves the ETH in the
+                  wallet.
+                </li>
+              )}
+            </ul>
+            </div>
+          </Modal>
 
           <DevWalletPanel
             variant={tab}
@@ -838,6 +1145,7 @@ export default function App() {
             live={live}
             reload={loadWallets}
             report={report}
+            nums={nums}
           />
           <FundPanel
             variant={tab}
@@ -847,6 +1155,8 @@ export default function App() {
             dispersers={dispersers}
             reload={loadWallets}
             report={report}
+            pair={pair}
+            nums={nums}
           />
           {/* The v2 bench: ETH that arrives from outside the console. It sits
               beside step 4 because it answers the same question — is every
@@ -855,6 +1165,14 @@ export default function App() {
             <ExternalFundPanel wallets={wallets} rows={rows} reload={loadWallets} variant={tab} />
           )}
 
+          {/* The form READS the quote asset now; it does not own it. `pair` is
+              resolved above, out of the factory read this file owns, and the
+              picker the form still draws goes through the same guarded setter
+              the first station's does — so changing it there states its cost
+              instead of quietly stranding the wallets holding the old one.
+              `onPairReset` is the ONE unguarded write: the protocol switch
+              putting a pons-v1 launch back on native, because an effect must
+              never raise a dialog. */}
           <LaunchForm
             variant={tab}
             step={step('launch')}
@@ -868,9 +1186,14 @@ export default function App() {
             report={report}
             onDraft={setDraft}
             onSizing={setSizing}
-            pairToken={pairToken}
-            onPairToken={setPairToken}
-            onPair={setPair}
+            configV2={configV2}
+            quoteOptions={quoteOptions}
+            pairToken={quote.address}
+            pair={pair}
+            onPairToken={askPair}
+            onPairReset={setPairToken}
+            ownsPair={tab !== 'v2'}
+            nums={nums}
           />
           {/* The console's answer, between the launch and the exit because that is
               where it falls: you launch, you read this, and only later do you

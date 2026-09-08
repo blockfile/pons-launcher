@@ -5,6 +5,9 @@ import { Busy } from './Section.jsx';
 import { rolesFor } from '../variant.js';
 import Address from './Address.jsx';
 import { runPacedFunding, PACE_MIN_MS, PACE_MAX_MS } from './pacedFunding.js';
+// Whether the run can run at all, and why not — one expression, drawn on the
+// page as well as used to disable the button. Pure and tested; see quoteAsset.js.
+import { fundGate } from './quoteAsset.js';
 
 /**
  * Step 4 — moving ETH from the dev wallet out to the bundle wallets.
@@ -61,7 +64,24 @@ function timedSummary(job) {
   return `${job.status}: ${job.completed || 0}/${job.total || 0}`;
 }
 
-export default function FundPanel({ step, wallets, rows, dispersers, reload, report, variant = 'v1' }) {
+export default function FundPanel({
+  step,
+  wallets,
+  rows,
+  dispersers,
+  reload,
+  report,
+  // The launch's quote asset, READ ONLY. This step moves ETH whatever the launch
+  // is priced in — but on a paired launch the ETH it sends is not what the
+  // bundle buys with, it is what the bundle then swaps for the quote asset, and
+  // saying so here is the difference between a step that reads top-to-bottom and
+  // one an operator has to be told about.
+  pair = null,
+  // Step key -> live number, so this panel can name another station without
+  // knowing where it sits: the numbering closes by KEY, not by position.
+  nums = {},
+  variant = 'v1',
+}) {
   const roles = rolesFor(variant);
   const isV2 = variant === 'v2';
   const [includeTokens, setIncludeTokens] = useState(false);
@@ -184,6 +204,16 @@ export default function FundPanel({ step, wallets, rows, dispersers, reload, rep
   // Read, never decided here: the backend picks the path per run from the same
   // two numbers. This only names the choice it is going to make.
   const active = dispersers?.addresses?.length ?? 0;
+  // Whether this run can run, and the sentence that says why not. Both halves
+  // out of one expression, so a button that refuses can never refuse silently:
+  // the two conditions used to live in a `title` and a `disabled` that agreed
+  // only by inspection.
+  const gate = fundGate({
+    targets: targets.length,
+    needsDisperser: roles.dispersers,
+    dispersers: active,
+    nums,
+  });
   const fundEndpoint = isV2 ? '/v2/relay/fund' : '/fund';
   const fundBody = isV2 ? { targets } : { targets, variant };
   const canResumeTimed = timedStatus?.status === 'stopped' && Number(timedStatus.remaining) > 0;
@@ -208,12 +238,27 @@ export default function FundPanel({ step, wallets, rows, dispersers, reload, rep
         )}
       </p>
 
+      {/* WHAT THIS ETH IS FOR, when it is not what the bundle buys with. On a
+          paired launch the Fund column is the ETH each wallet SWAPS for the
+          quote asset — so this step is not the last thing before the launch, and
+          the step that is comes back up the page. Saying so is the whole of the
+          fix: nothing here changes, it just stops being a surprise. Absent on a
+          native launch, where the ETH sent IS the ETH spent. */}
+      {pair && (
+        <p className="hint">
+          This launch is priced in <b>{pair.symbol}</b>, so the ETH sent here is not what the bundle
+          buys with — it is what each wallet then <b>swaps for {pair.symbol}</b>. After this run,
+          go back to step {nums.wallets ?? 3} and use <b>Pair funding · {pair.symbol}</b>. A wallet
+          holding only ETH is dropped by preflight.
+        </p>
+      )}
+
       <div className="row">
         {isV2 ? (
           <Busy
             busy={busy === 'fund'}
-            disabled={!targets.length}
-            title={targets.length ? '' : 'enter a fund amount in the table above'}
+            disabled={!gate.enabled}
+            title={gate.why || ''}
             onClick={() => act('fund', () => api(fundEndpoint, 'POST', fundBody))}
           >
             {targets.length
@@ -228,14 +273,8 @@ export default function FundPanel({ step, wallets, rows, dispersers, reload, rep
                 this tab on purpose. */}
             <Busy
               busy={pacing}
-              disabled={!targets.length || !dispersers?.addresses?.length}
-              title={
-                !targets.length
-                  ? 'enter a fund amount in the table above'
-                  : !dispersers?.addresses?.length
-                    ? 'no disperser deployed — deploy one in step 2 first'
-                    : ''
-              }
+              disabled={!gate.enabled}
+              title={gate.why || ''}
               onClick={sendPaced}
             >
               {targets.length
@@ -253,6 +292,11 @@ export default function FundPanel({ step, wallets, rows, dispersers, reload, rep
             )}
           </>
         )}
+
+        {/* THE REFUSAL, ON THE PAGE. "Nothing to send" is a state, not a reason,
+            and the reason lived in a `title` nobody sees. It names the step that
+            fixes it, by that step's live number. */}
+        {gate.why && <span className="hint">{gate.why}</span>}
 
         {isV2 && targets.length > 0 && (
           <span className="hint">

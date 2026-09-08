@@ -30,6 +30,13 @@ export default function Modal({
   title,
   question = 'Proceed?',
   confirmLabel = 'Confirm',
+  // The confirm button's tier, for the rare dialog whose answer moves NO money.
+  // Amber is the console's spend colour and it is this button's default, which
+  // is right for every dialog that predates this prop — they all confirm a
+  // transfer, a launch or a delete. A dialog that only changes what the console
+  // is denominated in spends nothing, and the law gives indigo (.btn-primary) to
+  // a neutral forward action. Left empty everywhere else, so nothing changes.
+  confirmClass = '',
   cancelLabel = 'Cancel',
   confirmDisabled = false,
   onConfirm,
@@ -172,7 +179,7 @@ export default function Modal({
           </button>
           <button
             type="button"
-            className={danger ? 'danger' : ''}
+            className={danger ? 'danger' : confirmClass}
             disabled={confirmDisabled || submitting}
             onClick={handleConfirm}
           >
