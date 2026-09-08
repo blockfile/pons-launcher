@@ -162,6 +162,9 @@ async function resolvePairTokens(opts = {}) {
   // production uses the real Multicall3 read.
   const mc = deps.multicall || ((calls) => multicall(rpc, calls, deps));
   const tokens = [nativeOption()];
+  // How many approval slots came back decodable. Zero, with candidates to ask
+  // about, means the CHAIN did not answer — not that it answered "none".
+  let answered = 0;
 
   try {
     // ── candidate set: logs ∪ seed, deduped, lowercased ──────────────────────
@@ -191,6 +194,11 @@ async function resolvePairTokens(opts = {}) {
       );
       const approved = candidates.filter((_addr, i) => {
         const decoded = decodeOr(factoryIface, 'approvedPairTokens', approvedSlots[i], null);
+        // A slot that DECODED is evidence the chain answered, whatever it said.
+        // Nothing else in this function can tell "the factory approves none of
+        // these" apart from "the read failed" — both leave `tokens` at native
+        // alone — and those two must not be cached the same way. See below.
+        if (decoded) answered += 1;
         return decoded ? Boolean(decoded[0]) : false;
       });
 
@@ -229,6 +237,36 @@ async function resolvePairTokens(opts = {}) {
   } catch (_err) {
     // A total failure still returns native alone rather than throwing — the
     // form has to be usable even when the RPC is unhappy.
+    answered = 0;
+  }
+
+  // A FAILED READ MUST NEVER BECOME THE CACHED ANSWER.
+  //
+  // The degrade-to-native rule above is right — the picker must always have
+  // something to pick — but the result was then cached like any other, so ONE
+  // bad read blanked every pair balance in the console for the whole five-minute
+  // TTL. Observed live: a 31-wallet bundle holding NVDA showed a dash in every
+  // row ("31 balances could not be read at all") while a direct Multicall3 read
+  // of the same wallets returned every balance in 379ms. The chain was fine; the
+  // cache was holding a native-only list produced by one unlucky refill, and
+  // GET /wallets swallows the resulting "not an approved pair token" and answers
+  // in the native shape, so nothing on screen could say why.
+  //
+  // `answered` separates the two states that both leave `tokens` at native
+  // alone: the factory approving nothing (answered > 0) and the read failing
+  // (answered === 0 with candidates to ask about).
+  const failed = answered === 0 && tokens.length === 1;
+  if (failed) {
+    // STALE BUT TRUE beats FRESH BUT EMPTY — for a READ. A list that was right
+    // five minutes ago still names the right tokens; a native-only list names
+    // none, and the console cannot tell that apart from "you are on a native
+    // launch". Only for the cached path: `refresh: true` is what the money paths
+    // pass (prepareV2, swapToPair, swapFromPair) precisely so an un-approved
+    // token cannot be spent against, and they must keep failing closed here.
+    if (!refresh && cache && cache.tokens.length > 1) return cache.tokens;
+    // Nothing better to offer. Return native alone WITHOUT caching it, so the
+    // very next call retries instead of serving this for five minutes.
+    return tokens;
   }
 
   // Stable order: native first, then the rest by symbol so the picker does not

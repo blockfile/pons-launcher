@@ -154,3 +154,91 @@ test('a getLogs failure still resolves the known pairs from the seed', async () 
   // The seed contains the well-known RWAs.
   assert.ok(SEED_CANDIDATES.map((a) => getAddress(a)).includes(USDG));
 });
+
+// ── A FAILED READ MUST NOT BECOME THE CACHED ANSWER ─────────────────────────
+// Observed live: a 31-wallet bundle holding NVDA showed a dash in every row
+// while a direct Multicall3 read of the same wallets returned every balance in
+// 379ms. The chain was fine. One unlucky refill had degraded to native-alone,
+// that got cached like any other answer, and for the whole five-minute TTL
+// GET /wallets resolved no pair and answered in the native shape.
+
+const boom = () => { throw new Error('multicall unavailable'); };
+
+test('a failed read serves the last good list rather than native alone', async () => {
+  clearPairTokenCache();
+  const good = await resolvePairTokens({
+    refresh: true,
+    provider: providerWithLog(NEWT),
+    multicall: fakeMulticall(db(), { n: 0 }),
+  });
+  assert.ok(good.length > 1, 'precondition: a good list was cached');
+
+  // THE CACHE MUST BE EXPIRED, or the read never happens and this proves
+  // nothing. A first attempt at this test called through a WARM cache, returned
+  // early on the TTL check, and passed with the fix removed — a vacuous test.
+  // Advancing the clock past the TTL is what puts the failing refill on the path.
+  const realNow = Date.now;
+  Date.now = () => realNow() + 6 * 60 * 1000;
+  try {
+    const stale = await resolvePairTokens({
+      // no refresh: the display path, the one GET /wallets uses
+      provider: providerWithLog(NEWT),
+      multicall: boom,
+    });
+    assert.ok(stale.length > 1, 'a failed refill does not blank the list');
+    assert.deepEqual(stale.map((t) => t.symbol), good.map((t) => t.symbol));
+  } finally {
+    Date.now = realNow;
+  }
+});
+
+test('a failed read is NOT cached, so the next call retries instead of serving it', async () => {
+  clearPairTokenCache();
+  const first = await resolvePairTokens({
+    refresh: true,
+    provider: { getLogs: async () => [] },
+    multicall: boom,
+  });
+  assert.equal(first.length, 1, 'nothing better to offer than native');
+
+  // If that had been cached, this would return native alone from the cache
+  // without asking the chain at all.
+  const counter = { n: 0 };
+  const second = await resolvePairTokens({
+    provider: providerWithLog(NEWT),
+    multicall: fakeMulticall(db(), counter),
+  });
+  assert.ok(counter.n > 0, 'the failure was not cached — the chain was asked again');
+  assert.ok(second.length > 1, 'and the retry recovers the real list');
+});
+
+test('refresh:true still fails CLOSED — the money paths never get a stale list', async () => {
+  clearPairTokenCache();
+  const good = await resolvePairTokens({
+    refresh: true,
+    provider: providerWithLog(NEWT),
+    multicall: fakeMulticall(db(), { n: 0 }),
+  });
+  assert.ok(good.length > 1);
+
+  // prepareV2 / swapToPair / swapFromPair pass refresh:true precisely so an
+  // un-approved token cannot be spent against. A stale answer there would
+  // defeat that, so they get native alone and resolveApprovedPair throws.
+  const forced = await resolvePairTokens({
+    refresh: true,
+    provider: providerWithLog(NEWT),
+    multicall: boom,
+  });
+  assert.equal(forced.length, 1, 'a forced refresh that fails must not serve stale');
+});
+
+test('a genuine "nothing approved" IS cached — it is an answer, not a failure', async () => {
+  clearPairTokenCache();
+  const counter = { n: 0 };
+  const opts = { provider: { getLogs: async () => [] }, multicall: fakeMulticall({}, counter) };
+  const first = await resolvePairTokens({ ...opts, refresh: true });
+  assert.equal(first.length, 1);
+  const reads = counter.n;
+  await resolvePairTokens(opts);
+  assert.equal(counter.n, reads, 'the chain answered "none" — that is cached like any answer');
+});
