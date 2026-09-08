@@ -5,7 +5,7 @@ import { Busy } from './Section.jsx';
 import Modal, { Fact } from './Modal.jsx';
 import { rolesFor } from '../variant.js';
 import { recoverTargets } from './pairBalance.js';
-import { ethShortfall, swapGate, recoverGate } from './quoteAsset.js';
+import { ethShortfall, swapGate, recoverGate, swapPricingKey } from './quoteAsset.js';
 
 /**
  * THE STATION BETWEEN FUNDING AND LAUNCHING — where each wallet buys its own
@@ -113,6 +113,20 @@ export default function PairSwapPanel({
   // Serialised so the preview below re-runs when the AMOUNTS change and not merely
   // when the array identity does (it is rebuilt every render).
   const pairKey = JSON.stringify(pairTargets);
+  // AND WHEN THE BALANCES CHANGE, which is the whole point of this station.
+  //
+  // The dry run is the endpoint's own verdict, and its verdict is a function of
+  // what the wallets HOLD as much as of what they were asked to buy. Keying the
+  // preview on the amounts alone meant the one event this station exists to wait
+  // for — step 4 landing ETH in the wallets — did not re-price it: the table
+  // showed the new balances while this panel went on reporting the refusal it had
+  // computed against the old ones ("No wallet can be bought for right now. 31 are
+  // short of ETH", with every wallet visibly funded). Observed on a live launch.
+  //
+  // The id is in the key beside the balance so that a wallet appearing or leaving
+  // re-prices too, and it is built off `bundle` rather than `pairTargets` because
+  // a wallet with no Buy amount still changes what the run would do.
+  const pricingKey = swapPricingKey(bundle, pairTargets);
 
   // ── HAVE THE WALLETS GOT THE ETH YET ────────────────────────────────────────
   // The station's real precondition, and the sentence the old control buried in a
@@ -166,7 +180,7 @@ export default function PairSwapPanel({
       clearTimeout(t);
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [pair?.address, pairKey, variant]);
+  }, [pair?.address, pricingKey, variant]);
 
   /**
    * Buy the quote asset, one wallet at a time, each with its own ETH.

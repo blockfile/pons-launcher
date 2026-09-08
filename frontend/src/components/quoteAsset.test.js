@@ -7,6 +7,7 @@ import {
   pairHoldings,
   shortOfPair,
   ethShortfall,
+  swapPricingKey,
   pairChangeImpact,
   strandedRecord,
   strandingCleared,
@@ -719,4 +720,41 @@ test('the recovery is dead when nothing is held, and says so rather than offerin
   const live = recoverGate({ symbol: 'NVDA', holders: 3, plan: { wouldSwap: 3 } });
   assert.equal(live.enabled, true);
   assert.equal(live.why, null);
+});
+
+// THE REGRESSION THIS EXISTS FOR, observed on a live launch: the operator funded
+// 31 wallets, the table showed every balance, and the swap station went on
+// reporting "No wallet can be bought for right now. 31 are short of ETH" — the
+// dry run's verdict, computed against the balances of minutes earlier, because
+// the preview was keyed on the Buy amounts alone. The rule: any two states that
+// would price differently must produce different keys.
+test('the swap price preview re-runs when a BALANCE changes, not only an amount', () => {
+  const targets = [{ walletId: 'a', amountPair: '0.13' }];
+  const unfunded = [{ id: 'a', balanceEth: '0.000478' }];
+  const funded = [{ id: 'a', balanceEth: '0.016469' }];
+
+  // The bug: identical targets, different balances. These MUST differ.
+  assert.notEqual(swapPricingKey(unfunded, targets), swapPricingKey(funded, targets));
+
+  // And the properties that were already right stay right.
+  assert.equal(swapPricingKey(funded, targets), swapPricingKey(funded, targets));
+  assert.notEqual(
+    swapPricingKey(funded, targets),
+    swapPricingKey(funded, [{ walletId: 'a', amountPair: '0.14' }])
+  );
+});
+
+test('a wallet arriving or leaving re-prices, and a wallet with no Buy amount counts', () => {
+  const targets = [{ walletId: 'a', amountPair: '0.13' }];
+  const one = [{ id: 'a', balanceEth: '0.01' }];
+  const two = [{ id: 'a', balanceEth: '0.01' }, { id: 'b', balanceEth: '0.01' }];
+  // 'b' names no amount, so `targets` is unchanged — the key must still move,
+  // because what the run would do has changed.
+  assert.notEqual(swapPricingKey(one, targets), swapPricingKey(two, targets));
+
+  // An unread balance is not silently equal to a zero one.
+  assert.notEqual(
+    swapPricingKey([{ id: 'a' }], targets),
+    swapPricingKey([{ id: 'a', balanceEth: '0' }], targets)
+  );
 });

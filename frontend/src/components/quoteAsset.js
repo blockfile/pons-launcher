@@ -616,3 +616,33 @@ export function launchGate({
     fire: { enabled: !fireWhy, why: fireWhy },
   };
 }
+
+/**
+ * THE KEY THE SWAP STATION'S PRICE PREVIEW RE-RUNS ON.
+ *
+ * The dry run is the endpoint's own verdict, and that verdict is a function of
+ * what each wallet HOLDS as much as of what it was asked to buy. Keying the
+ * preview on the amounts alone meant the one event this whole station exists to
+ * wait for — the funding step landing ETH in the wallets — did not re-price it.
+ * On a live launch the table showed 31 funded wallets while the station went on
+ * reporting "No wallet can be bought for right now. 31 are short of ETH",
+ * computed against balances that were minutes stale.
+ *
+ * The recovery side of the same panel already had this right: its key carries
+ * `heldPair` per wallet, "so the preview re-prices when a wallet's holding
+ * changes rather than only when the set of holders does". This is that rule,
+ * applied to the side that spends ETH, and pulled out here so a test can hold
+ * it: any two states that would price differently MUST produce different keys.
+ *
+ * Built off the whole bundle rather than the priced targets because a wallet
+ * with no Buy amount still changes what the run would do, and the id travels
+ * beside the balance so a wallet arriving or leaving re-prices too.
+ *
+ * @param {Array<object>} bundle bundle wallets carrying `id` and `balanceEth`
+ * @param {Array<object>} targets the priced targets, `{walletId, amountPair}`
+ * @returns {string} a value that changes whenever the dry run's answer could
+ */
+export function swapPricingKey(bundle = [], targets = []) {
+  const balances = (bundle || []).map((w) => `${w?.id}:${w?.balanceEth ?? ''}`).join('|');
+  return `${JSON.stringify(targets || [])}#${balances}`;
+}
