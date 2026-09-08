@@ -45,6 +45,7 @@
 //   npm run burst -- --n 40       size it to your bundle
 //   npm run burst -- --rounds 3   three bursts, 2s apart, to see a cap recover
 //   npm run burst -- --warm 0     skip the warm-up, to price a cold pool
+//   npm run burst -- --ramp       4, 8, 12, 16, 24, 31: find the concurrency cliff
 
 const { provider, warmPool, poolStats, isRateLimited } = require('../src/evm/provider');
 const { monotonic, ms, summary } = require('../src/evm/timing');
@@ -60,6 +61,11 @@ const N = Math.max(1, arg('n', 31));
 const ROUNDS = Math.max(1, arg('rounds', 1));
 const WARM = Math.max(0, arg('warm', N * 2 + 2));
 const GAP_MS = Math.max(0, arg('gap', 2000));
+// A ramp answers the question one size cannot: a 31-wide burst that spreads over
+// seconds says something is queuing, but not AT WHAT WIDTH it starts. That number
+// is the actionable one -- it is how many wallets can be fired at this endpoint
+// before it begins holding them, and therefore how the bundle has to be split.
+const RAMP = process.argv.includes('--ramp');
 
 const sleep = (delay) => new Promise((r) => setTimeout(r, delay));
 
@@ -118,12 +124,28 @@ async function burst(rpc, n) {
   }
   console.log('');
 
-  for (let round = 1; round <= ROUNDS; round += 1) {
-    const out = await burst(rpc, N);
+  // Ascending, and each size gets the same warm pool the launch would have, so
+  // the only thing changing between rows is the width of the burst.
+  const sizes = RAMP ? [4, 8, 12, 16, 24, N].filter((n, i, a) => n <= N && a.indexOf(n) === i) : [N];
+  if (RAMP) console.log('  width   min      median   p95      max      spread    limited');
+
+  for (const size of sizes) {
+   for (let round = 1; round <= ROUNDS; round += 1) {
+    const out = await burst(rpc, size);
     const times = out.map((o) => o.at);
     const limited = out.filter((o) => o.limited).length;
     const s = summary(times);
     const spread = Math.max(...times) - Math.min(...times);
+
+    if (RAMP) {
+      const c = (v) => `${v.toFixed(1)}ms`.padEnd(9);
+      console.log(
+        `  ${String(size).padStart(3)}     ${c(s.min)}${c(s.median)}${c(s.p95)}${c(s.max)}` +
+          `${c(spread)}${limited}`
+      );
+      if (round < ROUNDS) await sleep(GAP_MS);
+      continue;
+    }
 
     console.log(`round ${round}`);
     console.log(
@@ -141,6 +163,8 @@ async function burst(rpc, n) {
         `${spread >= 1000 ? 'ENOUGH TO CROSS A TAX STEP' : 'inside one tax step'}`
     );
     if (round < ROUNDS) await sleep(GAP_MS);
+   }
+   if (RAMP && size !== sizes[sizes.length - 1]) await sleep(GAP_MS);
   }
 
   console.log('');
