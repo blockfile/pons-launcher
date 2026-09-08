@@ -1,7 +1,17 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 
-import { splitTotal, pairedFunds, pairedReserveEth, fillAction, FILL_BASES } from './autoFill.js';
+import {
+  splitTotal,
+  pairedFunds,
+  pairedReserveEth,
+  fillAction,
+  heldPairFill,
+  FILL_BASES,
+} from './autoFill.js';
+// The pair column's own parser, used here to compare a written amount against the
+// balance it came from as SCALED INTEGERS — the guarantee is about the digits.
+import { toUnits } from './pairBalance.js';
 
 // A deterministic Math.random stand-in, so the split under test and the oracle
 // below are fed the identical sequence.
@@ -224,4 +234,163 @@ test('every basis is one FILL_BASES knows', () => {
   for (const basis of FILL_BASES) {
     assert.equal(fillAction({ ...paired, basis, totalBuy: '1', ethTotal: '1', fundedCount: 1 }).basis, basis);
   }
+});
+
+// ── THE BUY COLUMN FROM THE PAIR TOKEN THE WALLETS ALREADY HOLD ──────────────
+// The basis the operator asked for: 31 wallets holding 0.0031 ETH (the gas
+// reserve, nothing more) and 0.09–0.16 NVDA each. Every other basis sizes from
+// ETH or from a typed total and so fills in approximately nothing; this one reads
+// the column the value is actually in.
+
+const held = (id, pairBalance) => ({ id, address: `0x${id}`, pairBalance });
+
+test('each Buy amount is the wallet’s OWN pair balance, floored, never rounded up', () => {
+  // The whole safety of this basis: preflight demands the wallet HOLD its Buy
+  // amount, so a figure a hair above the balance is a wallet silently dropped.
+  const wallets = [
+    held('w1', '0.0900000000000000'),
+    held('w2', '0.1599999999999999'),
+    held('w3', '0.1234569999999999'),
+    held('w4', '123.456789123456789'),
+  ];
+  const out = heldPairFill(wallets, { places: 6 });
+  assert.deepEqual(out.patches.w1, { mode: 'fixed', buy: '0.09', fund: '0' });
+  assert.equal(out.patches.w2.buy, '0.159999');
+  assert.equal(out.patches.w3.buy, '0.123456');
+  assert.equal(out.patches.w4.buy, '123.456789');
+  for (const w of wallets) {
+    assert.ok(
+      Number(out.patches[w.id].buy) <= Number(w.pairBalance),
+      `${out.patches[w.id].buy} is above the ${w.pairBalance} it was taken from`
+    );
+  }
+});
+
+test('the floor is never above the balance, for any balance and any cap', () => {
+  const rand = seeded(11);
+  for (let i = 0; i < 500; i++) {
+    // A balance with a long tail, which is what formatUnits(wei, 18) hands over.
+    const whole = Math.floor(rand() * 1000);
+    const frac = String(Math.floor(rand() * 1e18)).padStart(18, '0').slice(0, 18);
+    const balance = `${whole}.${frac}`;
+    const places = Math.floor(rand() * 7);
+    const out = heldPairFill([held('w', balance)], { places });
+    const written = out.patches.w?.buy;
+    if (written === undefined) continue;
+    // Compared as scaled integers, not floats — this is a guarantee about the
+    // digits, and a float comparison would decide it by one part in 10^17.
+    assert.ok(toUnits(written) <= toUnits(balance), `${written} > ${balance}`);
+    const dp = (written.split('.')[1] || '').length;
+    assert.ok(dp <= places, `${written} has more than ${places} decimals`);
+  }
+});
+
+test('an unread balance is REPORTED and left alone — never filled with 0', () => {
+  const out = heldPairFill([held('w1', null), held('w2', '0.5'), held('w3', undefined)], {
+    places: 6,
+  });
+  assert.deepEqual(Object.keys(out.patches), ['w2']);
+  assert.deepEqual(out.unread.map((u) => u.walletId), ['w1', 'w3']);
+  assert.equal(out.patches.w1, undefined, 'an unread wallet must not be written at all');
+  assert.deepEqual(out.empty, [], 'unread is not empty — they are different facts');
+});
+
+test('a balance that could not be parsed is unread, not zero', () => {
+  // The pair column's parser is deliberately strict: an exponent form, a sign or
+  // a stray character is "unknown", and unknown must not become a claim.
+  const out = heldPairFill([held('w1', '1e-3'), held('w2', '-0.5'), held('w3', 'oops')], {
+    places: 6,
+  });
+  assert.deepEqual(out.patches, {});
+  assert.equal(out.unread.length, 3);
+});
+
+test('a wallet holding nothing is skipped, and named as empty rather than as unread', () => {
+  const out = heldPairFill([held('w1', '0'), held('w2', '0.000000000000000000'), held('w3', '2')], {
+    places: 6,
+  });
+  assert.deepEqual(Object.keys(out.patches), ['w3']);
+  assert.deepEqual(out.empty.map((e) => e.walletId), ['w1', 'w2']);
+  assert.deepEqual(out.unread, []);
+});
+
+test('dust below the decimals cap is empty rather than a zero Buy amount', () => {
+  // 0.0000004 floors to 0 at six places. Writing that as "0" would be a Buy
+  // amount of nothing; writing it as 0.000001 would be above the balance.
+  const out = heldPairFill([held('w1', '0.0000004'), held('w2', '0.5')], { places: 6 });
+  assert.deepEqual(Object.keys(out.patches), ['w2']);
+  assert.deepEqual(out.empty.map((e) => e.heldPair), ['0.0000004']);
+});
+
+test('places is capped at the pair token’s own decimals — a 2-decimal asset gets 2', () => {
+  const out = heldPairFill([held('w1', '12.3456'), held('w2', '0.009')], { places: 2 });
+  assert.equal(out.patches.w1.buy, '12.34');
+  assert.equal(out.patches.w2, undefined, '0.009 floors to nothing at 2 places');
+  assert.equal(out.empty.length, 1);
+
+  const zero = heldPairFill([held('w1', '12.9')], { places: 0 });
+  assert.equal(zero.patches.w1.buy, '12');
+});
+
+test('the Fund column goes to ZERO — these wallets have no swap left to fund', () => {
+  const out = heldPairFill([held('w1', '0.5'), held('w2', '0.25')], { places: 6 });
+  for (const p of Object.values(out.patches)) {
+    assert.equal(p.fund, '0');
+    // Every reader of the column filters on > 0, so a zero sends nothing.
+    assert.equal(Number(p.fund) > 0, false);
+  }
+});
+
+test('the total is the sum of what was WRITTEN, in one asset, added as integers', () => {
+  const out = heldPairFill(
+    [held('w1', '0.0999999'), held('w2', '0.1000001'), held('w3', null), held('w4', '0')],
+    { places: 6 }
+  );
+  assert.equal(out.filled, 2);
+  assert.equal(out.total, '0.199999'); // 0.099999 + 0.1, both floored
+});
+
+test('an absent bundle is an empty fill, not a crash', () => {
+  assert.deepEqual(heldPairFill(null), { patches: {}, filled: 0, unread: [], empty: [], total: '0' });
+});
+
+// ── the chooser's fourth entry ───────────────────────────────────────────────
+test('the heldPair basis is dead when no wallet holds any, and says why', () => {
+  const none = fillAction({ ...paired, basis: 'heldPair', heldPairCount: 0 });
+  assert.equal(none.enabled, false);
+  assert.match(none.why, /No bundle wallet is holding any NVDA/);
+
+  const some = fillAction({ ...paired, basis: 'heldPair', heldPairCount: 12 });
+  assert.equal(some.enabled, true);
+  assert.equal(some.why, null);
+  // One press, and it WRITES — no quote to take first, unlike the ETH bases.
+  assert.match(some.label, /Write 12 Buy amounts/);
+  assert.match(
+    fillAction({ ...paired, basis: 'heldPair', heldPairCount: 1 }).label,
+    /Write 1 Buy amount$/
+  );
+});
+
+test('unread balances are named in the refusal — a dash is not a zero', () => {
+  const act = fillAction({ ...paired, basis: 'heldPair', heldPairCount: 0, unreadPair: 31 });
+  assert.equal(act.enabled, false);
+  assert.match(act.why, /31 balances could not be read/);
+  // And they never arm it on their own: unknown is not a holding.
+  assert.equal(fillAction({ ...paired, basis: 'heldPair', unreadPair: 31 }).enabled, false);
+});
+
+test('the heldPair basis is denominated in the pair token, not in ETH', () => {
+  assert.equal(fillAction({ ...paired, basis: 'heldPair', heldPairCount: 3 }).unit, 'NVDA');
+});
+
+test('a native launch never lands on heldPair — there is no second token to hold', () => {
+  const act = fillAction({ basis: 'heldPair', paired: false, bundleCount: 5, heldPairCount: 5 });
+  assert.equal(act.basis, 'pair');
+  assert.equal(act.unit, 'ETH');
+});
+
+test('no bundle wallets still refuses first, heldPair included', () => {
+  const act = fillAction({ ...paired, bundleCount: 0, basis: 'heldPair', heldPairCount: 4 });
+  assert.equal(act.enabled, false);
+  assert.match(act.why, /No bundle wallets/);
 });

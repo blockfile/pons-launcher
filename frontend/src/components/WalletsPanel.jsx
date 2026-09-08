@@ -6,7 +6,7 @@ import Address from './Address.jsx';
 import Modal, { Fact } from './Modal.jsx';
 import Share, { pct, tokens } from './Share.jsx';
 import BackupControls from './BackupControls.jsx';
-import { splitTotal, pairedFunds, pairedReserveEth, fillAction } from './autoFill.js';
+import { splitTotal, pairedFunds, pairedReserveEth, fillAction, heldPairFill } from './autoFill.js';
 import { pairStatus, pairShortfall, balanceFill } from './pairBalance.js';
 import { rolesFor } from '../variant.js';
 // Which curve a paired launch is priced against, and the one place a pair-token
@@ -121,13 +121,13 @@ export default function WalletsPanel({
   // total or the quote asset changes and it would be answering a stale question.
   const [fill, setFill] = useState(null);
 
-  // ── ONE FILL CONTROL, THREE BASES ───────────────────────────────────────────
+  // ── ONE FILL CONTROL, FOUR BASES ────────────────────────────────────────────
   // This box used to be three stacked ones: "Auto-fill buys" with a pair-token
   // total, a "CONVERTER" with its own "use as total", and "OR FILL FROM THE ETH
   // THE WALLETS ALREADY HOLD". Three mechanisms writing one column, each with a
   // heading, a field and a button of its own — which is the "Distributions and
   // converts etc." an operator called confusing, and they were right: they are not
-  // three tools, they are three answers to WHAT DECIDES THE SIZE OF THE BUYS.
+  // three tools, they are answers to WHAT DECIDES THE SIZE OF THE BUYS.
   //
   // So the basis is now a choice, and everything below it — which field is drawn,
   // which quote is shown, what the button is called and whether it can be pressed
@@ -135,6 +135,13 @@ export default function WalletsPanel({
   // tested; the WRITES are untouched, and each keeps its own safeguard: the
   // converter still writes nothing without a deliberate press, and the balance
   // fill is still price-then-write in two.
+  //
+  // A FOURTH ANSWER was missing, and a swapped bundle is exactly the case that
+  // needed it: 31 wallets holding the gas reserve in ETH and their value in NVDA.
+  // All three above size from ETH or from a typed total, so on that screen they
+  // fill in approximately nothing. 'heldPair' reads the column the value is in.
+  // It is the only basis that needs no server, so it is the only one that writes
+  // on a single press — see fillFromHeldPair and heldPairFill.
   //
   // Native launches have exactly one basis (there is one asset), so the chooser is
   // absent there and this is the control it has always been.
@@ -435,16 +442,53 @@ export default function WalletsPanel({
   // written one nobody agreed to.
   const quotedPair =
     rate?.pairOut && Number(rate.ethIn) === Number(ethTotal) ? Number(rate.pairOut) : null;
+
+  // THE DECIMALS EVERY PAIR-TOKEN AMOUNT THIS PANEL WRITES IS CAPPED AT: six, or
+  // the token's own if it has fewer. One expression, used by the split, by the
+  // converter's floor and by the held-pair fill, so no two of them can disagree
+  // about what the launch can parse.
+  const pairPlaces = pair ? Math.min(6, Number(pair.decimals) || 6) : 6;
+
+  // WHAT THE BUNDLE IS ALREADY HOLDING OF THE QUOTE ASSET, as the patches that
+  // would be written from it. Derived on render rather than on the press because
+  // the count is what arms the control and what the readout states — computing it
+  // twice, once for the button and once for the write, is how the two drift.
+  // Costs one BigInt per row and reads the same `pairBalance` the table draws.
+  const heldPairPlan = pair ? heldPairFill(bundle, { places: pairPlaces }) : null;
+
   const filler = fillAction({
     basis,
     paired: Boolean(pair),
     symbol: buyUnit,
     bundleCount: bundle.length,
     fundedCount: fundedBundle,
+    heldPairCount: heldPairPlan?.filled ?? 0,
+    unreadPair: heldPairPlan?.unread.length ?? 0,
     totalBuy,
     ethTotal,
     quotedPair,
   });
+
+  // THE ONE THING A WALLET HOLDING ITS OWN NVDA STILL NEEDS: gas. Not a swap —
+  // there is nothing left to buy — but the launch's approve + buy and this
+  // console's standing promise of gas for SELL_RESERVE exits are still ETH, out
+  // of that wallet's own balance. Counted, never written: a Fund figure is read
+  // elsewhere as "the ETH this wallet must HOLD" (see ethShortfall), so writing a
+  // top-up into it would report the bundle as short of ETH for a swap it is not
+  // making. So the console says how many are thin and leaves the number to the
+  // operator. Zero when /gas could not be read, in which case nothing is claimed.
+  //
+  // AND THE FIGURE IS A FLOOR, said as one on screen: /gas returns the buy and a
+  // sell (approve included), so this is the buy plus SELL_RESERVE exits — the
+  // launch's own approve of the quote asset is on top of it. A wallet under this
+  // certainly cannot pay for the launch and its exits; one over it is not thereby
+  // proved to be able to.
+  const gasShortHolders =
+    heldPairPlan && reservePerWallet > 0
+      ? bundle.filter(
+          (w) => heldPairPlan.patches[w.id] && Number(w.balanceEth || 0) < reservePerWallet
+        ).length
+      : 0;
 
   // Split the typed total across the bundle wallets into a random, jittered
   // spread — no two the same, so the buys read as organic rather than a pattern
@@ -480,8 +524,7 @@ export default function WalletsPanel({
     // Six decimals on a native launch, exactly as before; on a paired one, capped
     // at the pair token's own decimals so every amount is one the launch — and
     // the pricing call below — can parse.
-    const places = pair ? Math.min(6, Number(pair.decimals) || 6) : 6;
-    const amounts = splitTotal(bundle.length, total, { places });
+    const amounts = splitTotal(bundle.length, total, { places: pairPlaces });
 
     // ── NATIVE: buy and fund are the same asset, so Fund is arithmetic ─────────
     if (!pair) {
@@ -591,8 +634,7 @@ export default function WalletsPanel({
     // Floored to the places the split writes at — the same rule splitTotal uses,
     // capped at the pair token's own decimals — and floored rather than rounded
     // so the total taken is never above what the quote actually offered.
-    const places = Math.min(6, Number(pair.decimals) || 6);
-    const scale = 10 ** places;
+    const scale = 10 ** pairPlaces;
     const taken = String(Math.floor(Number(rate.pairOut) * scale) / scale);
     setTotalBuy(taken);
     // The previous fill priced a different total and is no longer an account of
@@ -687,6 +729,69 @@ export default function WalletsPanel({
       `Filled ${filled} wallet(s) for ${Number(plan.totalBuyPair).toFixed(6)} ${plan.pairSymbol}. ` +
         `No ETH moved — edit, then buy the pair token in step ${nums.swap ?? 5}.`,
       skipped.length ? 'error' : 'ok'
+    );
+  }
+
+  /**
+   * WRITE EACH WALLET'S OWN QUOTE-ASSET HOLDING INTO ITS BUY AMOUNT.
+   *
+   * The operator's own question — "is there a button that will fill the buy
+   * amount based on the NVDA the bundle wallets hold?" — and until now there was
+   * not: the other three bases all size from ETH or from a typed total, so on a
+   * bundle that has already been swapped (0.0031 ETH of gas and 0.09–0.16 NVDA
+   * each) they fill in approximately nothing.
+   *
+   * ONE PRESS, AND NO SERVER CALL. The 'eth' and 'held' bases are two presses
+   * because a quote or a dry run stands between the operator and the number, and
+   * a figure nobody has seen must not be written. Here both sides of the
+   * arithmetic are the SAME asset and both are already on this screen — the pair
+   * column is the balance, the Buy column is the requirement — so there is
+   * nothing to price and nothing to preview. It writes.
+   *
+   * Every safeguard is in heldPairFill, which is pure and tested: floored to
+   * `pairPlaces` so no amount can exceed the balance behind it, an unread balance
+   * left untouched and reported rather than claimed to be zero, and Fund set to 0
+   * because these wallets have no swap left to fund.
+   */
+  function fillFromHeldPair() {
+    if (!heldPairPlan || heldPairPlan.filled === 0) return;
+    const { patches, filled, unread, empty, total } = heldPairPlan;
+    Object.entries(patches).forEach(([id, patch]) => setRow(id, patch));
+    // Both readouts described a different column: the auto-fill's total is not
+    // what is in the Buy column now, and the ETH plan priced buys that are not
+    // going to be made.
+    setFill(null);
+    setBalPlan(null);
+
+    report(
+      `filled the Buy column for ${filled} wallet(s) from the ${pair.symbol} they are ALREADY holding — ` +
+        `${total} ${pair.symbol} in total. Each amount is that wallet's own balance floored to ` +
+        `${pairPlaces} decimals, so it is never above what the wallet holds and preflight cannot drop it ` +
+        'for being short. Nothing was priced and nothing was sent: this read the balances on screen. ' +
+        `Fund was set to 0 for those wallets — they hold their ${pair.symbol} already, so there is no swap ` +
+        `to pay for and step ${nums.swap ?? 5} will report them as already funded` +
+        (gasShortHolders > 0
+          ? `. ${gasShortHolders} of them hold less than ${reservePerWallet.toFixed(6)} ETH, which is the gas for ` +
+            `their buy and ${SELL_RESERVE} sells at today's fees — the launch's own approve is on top of that, so ` +
+            'treat it as a floor. Top those up by hand in the Fund column: no figure is written for you, because a ' +
+            'Fund amount is read elsewhere as ETH the wallet must HOLD and a top-up would report the bundle as ' +
+            'short of ETH for a swap it is not making'
+          : '') +
+        (unread.length
+          ? `. ${unread.length} wallet(s) were LEFT ALONE because their ${pair.symbol} balance could not be ` +
+            `read (a dash is not a zero): ${unread.map((u) => u.address).join(', ')} — refresh the balances ` +
+            'and run this again'
+          : '') +
+        (empty.length
+          ? `. ${empty.length} wallet(s) hold no ${pair.symbol} worth naming at ${pairPlaces} decimals and were ` +
+            'left alone'
+          : '') +
+        '.'
+    );
+    notify(
+      `Filled ${filled} wallet(s) with the ${Number(total).toFixed(6)} ${pair.symbol} they already hold. ` +
+        'Nothing moved, nothing was priced — Fund is 0, there is no swap left to make.',
+      unread.length ? 'error' : 'ok'
     );
   }
 
@@ -1116,6 +1221,11 @@ export default function WalletsPanel({
                 <option value="pair">a total in {pair.symbol}</option>
                 <option value="eth">a total in ETH, converted</option>
                 <option value="held">the ETH the wallets already hold</option>
+                {/* THE FOURTH ANSWER, and the one a swapped bundle needs: the
+                    three above all size from ETH or from a typed total, and a
+                    bundle that has been through the swap station holds its value
+                    in the quote asset — the ETH left in it is the gas reserve. */}
+                <option value="heldPair">the {pair.symbol} the wallets already hold</option>
               </select>
             </label>
           )}
@@ -1185,15 +1295,23 @@ export default function WalletsPanel({
               than only in a tooltip. */}
           <Busy
             className="ghost"
-            busy={busy === (filler.basis === 'held' ? 'from-balance' : 'auto-fill')}
+            // 'heldPair' never sets a busy key: it makes no request. It reads the
+            // pair column already on screen and writes, inside the press.
+            busy={
+              filler.basis === 'heldPair'
+                ? false
+                : busy === (filler.basis === 'held' ? 'from-balance' : 'auto-fill')
+            }
             disabled={!filler.enabled}
             title={filler.why || ''}
             onClick={
-              filler.basis === 'held'
-                ? priceFromBalance
-                : filler.basis === 'eth'
-                  ? takeConverted
-                  : distribute
+              filler.basis === 'heldPair'
+                ? fillFromHeldPair
+                : filler.basis === 'held'
+                  ? priceFromBalance
+                  : filler.basis === 'eth'
+                    ? takeConverted
+                    : distribute
             }
           >
             {filler.label}
@@ -1202,6 +1320,13 @@ export default function WalletsPanel({
           <span className="hint">
             {filler.why ? (
               filler.why
+            ) : filler.basis === 'heldPair' ? (
+              <>
+                <b>Use this once the wallets have bought their {pair?.symbol}</b> — each Buy amount
+                becomes the {pair?.symbol} that wallet is holding right now, floored to {pairPlaces}{' '}
+                decimals so it can never ask for more than it has. One press, no quote: this reads
+                the {pair?.symbol} column below · Fund goes to 0 — there is no swap left to fund
+              </>
             ) : filler.basis === 'held' ? (
               <>
                 <b>Use this once the wallets are funded</b> — it works backwards from the ETH they
@@ -1319,6 +1444,81 @@ export default function WalletsPanel({
                 </span>
               )}
 
+              {/* ── SIZED FROM THE PAIR TOKEN THE WALLETS ALREADY HOLD ────────
+                  No quote line here, because there is no quote: both sides of
+                  this are the same asset, and the only figures on screen are two
+                  readings of the column below. What it states instead is what
+                  will be written, what will NOT be (an unread balance is a
+                  question, not a zero) and the one thing these wallets still
+                  need, which is gas and not a swap. */}
+              {pair && filler.basis === 'heldPair' && heldPairPlan && (
+                <>
+                  <span className="convert-line">
+                    {heldPairPlan.filled > 0 ? (
+                      <>
+                        {heldPairPlan.filled} of {bundle.length} wallet
+                        {bundle.length === 1 ? '' : 's'} hold{' '}
+                        <b>
+                          {Number(heldPairPlan.total).toFixed(6)} {pair.symbol}
+                        </b>{' '}
+                        between them — one press writes each wallet's own holding into its Buy
+                        amount
+                      </>
+                    ) : (
+                      <span className="hint">
+                        no bundle wallet is holding any {pair.symbol} yet — there is nothing to size
+                        a buy from
+                      </span>
+                    )}
+                  </span>
+                  <span className="convert-note hint">
+                    floored to {pairPlaces} decimals, so no Buy amount is ever above the balance
+                    behind it — preflight demands a wallet HOLD its Buy amount and drops it when it
+                    does not · nothing is priced and no ETH moves
+                    {heldPairPlan.unread.length > 0 &&
+                      ` · ${heldPairPlan.unread.length} balance${
+                        heldPairPlan.unread.length === 1 ? '' : 's'
+                      } could not be read and ${
+                        heldPairPlan.unread.length === 1 ? 'is' : 'are'
+                      } left alone — a dash is not a zero; refresh the balances`}
+                    {heldPairPlan.empty.length > 0 &&
+                      ` · ${heldPairPlan.empty.length} hold no ${pair.symbol} worth naming at ${pairPlaces} decimals`}
+                  </span>
+                  {/* THE FUND COLUMN, STATED RATHER THAN GUESSED AT. These wallets
+                      are not waiting on a swap, so the ETH to buy their pair token
+                      is not a thing to send — that is what the 0 means. Gas is a
+                      different question, and it is answered as a count, not
+                      written into a field that means "the ETH this wallet must
+                      hold". */}
+                  <span className="convert-note hint">
+                    Fund is set to 0 for every wallet this writes: they already hold their{' '}
+                    {pair.symbol}, so there is nothing to swap and step {nums.swap ?? 5} will say so.
+                    Their ETH is gas, not buying power
+                    {reservePerWallet > 0 ? (
+                      gasShortHolders > 0 ? (
+                        <>
+                          {' '}
+                          — and {gasShortHolders} of them hold less than{' '}
+                          <b>{reservePerWallet.toFixed(6)} ETH</b>, the gas for their buy and{' '}
+                          {SELL_RESERVE} sells at today's fees, with the launch's own approve on top
+                          of it. Top those up by hand: no figure is written for you, because a Fund
+                          amount is read elsewhere as ETH the wallet must HOLD, and a top-up written
+                          there would report this bundle as short of ETH for a swap it is not making
+                        </>
+                      ) : (
+                        <>
+                          {' '}
+                          — and each of them holds at least {reservePerWallet.toFixed(6)} ETH, the
+                          gas for its buy and {SELL_RESERVE} sells at today's fees
+                        </>
+                      )
+                    ) : (
+                      <> — the gas cost could not be read, so no ETH claim is made about them</>
+                    )}
+                  </span>
+                </>
+              )}
+
               {/* THE ACCOUNT OF THE LAST FILL, on a paired launch. Never the native
                   line with a pair symbol swapped in — that line adds the typed
                   total to a gas figure, and here the typed total is NVDA. So it
@@ -1365,8 +1565,10 @@ export default function WalletsPanel({
               )}
 
               {/* A rate is a quote and it moves. Said plainly, with the moment it
-                  was taken, so no figure above can be mistaken for a fact. */}
-              {pair && filler.basis !== 'held' && (
+                  was taken, so no figure above can be mistaken for a fact. Absent
+                  on the two bases that take no rate at all: 'held' prices per
+                  wallet server-side, and 'heldPair' prices nothing whatsoever. */}
+              {pair && filler.basis !== 'held' && filler.basis !== 'heldPair' && (
                 <span className="convert-note hint">
                   {rate?.quotedAt
                     ? `live quote, taken ${new Date(rate.quotedAt).toLocaleTimeString()} — it moves. ` +
