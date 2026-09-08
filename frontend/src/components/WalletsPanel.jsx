@@ -1204,18 +1204,23 @@ export default function WalletsPanel({
               filler.why
             ) : filler.basis === 'held' ? (
               <>
-                each wallet spends its OWN ETH, keeping back gas for the swap, the launch's approve +
-                buy and {SELL_RESERVE} sells · prices only — nothing is written until you say so
+                <b>Use this once the wallets are funded</b> — it works backwards from the ETH they
+                actually hold, so it can never ask for more than they have. Each wallet spends its
+                OWN ETH, keeping back gas for the swap, the launch's approve + buy and{' '}
+                {SELL_RESERVE} sells · prices only — nothing is written until you say so
               </>
             ) : filler.basis === 'eth' ? (
               <>
-                converts once, into the {pair?.symbol} total, on this press · the rate moves and the
-                number you accept does not
+                <b>You name the size, then fund the wallets to match</b> — same as a {pair?.symbol}{' '}
+                total, but typed in ETH. Converts once, into the {pair?.symbol} total, on this press ·
+                the rate moves and the number you accept does not
               </>
             ) : pair ? (
               <>
-                random split in {pair.symbol} · each Fund is the ETH to swap for its {pair.symbol} +
-                gas · fields stay editable · moves no ETH
+                <b>You name the size, then fund the wallets to match</b> — the Fund column says how
+                much ETH each one needs, and step {nums?.fund ?? 4} sends it. Random split in{' '}
+                {pair.symbol} · each Fund is the ETH to swap for its {pair.symbol} + gas · fields
+                stay editable · moves no ETH
               </>
             ) : (
               <>
