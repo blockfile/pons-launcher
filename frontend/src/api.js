@@ -71,15 +71,38 @@ export async function api(path, method = 'GET', body) {
 }
 
 /**
- * Download every wallet's private key as a file.
+ * Download the private keys of ONE v1/v2 tab's wallets as a file.
+ *
+ * It used to take no scope at all and post `{ confirm: true }` to a route that
+ * answered with `ks.exportAll()` — every key in the keystore, V3 through V8
+ * included, from a button beside the v1/v2 bundle. The route is scoped now (see
+ * its header in backend/src/routes/wallets.js), and so is this: `variant` says
+ * WHICH tab, and the two optional narrowings say which of its wallets.
+ *
+ *   variant    'v1' | 'v2' — the tab whose wallets these are. Never both.
+ *   role       one tier only: the tab's dev role, or its bundle role.
+ *   walletIds  exactly these wallets (the table's ticked rows). Wins over role;
+ *              an empty list is treated as no selection, so a mis-wired caller
+ *              cannot silently widen the file to the whole tab.
+ *   format     'json' or 'csv' — csv because checking twenty addresses is a
+ *              spreadsheet job.
  *
  * The keys go straight from the response into a Blob and never touch the DOM:
  * anything rendered on screen can be screenshotted, shoulder-surfed, or left
- * open in a tab. `format` is 'json' or 'csv' — csv because checking twenty
- * addresses is a spreadsheet job.
+ * open in a tab.
  */
-export async function downloadBackup(format = 'json') {
-  const data = await api('/wallets/backup', 'POST', { confirm: true });
+export async function downloadBackup({
+  variant = 'v1',
+  role = null,
+  walletIds = null,
+  format = 'json',
+} = {}) {
+  const ids = Array.isArray(walletIds) && walletIds.length ? walletIds : null;
+  const payload = { confirm: true, variant };
+  if (ids) payload.walletIds = ids;
+  else if (role) payload.role = role;
+
+  const data = await api('/wallets/backup', 'POST', payload);
 
   const body =
     format === 'csv'
@@ -89,14 +112,19 @@ export async function downloadBackup(format = 'json') {
       : JSON.stringify(data, null, 2);
 
   const stamp = data.exportedAt.slice(0, 10);
+  // The scope rides in the FILENAME, not only inside the file: two downloads a
+  // day apart otherwise differ by nothing but the date while holding completely
+  // different sets of keys — and the one that matters holds fewer.
+  const tag = ids ? '-selected' : role ? `-${role}` : '';
+  const name = `pons-${variant}-wallets${tag}-${stamp}.${format}`;
   const url = URL.createObjectURL(new Blob([body], { type: 'text/plain' }));
   const a = document.createElement('a');
   a.href = url;
-  a.download = `pons-wallets-${stamp}.${format}`;
+  a.download = name;
   a.click();
   URL.revokeObjectURL(url);
 
-  return `${data.count} keys written to pons-wallets-${stamp}.${format} — store it offline`;
+  return `${data.count} ${variant.toUpperCase()} key(s) written to ${name} — store it offline`;
 }
 
 /**

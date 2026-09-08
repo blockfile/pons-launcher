@@ -320,29 +320,107 @@ router.post('/wallets/export', requireApiKey, requireAuthConfigured, (req, res, 
   }
 });
 
-// POST /api/wallets/backup — every key at once, for an offline backup. Same
-// two locks as the single export, and logged the same way: whoever holds the
-// file this produces controls every wallet in it.
+// POST /api/wallets/backup — v1/v2 private keys for an offline backup, SCOPED
+// TO THE TAB THAT ASKED.
+//
+// This route used to be `ks.exportAll()`: every private key in the keystore, in
+// one file, from a button that sits beside the v1/v2 bundle. An operator taking
+// a backup to move ONE bundle was handed the keys to V3, V4, V5, V6, V7 and V8
+// as well — tabs that have nothing to do with a v1/v2 launch, and that each
+// solved exactly this for themselves (see /v3/wallets/backup, /v4/wallets/backup,
+// /v5/wallets/backup …). Nothing in the console ever wanted the whole keystore:
+// the ONLY caller was the v1/v2 panels' BackupControls, so rather than leave a
+// whole-keystore export wired to a button, the route itself is scoped.
+//
+// THE FLOOR IS THE VARIANT'S OWN TWO ROLES — v1 is dev + bundle, v2 is v2dev +
+// v2bundle — resolved through the same variants table every money path uses. The
+// narrowings below only ever SUBTRACT from that floor, so no request shape can
+// reach a role this launcher does not own. A v1 backup cannot carry v2's keys
+// either, which is the same separation the two tabs already have everywhere else.
+//
+// THREE SHAPES, mirroring /v3/wallets/backup:
+//   (neither)     — the whole tab: its dev wallet and its bundle wallets.
+//   { role }      — one tier only ('dev'|'bundle' for v1, 'v2dev'|'v2bundle' for
+//                   v2). This is "the bundle wallets only" and "the main/dev
+//                   wallet only".
+//   { walletIds } — exactly the wallets named (the table's ticked rows). An id
+//                   naming a wallet this tab does not own simply misses the
+//                   floor above, so a stray or hostile id can only ever export
+//                   FEWER wallets — never another tab's key.
+//
+// Same two locks as the single-key export: an API key, and a configured
+// credential so a keyless deployment fails closed rather than serving keys.
+//
+// v3-v8 are NOT reachable here. They each have their own scoped route, and a
+// second door into the same keys is a second thing to get wrong.
+const BACKUP_VARIANTS = ['v1', 'v2'];
+
 router.post('/wallets/backup', requireApiKey, requireAuthConfigured, (req, res, next) => {
   try {
+    const body = req.body || {};
+    if (body.confirm !== true) throw new Error('backup requires { confirm: true }');
+
+    // Omitted means v1, the same default every other route on this module keeps,
+    // so a caller that predates the scoping still gets a coherent (v1) file
+    // rather than a 500 — and never gets another tab's keys.
+    const variant = body.variant === undefined || body.variant === null ? DEFAULT_VARIANT : body.variant;
+    if (!BACKUP_VARIANTS.includes(variant)) {
+      throw new Error(
+        `backup variant must be one of ${BACKUP_VARIANTS.join(', ')} — v3..v8 each have their own backup route`
+      );
+    }
+    const tab = rolesFor(variant);
+    const own = new Set([tab.dev, tab.bundle]);
+
     const ks = keystoreFor(req.user.id);
-    if ((req.body || {}).confirm !== true) throw new Error('backup requires { confirm: true }');
-    const wallets = ks.exportAll();
-    console.warn(`[pons-launcher] FULL KEYSTORE EXPORTED — ${wallets.length} private keys`);
-    // The count and the fact, never the keys — an audit trail that is itself a
-    // copy of the keystore would be worse than no audit trail.
-    activityFor(req.user.id).record('export', `downloaded a full backup of ${wallets.length} private key(s)`, {
-      count: wallets.length,
-    });
+    // The floor this never exports past. Everything below only narrows it.
+    const all = ks.exportAll().filter((w) => own.has(w.role));
+
+    const role = typeof body.role === 'string' && body.role ? body.role : null;
+    if (role && !own.has(role)) {
+      throw new Error(`role must be one of ${[...own].join(', ')} for ${variant}`);
+    }
+    const requestedIds = Array.isArray(body.walletIds) ? new Set(body.walletIds.map(String)) : null;
+
+    const wallets = requestedIds
+      ? all.filter((w) => requestedIds.has(w.id))
+      : role
+        ? all.filter((w) => w.role === role)
+        : all;
+
+    const scope = requestedIds ? 'selected' : role || 'all';
+    console.warn(
+      `[pons-launcher] ${variant.toUpperCase()} KEYSTORE BACKUP EXPORTED (${scope}) — ${wallets.length} private keys`
+    );
+    // The count, the tab and the scope — never the keys, and never an address
+    // this file did not carry. An audit trail that is itself a copy of the
+    // keystore would be worse than no audit trail.
+    activityFor(req.user.id).record(
+      'export',
+      `[${variant}] downloaded a backup of ${wallets.length} ${scope} private key(s)`,
+      { count: wallets.length, variant, scope }
+    );
     res.json({
       exportedAt: new Date().toISOString(),
       chainId: config.chainId,
       count: wallets.length,
+      variant,
+      scope,
+      // Said in the file itself, because a backup outlives the session that
+      // produced it and the person opening it months later has no way to tell a
+      // whole-tab file from a hand-picked one by looking at the keys.
+      note:
+        scope === 'selected'
+          ? `Selected export — ${wallets.length} of ${all.length} ${variant.toUpperCase()} wallet(s), the rows ticked on the tab. The rest are NOT in this file.`
+          : role
+            ? `Per-tier export — the ${wallets.length} ${role} wallet(s) only. Other ${variant.toUpperCase()} wallets are NOT in this file.`
+            : `Every ${variant.toUpperCase()} wallet — its dev wallet and its bundle wallets.`,
       // Stated in the file itself, because a backup outlives the session that
       // produced it and the person opening it may not be the one who made it.
       warning:
         'These private keys control real funds. Anyone holding this file can spend every wallet in it. ' +
-        'Store it offline. There are no mnemonics: the keystore holds private keys only.',
+        'Store it offline. There are no mnemonics: the keystore holds private keys only. ' +
+        `It holds ${variant.toUpperCase()}'s wallets only — no other launcher tab's keys are in it.`,
       wallets,
     });
   } catch (err) {

@@ -265,7 +265,10 @@ POST   /api/wallets/generate    { count, label, role }
 POST   /api/wallets/import      { privateKeys[], label, role }
 DELETE /api/wallets/:id         archives the wallet — does NOT destroy the key
 POST   /api/wallets/export      { id, confirm: true } — logged
-POST   /api/wallets/backup      { confirm: true } — every key at once, logged
+POST   /api/wallets/backup      { confirm: true, variant, role?, walletIds? } — logged.
+                                Scoped to ONE launcher: v1 (dev+bundle) or v2 (v2dev+v2bundle).
+                                `role` narrows to one tier, `walletIds` to named wallets.
+                                Never returns another tab's keys; v3–v8 have their own routes.
 POST   /api/fund                { targets: [{ walletId, amountEth }] }
 POST   /api/sweep               { includeTokens?, tokenAddress? }
 POST   /api/preflight           signs the bundle, sends nothing
