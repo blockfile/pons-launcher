@@ -96,6 +96,27 @@ const config = {
   relayQuoteRetries: Math.max(0, num(process.env.RELAY_QUOTE_RETRIES, 5)),
   relayQuote429BackoffMs: Math.max(0, num(process.env.RELAY_QUOTE_BACKOFF_MS, 20000)),
 
+  // HOW LONG THE PROXY IN FRONT OF THIS PROCESS WILL WAIT FOR A RESPONSE, in ms.
+  //
+  // NOT a timeout this process enforces — it cannot, and nothing here reads it
+  // to cut a run short. It is nginx's `proxy_read_timeout`, which both configs
+  // in deploy/ set to 180s, and the app holds the number for exactly one reason:
+  // so the console can say BEFORE a long request is sent whether anyone will
+  // still be listening when it finishes.
+  //
+  // The case it exists for is the untimed v2 Relay funding run. That path quotes
+  // EVERY wallet before it sends ANY deposit (relay/funding.js), so thirty
+  // wallets at a 15s relayQuoteGapMs is 450s of quoting against a 180s ceiling:
+  // the operator gets 504 Gateway Time-out while the deposits keep going out
+  // server-side, which reads as failure and is not. See frontend
+  // components/quoteWindow.js for the projection this feeds.
+  //
+  // RAISE IT TOGETHER WITH THE NGINX DIRECTIVE, never on its own — a value
+  // larger than what nginx actually waits turns the console's warning off while
+  // the trap is still armed. 0 means "no proxy in front", which switches the
+  // warning off deliberately.
+  gatewayTimeoutMs: Math.max(0, num(process.env.GATEWAY_TIMEOUT_MS, 180000)),
+
   // V3's chain runner retries a rate-limited Relay QUOTE (pre-broadcast, so safe)
   // rather than halting the run for a manual resume. Shorter than the v2 funding
   // backoff above because a V3 cycle is ~7s and a 20s stall per blip would bunch

@@ -52,7 +52,17 @@ export function notify(message, kind = 'info') {
   }
 }
 
-export async function api(path, method = 'GET', body) {
+/**
+ * `quiet: true` suppresses the automatic error toast for THIS call, and nothing
+ * else. It exists for the one response that is not what it looks like: a 504
+ * from nginx on the untimed v2 funding run is the gateway giving up on the
+ * answer while the deposits keep going out server-side, and a red "blocked ·
+ * 504 Gateway Time-out" ticket over that is not a warning, it is the wrong
+ * fact. A caller passing this OWNS the notice — see FundPanel's sendUntimed,
+ * which raises its own on both branches. Default stays loud, because "nothing
+ * fails silently" is the rule this is an exception to.
+ */
+export async function api(path, method = 'GET', body, { quiet = false } = {}) {
   const res = await fetch(`/api${path}`, {
     method,
     headers: { 'content-type': 'application/json', 'x-api-key': apiKey },
@@ -64,8 +74,16 @@ export async function api(path, method = 'GET', body) {
     // A blocked mutation always announces itself. Background reads (price, gas,
     // configs) fail quietly — their callers already handle it — so only
     // non-GET refusals raise a toast.
-    if (method !== 'GET') notify(message, 'error');
-    throw new Error(message);
+    if (method !== 'GET' && !quiet) notify(message, 'error');
+    const err = new Error(message);
+    // THE STATUS, NOT JUST THE SENTENCE. A caller that has to tell a gateway
+    // timeout from a refusal was left sniffing the message text for "504",
+    // which is a string a backend error could also contain. This is the number
+    // the browser actually received. Absent when fetch itself rejects — and
+    // that absence is meaningful: no status means no response at all, which
+    // cannot be told apart from a timeout and must not be reported as failure.
+    err.status = res.status;
+    throw err;
   }
   return json;
 }

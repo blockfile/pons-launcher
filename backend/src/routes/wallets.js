@@ -656,7 +656,18 @@ router.get('/v2/relay/status', requireApiKey, async (req, res, next) => {
 // starting it; only stopping/resuming needs the web UI to be open.
 router.get('/v2/relay/timed-fund', requireApiKey, (req, res, next) => {
   try {
-    res.json(timedRelayFunding.status(req.user.id));
+    // THE TIMED JOB, PLUS THE UNTIMED PATH'S PACING. The second half is
+    // read-only and decides nothing here: it is the quote gap, batch size and
+    // proxy timeout the console needs to say, before the UNTIMED button is
+    // pressed, whether that request can survive its own quote phase. It is
+    // served from this route because this is the one funding endpoint the
+    // console already polls — a number the console invented for itself would
+    // drift from the one the run actually paces by, which is the whole failure
+    // mode. See relayFunding.quotePacing.
+    res.json({
+      ...timedRelayFunding.status(req.user.id),
+      quotePacing: relayFunding.quotePacing(),
+    });
   } catch (err) {
     next(err);
   }

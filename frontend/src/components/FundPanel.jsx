@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from 'react';
-import { api } from '../api.js';
+import { LuTriangleAlert } from 'react-icons/lu';
+import { api, notify } from '../api.js';
 import Step from './Step.jsx';
 import { Busy } from './Section.jsx';
 import { rolesFor } from '../variant.js';
@@ -18,6 +19,9 @@ import {
 // Whether the run can run at all, and why not — one expression, drawn on the
 // page as well as used to disable the button. Pure and tested; see quoteAsset.js.
 import { fundGate } from './quoteAsset.js';
+// HOW BIG THE UNTIMED RUN MAY BE BEFORE THE GATEWAY STOPS LISTENING, and what a
+// 504 on it actually means. Pure and tested; see quoteWindow.js.
+import { fundFailure, quoteWindow, timedAlternative } from './quoteWindow.js';
 
 /**
  * Step 4 — moving ETH from the dev wallet out to the bundle wallets.
@@ -90,6 +94,23 @@ export default function FundPanel({
   const [timedPerTick, setTimedPerTick] = useState(1);
   const [timedStatus, setTimedStatus] = useState(null);
 
+  // ── THE UNTIMED RUN'S OWN LIMIT ────────────────────────────────────────────
+  //
+  // The quote gap, the batch size and what the proxy in front will wait for.
+  // They arrive on the SAME poll as the timed job (GET /v2/relay/timed-fund,
+  // `quotePacing`) and are held separately from `timedStatus` on purpose: the
+  // start/stop/resume responses share that state's shape but carry no pacing,
+  // so folding the two together would blank the limit every time a timed
+  // control was pressed. Null until the first read answers, which is what makes
+  // quoteWindow's documented fallbacks the right thing to draw meanwhile.
+  const [quotePace, setQuotePace] = useState(null);
+  // The operator's deliberate override of that limit — see the lock control
+  // below for why it is a shape change and not a refusal.
+  const [untimedArmed, setUntimedArmed] = useState(false);
+  // Set when an untimed run's request died without an answer. Not an error: the
+  // run is very likely still going server-side, and this is what says so.
+  const [blind, setBlind] = useState(null);
+
   // V1 paced run. The Stop flag is a ref, not state: the loop reads it between
   // wallets and a re-render is not needed for it to take effect. `wake` lets
   // Stop cut the current 8–9 s gap short instead of waiting it out.
@@ -155,11 +176,65 @@ export default function FundPanel({
     }
   }
 
+  // THE UNTIMED RUN, AND THE ONE ANSWER IT CANNOT GIVE.
+  //
+  // Not `act`: the shared handler reports every rejection as `ERROR: …`, and
+  // for THIS request that is wrong in the one case that matters. /v2/relay/fund
+  // quotes every wallet before it sends any deposit, so a long run outlives the
+  // proxy's patience and the browser is handed a 504 by nginx while the server
+  // carries on funding. The operator read that as failure and pressed again —
+  // a second run, over wallets the first had already paid. So the failure is
+  // classified rather than printed (see fundFailure), and the two branches that
+  // are not really failures leave the panel in a state that has to be cleared
+  // deliberately before this button can be pressed a second time.
+  //
+  // `quiet` because this call owns its own notice: api.js's automatic red
+  // ticket would say "blocked · 504 Gateway Time-out" over the top of a run
+  // that is still going. Every branch below raises one itself.
+  async function sendUntimed() {
+    setBusy('fund');
+    setBlind(null);
+    try {
+      const out = await api(fundEndpoint, 'POST', fundBody, { quiet: true });
+      report(out);
+      if (out?.mode === 'relay-solver') setRelayRuns(out.results || []);
+      setUntimedArmed(false);
+      setTimeout(reload, 3000);
+      setTimeout(refreshTimed, 3000);
+    } catch (err) {
+      const failure = fundFailure({
+        // Attached by api.js from the real response. Absent when fetch itself
+        // rejected, which is the ambiguous case fundFailure reports as such.
+        status: err.status ?? null,
+        message: err.message,
+        wallets: targets.length,
+        window: win,
+      });
+      report(failure.text);
+      if (failure.kind === 'failed') {
+        notify(failure.headline, 'error');
+      } else {
+        // 'note', not 'blocked'. Nothing was blocked; an answer was lost.
+        notify(failure.headline, 'info');
+        setBlind(failure);
+        // Re-lock: whatever the operator overrode, the next press is now a
+        // different and worse decision than the one they made a moment ago.
+        setUntimedArmed(false);
+        // The deposits may well be landing. Read the balances anyway — it is
+        // the only progress this console can still show.
+        setTimeout(reload, 3000);
+      }
+    } finally {
+      setBusy('');
+    }
+  }
+
   async function refreshTimed() {
     if (!isV2) return;
     try {
       const out = await api('/v2/relay/timed-fund');
       setTimedStatus(out);
+      if (out.quotePacing) setQuotePace(out.quotePacing);
       if (out.results?.length) setRelayRuns(out.results);
     } catch (_err) {
       // Funding status is nice-to-have; a transient poll miss should not paint
@@ -175,6 +250,7 @@ export default function FundPanel({
         const out = await api('/v2/relay/timed-fund');
         if (!alive) return;
         setTimedStatus(out);
+        if (out.quotePacing) setQuotePace(out.quotePacing);
         if (out.results?.length) setRelayRuns(out.results);
       } catch (_err) {
         // Kept quiet for the same reason as refreshTimed: the normal wallet
@@ -199,6 +275,17 @@ export default function FundPanel({
     .filter((t) => Number(t.amountEth) > 0);
 
   const total = targets.reduce((s, t) => s + Number(t.amountEth), 0);
+
+  // FAIL CLOSED ON A CHANGED RUN. An override of the untimed limit was granted
+  // for a specific number of wallets; change that number and it is a different
+  // press, granted again in one click. The alternative is an override still
+  // armed from ten minutes and four table edits ago.
+  //
+  // Below `targets` deliberately: hook order is body order, and reading it from
+  // an effect declared above its own declaration is a TDZ crash on first render.
+  useEffect(() => {
+    setUntimedArmed(false);
+  }, [targets.length]);
 
   // Read, never decided here: the backend picks the path per run from the same
   // two numbers. This only names the choice it is going to make.
@@ -237,6 +324,26 @@ export default function FundPanel({
         max: perTickCap,
       });
 
+  // ── WHAT ONE PRESS OF THE UNTIMED BUTTON COMMITS TO ────────────────────────
+  //
+  // Undefined spreads to quoteWindow's defaults, so before the first poll
+  // answers this draws the backend's own documented defaults rather than
+  // nothing — and is replaced by the live figures the moment they arrive.
+  const win = quoteWindow({
+    wallets: targets.length,
+    gapMs: quotePace?.gapMs,
+    batchSize: quotePace?.batchSize,
+    timeoutMs: quotePace?.gatewayTimeoutMs,
+  });
+  // The settings that DO fit, computed from the same cap the timed selects are
+  // built from — never a sentence with numbers typed into it.
+  const insteadUse = timedAlternative({ wallets: targets.length, perTick: perTickCap });
+  // Two reasons to make the press deliberate, one shape. `over` is a forecast
+  // and `blind` is a run whose outcome nobody knows; both end in "this press
+  // costs more than it looks like", which is exactly what a lock is for.
+  const untimedRisky = targets.length > 0 && (win.over || Boolean(blind));
+  const untimedLocked = untimedRisky && !untimedArmed;
+
   return (
     <Step {...step}>
       <p className="lede">
@@ -273,16 +380,47 @@ export default function FundPanel({
 
       <div className="row">
         {isV2 ? (
-          <Busy
-            busy={busy === 'fund'}
-            disabled={!gate.enabled}
-            title={gate.why || ''}
-            onClick={() => act('fund', () => api(fundEndpoint, 'POST', fundBody))}
-          >
-            {targets.length
-              ? `Relay ${total.toFixed(4)} ETH to ${targets.length} wallet${targets.length === 1 ? '' : 's'}`
-              : 'Nothing to send'}
-          </Busy>
+          /* THE CONTROL CHANGES SHAPE RATHER THAN DISAPPEARING.
+
+             Refusing outright would remove a working escape hatch — an operator
+             who has raised nginx's proxy_read_timeout (they have been told to,
+             and may have) is entitled to the one-press run at any size, and
+             must not have to edit code to get it. Warning alone leaves the trap
+             armed exactly as it was: the whole failure was that the press LOOKED
+             ordinary. So over the limit the amber button is not there to be hit
+             by reflex; a flat grey control stands in its place, naming the
+             limit, and one click puts the amber button back. Two gestures, no
+             refusal, and the second one is made after reading the notice below.
+
+             .quiet, and never .quiet.is-on: this control spends nothing and
+             moves nothing, and the panel's amber belongs to the funding action
+             it reveals. */
+          untimedLocked ? (
+            <button
+              className="quiet"
+              title={
+                blind
+                  ? "the last untimed run's outcome is unknown — check the dev wallet's nonce before starting another"
+                  : `${win.sentence}. Unlocks the button as it was; the run will 504 and continue server-side.`
+              }
+              onClick={() => setUntimedArmed(true)}
+            >
+              {blind
+                ? 'Unlock untimed run — last outcome unknown'
+                : `Unlock untimed run — over the ${win.maxWallets}-wallet limit`}
+            </button>
+          ) : (
+            <Busy
+              busy={busy === 'fund'}
+              disabled={!gate.enabled}
+              title={gate.why || ''}
+              onClick={sendUntimed}
+            >
+              {targets.length
+                ? `Relay ${total.toFixed(4)} ETH to ${targets.length} wallet${targets.length === 1 ? '' : 's'}`
+                : 'Nothing to send'}
+            </Busy>
+          )
         ) : (
           <>
             {/* V1 funds 1 by 1 through the disperser contract, 8–9 s apart, so
@@ -316,10 +454,33 @@ export default function FundPanel({
             fixes it, by that step's live number. */}
         {gate.why && <span className="hint">{gate.why}</span>}
 
+        {/* THE WAY BACK. An unlock granted by mistake is undone here rather
+            than by reloading the page — bare text, the bottom rung, because
+            re-locking is the safe direction and needs no weight. */}
+        {isV2 && untimedRisky && untimedArmed && (
+          <button
+            className="link"
+            title="put the limit back"
+            onClick={() => setUntimedArmed(false)}
+          >
+            re-lock
+          </button>
+        )}
+
         {isV2 && targets.length > 0 && (
           <span className="hint">
             strict exact-output Relay deposits — verify balances before preflight
           </span>
+        )}
+
+        {/* WHAT THE PRESS COSTS, WHEN IT IS STILL A REASONABLE ONE. Under the
+            limit nothing else changes: the same button, plus the seconds it
+            will sit there quoting before anything reaches the chain, and the
+            window it has to finish inside. The number the whole feature is
+            built on is the same one shown here — an operator watching 45 s of
+            "working…" should be able to see that 45 s was the deal. */}
+        {isV2 && targets.length > 0 && !untimedRisky && win.sentence && (
+          <span className="hint">{win.sentence}</span>
         )}
 
         {!isV2 && targets.length > 0 && (
@@ -369,6 +530,79 @@ export default function FundPanel({
           Sweep back to dev
         </Busy>
       </div>
+
+      {/* THE OUTCOME NOBODY KNOWS, STATED WHERE THE HAND IS.
+          Vermilion, and it is the only thing in the console entitled to it
+          here: at this moment the run IS live and IS irreversible — deposits
+          are going out and no control can stop them. The same words go to the
+          readout, but the sentence that prevents the second press has to be
+          beside the button that would make it. */}
+      {isV2 && blind && (
+        <div className="notice danger">
+          <h3>
+            <LuTriangleAlert aria-hidden="true" />
+            <span>{blind.headline}</span>
+            {/* Dismissal is a READING, not an outcome — nothing here can learn
+                what the run did, so the only thing that clears this is the
+                operator saying they have looked. It also re-locks by leaving
+                `untimedArmed` alone: the lock is keyed on this notice. */}
+            <button
+              className="link"
+              style={{ marginLeft: 'auto' }}
+              title="clears this notice only — it neither stops nor confirms the run"
+              onClick={() => setBlind(null)}
+            >
+              nonce checked
+            </button>
+          </h3>
+          <ul>
+            {blind.lines.map((line, i) => (
+              <li key={i}>
+                {line.crux && <b className="crux">{line.crux}</b>}
+                {line.crux ? ' ' : ''}
+                {line.text}
+              </li>
+            ))}
+          </ul>
+        </div>
+      )}
+
+      {/* THE LIMIT, BEFORE THE PRESS RATHER THAN AFTER IT.
+          Grey: this is a forecast, not a live thing and not a settled one, and
+          the money colour is spoken for by the funding action itself. One
+          .crux carries the clause that cost the operator an evening. */}
+      {isV2 && !blind && untimedRisky && (
+        <div className="notice">
+          <h3>
+            <LuTriangleAlert aria-hidden="true" />
+            <span>
+              Untimed run: {targets.length} wallets · about {win.duration} of quoting · the gateway
+              waits {win.limitLabel}
+            </span>
+          </h3>
+          <ul>
+            <li>
+              Every wallet is quoted before any deposit is sent —{' '}
+              {win.batchSize > 1 ? `${win.batchSize} quotes` : 'one quote'} per{' '}
+              {(win.gapMs / 1000).toFixed(0)} s, {win.batches} times over — so the browser holds
+              this request open for about {win.duration} with nothing on chain. Past{' '}
+              {win.limitLabel} the proxy answers 504 Gateway Time-out instead.
+            </li>
+            <li>
+              <b className="crux">The run will continue server-side anyway.</b> The 504 is the
+              gateway giving up on the answer, not the funding failing: the deposits keep going
+              out, this console can report neither progress nor outcome, and a second press would
+              fund every wallet again.
+            </li>
+            <li>
+              Use the row below instead: {insteadUse}. The server holds that job, this tab may
+              close, and it is paced at Relay&apos;s own budget rather than against the proxy&apos;s
+              patience. Up to {win.maxWallets} wallet{win.maxWallets === 1 ? '' : 's'} still fits
+              one untimed press.
+            </li>
+          </ul>
+        </div>
+      )}
 
       {isV2 && (
         <div className="row">

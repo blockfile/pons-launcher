@@ -4,7 +4,7 @@ const test = require('node:test');
 const assert = require('node:assert/strict');
 const { parseEther } = require('ethers');
 
-const { quoteBody, depositStep, fundV2Bundle } = require('./funding');
+const { quoteBody, depositStep, fundV2Bundle, quotePacing } = require('./funding');
 
 const DEV = '0x1111111111111111111111111111111111111111';
 const V2_BUNDLE = '0x2222222222222222222222222222222222222222';
@@ -265,4 +265,66 @@ test('dry run quotes Relay but does not broadcast deposits', async () => {
   assert.equal(out.results[0].simulated, true);
   assert.equal(out.results[0].hash, null);
   assert.equal(sent.length, 0);
+});
+
+// ── THE PACING, READ BACK ───────────────────────────────────────────────────
+//
+// quotePacing() exists so the console can price a press before it is one: the
+// untimed run quotes EVERY wallet before it sends ANY deposit, so its request
+// lives for roughly (wallets ÷ batchSize) × gapMs, and if that outlasts the
+// proxy in front the operator gets a 504 over a run that is still going. It is
+// a read of the module's own constants and nothing else — if it ever starts
+// reporting a figure the run does not actually pace by, the warning built on it
+// becomes a comfortable lie.
+
+test('quotePacing reports the constants the run is actually paced by', () => {
+  const config = require('../config');
+  const pacing = quotePacing();
+
+  assert.equal(pacing.batchSize, config.relayQuoteBatchSize);
+  assert.equal(pacing.gapMs, config.relayQuoteGapMs);
+  assert.equal(pacing.retries, config.relayQuoteRetries);
+  assert.equal(pacing.backoffMs, config.relayQuote429BackoffMs);
+  assert.equal(pacing.gatewayTimeoutMs, config.gatewayTimeoutMs);
+  assert.equal(pacing.maxTargets, 31, 'the same ceiling planTargets enforces');
+});
+
+test('quotePacing is a read: calling it changes nothing and repeats itself', () => {
+  assert.deepEqual(quotePacing(), quotePacing());
+});
+
+test('one Relay quote per wallet — the assumption the whole projection rests on', async () => {
+  // The console projects the untimed run as (wallets / batchSize) batches of
+  // quoting. That is only true while a wallet costs exactly one quote, so pin
+  // it here rather than in a comment: a second quote per wallet would silently
+  // double the real wait while the warning kept quoting the old figure.
+  const wallets = [{ id: 'dev', role: 'v2dev', address: DEV }];
+  const targets = [];
+  for (let i = 0; i < 10; i += 1) {
+    const address = `0x${String(i).repeat(40).slice(0, 40)}`;
+    wallets.push({ id: `v2b${i}`, role: 'v2bundle', address });
+    targets.push({ walletId: `v2b${i}`, amountEth: '0.01' });
+  }
+  const ks = {
+    list: () => wallets,
+    walletWithRole: (role) => wallets.find((w) => w.role === role) || null,
+    walletsWithRole: (role) => wallets.filter((w) => w.role === role),
+    signer: () => ({ sendTransaction: async () => ({ hash: HASH }) }),
+  };
+
+  let quotes = 0;
+  const out = await fundV2Bundle(targets, {
+    keystore: ks,
+    relayQuote: async (args) => {
+      quotes += 1;
+      return relayQuote(args);
+    },
+    rpc: fakeRpc(),
+    getFeesFn: async () => REFRESHED_FEES,
+    dryRun: true,
+    quoteBatchGapMs: 0, // the gap is what the console projects; do not wait it out here
+  });
+
+  assert.equal(quotes, 10, 'ten wallets, ten quotes');
+  assert.equal(out.results.length, 10);
 });

@@ -353,12 +353,39 @@ async function status(requestId, deps = {}) {
   });
 }
 
+/**
+ * THE PACING THIS MODULE RUNS AT, READ-ONLY — for the console to price a press.
+ *
+ * Nothing here decides anything; it reports the constants above so the console
+ * can do the one sum the operator needs before pressing an untimed run: every
+ * wallet is quoted before any deposit is sent, so the request is held open for
+ * roughly (wallets ÷ batchSize) × gapMs — and if that exceeds what the proxy in
+ * front will wait for, the answer is lost even though the run is not. Two 504s
+ * on a 30-wallet run are what this exists to stop happening a third time.
+ *
+ * `gatewayTimeoutMs` is not this module's business at all, but it is the other
+ * half of that comparison and the console has no other way to learn it, so it
+ * rides along rather than earning a second endpoint. See config.js for why the
+ * app knows it at all.
+ */
+function quotePacing() {
+  return {
+    batchSize: QUOTE_BATCH_SIZE,
+    gapMs: QUOTE_BATCH_GAP_MS,
+    retries: QUOTE_RETRIES,
+    backoffMs: QUOTE_BACKOFF_MS,
+    maxTargets: MAX_TARGETS,
+    gatewayTimeoutMs: config.gatewayTimeoutMs,
+  };
+}
+
 module.exports = {
   NATIVE,
   quoteBody,
   depositStep,
   fundV2Bundle,
   quoteDeposit,
+  quotePacing,
   status,
   _private: { planTargets, normaliseTx, gasLimitOf, publicDetails, publicFees },
 };
