@@ -15,16 +15,21 @@
 //
 //   npm run pairs                          # against RPC_URL
 //   RPC_URL=https://rpc.mainnet.chain.robinhood.com npm run pairs
-//   npm run pairs -- --check               # exit 1 if the chain has pairs the seed lacks
+//   npm run pairs -- --check               # exit 1 if the chain has pairs the seed lacks,
+//                                          # exit 2 if THIS endpoint cannot tell
 //
 // --check is the one to put in front of a launch: it answers "is my picker
 // showing everything the factory would accept" without changing anything.
 //
 // Read-only. It sends no transaction and signs nothing.
 
-const { getAddress } = require('ethers');
+const { getAddress, Interface } = require('ethers');
 const config = require('../src/config');
+const { provider } = require('../src/evm/provider');
+const { FACTORY_V2_ABI } = require('../src/evm/v2/abi');
 const { resolvePairTokens, SEED_CANDIDATES } = require('../src/evm/v2/pairTokens');
+
+const factoryIface = new Interface(FACTORY_V2_ABI);
 
 const CHECK = process.argv.includes('--check');
 
@@ -39,17 +44,52 @@ const CHECK = process.argv.includes('--check');
   const seeded = new Set(SEED_CANDIDATES.map((a) => getAddress(a).toLowerCase()));
   const missing = pairs.filter((t) => !seeded.has(getAddress(t.address).toLowerCase()));
 
-  if (pairs.length <= SEED_CANDIDATES.length / 2) {
-    console.log('  WARNING: this endpoint resolved only', pairs.length, 'pairs.');
-    console.log('  A range-limited node (QuickNode) cannot run the whole-chain getLogs, so this');
-    console.log('  is the SEED talking, not the chain. Re-run against a matched-count-limited');
-    console.log('  endpoint before trusting the output:');
-    console.log('    RPC_URL=https://rpc.mainnet.chain.robinhood.com npm run pairs');
-    console.log('');
+  // CAN THIS ENDPOINT DISCOVER AT ALL? Asked directly, not inferred from the
+  // count, and that distinction is the whole value of this script now.
+  //
+  // The seed carries all 56, so a range-limited node RESOLVES all 56 -- by
+  // confirming the seed, not by finding anything. The comparison below would
+  // then agree with itself and print OK forever, including on the day a 57th
+  // pair is approved. Counting is no help either: a complete seed produces a
+  // complete-looking answer. The only honest question is whether the
+  // whole-chain getLogs works HERE, so it is run.
+  let discovers = false;
+  let logsError = '';
+  try {
+    const topics = factoryIface.encodeFilterTopics('PairTokenApprovalUpdated', []);
+    const logs = await provider.getLogs({
+      address: config.v2FactoryAddress,
+      topics,
+      fromBlock: 0,
+      toBlock: 'latest',
+    });
+    discovers = logs.length > 0;
+    if (!discovers) logsError = 'the query succeeded but returned no approval events';
+  } catch (err) {
+    logsError = err.shortMessage || err.message;
   }
 
   if (CHECK) {
     console.log(`  chain: ${pairs.length} approved · seed: ${SEED_CANDIDATES.length} entries`);
+    console.log(
+      discovers
+        ? '  discovery: WORKS here — this endpoint can find pairs the seed does not carry.'
+        : `  discovery: BLIND here — ${logsError}.`
+    );
+
+    if (!discovers) {
+      // Refusing to answer is the point. A green tick from an endpoint that
+      // cannot look is worse than no tick: it is the seed agreeing with itself,
+      // and it is exactly what hid AMD.
+      console.log('');
+      console.log('  CANNOT VERIFY FROM THIS ENDPOINT. Everything below the seed is invisible to');
+      console.log('  it, so "every approved pair is in the seed" would only mean "the seed');
+      console.log('  matches the seed". Re-run against a matched-count-limited node:');
+      console.log('    RPC_URL=https://rpc.mainnet.chain.robinhood.com npm run pairs -- --check');
+      console.log('');
+      process.exit(2);
+    }
+
     if (!missing.length) {
       console.log('  OK — every approved pair is in the seed.');
       process.exit(0);
