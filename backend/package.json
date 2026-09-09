@@ -20,6 +20,7 @@
     "v4:simulate": "node scripts/v4-simulate.js",
     "latency": "node scripts/latency.js",
     "burst": "node scripts/burst.js",
+    "pairs": "node scripts/pairs.js",
     "tick-race": "node scripts/tick-race.js",
     "deploy": "node scripts/deploy-contract.js",
     "rescue": "node scripts/rescue-distributor.js"

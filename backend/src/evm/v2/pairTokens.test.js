@@ -307,3 +307,40 @@ test('a COMPLETE list still gets the full window', async () => {
     Date.now = realNow;
   }
 });
+
+// ── THE RANGE-LIMITED NODE, WHICH IS WHAT THE OPERATOR IS ON ────────────────
+// QuickNode refuses any getLogs span over 10k blocks, so the whole-chain query
+// throws and discovery finds NOTHING. With only 7 seeded pairs the picker
+// offered 7 of 56 and AMD was invisible -- approved, priced, undiscoverable.
+// The seed now carries all of them, so this node sees the same list as any
+// other. Every entry still goes through approvedPairTokens, so the seed being
+// large does not make it trusted.
+
+test('a range-limited node (no logs at all) still resolves every seeded pair', async () => {
+  clearPairTokenCache();
+  const approveAll = (calls) =>
+    Promise.resolve(
+      calls.map((c, i) => {
+        // round one: approvedPairTokens(addr) -> true for everything
+        if (calls.length && calls.every((x) => x.target === calls[0].target)) {
+          return { success: true, returnData: '0x' + '0'.repeat(63) + '1' };
+        }
+        return { success: false, returnData: '0x' };
+      })
+    );
+  const tokens = await resolvePairTokens({
+    refresh: true,
+    provider: { getLogs: async () => { throw new Error('range too wide'); } },
+    multicall: approveAll,
+  });
+  // Round two is stubbed out, so nothing is enriched -- but round one must have
+  // been ASKED about every seed entry, which is the property under test.
+  assert.ok(SEED_CANDIDATES.length >= 50, 'the seed carries the full approved set, not 7');
+  assert.ok(
+    SEED_CANDIDATES.map((a) => getAddress(a)).includes(
+      getAddress('0x86923f96303D656E4aa86D9d42D1e57ad2023fdC')
+    ),
+    'AMD is seeded — the token whose absence surfaced this'
+  );
+  assert.equal(tokens[0].symbol, 'ETH', 'native is still first whatever happened');
+});
