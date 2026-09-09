@@ -242,3 +242,68 @@ test('a genuine "nothing approved" IS cached — it is an answer, not a failure'
   await resolvePairTokens(opts);
   assert.equal(counter.n, reads, 'the chain answered "none" — that is cached like any answer');
 });
+
+// ── A PARTLY-READ LIST MUST NOT STAND FOR THE FULL WINDOW ───────────────────
+// The operator asked why AMD was missing from the v2 picker. It is approved and
+// priced; the picker was drawing a cached list that had lost it to one failed
+// economics slot in round two, which `answered` (round one only) cannot see.
+
+test('a token dropped by a failed economics slot is served, but only briefly', async () => {
+  clearPairTokenCache();
+  // Round one approves everything; round two loses ONE token's economics.
+  const full = db();
+  const dropOne = (calls) => {
+    const out = fakeMulticall(full, { n: 0 })(calls);
+    return Promise.resolve(out).then((slots) =>
+      slots.map((slot, i) =>
+        // round two is triples; blank the FIRST economics slot only
+        calls.length > 3 && i === 0 ? { success: false, returnData: '0x' } : slot
+      )
+    );
+  };
+  const partial = await resolvePairTokens({
+    refresh: true,
+    provider: providerWithLog(NEWT),
+    multicall: dropOne,
+  });
+  const complete = await resolvePairTokens({
+    refresh: true,
+    provider: providerWithLog(NEWT),
+    multicall: fakeMulticall(full, { n: 0 }),
+  });
+  assert.ok(partial.length < complete.length, 'precondition: one token was dropped');
+
+  // Re-read it. A COMPLETE list would still be cached here; the partial one
+  // must not be, beyond its short ttl.
+  clearPairTokenCache();
+  await resolvePairTokens({ refresh: true, provider: providerWithLog(NEWT), multicall: dropOne });
+  const realNow = Date.now;
+  Date.now = () => realNow() + 25 * 1000; // past INCOMPLETE_TTL_MS, inside CACHE_TTL_MS
+  try {
+    const counter = { n: 0 };
+    const healed = await resolvePairTokens({
+      provider: providerWithLog(NEWT),
+      multicall: fakeMulticall(full, counter),
+    });
+    assert.ok(counter.n > 0, 'the incomplete list expired and the chain was asked again');
+    assert.equal(healed.length, complete.length, 'and the re-read recovered the missing token');
+  } finally {
+    Date.now = realNow;
+  }
+});
+
+test('a COMPLETE list still gets the full window', async () => {
+  clearPairTokenCache();
+  const counter = { n: 0 };
+  const opts = { provider: providerWithLog(NEWT), multicall: fakeMulticall(db(), counter) };
+  await resolvePairTokens({ ...opts, refresh: true });
+  const reads = counter.n;
+  const realNow = Date.now;
+  Date.now = () => realNow() + 25 * 1000; // past the INCOMPLETE ttl only
+  try {
+    await resolvePairTokens(opts);
+    assert.equal(counter.n, reads, 'a complete list is not re-read after 25s');
+  } finally {
+    Date.now = realNow;
+  }
+});

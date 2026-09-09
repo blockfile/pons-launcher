@@ -75,7 +75,10 @@ const SEED_CANDIDATES = [
 // The list changes rarely (an owner action), so it is cached. TTL is a safety
 // net; the frontend can force a fresh read with refresh:true.
 const CACHE_TTL_MS = 5 * 60 * 1000;
-let cache = null; // { at:number, tokens:Array }
+// An incomplete read is cached only briefly, so a pair lost to one bad slot
+// comes back on the next listing instead of five minutes later.
+const INCOMPLETE_TTL_MS = 20 * 1000;
+let cache = null; // { at:number, tokens:Array, ttlMs:number }
 
 /** The native-ETH option, always first and always present. */
 function nativeOption() {
@@ -155,7 +158,9 @@ async function resolvePairTokens(opts = {}) {
   const rpc = opts.provider || provider;
   const deps = opts;
 
-  if (!refresh && cache && Date.now() - cache.at < CACHE_TTL_MS) return cache.tokens;
+  // The entry carries its OWN ttl: an INCOMPLETE list is cached briefly rather
+  // than for the full window. See the `dropped` handling below.
+  if (!refresh && cache && Date.now() - cache.at < (cache.ttlMs ?? CACHE_TTL_MS)) return cache.tokens;
 
   const factoryAddress = deps.factoryAddress || config.v2FactoryAddress;
   // The multicall is injectable so the resolver can be exercised without a chain;
@@ -165,6 +170,13 @@ async function resolvePairTokens(opts = {}) {
   // How many approval slots came back decodable. Zero, with candidates to ask
   // about, means the CHAIN did not answer — not that it answered "none".
   let answered = 0;
+  // How many the factory said YES to. Round two then reads economics, symbol and
+  // decimals for each, and an entry whose economics slot fails to decode is
+  // dropped from the list -- silently, and by design, since a token the factory
+  // cannot price is unusable. But a MULTICALL that partly fails looks identical
+  // to that, and caching it hides an approved pair for the whole window. This is
+  // how the two are told apart afterwards.
+  let approvedCount = 0;
 
   try {
     // ── candidate set: logs ∪ seed, deduped, lowercased ──────────────────────
@@ -201,6 +213,8 @@ async function resolvePairTokens(opts = {}) {
         if (decoded) answered += 1;
         return decoded ? Boolean(decoded[0]) : false;
       });
+
+      approvedCount = approved.length;
 
       // ── round two: economics + symbol + decimals for the approved ones ─────
       if (approved.length) {
@@ -273,7 +287,32 @@ async function resolvePairTokens(opts = {}) {
   // reshuffle between reads.
   const rest = tokens.slice(1).sort((a, b) => a.symbol.localeCompare(b.symbol));
   const ordered = [tokens[0], ...rest];
-  cache = { at: Date.now(), tokens: ordered };
+
+  // A PARTLY-READ LIST IS NOT A WRONG LIST, BUT IT IS NOT A DURABLE ONE EITHER.
+  //
+  // Observed: the operator asked why AMD was missing from the v2 picker. AMD is
+  // approved and priced -- a live read returns it with phantomQuote 6.6662 and a
+  // graduation threshold of 16.6655 -- so the picker was drawing a CACHED list
+  // that had lost it. Round two reads economics, symbol and decimals for each
+  // approved token, and one economics slot failing to decode drops that token:
+  //
+  //     if (!econ) return; // an approved token the factory cannot price
+  //
+  // which is right for a token that genuinely cannot be priced, and wrong for a
+  // multicall that partly failed -- and the two are indistinguishable at that
+  // line. The `answered` guard above only watches round ONE, so an incomplete
+  // round two sailed past it and stood for the full five minutes.
+  //
+  // It is still SERVED: 55 pairs is far better than none, and a token may be
+  // unpriceable forever, so refusing to cache would hammer the chain on every
+  // listing. It just does not get to STAND for long -- a short ttl on the entry
+  // makes the next request re-read and heal it.
+  const dropped = approvedCount - (ordered.length - 1);
+  cache = {
+    at: Date.now(),
+    tokens: ordered,
+    ttlMs: dropped > 0 ? INCOMPLETE_TTL_MS : CACHE_TTL_MS,
+  };
   return ordered;
 }
 
