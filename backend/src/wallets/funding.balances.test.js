@@ -121,3 +121,69 @@ test('an empty keystore never reaches the token read at all', async () => {
   assert.deepEqual(out, []);
   assert.equal(batchCalls.length, 0);
 });
+
+// ── ONE READ FOR EVERY WALLET, NOT ONE READ PER WALLET ──────────────────────
+// The listing used a sequential `for … await rpc.getBalance(…)` over the WHOLE
+// keystore — every tab's wallets, not just this one's. With several hundred
+// seasoned wallets that took ~10s, and the console reloads this after every
+// create, import and delete, so deleting one wallet cost ten seconds.
+
+function batchHarness({ native = {}, unread = [] } = {}) {
+  const nativeReads = [];
+  const nativeBatches = [];
+  const deps = {
+    keystore: { list: () => WALLETS },
+    provider: {
+      getBalance: async (a) => {
+        nativeReads.push(a);
+        return native[a] ?? 0n;
+      },
+    },
+    readNativeBalances: async (addresses) => {
+      nativeBatches.push(addresses);
+      return addresses.map((a) => (unread.includes(a) ? null : (native[a] ?? 0n)));
+    },
+    readTokenBalances: async (_t, owners) => owners.map(() => null),
+  };
+  return { deps, nativeReads, nativeBatches };
+}
+
+test('every native balance comes from ONE batched read, not one call per wallet', async () => {
+  const { deps, nativeReads, nativeBatches } = batchHarness({
+    native: { [WALLETS[0].address]: parseEther('1.5'), [WALLETS[1].address]: parseEther('0.25') },
+  });
+  const out = await funding.balances(deps);
+
+  assert.equal(nativeBatches.length, 1, 'exactly one batched read');
+  assert.deepEqual(nativeBatches[0], WALLETS.map((w) => w.address), 'and it asks for every wallet');
+  assert.equal(nativeReads.length, 0, 'no per-wallet getBalance at all on the happy path');
+
+  assert.equal(out[0].balanceEth, '1.5');
+  assert.equal(out[1].balanceEth, '0.25');
+  assert.equal(out[2].balanceEth, '0.0');
+});
+
+test('a slot that could not be read falls back to that ONE wallet, not all of them', async () => {
+  const { deps, nativeReads, nativeBatches } = batchHarness({
+    native: { [WALLETS[1].address]: parseEther('2') },
+    unread: [WALLETS[1].address],
+  });
+  const out = await funding.balances(deps);
+
+  assert.equal(nativeBatches.length, 1);
+  assert.deepEqual(nativeReads, [WALLETS[1].address], 'only the unread wallet is re-read');
+  // And it is a NUMBER, not null: every reader of this listing assumes that.
+  assert.equal(out[1].balanceEth, '2.0');
+  assert.equal(typeof out[1].balanceWei, 'string');
+  for (const row of out) assert.ok(Number.isFinite(Number(row.balanceEth)), 'balanceEth stays numeric');
+});
+
+test('a batch that fails entirely still answers, one wallet at a time', async () => {
+  const { deps, nativeReads } = batchHarness({
+    native: { [WALLETS[0].address]: parseEther('0.5') },
+    unread: WALLETS.map((w) => w.address),
+  });
+  const out = await funding.balances(deps);
+  assert.equal(nativeReads.length, WALLETS.length, 'falls all the way back rather than reporting nothing');
+  assert.equal(out[0].balanceEth, '0.5');
+});
