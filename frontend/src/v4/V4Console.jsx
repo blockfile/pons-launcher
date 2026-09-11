@@ -270,11 +270,11 @@ export default function V4Console({ health, credential, report, output, reported
       {
         key: 'gather',
         n: 5,
-        // Optional and repeatable — like v3's exit/sweep, an empty set of wallets is
-        // both "gathered" and "never run", so there is nothing honest to mark done.
+        // Optional and repeatable — like v3's exit/sweep, an empty set of funders is both
+        // "swept" and "never run", so there is nothing honest to mark done.
         done: false,
-        title: 'Gather the ETH back',
-        detail: 'sweep leftover ETH to a super-main, through Relay',
+        title: 'Sweep funders to a super-main',
+        detail: 'leftover funder ETH → one super-main, by Relay or direct',
       },
     ];
 

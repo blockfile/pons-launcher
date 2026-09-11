@@ -4,41 +4,67 @@ import Step from '../components/Step.jsx';
 import { Busy } from '../components/Section.jsx';
 import Modal, { Fact } from '../components/Modal.jsx';
 import Address from '../components/Address.jsx';
-import { eth } from './roles.js';
+import { eth, plural } from './roles.js';
+import { sumWei, weiToEth } from './weiTotal.js';
 
 /**
- * Step 5 — gather the ETH back.
+ * Step 5 — sweep the funders' leftover ETH to one super-main.
  *
- * Sweeps leftover ETH from a chosen set of wallets (funding, seeds, withdrawn) to a
- * super-main, THROUGH RELAY. Never direct: a direct seed → super-main transfer would
- * re-link the seasoned wallet to the super-main on chain, which is the one thing V4
- * exists to avoid. The backend refuses a direct path; this panel only offers Relay.
+ * FUNDERS ONLY. Aged seed wallets are never swept, and neither are the other super-mains:
+ * the backend refuses any wallet that is not a funder, so nothing this panel sends can reach
+ * one. A funder still running a campaign is skipped.
  *
- * Seed balances are tiny (0.0005), and the Relay fee + gas to move one usually exceeds
- * it, so most seeds are skipped as dust — the recoverable ETH is in the funding wallets.
- * A funder mid-campaign is never swept (it would starve the campaign).
+ * Two routes, chosen per sweep:
+ *   Relay  (default) the funder stays unlinked from the super-main on chain. A Relay fee +
+ *          gas per funder; small balances fall under the dust floor.
+ *   Direct a plain send, gas only — recovers almost everything, and links each funder to
+ *          the super-main on chain. No seed is linked either way: their funding went
+ *          through Relay.
+ *
+ * The preview lists every funder it would sweep, all ticked. Untick any to leave it holding
+ * its ETH; only the ticked ones are sent.
  */
-const CATS = [
-  { key: 'funding', label: 'Funding wallets', hint: 'leftover after campaigns (any mid-campaign are skipped)' },
-  { key: 'seeds', label: 'Seed wallets', hint: 'small funded balances — usually dust, mostly skipped' },
-  { key: 'withdrawn', label: 'Withdrawn seeds', hint: 'seeds set aside from the pool' },
+const ROUTES = [
+  { key: 'relay', label: 'Relay — funders stay unlinked (≈3% fee, dust floor)' },
+  { key: 'direct', label: 'Direct — gas only, links each funder to the super-main' },
 ];
+
+/** The one line the result panel shows after a sweep. */
+function summarise(out) {
+  const t = out.totals;
+  const how = out.route === 'direct' ? 'directly' : 'through Relay';
+  return (
+    `${out.dryRun ? '[dry run — nothing signed] ' : ''}Swept ${t.moved}/${t.wallets} funder(s) ${how} — ${t.eth} ETH.` +
+    (t.failed ? ` ${t.failed} failed.` : '') +
+    (t.pending ? ` ${t.pending} pending — no receipt yet, check the explorer.` : '') +
+    (t.notAttempted ? ` ${t.notAttempted} not attempted — Relay is rate-limiting; run the sweep again in a minute.` : '')
+  );
+}
 
 export default function V4GatherPanel({ step, masters = [], explorer, reload, report }) {
   const [busy, setBusy] = useState('');
-  const [cats, setCats] = useState({ funding: true, seeds: false, withdrawn: false });
   const [dest, setDest] = useState('');
+  const [route, setRoute] = useState('relay');
   const [preview, setPreview] = useState(null);
+  const [ticked, setTicked] = useState([]);
   const [arming, setArming] = useState(false);
 
-  // Super-mains are the intended destination; fall back to every funding wallet if none
-  // is flagged, so the panel still works before super-mains are designated.
   const supers = masters.filter((w) => w.isSuperMain);
-  const destOptions = supers.length ? supers : masters;
+  // A super-main un-flagged in step 1 after being chosen here is no longer a destination.
+  const destOk = supers.some((w) => w.id === dest);
+  const rows = preview ? preview.wallets : [];
+  const tickedRows = rows.filter((w) => ticked.includes(w.walletId));
+  const tickedEth = weiToEth(sumWei(tickedRows));
+  const allTicked = rows.length > 0 && tickedRows.length === rows.length;
+  const direct = route === 'direct';
 
-  const chosen = Object.keys(cats).filter((k) => cats[k]);
-  const ready = dest && chosen.length > 0;
-  const query = () => `destinationId=${encodeURIComponent(dest)}&categories=${chosen.join(',')}`;
+  const reset = () => {
+    setPreview(null);
+    setTicked([]);
+  };
+  const toggleTick = (id) => setTicked((p) => (p.includes(id) ? p.filter((x) => x !== id) : [...p, id]));
+  const toggleAll = () => setTicked(allTicked ? [] : rows.map((w) => w.walletId));
+  const link = (address) => (explorer ? `${explorer}/address/${address}` : '');
 
   async function act(what, fn) {
     setBusy(what);
@@ -54,61 +80,72 @@ export default function V4GatherPanel({ step, masters = [], explorer, reload, re
   return (
     <Step {...step}>
       <p className="lede">
-        Gathers leftover ETH from the wallets you choose to a super-main, <b>through Relay</b> — so no
-        wallet is linked to the super-main on chain. Seed balances are tiny and usually skipped as dust;
-        the recoverable ETH is in the funding wallets. A funder still running a campaign is left alone.
+        Sweeps leftover ETH from your <b>funders</b> to one super-main. Aged seed wallets and the other
+        super-mains are never touched, and a funder still running a campaign is left alone.
       </p>
+
+      {supers.length === 0 && (
+        <p className="hint">
+          No super-main yet — flag one in step 1 (the ↑ arrow on a funding wallet), then sweep the funders to it.
+        </p>
+      )}
 
       <div className="row">
         <label>
           to super-main
           <select
-            value={dest}
+            value={destOk ? dest : ''}
+            disabled={supers.length === 0}
             onChange={(e) => {
               setDest(e.target.value);
-              setPreview(null);
+              reset();
             }}
           >
             <option value="">choose one…</option>
-            {destOptions.map((w) => (
+            {supers.map((w) => (
               <option key={w.id} value={w.id}>
                 {w.address.slice(0, 10)}… ·{' '}
                 {w.balanceEth == null ? 'unreadable' : `${Number(w.balanceEth).toFixed(4)} ETH`}
-                {w.isSuperMain ? ' · super-main' : ''}
+              </option>
+            ))}
+          </select>
+        </label>
+        <label>
+          route
+          <select
+            value={route}
+            onChange={(e) => {
+              setRoute(e.target.value);
+              reset();
+            }}
+          >
+            {ROUTES.map((r) => (
+              <option key={r.key} value={r.key}>
+                {r.label}
               </option>
             ))}
           </select>
         </label>
       </div>
 
-      <div className="row" style={{ gap: 16, flexWrap: 'wrap' }}>
-        {CATS.map((c) => (
-          <label key={c.key} style={{ display: 'inline-flex', gap: 8, alignItems: 'center' }}>
-            <input
-              type="checkbox"
-              checked={Boolean(cats[c.key])}
-              onChange={(e) => {
-                setCats((p) => ({ ...p, [c.key]: e.target.checked }));
-                setPreview(null);
-              }}
-            />
-            <span>
-              {c.label} <span className="hint">· {c.hint}</span>
-            </span>
-          </label>
-        ))}
-      </div>
+      {direct && (
+        <p className="hint">
+          <b>Direct links on-chain:</b> every funder swept shows up sending straight to this super-main, so
+          they become publicly tied together. Seeds stay unlinked — their funding went through Relay.
+        </p>
+      )}
 
       <div className="row">
         <Busy
           busy={busy === 'preview'}
           className="btn-primary"
-          disabled={!ready}
+          disabled={!destOk}
           onClick={() =>
             act('preview', async () => {
-              const out = await api(`/v4/sweep/preview?${query()}`);
+              const out = await api(`/v4/sweep/preview?destinationId=${encodeURIComponent(dest)}&route=${route}`);
               setPreview(out);
-              return `Gather preview: ${out.walletCount} wallet(s), ${out.totalEth} ETH.`;
+              setTicked(out.wallets.map((w) => w.walletId));
+              return `Sweep preview (${out.route}): ${plural(out.walletCount, 'funder')}, ${out.totalEth} ETH.`;
             })
           }
         >
@@ -117,32 +154,41 @@ export default function V4GatherPanel({ step, masters = [], explorer, reload, re
         <Busy
           busy={busy === 'sweep'}
           className="danger"
-          disabled={!preview || !preview.walletCount}
+          disabled={tickedRows.length === 0}
           onClick={() => setArming(true)}
         >
-          Gather to super-main
+          Sweep {plural(tickedRows.length, 'funder')}
         </Busy>
       </div>
 
       {preview && (
         <div className="table-card" style={{ marginTop: 8 }}>
-          {preview.wallets.length > 0 ? (
+          {rows.length > 0 ? (
             <table>
               <thead>
                 <tr>
-                  <th>Wallet</th>
-                  <th>Role</th>
+                  <th style={{ width: 28 }}>
+                    <input type="checkbox" checked={allTicked} onChange={toggleAll} aria-label="tick every funder" />
+                  </th>
+                  <th>Funder</th>
                   <th className="num">Balance</th>
                   <th className="num">Sends</th>
                 </tr>
               </thead>
               <tbody>
-                {preview.wallets.map((w) => (
-                  <tr key={w.walletId}>
+                {rows.map((w) => (
+                  <tr key={w.walletId} className={ticked.includes(w.walletId) ? 'is-on' : ''}>
                     <td>
-                      <Address value={w.address} plain href={explorer ? `${explorer}/address/${w.address}` : ''} />
+                      <input
+                        type="checkbox"
+                        checked={ticked.includes(w.walletId)}
+                        onChange={() => toggleTick(w.walletId)}
+                        aria-label={`Sweep ${w.address}`}
+                      />
                     </td>
-                    <td>{w.role === 'v4master' ? 'funding' : 'seed'}</td>
+                    <td>
+                      <Address value={w.address} plain href={link(w.address)} />
+                    </td>
                     <td className="num">{eth(w.balanceEth)}</td>
                     <td className="num">{eth(w.sendEth)}</td>
                   </tr>
@@ -151,51 +197,80 @@ export default function V4GatherPanel({ step, masters = [], explorer, reload, re
             </table>
           ) : (
             <p className="hint">
-              Nothing clears the dust floor — the chosen wallets are empty or hold less than it costs to
-              move. Funding wallets are where the recoverable ETH is.
+              No funder has anything to sweep{preview.route === 'relay' ? ' above the dust floor' : ''} — see why
+              below.
             </p>
           )}
           <p className="hint">
-            {preview.walletCount} wallet(s) → <b>{preview.totalEth} ETH</b> to{' '}
-            {preview.destination.address.slice(0, 10)}…
-            {preview.skipped.length ? ` · ${preview.skipped.length} skipped (dust or empty)` : ''}
+            {tickedRows.length} of {rows.length} ticked → <b>{tickedEth} ETH</b> to{' '}
+            {preview.destination.address.slice(0, 10)}… by {preview.route === 'direct' ? 'direct send' : 'Relay'}
           </p>
+          {preview.skipped.length > 0 && (
+            <table>
+              <thead>
+                <tr>
+                  <th>Skipped</th>
+                  <th className="num">Balance</th>
+                  <th>Why</th>
+                </tr>
+              </thead>
+              <tbody>
+                {preview.skipped.map((s) => (
+                  <tr key={s.walletId}>
+                    <td>
+                      <Address value={s.address} plain href={link(s.address)} />
+                    </td>
+                    <td className="num">{s.balanceEth == null ? '—' : eth(s.balanceEth)}</td>
+                    <td>
+                      <span className="hint">{s.reason}</span>
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          )}
         </div>
       )}
 
       <Modal
         open={arming}
         danger
-        title={`Gather ${preview ? preview.walletCount : 0} wallet(s) to the super-main?`}
-        question="Each wallet's balance is sent to the super-main through Relay — irreversible."
-        confirmLabel="Gather it"
+        title={`Sweep ${plural(tickedRows.length, 'funder')} to the super-main?`}
+        question={
+          direct
+            ? 'Each ticked funder sends its balance straight to the super-main — irreversible, and it links them on-chain.'
+            : "Each ticked funder's balance goes to the super-main through Relay — irreversible."
+        }
+        confirmLabel="Sweep them"
         onCancel={() => setArming(false)}
         onConfirm={async () => {
           await act('sweep', async () => {
             const out = await api('/v4/sweep', 'POST', {
-              destinationId: dest,
-              categories: chosen,
-              minSweepEth: preview?.minSweepEth,
+              destinationId: preview.destination.walletId,
+              route: preview.route,
+              walletIds: tickedRows.map((w) => w.walletId),
+              minSweepEth: preview.minSweepEth,
               confirm: true,
             });
-            setPreview(null);
+            reset();
             await reload();
-            return (
-              `Gathered ${out.totals.sent}/${out.totals.wallets} wallet(s) — ${out.totals.eth} ETH.` +
-              (out.totals.failed ? ` ${out.totals.failed} failed.` : '')
-            );
+            return summarise(out);
           });
           setArming(false);
         }}
       >
         {preview && (
           <>
-            <Fact label="Wallets">{preview.walletCount}</Fact>
-            <Fact label="Total">{preview.totalEth} ETH</Fact>
+            <Fact label="Funders">{tickedRows.length}</Fact>
+            <Fact label="Total">{tickedEth} ETH</Fact>
             <Fact label="To" mono>
               {preview.destination.address}
             </Fact>
-            <Fact label="Route">Relay — the wallets stay unlinked from the super-main</Fact>
+            <Fact label="Route">
+              {preview.route === 'direct'
+                ? 'Direct — each funder is linked to the super-main on-chain'
+                : 'Relay — the funders stay unlinked from the super-main'}
+            </Fact>
           </>
         )}
       </Modal>
