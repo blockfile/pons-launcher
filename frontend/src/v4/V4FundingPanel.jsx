@@ -343,9 +343,19 @@ export default function V4FundingPanel({
    *
    * ONE DAY, and every target on it. A seasoning campaign is slow because the
    * wallets it feeds have to look unrelated to each other; the funders being
-   * filled here are about to spend openly through Relay anyway, so the only
-   * thing worth buying is that they do not all arrive in one block from one
-   * address. Ten minutes to an hour between them does that in an afternoon.
+   * filled here are about to spend openly through Relay anyway, and funders never
+   * hold the token, so nothing about this hop reaches a bubble map. Spacing buys
+   * no privacy here either — each Relay order is matched by its own amount and
+   * time however far apart they are.
+   *
+   * THE SPACING IS FOR RELAY'S RATE LIMIT, and it is sized on it: about four
+   * quotes per minute per IP (measured — see relay/timedFunding.js), and the
+   * runner counts a refused quote as a failed attempt — three in a row HALT the
+   * campaign. "Divide across super-mains" runs five splits at once, so each is
+   * spaced 4–8 minutes: together under one quote a minute, far below the limit,
+   * and 24 funders per super-main are paid in two to three hours rather than the
+   * twelve-plus the old 10–60 minute spacing took. Tighter than this and five
+   * parallel splits start tripping the limit, and halting.
    */
   /**
    * How much each funder needs, worked out from what it is being filled for.
@@ -394,8 +404,9 @@ export default function V4FundingPanel({
     perDayMax: count,
     amountMinEth: sizing.minEth,
     amountMaxEth: sizing.maxEth,
-    gapMinMs: 10 * 60_000,
-    gapMaxMs: 60 * 60_000,
+    // Sized on Relay's rate limit, not on privacy — see "A split's shape" above.
+    gapMinMs: 4 * 60_000,
+    gapMaxMs: 8 * 60_000,
     // No random wait before the first send. A seasoning campaign earns that
     // offset — starting at the same hour daily is a pattern. A split does not:
     // these wallets spend openly through Relay within hours, and the offset was
@@ -471,8 +482,8 @@ export default function V4FundingPanel({
     <div className="notice">
       <h3>Split one wallet across the others</h3>
       <p>
-        Fills the other funding wallets from this one, through Relay, at random amounts ten minutes
-        to an hour apart. A solver pays each of them, so nothing on chain connects them to the
+        Fills the other funding wallets from this one, through Relay, at random amounts four to
+        eight minutes apart. A solver pays each of them, so nothing on chain connects them to the
         source.
       </p>
       {wallets.length < 2 ? (
