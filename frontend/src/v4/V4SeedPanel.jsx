@@ -8,6 +8,7 @@ import { LuTrash2, LuUndo2 } from 'react-icons/lu';
 import IconButton from './IconButton.jsx';
 import V4BackupControls from './V4BackupControls.jsx';
 import { MAX_GENERATE, ROLES, clock, eth } from './roles.js';
+import { STATUS_WORDS, orderByStatus, seedStatus, statusCounts } from './seedStatus.js';
 
 // A column header that also acts as a sort control. Styled to read as the plain
 // header text it replaces — no button chrome — so the table gains sorting without
@@ -167,36 +168,17 @@ export default function V4SeedPanel({ step, wallets, masters, facts, explorer, r
   );
 
   /**
-   * Split the seed table into "seasoned pool" (earlier runs) and "new campaign"
-   * (the batch being seasoned now, plus any freshly generated wallet not yet in a
-   * campaign).
+   * THE TABLE IS SPLIT BY STATE, NOT BY RUN: "Ready to use" holds every wallet funded
+   * a day or more ago, whichever run funded it; "Not ready yet" holds everything else,
+   * each row saying why (see v4/seedStatus.js). It used to split by run — an aged
+   * wallet from the latest run sat under "New campaign" until a later run started,
+   * which read as the old campaign never moving up. A wallet now crosses into Ready
+   * the day it seasons, which is the question the operator is asking.
    *
-   * THE BOUNDARY IS WHICH RUN A WALLET BELONGS TO, NOT WHETHER IT HAS SEASONED
-   * YET — so a wallet never hops from "new" to "done" the day it seasons, and last
-   * run's still-aging wallets stay with last run. A seed carries the createdAt of
-   * the campaign that claimed it (null until one does).
-   *
-   * A RUN IS NOT ALWAYS ONE CAMPAIGN. "Start on all N funders" fans a single
-   * action out into N sibling campaigns (e.g. 20 funders × 5 wallets = 100),
-   * created within moments of each other. Keying "new" off the SINGLE latest
-   * createdAt would show only one funder's 5 wallets and scatter the other 95 into
-   * the pool — so cluster every campaign created within a short window of the
-   * newest as ONE new batch. A genuinely earlier run (the previous seasoning,
-   * hours or days back) falls outside the window and stays in the pool.
-   *
-   * With only one run there is nothing older to be the pool, so every wallet is
-   * the current batch and the seasoned-pool section is empty — it appears the
-   * instant a later run gives the first one somewhere to go.
+   * `now` is read once per render so every row is judged against the same instant.
    */
-  const NEW_BATCH_WINDOW_MS = 15 * 60 * 1000; // a fan-out starts in well under this; separate runs are days apart
-  const newestCampaignAt = wallets.reduce(
-    (max, w) => (w.campaignCreatedAt && (!max || w.campaignCreatedAt > max) ? w.campaignCreatedAt : max),
-    null
-  );
-  const newBatchCutoff = newestCampaignAt ? Date.parse(newestCampaignAt) - NEW_BATCH_WINDOW_MS : null;
-  const inNewBatch = (w) =>
-    !w.campaignId ||
-    (newBatchCutoff != null && w.campaignCreatedAt && Date.parse(w.campaignCreatedAt) >= newBatchCutoff);
+  const now = Date.now();
+  const statusOf = (w) => seedStatus(w, facts[w.id], { seasonDays: season, now });
   // Case-insensitive substring match on the address — a pasted CA, or the first
   // few characters of one, narrows the table to the wallet(s) it names. An empty
   // search matches everything, so the default is the full list restored.
@@ -242,23 +224,14 @@ export default function V4SeedPanel({ step, wallets, masters, facts, explorer, r
   // Withdrawn seeds — keys exported to spend elsewhere, held out of the V1/V3
   // claim pool — get their OWN section so they don't clutter the two active
   // groups (and can't be swept into a bulk delete meant for live ones). A wallet
-  // is in exactly one of the three: withdrawn first, then split the rest by
-  // campaign. `withdrawnIds` is derived above from /v4/seasoned. `arrange` applies
-  // the search filter and sort — the identity until either is used.
+  // is in exactly one of the three: withdrawn first, then ready or not. Not-ready
+  // rows are status-ordered before `arrange` (problems first — see seedStatus.js);
+  // a clicked column sort then overrides that, and the search filter keeps the
+  // order it is given. `withdrawnIds` is derived above from /v4/seasoned.
   const withdrawnList = arrange(wallets.filter((w) => withdrawnIds.has(w.id)));
   const active = wallets.filter((w) => !withdrawnIds.has(w.id));
-  const newBatch = arrange(active.filter(inNewBatch));
-  const seasonedPool = arrange(active.filter((w) => !inNewBatch(w)));
-
-  // Per-group figures for the section headers — the same derivations as the
-  // overall stat line, scoped to one group.
-  const groupStats = (list) => ({
-    total: list.length,
-    funded: list.filter((w) => facts[w.id]?.status === 'sent').length,
-    usable: list.filter((w) => (w.daysSinceFunded ?? -1) >= season).length,
-    aging: list.filter((w) => w.daysSinceFunded != null && w.daysSinceFunded < season).length,
-    fresh: list.filter((w) => !w.campaignId).length,
-  });
+  const readyList = arrange(active.filter((w) => statusOf(w).ready));
+  const notReadyList = arrange(orderByStatus(active.filter((w) => !statusOf(w).ready), statusOf));
 
   /**
    * Delete the ticked wallets, one request each.
@@ -346,9 +319,10 @@ export default function V4SeedPanel({ step, wallets, masters, facts, explorer, r
 
   // The rows for one group. The "No." is a within-section ordinal (restarts at 1
   // per section), a label for the row rather than a global index.
-  function seedRows(list) {
+  function seedRows(list, { showStatus = false } = {}) {
     return list.map((w, i) => {
       const fact = facts[w.id];
+      const status = showStatus ? statusOf(w) : null;
       return (
         <tr key={w.id}>
           <td>
@@ -416,6 +390,14 @@ export default function V4SeedPanel({ step, wallets, masters, facts, explorer, r
               `${w.daysSinceFunded}d`
             )}
           </td>
+          {/* Why a not-ready wallet is not ready — the column that section exists for.
+              The chip's class comes from seedStatus: amber only for a wallet that will
+              never be funded, the outline for one still on its way. */}
+          {status && (
+            <td>
+              <span className={`fund-state${status.tone ? ` is-${status.tone}` : ''}`}>{status.label}</span>
+            </td>
+          )}
           <td>
             <span style={{ display: 'inline-flex', alignItems: 'center', gap: 6, flexWrap: 'wrap' }}>
               <span className={`fund-state ${w.backedUp ? 'is-in' : 'is-part'}`}>
@@ -461,26 +443,24 @@ export default function V4SeedPanel({ step, wallets, masters, facts, explorer, r
 
   // One titled, scrollable section for a group of seeds. The header checkbox is
   // scoped to THIS section — ticking it selects (or clears) only this group's
-  // wallets within the shared `ticked` set, so a select-all in the seasoned pool
-  // never sweeps the new batch into a bulk delete. Renders nothing for an empty
+  // wallets within the shared `ticked` set, so a select-all in the Ready section
+  // never sweeps the not-ready ones into a bulk delete. Renders nothing for an empty
   // group so a section only exists when it has wallets.
   //
   // `accent` is a CSS colour var ('jade' | 'sky' | 'grey') that highlights the
-  // header so the three groups are told apart at a glance.
+  // header so the three groups are told apart at a glance. `showStatus` adds the
+  // Status column — only the not-ready section needs one; every Ready row would say
+  // "ready".
   //
   // EVERY section gets a "Back up N" of ALL its wallets — no age gate — because a
   // backup is a SAFETY net, and the wallets that most need one are the fresh,
   // unfunded batch you are about to send real ETH to (step 3 refuses to start a
-  // campaign until they are backed up). `showUsable` adds a second "Export usable
-  // N" for the aged subset (the file you open on the day you spend), but only when
-  // it is a real subset — no point offering it when every wallet already qualifies.
-  function seedSection(title, hint, list, { accent = 'grey', showUsable = false } = {}) {
+  // campaign until they are backed up). On the Ready section that same button IS
+  // the usable export — the file you open on the day you spend.
+  function seedSection(title, hint, list, { accent = 'grey', showStatus = false } = {}) {
     if (!list.length) return null;
     const ids = list.map((w) => w.id);
     const allInSection = ids.every((id) => ticked.includes(id));
-    const usableSeeds = showUsable
-      ? list.filter((w) => (w.daysSinceFunded ?? -1) >= season)
-      : [];
     return (
       <div style={{ marginBottom: 18 }}>
         <div
@@ -500,18 +480,6 @@ export default function V4SeedPanel({ step, wallets, masters, facts, explorer, r
               exportIds={ids}
               label={`Back up ${list.length}`}
             />
-            {/* Only the aged ones — the "safe to spend today" file — and only when
-                that is fewer than the whole section, else it just repeats Back up. */}
-            {usableSeeds.length > 0 && usableSeeds.length < list.length && (
-              <V4BackupControls
-                masters={masters}
-                seeds={list}
-                report={report}
-                reload={reload}
-                exportIds={usableSeeds.map((w) => w.id)}
-                label={`Export usable ${usableSeeds.length}`}
-              />
-            )}
           </span>
         </div>
         <div className="table-scroll" style={{ maxHeight: 460, overflowY: 'auto' }}>
@@ -554,39 +522,26 @@ export default function V4SeedPanel({ step, wallets, masters, facts, explorer, r
                     </span>
                   </button>
                 </th>
+                {showStatus && <th>Status</th>}
                 <th>Key</th>
                 <th />
               </tr>
             </thead>
-            <tbody>{seedRows(list)}</tbody>
+            <tbody>{seedRows(list, { showStatus })}</tbody>
           </table>
         </div>
       </div>
     );
   }
 
-  const poolStats = groupStats(seasonedPool);
-  const newStats = groupStats(newBatch);
-  const poolHint = `${poolStats.total} wallet${poolStats.total === 1 ? '' : 's'} · ${poolStats.usable} usable · ${poolStats.aging} aging`;
-  // "New campaign" only reads right when there is an older pool to be new relative
-  // to; with a single batch it is simply the current one.
-  const newTitle = seasonedPool.length ? 'New campaign' : 'Current campaign';
-  // The new batch may be ONE campaign or a fan-out of many (Start on all N
-  // funders) — say which so 100 wallets across 20 campaigns don't read as a
-  // 5-wallet campaign. One campaign → its name; several → "across N campaigns".
-  const newCampaignCount = new Set(newBatch.map((w) => w.campaignId).filter(Boolean)).size;
-  const newCampaignLabel =
-    newCampaignCount > 1
-      ? `across ${newCampaignCount} campaigns · `
-      : newBatch.find((w) => w.campaignName)
-        ? `${newBatch.find((w) => w.campaignName).campaignName} · `
-        : '';
-  const newHint =
-    newCampaignLabel +
-    `${newStats.total} wallet${newStats.total === 1 ? '' : 's'}` +
-    (newStats.funded ? ` · ${newStats.funded} funded` : '') +
-    (newStats.aging ? ` · ${newStats.aging} aging` : '') +
-    (newStats.fresh ? ` · ${newStats.fresh} not yet in a campaign` : '');
+  const walletsWord = (n) => `${n} wallet${n === 1 ? '' : 's'}`;
+  const readyHint = `${walletsWord(readyList.length)} · funded ${season}+ day ago · safe to hand to V1/V3 or export`;
+  // Every non-zero status, in the section's own order, so the header answers "what
+  // is left to happen" in one line: "685 wallets · 5 failed · 600 not in a campaign".
+  const notReadyCounts = statusCounts(notReadyList, statusOf);
+  const notReadyHint = [walletsWord(notReadyList.length)]
+    .concat(STATUS_WORDS.filter(([key]) => notReadyCounts[key]).map(([key, word]) => `${notReadyCounts[key]} ${word}`))
+    .join(' · ');
   const withdrawnHint = `${withdrawnList.length} wallet${withdrawnList.length === 1 ? '' : 's'} · keys exported, held out of the claim pool · Restore on any row to return it`;
 
   /* ── THE HAND-OFF RECORD ───────────────────────────────────────────────────
@@ -765,10 +720,9 @@ export default function V4SeedPanel({ step, wallets, masters, facts, explorer, r
           not make them. One implementation, drawn here and in step 1 beside the
           funding wallets' deletes (see V4BackupControls' header). */}
       <div className="row">
-        {/* Just the whole-tab safety backup here. The "usable" export is now PER
-            SECTION — each pool exports only its own usable seeds (see seedSection),
-            so it never bundles another section's wallets, and a withdrawn seed
-            (its key already exported) is never swept into a pool's file. */}
+        {/* Just the whole-tab safety backup here. The "usable" export is the Ready
+            section's own "Back up N" (see seedSection) — exactly the aged wallets,
+            and never a withdrawn seed (its key already exported). */}
         <V4BackupControls masters={masters} seeds={wallets} report={report} reload={reload} />
       </div>
 
@@ -918,14 +872,11 @@ export default function V4SeedPanel({ step, wallets, masters, facts, explorer, r
           </p>
         </div>
       ) : (
-        // TWO SECTIONS, split on the campaign a wallet belongs to (see the
-        // newCampaign / seasonedPool derivation): the earlier campaigns' wallets
-        // (the seasoned pool) and the newest campaign's + freshly generated ones
-        // (the batch being seasoned now). Each is its own scrolling table so an
-        // earlier run's still-aging wallets never sit in the same list as a fresh
-        // batch — the confusion this split exists to remove. A single campaign
-        // has no older pool, so only the "current campaign" section shows until a
-        // second campaign gives the first somewhere to go.
+        // SECTIONS BY STATE (see the readyList / notReadyList derivation): every
+        // wallet that is safe to use, from any run, in one table; everything still on
+        // its way — or never going to arrive — in another, each row saying which; and
+        // the withdrawn set aside. Each is its own scrolling table, and a wallet moves
+        // from the second to the first on the day it seasons.
         <>
           {/* Filter the whole table down to a pasted address (or a prefix of
               one). It narrows what is DRAWN across all three sections — the stat
@@ -959,7 +910,7 @@ export default function V4SeedPanel({ step, wallets, masters, facts, explorer, r
 
           {/* Every section filtered to nothing — say so, rather than leave the
               tables to vanish with no explanation. */}
-          {q && withdrawnList.length + newBatch.length + seasonedPool.length === 0 && (
+          {q && withdrawnList.length + readyList.length + notReadyList.length === 0 && (
             <div className="notice">
               <h3>No wallet matches “{search.trim()}”</h3>
               <p>
@@ -969,15 +920,12 @@ export default function V4SeedPanel({ step, wallets, masters, facts, explorer, r
             </div>
           )}
 
-          {seedSection('Seasoned pool — earlier campaigns', poolHint, seasonedPool, {
-            accent: 'jade',
-            showUsable: true,
-          })}
-          {seedSection(newTitle, newHint, newBatch, { accent: 'sky', showUsable: true })}
+          {seedSection('Ready to use', readyHint, readyList, { accent: 'jade' })}
+          {seedSection('Not ready yet', notReadyHint, notReadyList, { accent: 'sky', showStatus: true })}
           {/* Set aside, drawn last: keys already exported, held out of the claim
-              pool. Its own section so a live-batch select-all never reaches them
-              and they don't pad the seasoned-pool counts. Each row keeps its
-              Restore; "Back up N" re-downloads exactly these set-aside keys. */}
+              pool. Its own section so a select-all above never reaches them and
+              they don't pad the Ready count. Each row keeps its Restore; "Back up N"
+              re-downloads exactly these set-aside keys. */}
           {seedSection('Withdrawn — set aside', withdrawnHint, withdrawnList, { accent: 'grey' })}
 
           {/* Said once, under the tables, because the column heading cannot carry

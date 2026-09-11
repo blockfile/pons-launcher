@@ -189,6 +189,9 @@ export default function V4Console({ health, credential, report, output, reported
       for (const t of details[c.id]?.transfers || []) {
         map[t.walletId] = {
           campaign: c.name,
+          // So the seed table can tell a wallet waiting on a running campaign from one
+          // whose campaign is halted, paused or cancelled — see v4/seedStatus.js.
+          campaignStatus: c.status,
           day: t.day,
           amountEth: t.amountEth,
           status: t.status,
