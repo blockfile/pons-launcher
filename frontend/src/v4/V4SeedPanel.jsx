@@ -158,14 +158,6 @@ export default function V4SeedPanel({ step, wallets, masters, facts, explorer, r
   // one-day-old wallet is old enough for this pool, and leaving it editable only let an
   // operator set a threshold that then hid usable wallets from step 3.
   const season = 1;
-  // Withdrawn seeds are set aside (key already exported, held out of the claim
-  // pool), so they count as neither "usable" nor "aging" in the overall tally —
-  // the same way the backend's available() drops them. Keeps the stat line honest
-  // with the per-section export, which also never includes a withdrawn seed.
-  const usable = wallets.filter((w) => !withdrawnIds.has(w.id) && (w.daysSinceFunded ?? -1) >= season);
-  const waiting = wallets.filter(
-    (w) => !withdrawnIds.has(w.id) && w.daysSinceFunded != null && w.daysSinceFunded < season
-  );
 
   /**
    * THE TABLE IS SPLIT BY STATE, NOT BY RUN: "Ready to use" holds every wallet funded
@@ -175,10 +167,33 @@ export default function V4SeedPanel({ step, wallets, masters, facts, explorer, r
    * which read as the old campaign never moving up. A wallet now crosses into Ready
    * the day it seasons, which is the question the operator is asking.
    *
-   * `now` is read once per render so every row is judged against the same instant.
+   * `now` is read once per render so every row is judged against the same instant,
+   * and readiness is judged on it — from each wallet's funding time — rather than on
+   * the day count the last wallet read carried (see seedStatus).
    */
   const now = Date.now();
   const statusOf = (w) => seedStatus(w, facts[w.id], { seasonDays: season, now });
+
+  // Withdrawn seeds are set aside (key already exported, held out of the claim
+  // pool), so they count as neither "usable" nor "aging" in the overall tally —
+  // the same way the backend's available() drops them. Counted with the SAME rule as
+  // the sections below, so the stat line and the Ready count never disagree.
+  const usable = wallets.filter((w) => !withdrawnIds.has(w.id) && statusOf(w).ready);
+  const waiting = wallets.filter((w) => !withdrawnIds.has(w.id) && statusOf(w).key === 'aging');
+
+  // A WALLET MOVES TO READY ON ITS OWN, even with nothing polling. The console stops
+  // re-reading the wallet list once no campaign is running — which is exactly when
+  // the last day's seeds cross their 24 hours. So while any wallet is still aging,
+  // re-draw once a minute: `now` moves, seedStatus re-judges, and the row crosses
+  // over. No request is made; the funding times are already here. It stops by itself
+  // when the last aging wallet has crossed.
+  const anyAging = waiting.length > 0;
+  const [, setMinuteTick] = useState(0);
+  useEffect(() => {
+    if (!anyAging) return undefined;
+    const t = setInterval(() => setMinuteTick((n) => n + 1), 60_000);
+    return () => clearInterval(t);
+  }, [anyAging]);
   // Case-insensitive substring match on the address — a pasted CA, or the first
   // few characters of one, narrows the table to the wallet(s) it names. An empty
   // search matches everything, so the default is the full list restored.

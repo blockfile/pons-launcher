@@ -15,6 +15,19 @@ test('a wallet funded a day or more ago is ready, from whatever run', () => {
   assert.equal(at({ daysSinceFunded: 1, fundedAt: iso(25 * HOUR), campaignId: 'new' }, { status: 'sent' }).ready, true);
 });
 
+test('readiness follows the clock, not the last server read: a wallet turns ready at 24h on its own', () => {
+  // The server's daysSinceFunded was read an hour ago, when the wallet was 23h old,
+  // and still says 0. The funding time says it has now crossed the line.
+  const stale = { daysSinceFunded: 0, fundedAt: iso(24 * HOUR + 60_000), campaignId: 'c' };
+  assert.equal(at(stale, { status: 'sent' }).key, 'ready');
+  // One minute short is still aging.
+  assert.equal(at({ daysSinceFunded: 0, fundedAt: iso(24 * HOUR - 60_000) }, { status: 'sent' }).key, 'aging');
+  // Exactly 24h is ready — the server's floor((now - fundedAt) / day) >= 1 agrees.
+  assert.equal(at({ daysSinceFunded: 0, fundedAt: iso(24 * HOUR) }, { status: 'sent' }).key, 'ready');
+  // With no readable funding time, the server's day count still decides.
+  assert.equal(at({ daysSinceFunded: 2, fundedAt: null }, { status: 'sent' }).key, 'ready');
+});
+
 test('a wallet funded under a day ago is aging, with the hours it still needs', () => {
   const s = at({ daysSinceFunded: 0, fundedAt: iso(10 * HOUR), campaignId: 'c' }, { status: 'sent' });
   assert.equal(s.key, 'aging');

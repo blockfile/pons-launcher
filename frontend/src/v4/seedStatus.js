@@ -37,11 +37,17 @@ const RANK = { failed: 0, cancelled: 1, halted: 2, paused: 3, aging: 4, waiting:
 export function seedStatus(wallet, fact, { seasonDays = 1, now = Date.now() } = {}) {
   const w = wallet || {};
   if (w.daysSinceFunded != null) {
-    if (w.daysSinceFunded >= seasonDays) return { key: 'ready', ready: true, rank: -1, label: 'ready', tone: 'in' };
+    // READY IS JUDGED ON THE CLOCK, from the funding time, not on the server's
+    // daysSinceFunded — that is a day count taken when the list was last read, and the
+    // console stops reading once no campaign is running. The last day's seeds cross
+    // the line after that, and would sit in "aging" until a reload. Same rule as the
+    // server's floor((now - fundedAt) / day) >= seasonDays; the day count is only the
+    // fallback for a row with no readable funding time.
     const fundedAt = Date.parse(w.fundedAt || '');
-    const hoursLeft = Number.isFinite(fundedAt)
-      ? Math.max(1, Math.ceil((fundedAt + seasonDays * DAY_MS - now) / HOUR_MS))
-      : null;
+    const seasonMs = seasonDays * DAY_MS;
+    const ready = Number.isFinite(fundedAt) ? now - fundedAt >= seasonMs : w.daysSinceFunded >= seasonDays;
+    if (ready) return { key: 'ready', ready: true, rank: -1, label: 'ready', tone: 'in' };
+    const hoursLeft = Number.isFinite(fundedAt) ? Math.max(1, Math.ceil((fundedAt + seasonMs - now) / HOUR_MS)) : null;
     return {
       key: 'aging',
       ready: false,
