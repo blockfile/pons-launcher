@@ -91,14 +91,14 @@ export default function V4SeedPanel({ step, wallets, masters, facts, explorer, r
   // the seed headers use.
   const [handoffSort, setHandoffSort] = useState(null);
   // How many seed wallets are aged past the gate right now, which of them have
-  // already been handed off to V1/V3, and which the operator has pulled back out
+  // already been handed off to another tab, and which the operator has pulled back out
   // of the claimable pool by hand — read-only, drawn beside the generate row so
   // an operator sees where a wallet went without switching tabs. Polled the same
   // way loadWallets is in V4Console: on mount and every 60s, quietly on failure.
   //
   // `withdrawn` is the reversible "set this seed aside" mark: a wallet whose key
   // has been exported to spend elsewhere stays here and stays backed up, but
-  // `count` already excludes it so a V1/V3 claim never grabs it.
+  // `count` already excludes it so no tab's claim ever grabs it.
   const [seasoned, setSeasoned] = useState({ count: 0, graduated: [], withdrawn: [] });
 
   useEffect(() => {
@@ -221,8 +221,8 @@ export default function V4SeedPanel({ step, wallets, masters, facts, explorer, r
   }
   const sortArrow = (key) => (sort?.key !== key ? '↕' : sort.dir === 'asc' ? '↑' : '↓');
 
-  // Withdrawn seeds — keys exported to spend elsewhere, held out of the V1/V3
-  // claim pool — get their OWN section so they don't clutter the two active
+  // Withdrawn seeds — keys exported to spend elsewhere, held out of the claim pool
+  // that V1, V2, V3 and V5–V8 draw from — get their OWN section so they don't clutter the two active
   // groups (and can't be swept into a bulk delete meant for live ones). A wallet
   // is in exactly one of the three: withdrawn first, then ready or not. Not-ready
   // rows are status-ordered before `arrange` (problems first — see seedStatus.js);
@@ -282,7 +282,7 @@ export default function V4SeedPanel({ step, wallets, masters, facts, explorer, r
    * whole set — unlike the deletes, this rewrites no keystore, it only sets a
    * mark, so there is no per-wallet file rewrite to serialise. The wallets stay
    * here and stay backed up; `count` on the pool simply stops counting them, so
-   * a V1/V3 claim can never grab a seed whose key is already in use elsewhere.
+   * no tab's claim can ever grab a seed whose key is already in use elsewhere.
    * Reversible with Restore.
    */
   async function withdrawTicked(list) {
@@ -409,7 +409,7 @@ export default function V4SeedPanel({ step, wallets, masters, facts, explorer, r
                   undoes. */}
               {withdrawnIds.has(w.id) && (
                 <>
-                  <span className="fund-state" title="held out of the V1/V3 claim pool — reversible">
+                  <span className="fund-state" title="held out of the claim pool — no tab can claim it — reversible">
                     withdrawn
                   </span>
                   <IconButton
@@ -535,7 +535,7 @@ export default function V4SeedPanel({ step, wallets, masters, facts, explorer, r
   }
 
   const walletsWord = (n) => `${n} wallet${n === 1 ? '' : 's'}`;
-  const readyHint = `${walletsWord(readyList.length)} · funded ${season}+ day ago · safe to hand to V1/V3 or export`;
+  const readyHint = `${walletsWord(readyList.length)} · funded ${season}+ day ago · claimable by V1, V2, V3 and V5–V8, or export`;
   // Every non-zero status, in the section's own order, so the header answers "what
   // is left to happen" in one line: "685 wallets · 5 failed · 600 not in a campaign".
   const notReadyCounts = statusCounts(notReadyList, statusOf);
@@ -545,8 +545,8 @@ export default function V4SeedPanel({ step, wallets, masters, facts, explorer, r
   const withdrawnHint = `${withdrawnList.length} wallet${withdrawnList.length === 1 ? '' : 's'} · keys exported, held out of the claim pool · Restore on any row to return it`;
 
   /* ── THE HAND-OFF RECORD ───────────────────────────────────────────────────
-     Wallets V1 or V3 claimed out of the seasoned pool. A claim RE-ROLES the
-     wallet (v4seed → v3bundle) and it leaves the seed table in the same breath,
+     Wallets another tab (V1, V2, V3, V5–V8) claimed out of the seasoned pool. A
+     claim RE-ROLES the wallet (v4seed → e.g. v3bundle) and it leaves the seed table in the same breath,
      so /v4/seasoned's `graduated` is the only surviving statement of where it
      went — which makes this an audit record, and an audit record that shows the
      first twenty of thirty-nine rows is not one. Everything below is a view over
@@ -840,7 +840,7 @@ export default function V4SeedPanel({ step, wallets, masters, facts, explorer, r
       {wallets.length > 0 && (
         <p className="hint" style={{ margin: '0 0 12px' }}>
           Withdraw seeds whose keys you've exported to use elsewhere — they stay here and stay
-          backed up, but a V1/V3 claim will never grab them. Reversible.
+          backed up, but no tab's claim will ever grab them. Reversible.
         </p>
       )}
 
