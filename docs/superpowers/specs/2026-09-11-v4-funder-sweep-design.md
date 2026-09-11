@@ -90,6 +90,10 @@ Reads only. Returns `destination`, `route`, `minSweepEth`, `wallets[]`
    `pending` (no receipt within the cap) or `failed` (the send threw).
 7. Totals count `sent` (relay) or `confirmed` (direct) as moved. Activity log records the
    route; Direct entries say "direct — links these funders to the super-main on-chain".
+8. **DRY_RUN is honoured on both routes.** Relay already simulates inside `v4/relay.js`;
+   the direct path checks `deps.dryRun ?? config.dryRun` and signs nothing, reporting rows
+   `simulated`. Without this, a direct sweep would really send on a server the operator
+   believes is dry-running.
 
 `v4/relay.js` is not modified. Low-level infra (`evm/provider`, `evm/fees`,
 `evm/receipt`) is imported as today; the gas-estimate helper is V4's own copy (isolation
