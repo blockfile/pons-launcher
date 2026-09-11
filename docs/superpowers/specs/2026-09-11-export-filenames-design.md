@@ -23,7 +23,8 @@ e.g. `100pcs-V4-funding-wallets-2026-09-11.json`. No spaces (operator's choice).
   - exactly one wallet → singular `wallet`.
 - `suffix` — only V8's bare-keys text file: `keys`.
 - Role words: V1/V2/V5 dev→`dev`, bundle→`bundle`; V3/V6/V7 dev→`treasury`, main→`main`,
-  bundle→`bundle`; V4 v4master→`funding`, v4seed→`seed`; V8 main→`main`, bundle→`bundle`.
+  bundle→`bundle`; V4 v4master→`funding`, v4seed→`seed`; V8 main→`source`,
+  bundle→`destination` (V8's on-screen words — its old filenames used them too).
 - The V4 hand-off log CSV (addresses/tabs/times, no keys) follows the same shape with its
   row count: `42pcs-V4-handoffs-v3-2026-09-11.csv` (the search tag is kept).
 
