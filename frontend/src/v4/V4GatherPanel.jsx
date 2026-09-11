@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useRef, useState } from 'react';
 import { api } from '../api.js';
 import Step from '../components/Step.jsx';
 import { Busy } from '../components/Section.jsx';
@@ -17,12 +17,17 @@ import { sumWei, weiToEth } from './weiTotal.js';
  * Two routes, chosen per sweep:
  *   Relay  (default) the funder stays unlinked from the super-main on chain. A Relay fee +
  *          gas per funder; small balances fall under the dust floor.
- *   Direct a plain send, gas only — recovers almost everything, and links each funder to
- *          the super-main on chain. No seed is linked either way: their funding went
- *          through Relay.
+ *   Direct a plain send, gas only — recovers almost everything, and publicly links every
+ *          funder swept to the super-main, and so to each other. No seed gets a direct
+ *          edge, but each funder's seeds end up one Relay hop from the super-main.
  *
  * The preview lists every funder it would sweep, all ticked. Untick any to leave it holding
  * its ETH; only the ticked ones are sent.
+ *
+ * WHAT IS CONFIRMED IS WHAT WAS PREVIEWED. The POST sends the preview's route and
+ * destination, so the dialog and the warning read the preview too — never the live selects —
+ * and a preview that comes back after the selects changed is thrown away rather than shown
+ * under a route it was not made for.
  */
 const ROUTES = [
   { key: 'relay', label: 'Relay — funders stay unlinked (≈3% fee, dust floor)' },
@@ -37,7 +42,9 @@ function summarise(out) {
     `${out.dryRun ? '[dry run — nothing signed] ' : ''}Swept ${t.moved}/${t.wallets} funder(s) ${how} — ${t.eth} ETH.` +
     (t.failed ? ` ${t.failed} failed.` : '') +
     (t.pending ? ` ${t.pending} pending — no receipt yet, check the explorer.` : '') +
-    (t.notAttempted ? ` ${t.notAttempted} not attempted — Relay is rate-limiting; run the sweep again in a minute.` : '')
+    (t.notAttempted ? ` ${t.notAttempted} not attempted — Relay is rate-limiting; run the sweep again in a minute.` : '') +
+    (out.skipped.length ? ` ${out.skipped.length} skipped.` : '') +
+    (out.logWarning ? ` WARNING: ${out.logWarning}` : '')
   );
 }
 
@@ -48,6 +55,8 @@ export default function V4GatherPanel({ step, masters = [], explorer, reload, re
   const [preview, setPreview] = useState(null);
   const [ticked, setTicked] = useState([]);
   const [arming, setArming] = useState(false);
+  // Bumped by every reset; a preview whose number is stale when it returns is discarded.
+  const previewSeq = useRef(0);
 
   const supers = masters.filter((w) => w.isSuperMain);
   // A super-main un-flagged in step 1 after being chosen here is no longer a destination.
@@ -56,9 +65,11 @@ export default function V4GatherPanel({ step, masters = [], explorer, reload, re
   const tickedRows = rows.filter((w) => ticked.includes(w.walletId));
   const tickedEth = weiToEth(sumWei(tickedRows));
   const allTicked = rows.length > 0 && tickedRows.length === rows.length;
-  const direct = route === 'direct';
+  // The route a confirm would actually send: the preview's once there is one.
+  const direct = (preview ? preview.route : route) === 'direct';
 
   const reset = () => {
+    previewSeq.current += 1;
     setPreview(null);
     setTicked([]);
   };
@@ -95,7 +106,7 @@ export default function V4GatherPanel({ step, masters = [], explorer, reload, re
           to super-main
           <select
             value={destOk ? dest : ''}
-            disabled={supers.length === 0}
+            disabled={supers.length === 0 || busy !== ''}
             onChange={(e) => {
               setDest(e.target.value);
               reset();
@@ -114,6 +125,7 @@ export default function V4GatherPanel({ step, masters = [], explorer, reload, re
           route
           <select
             value={route}
+            disabled={busy !== ''}
             onChange={(e) => {
               setRoute(e.target.value);
               reset();
@@ -130,8 +142,9 @@ export default function V4GatherPanel({ step, masters = [], explorer, reload, re
 
       {direct && (
         <p className="hint">
-          <b>Direct links on-chain:</b> every funder swept shows up sending straight to this super-main, so
-          they become publicly tied together. Seeds stay unlinked — their funding went through Relay.
+          <b>Direct links on-chain:</b> every funder swept shows up sending straight to this super-main, so the
+          funders and the super-main become publicly tied together. No seed gets a direct link, but each funder's
+          seeds are then one Relay hop from the super-main — and Relay's order history can connect that hop.
         </p>
       )}
 
@@ -142,7 +155,12 @@ export default function V4GatherPanel({ step, masters = [], explorer, reload, re
           disabled={!destOk}
           onClick={() =>
             act('preview', async () => {
+              previewSeq.current += 1;
+              const mine = previewSeq.current;
               const out = await api(`/v4/sweep/preview?destinationId=${encodeURIComponent(dest)}&route=${route}`);
+              if (mine !== previewSeq.current) {
+                return 'Preview discarded — the super-main or route changed while it loaded. Preview again.';
+              }
               setPreview(out);
               setTicked(out.wallets.map((w) => w.walletId));
               return `Sweep preview (${out.route}): ${plural(out.walletCount, 'funder')}, ${out.totalEth} ETH.`;
@@ -238,7 +256,7 @@ export default function V4GatherPanel({ step, masters = [], explorer, reload, re
         title={`Sweep ${plural(tickedRows.length, 'funder')} to the super-main?`}
         question={
           direct
-            ? 'Each ticked funder sends its balance straight to the super-main — irreversible, and it links them on-chain.'
+            ? 'Each ticked funder sends its balance straight to the super-main — irreversible, and it publicly links the funders to the super-main.'
             : "Each ticked funder's balance goes to the super-main through Relay — irreversible."
         }
         confirmLabel="Sweep them"
