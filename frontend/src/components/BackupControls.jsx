@@ -28,9 +28,12 @@ import { resolveBackupScope, tierWord } from './backupScope.js';
  * The dialog states the exact count and the exact tier every time, because the
  * count is the only thing that tells an operator which file they are holding.
  *
- * CSV MOVED INSIDE THE DIALOG. It used to be a second trigger ("as CSV") beside
- * the button; with three scopes drawn per panel that would be six controls in a
- * row for one action. It is a box in a dialog the operator has to read anyway.
+ * THE FORMAT IS CHOSEN INSIDE THE DIALOG. CSV used to be a second trigger ("as
+ * CSV") beside the button; with three scopes drawn per panel that would be six
+ * controls in a row for one action. It is a select in a dialog the operator has
+ * to read anyway — JSON, CSV, and on V2 an XLSX sheet (address | key) — and it
+ * starts at JSON every time the dialog opens, so a format picked for one file is
+ * never silently carried into the next.
  *
  * The typed confirmation is deliberately not a click-through: this hands over
  * live private keys, and a mis-click should not be enough to do it.
@@ -52,7 +55,7 @@ export default function BackupControls({
   const [busy, setBusy] = useState(false);
   const [open, setOpen] = useState(false);
   const [typed, setTyped] = useState('');
-  const [csv, setCsv] = useState(false);
+  const [format, setFormat] = useState('json');
 
   const { kind, wallets: covered, tabCount } = resolveBackupScope(wallets, {
     variant,
@@ -105,7 +108,7 @@ export default function BackupControls({
         disabled={!count}
         onClick={() => {
           setTyped('');
-          setCsv(false);
+          setFormat('json');
           setOpen(true);
         }}
       >
@@ -117,22 +120,22 @@ export default function BackupControls({
         danger
         title={title}
         question={null}
-        confirmLabel={csv ? 'Download CSV' : 'Download'}
+        confirmLabel={format === 'json' ? 'Download' : `Download ${format.toUpperCase()}`}
         confirmDisabled={typed !== 'EXPORT'}
         onConfirm={() => {
-          const format = csv ? 'csv' : 'json';
           setOpen(false);
           run(format);
         }}
         onCancel={() => setOpen(false)}
       >
         <p>Anyone who opens that file can spend every one of them. {scope}</p>
-        <label className="modal-check">
-          <input type="checkbox" checked={csv} onChange={(e) => setCsv(e.target.checked)} />
-          <span>
-            Write it as CSV instead of JSON — one row per wallet, for checking a column of addresses
-            in a spreadsheet. The keys are in it either way.
-          </span>
+        <label>
+          File format
+          <select value={format} onChange={(e) => setFormat(e.target.value)}>
+            <option value="json">JSON — the full record: address, label, role, key</option>
+            <option value="csv">CSV — one row per wallet, for checking addresses in a spreadsheet</option>
+            {variant === 'v2' && <option value="xlsx">XLSX — Excel sheet: public address, private key</option>}
+          </select>
         </label>
         <label className="modal-type">
           Type EXPORT to continue.

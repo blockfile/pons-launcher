@@ -1,4 +1,5 @@
 import { getApiKey } from '../api.js';
+import { v8ExportName } from './exportName.js';
 
 /**
  * Download the private keys of V8's wallets only.
@@ -9,9 +10,12 @@ import { getApiKey } from '../api.js';
  *
  * Optionally NARROWED, so a single panel can back up only its own wallets
  * (role) or the operator can export a hand-picked selection (walletIds). With
- * neither, this is the full V8 backup. The filter also goes in the FILENAME,
- * not only inside the file, so two downloads a day apart are never mistaken for
- * one another — the one that matters is usually the one holding fewer keys.
+ * neither, this is the full V8 backup. The FILENAME says what the file holds,
+ * read from the wallets that came back rather than from the request (see
+ * exportName.js) — the count, the role when every wallet in it shares one,
+ * "selected" in front of a hand-picked export — so two downloads a day apart are
+ * never mistaken for one another; the one that matters is usually the one
+ * holding fewer keys.
  *
  * THIS IS THE ONLY COPY. The keys are random and have no mnemonic behind them:
  * they exist in one encrypted file on one machine, and this tab is about to
@@ -44,15 +48,23 @@ export async function downloadV8Backup({ role = null, roleLabel = '', walletIds 
   // Bare keys, newline-separated, with a trailing newline so the last line is a
   // complete line — some importers drop an unterminated one.
   const keysOnly = format === 'keys';
+  // The keys file writes a line only for a wallet that HAS a key, and its name
+  // counts from that same list, so the "Npcs" on the file can never promise a
+  // line the file does not hold. The JSON file holds every wallet returned.
+  const written = keysOnly ? wallets.filter((w) => w.privateKey) : wallets;
   const body2 = keysOnly
-    ? wallets.map((w) => w.privateKey).filter(Boolean).join('\n') + '\n'
+    ? written.map((w) => w.privateKey).join('\n') + '\n'
     : JSON.stringify(json, null, 2);
   const blob = new Blob([body2], { type: keysOnly ? 'text/plain' : 'application/json' });
   const url = URL.createObjectURL(blob);
   const a = document.createElement('a');
   a.href = url;
-  const tag = ids ? '-selected' : roleLabel ? `-${roleLabel}` : '';
-  a.download = `pons-v8-wallets${tag}${keysOnly ? '-keys' : ''}-${new Date().toISOString().slice(0, 10)}.${keysOnly ? 'txt' : 'json'}`;
+  a.download = v8ExportName({
+    wallets: written,
+    qualifier: ids ? 'selected' : '',
+    suffix: keysOnly ? 'keys' : '',
+    ext: keysOnly ? 'txt' : 'json',
+  });
   a.click();
   URL.revokeObjectURL(url);
 

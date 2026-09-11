@@ -1,3 +1,6 @@
+import { backupFileName } from './components/backupScope.js';
+import { buildXlsx, XLSX_MIME } from './components/xlsx.js';
+
 // The API key lives in module scope for the life of the tab, mirrored into
 // sessionStorage so that a refresh does not cost the operator a re-paste.
 //
@@ -102,8 +105,10 @@ export async function api(path, method = 'GET', body, { quiet = false } = {}) {
  *   walletIds  exactly these wallets (the table's ticked rows). Wins over role;
  *              an empty list is treated as no selection, so a mis-wired caller
  *              cannot silently widen the file to the whole tab.
- *   format     'json' or 'csv' — csv because checking twenty addresses is a
- *              spreadsheet job.
+ *   format     'json', 'csv' or 'xlsx' — csv because checking twenty addresses
+ *              is a spreadsheet job; xlsx (offered on V2 only) is the same job
+ *              for an operator who opens it in Excel: two columns, address and
+ *              key, every cell text so no key is ever read as a number.
  *
  * The keys go straight from the response into a Blob and never touch the DOM:
  * anything rendered on screen can be screenshotted, shoulder-surfed, or left
@@ -123,19 +128,31 @@ export async function downloadBackup({
   const data = await api('/wallets/backup', 'POST', payload);
 
   const body =
-    format === 'csv'
-      ? ['role,label,address,privateKey']
-          .concat(data.wallets.map((w) => [w.role, w.label, w.address, w.privateKey].join(',')))
-          .join('\n')
-      : JSON.stringify(data, null, 2);
+    format === 'xlsx'
+      ? buildXlsx(
+          [['Public address', 'Private key'], ...data.wallets.map((w) => [w.address, w.privateKey])],
+          { sheetName: 'Wallets', colWidths: [46, 70] }
+        )
+      : format === 'csv'
+        ? ['role,label,address,privateKey']
+            .concat(data.wallets.map((w) => [w.role, w.label, w.address, w.privateKey].join(',')))
+            .join('\n')
+        : JSON.stringify(data, null, 2);
+  const type = format === 'xlsx' ? XLSX_MIME : 'text/plain';
 
-  const stamp = data.exportedAt.slice(0, 10);
   // The scope rides in the FILENAME, not only inside the file: two downloads a
   // day apart otherwise differ by nothing but the date while holding completely
-  // different sets of keys — and the one that matters holds fewer.
-  const tag = ids ? '-selected' : role ? `-${role}` : '';
-  const name = `pons-${variant}-wallets${tag}-${stamp}.${format}`;
-  const url = URL.createObjectURL(new Blob([body], { type: 'text/plain' }));
+  // different sets of keys — and the one that matters holds fewer. The count and
+  // the tier are read from the wallets the backend RETURNED, not from what was
+  // asked for, so the name cannot claim a file holds something it does not.
+  const name = backupFileName({
+    variant,
+    wallets: data.wallets,
+    qualifier: ids ? 'selected' : '',
+    ext: format,
+    date: new Date(data.exportedAt),
+  });
+  const url = URL.createObjectURL(new Blob([body], { type }));
   const a = document.createElement('a');
   a.href = url;
   a.download = name;

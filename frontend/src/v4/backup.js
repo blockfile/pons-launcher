@@ -1,4 +1,5 @@
 import { getApiKey } from '../api.js';
+import { v4ExportName } from './exportName.js';
 
 /**
  * Download the private keys of V4's wallets only.
@@ -36,17 +37,15 @@ export async function downloadV4Backup({ minAgeDays, walletIds, includeFunders =
   // The filter goes in the FILENAME, not only inside the file. Two downloads a
   // week apart otherwise differ by one character of date and carry completely
   // different sets — and the one that matters is the one holding fewer keys.
-  // The filename records BOTH the filter and whether the funders rode along, so two
-  // downloads a week apart are never mistaken for one another.
-  const noFunders = includeFunders === false ? '-nofunders' : '';
-  const tag = fundersOnly
-    ? '-funders'
-    : ids
-      ? `-selected${noFunders}`
-      : minAgeDays
-        ? `-seasoned-${minAgeDays}d${noFunders}`
-        : '';
-  a.download = `pons-v4-wallets${tag}-${new Date().toISOString().slice(0, 10)}.json`;
+  // The name is read off the wallets the backend actually returned, not off the
+  // request: their count, and their role when they share one ("seed", "funding").
+  // Whether the funders rode along therefore shows as the kind itself — a seed-only
+  // file says "seed", one carrying a funder does not — rather than as a
+  // "-nofunders" tag built from the request, which once named a file that held a
+  // funding wallet. The filter that narrowed it leads ("selected", "seasoned-1d");
+  // the funders-only export needs none, its contents already say "funding".
+  const qualifier = fundersOnly ? '' : ids ? 'selected' : minAgeDays ? `seasoned-${minAgeDays}d` : '';
+  a.download = v4ExportName({ wallets: json.wallets, qualifier });
   a.click();
   URL.revokeObjectURL(url);
   if (fundersOnly) {

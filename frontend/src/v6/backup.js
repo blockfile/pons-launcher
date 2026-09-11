@@ -1,4 +1,5 @@
 import { getApiKey } from '../api.js';
+import { v6ExportName } from './exportName.js';
 
 /**
  * Download the private keys of V6's wallets only.
@@ -10,9 +11,11 @@ import { getApiKey } from '../api.js';
  * Optionally NARROWED, so a single panel can back up only its own wallets
  * (role) or the operator can export a hand-picked selection (walletIds). With
  * neither, this is the full V6 backup and is byte-identical to what it always
- * was. The filter also goes in the FILENAME, not only inside the file, so two
- * downloads a day apart are never mistaken for one another — the one that
- * matters is usually the one holding fewer keys.
+ * was. The FILENAME says what the file holds, read from the wallets that came
+ * back rather than from the request (see exportName.js) — the count, the role
+ * when every wallet in it shares one, "selected" in front of a hand-picked
+ * export — so two downloads a day apart are never mistaken for one another; the
+ * one that matters is usually the one holding fewer keys.
  */
 export async function downloadV6Backup({ role = null, roleLabel = '', walletIds = null } = {}) {
   const ids = Array.isArray(walletIds) && walletIds.length ? walletIds : null;
@@ -32,8 +35,7 @@ export async function downloadV6Backup({ role = null, roleLabel = '', walletIds 
   const url = URL.createObjectURL(blob);
   const a = document.createElement('a');
   a.href = url;
-  const tag = ids ? '-selected' : roleLabel ? `-${roleLabel}` : '';
-  a.download = `pons-v6-wallets${tag}-${new Date().toISOString().slice(0, 10)}.json`;
+  a.download = v6ExportName({ wallets: json.wallets, qualifier: ids ? 'selected' : '' });
   a.click();
   URL.revokeObjectURL(url);
   if (ids) return `Backed up ${json.wallets.length} selected V6 wallet key(s). Keep this file offline.`;

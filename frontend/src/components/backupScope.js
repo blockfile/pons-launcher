@@ -63,3 +63,40 @@ export function tierWord(role, variant = 'v1') {
   if (role === roles.bundle) return 'bundle';
   return role || '';
 }
+
+/**
+ * The filename of a V1/V2 key export: {count}pcs-{TAB}-{what}-{date}.{ext},
+ * e.g. 31pcs-V2-bundle-wallets-2026-09-11.xlsx.
+ *
+ * `what` comes from what the file HOLDS, not from what was asked for: when every
+ * wallet in it has the same role it is that role's word; a mixed file is plain
+ * "wallets", or "all-wallets" when nothing narrowed it. A narrowed export keeps
+ * its qualifier in front ("selected"). A name built from the request alone has
+ * already lied once — a V4 "nofunders" export that held a funding wallet.
+ *
+ * NOT tierWord. That hands an unknown role back raw, which a dialog sentence can
+ * survive and a filename cannot: "v2bundle" in a V1 file's name claims keys the
+ * file does not hold. Only this tab's own two roles ever become a word, and the
+ * comparison is explicit rather than a lookup table, so no role string can reach
+ * an inherited property and put something stranger in the name.
+ *
+ * The date is UTC, like the exportedAt it is normally handed.
+ *
+ * The V1/V2 pair's own copy, per the tab-isolation rule: every tab has one.
+ */
+export function backupFileName({
+  variant = 'v1',
+  wallets = [],
+  qualifier = '',
+  ext = 'json',
+  date = new Date(),
+} = {}) {
+  const roles = rolesFor(variant);
+  const list = wallets || [];
+  const held = new Set(list.map((w) => w?.role));
+  const only = held.size === 1 ? [...held][0] : undefined;
+  const kind = only === roles.dev ? 'dev' : only === roles.bundle ? 'bundle' : '';
+  const noun = list.length === 1 ? 'wallet' : 'wallets';
+  const what = [qualifier || (kind ? '' : 'all'), kind, noun].filter(Boolean).join('-');
+  return `${list.length}pcs-${variant.toUpperCase()}-${what}-${date.toISOString().slice(0, 10)}.${ext}`;
+}

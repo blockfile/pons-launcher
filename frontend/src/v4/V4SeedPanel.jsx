@@ -712,7 +712,7 @@ export default function V4SeedPanel({ step, wallets, masters, facts, explorer, r
     // rename the second, and a month later the two partials are indistinguishable
     // without opening them — exactly the mislead the tag exists to prevent.
     const tag = gq ? `-${gq.replace(/[^a-z0-9]/gi, '').slice(0, 12).toLowerCase()}` : '';
-    const name = `pons-v4-handoffs${tag}-${new Date().toISOString().slice(0, 10)}.csv`;
+    const name = `${rows.length}pcs-V4-handoffs${tag}-${new Date().toISOString().slice(0, 10)}.csv`;
     const url = URL.createObjectURL(new Blob([body], { type: 'text/csv' }));
     const a = document.createElement('a');
     a.href = url;

@@ -9,7 +9,7 @@ import assert from 'node:assert/strict';
 // The bug these pin: BackupControls used to be handed the console's whole wallet
 // list and count it, so the dialog beside the v1 bundle said "all 23 wallets"
 // while exporting V3 through V8 as well.
-import { resolveBackupScope, tabWallets, tierWord } from './backupScope.js';
+import { backupFileName, resolveBackupScope, tabWallets, tierWord } from './backupScope.js';
 
 // The list as GET /wallets returns it: ONE keystore holding every tab.
 const ALL = [
@@ -99,4 +99,59 @@ test('tabWallets and tierWord speak the tab that was asked for', () => {
   // still read "bundle", not "v2bundle".
   assert.equal(tierWord('v2bundle', 'v2'), 'bundle');
   assert.equal(tierWord('v2dev', 'v2'), 'dev');
+});
+
+// ── the file's name: what it holds, counted ──────────────────────────────────
+//
+// The name outlives the dialog — a file on a USB stick is known by its name
+// alone — so it is read from the wallets the backend actually RETURNED, never
+// from the scope that was asked for.
+
+const DAY = new Date('2026-09-11T12:00:00Z');
+const w = (role, n) => Array.from({ length: n }, () => ({ role }));
+
+test('a single-role file is named by that role, counted', () => {
+  assert.equal(
+    backupFileName({ variant: 'v2', wallets: w('v2bundle', 31), ext: 'xlsx', date: DAY }),
+    '31pcs-V2-bundle-wallets-2026-09-11.xlsx'
+  );
+});
+
+test('a qualifier leads; the contents still decide the kind', () => {
+  assert.equal(
+    backupFileName({ variant: 'v1', wallets: w('bundle', 3), qualifier: 'selected', ext: 'csv', date: DAY }),
+    '3pcs-V1-selected-bundle-wallets-2026-09-11.csv'
+  );
+  // Ticked rows spanning both tiers name no tier — "selected" and nothing more.
+  assert.equal(
+    backupFileName({
+      variant: 'v1',
+      wallets: [...w('dev', 1), ...w('bundle', 2)],
+      qualifier: 'selected',
+      date: DAY,
+    }),
+    '3pcs-V1-selected-wallets-2026-09-11.json'
+  );
+});
+
+test('a mixed file with no narrowing is all-wallets', () => {
+  assert.equal(
+    backupFileName({ variant: 'v2', wallets: [...w('v2dev', 1), ...w('v2bundle', 5)], date: DAY }),
+    '6pcs-V2-all-wallets-2026-09-11.json'
+  );
+});
+
+test('one wallet is singular', () => {
+  assert.equal(
+    backupFileName({ variant: 'v1', wallets: w('dev', 1), date: DAY }),
+    '1pcs-V1-dev-wallet-2026-09-11.json'
+  );
+});
+
+test('a role this tab does not own never becomes a word', () => {
+  // tierWord hands an unknown role back raw; a filename must not. "v2bundle" in
+  // a V1 file's name would claim keys of a tab the file does not speak for.
+  const name = backupFileName({ variant: 'v1', wallets: w('v2bundle', 2), date: DAY });
+  assert.equal(name, '2pcs-V1-all-wallets-2026-09-11.json');
+  assert.doesNotMatch(name, /v2bundle/);
 });

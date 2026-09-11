@@ -1,6 +1,8 @@
 import { getApiKey } from '../api.js';
+import { v3ExportName } from './exportName.js';
 
-// A v3 role → the word the panel uses for it, for the filename and the report.
+// A v3 role → the word the panel uses for it, for the report. The filename's word
+// comes from exportName.js, which names the file from the roles actually in it.
 const ROLE_WORD = { v3dev: 'treasury', v3main: 'main', v3bundle: 'bundle' };
 
 /**
@@ -34,12 +36,15 @@ export async function downloadV3Backup({ walletIds, role } = {}) {
   const blob = new Blob([JSON.stringify(json, null, 2)], { type: 'application/json' });
   const url = URL.createObjectURL(blob);
   const a = document.createElement('a');
-  // The filter rides in the FILENAME, not only inside the file: two downloads a
-  // day apart otherwise differ by nothing but the date while holding completely
-  // different sets of keys — and the one that matters holds fewer.
-  const tag = ids ? '-selected' : role ? `-${ROLE_WORD[role] || role}` : '';
+  // What the file holds rides in the FILENAME, not only inside the file: two
+  // downloads a day apart otherwise differ by nothing but the date while holding
+  // completely different sets of keys — and the one that matters holds fewer. The
+  // name is read off the wallets the backend actually returned (their count and,
+  // when they share one, their role), not off what was asked for: a per-panel
+  // export is named by its role because that is all it holds, and a selection
+  // keeps "selected" in front.
   a.href = url;
-  a.download = `pons-v3-wallets${tag}-${new Date().toISOString().slice(0, 10)}.json`;
+  a.download = v3ExportName({ wallets: json.wallets, qualifier: ids ? 'selected' : '' });
   a.click();
   URL.revokeObjectURL(url);
 
