@@ -528,11 +528,14 @@ export default function V4PlanPanel({ step, masters, seeds, campaigns, planDefau
               params: params(),
               seedsPerFunder: Math.max(1, Math.round(Number(seedsPer) || 0)),
               name: form.name.trim() || undefined,
-              // Sent only when a subset was actually chosen. Omitted, the route
-              // takes every free funder — which is the same answer, but reached
-              // by the server reading the live list rather than by this tab
-              // sending one it may have read a minute ago.
-              funderIds: picked ? chosenFunders.map((w) => w.id) : undefined,
+              // ALWAYS SENT, and it is the list this dialog just counted. Omitting it
+              // made the route fall back to "every free funder", which is NOT the same
+              // answer: the route has no notion of a distributor, so the default
+              // selection's one exclusion — the super-main that paid the split — was
+              // dropped on the way out, and a batch the dialog called 120 funders
+              // started 125, hanging seed wallets off the hub. What is shown is what
+              // is started.
+              funderIds: chosenFunders.map((w) => w.id),
             });
             setPreview(null);
             const refused = out.failed.length

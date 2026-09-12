@@ -691,3 +691,39 @@ test('POST /v4/wallets/backup honors an explicit walletIds set (per-section expo
   assert.equal(res.body.count, 3);
   assert.equal(res.body.minAgeDays, null);
 });
+
+// ── batchFunders: "every free funder" never means the split source ────────────
+
+test('a batch with no funderIds leaves out the wallets that paid a split', () => {
+  const masters = [{ id: 'sm1' }, { id: 'sm2' }, { id: 'f1' }, { id: 'f2' }, { id: 'f3' }];
+  const splitSources = new Set(['sm1', 'sm2']);
+  const picked = guards.batchFunders(masters, { busy: new Set(), requested: null, splitSources });
+  // The console's dialog counts the same three; starting five would hang seed wallets
+  // off the hub that Relay's records already tie to every funder it filled.
+  assert.deepEqual(picked.map((w) => w.id), ['f1', 'f2', 'f3']);
+});
+
+test('a batch that names its funders is honoured exactly, split source included', () => {
+  const masters = [{ id: 'sm1' }, { id: 'f1' }, { id: 'f2' }];
+  const splitSources = new Set(['sm1']);
+  const picked = guards.batchFunders(masters, {
+    busy: new Set(),
+    requested: ['sm1', 'f2'],
+    splitSources,
+  });
+  assert.deepEqual(picked.map((w) => w.id), ['sm1', 'f2'], 'an operator may name the distributor on purpose');
+});
+
+test('a busy funder is never in a batch, named or not', () => {
+  const masters = [{ id: 'f1' }, { id: 'f2' }];
+  const busy = new Set(['f1']);
+  const splitSources = new Set();
+  assert.deepEqual(
+    guards.batchFunders(masters, { busy, requested: null, splitSources }).map((w) => w.id),
+    ['f2']
+  );
+  assert.deepEqual(
+    guards.batchFunders(masters, { busy, requested: ['f1', 'f2'], splitSources }).map((w) => w.id),
+    ['f2']
+  );
+});

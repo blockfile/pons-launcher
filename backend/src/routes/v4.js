@@ -977,6 +977,22 @@ function divideSeeds(seedIds, funderIds, seedsPerFunder) {
 }
 
 /**
+ * Which funding wallets a batch covers.
+ *
+ * `requested` (funderIds) is "these, exactly", and it is honoured as given — an
+ * operator may deliberately name the wallet that ran a split. ABSENT means "every free
+ * funder", and that must NOT quietly include the SPLIT SOURCES: a wallet that paid a
+ * split already links to every funder it filled in Relay's records, so hanging seed
+ * wallets off it ties the whole tree to one address. The console leaves them out of its
+ * default selection for that reason; this is the same rule on the side that actually
+ * starts the campaigns, so a caller that omits the field cannot undo it.
+ */
+function batchFunders(masters, { busy, requested, splitSources }) {
+  const free = masters.filter((w) => !busy.has(w.id));
+  if (requested) return free.filter((w) => requested.includes(w.id));
+  return free.filter((w) => !splitSources.has(w.id));
+}
+/**
  * POST /api/v4/campaigns/batch — one campaign per funding wallet, in one call.
  *
  * WHY THIS EXISTS. A campaign is one funder feeding its own wallets, because
@@ -1011,11 +1027,20 @@ router.post('/v4/campaigns/batch', requireApiKey, async (req, res, next) => {
     // spends money the caller did not ask to spend.
     const requested = Array.isArray(body.funderIds) ? body.funderIds : null;
     if (requested && !requested.length) throw new Error('funderIds is empty — no funding wallet was chosen');
-    const funders = v4roles
-      .masters(ks)
-      .filter((w) => !busy.has(w.id))
-      .filter((w) => !requested || requested.includes(w.id));
-    if (!funders.length) throw new Error('no free funding wallets — every one is already running a campaign');
+    // Wallets that have paid a split — the distributors. Derived, because nothing marks
+    // one: a split campaign naming it as its source is the only thing that does.
+    const splitSources = new Set(
+      store.campaigns().filter((c) => (c.kind || 'season') === 'split').map((c) => c.masterWalletId)
+    );
+    const funders = batchFunders(v4roles.masters(ks), { busy, requested, splitSources });
+    if (!funders.length) {
+      throw new Error(
+        requested
+          ? 'none of the chosen funding wallets are free — every one is already running a campaign'
+          : 'no free funding wallets — every one is either running a campaign or paid a split. Name one in ' +
+            'funderIds to season from it anyway.'
+      );
+    }
 
     const claimed = store.claimedSeedIds();
     const seedIds = v4roles
@@ -1217,6 +1242,7 @@ module.exports._private = {
   assertNotSelfFunding,
   assertNotBusy,
   divideSeeds,
+  batchFunders,
   fundingFacts,
   seedCampaigns,
   assertGenerateCount,
