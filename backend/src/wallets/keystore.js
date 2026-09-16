@@ -661,6 +661,27 @@ function build(userId) {
   }
 
   /**
+   * Deliberate export of an ARCHIVED wallet's key — read-only.
+   *
+   * restore() is the way back for a wallet an operator wants to use again. This is for
+   * one who only needs the key — V4 exporting the keys of wallets it handed to another tab,
+   * which that tab later deleted, archiving them. It changes nothing: the wallet stays in
+   * the archive and the live keystore is untouched. It checks the key still derives the
+   * address it is filed under, the same check restore() makes, so it never hands over a
+   * key for the wrong wallet. Callers must gate this behind explicit confirmation, exactly
+   * like exportKey.
+   */
+  function exportArchivedKey(id) {
+    const record = bin.load().wallets.find((w) => w.id === id);
+    if (!record) throw new Error(`no archived wallet ${id}`);
+    const privateKey = bin.decrypt(record);
+    if (getAddress(new Wallet(privateKey).address) !== getAddress(record.address)) {
+      throw new Error(`archived key for ${record.address} does not match its address`);
+    }
+    return { address: record.address, privateKey };
+  }
+
+  /**
    * Every wallet with its plaintext key, for the operator to back up offline.
    *
    * There are no mnemonics to return: generate() derives each wallet from its own
@@ -751,6 +772,7 @@ function devWallet() {
     purge,
     signer,
     exportKey,
+    exportArchivedKey,
     exportAll,
     devWallet,
     bundleWallets,
@@ -827,6 +849,7 @@ module.exports = {
   purge: (...a) => def().purge(...a),
   signer: (...a) => def().signer(...a),
   exportKey: (...a) => def().exportKey(...a),
+  exportArchivedKey: (...a) => def().exportArchivedKey(...a),
   exportAll: (...a) => def().exportAll(...a),
   devWallet: (...a) => def().devWallet(...a),
   bundleWallets: (...a) => def().bundleWallets(...a),

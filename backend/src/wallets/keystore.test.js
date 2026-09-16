@@ -151,3 +151,19 @@ test('adoptLegacy moves the launch history alongside the wallets', () => {
   assert.ok(!fs.existsSync(process.env.HISTORY_PATH), 'legacy history file should have moved');
   assert.ok(fs.existsSync(history.pathFor('dana')), 'dana should now have a history file');
 });
+
+test('exportArchivedKey reads a deleted wallet key from the archive without restoring it', () => {
+  const [w] = keystore.generate(1, { role: 'bundle' });
+  const liveKey = keystore.exportKey(w.id).privateKey;
+  keystore.remove(w.id);
+  assert.ok(!keystore.list().some((x) => x.id === w.id), 'gone from the live keystore');
+
+  const out = keystore.exportArchivedKey(w.id);
+  assert.equal(out.address, w.address);
+  assert.equal(out.privateKey, liveKey, 'the same key the wallet had before the delete');
+  assert.equal(new Wallet(out.privateKey).address, w.address);
+
+  assert.ok(keystore.archived().some((x) => x.id === w.id), 'still in the archive — nothing was restored');
+  assert.ok(!keystore.list().some((x) => x.id === w.id), 'still not live');
+  assert.throws(() => keystore.exportArchivedKey('no-such-id'), /no archived wallet/);
+});
