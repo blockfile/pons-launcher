@@ -91,6 +91,10 @@ export default function V4SeedPanel({ step, wallets, masters, facts, explorer, r
   // { key: 'at' | 'tab', dir: 'asc' | 'desc' } — the same asc → desc → off cycle
   // the seed headers use.
   const [handoffSort, setHandoffSort] = useState(null);
+  // The keyed hand-off download: the rows it will export, frozen when its dialog opens
+  // (the record re-polls every minute), and the typed EXPORT confirmation.
+  const [keysFor, setKeysFor] = useState(null);
+  const [keysTyped, setKeysTyped] = useState('');
   // How many seed wallets are aged past the gate right now, which of them have
   // already been handed off to another tab, and which the operator has pulled back out
   // of the claimable pool by hand — read-only, drawn beside the generate row so
@@ -587,6 +591,8 @@ export default function V4SeedPanel({ step, wallets, masters, facts, explorer, r
        beside them. An address is hex and can never contain a `v`, so the two
        kinds of match cannot collide. */
   const gq = handoffSearch.trim().toLowerCase();
+  // The filter as it goes into a hand-off filename — shared by both downloads below.
+  const handoffTag = gq ? `-${gq.replace(/[^a-z0-9]/gi, '').slice(0, 12).toLowerCase()}` : '';
   const handoffMatches = (g) =>
     !gq ||
     String(g.address || '').toLowerCase().includes(gq) ||
@@ -696,7 +702,7 @@ export default function V4SeedPanel({ step, wallets, masters, facts, explorer, r
     // v1 would otherwise write the same filename twice, the browser would silently
     // rename the second, and a month later the two partials are indistinguishable
     // without opening them — exactly the mislead the tag exists to prevent.
-    const tag = gq ? `-${gq.replace(/[^a-z0-9]/gi, '').slice(0, 12).toLowerCase()}` : '';
+    const tag = handoffTag;
     const name = `${rows.length}pcs-V4-handoffs${tag}-${new Date().toISOString().slice(0, 10)}.${format}`;
     const url = URL.createObjectURL(new Blob([body], { type }));
     const a = document.createElement('a');
@@ -705,6 +711,45 @@ export default function V4SeedPanel({ step, wallets, masters, facts, explorer, r
     a.click();
     URL.revokeObjectURL(url);
     report(`Wrote ${rows.length} hand-off row(s) to ${name} — addresses, tabs and times only, no keys.`);
+  }
+
+  /**
+   * The same rows WITH their private keys, as an XLSX.
+   *
+   * The hand-off record itself stays public data. The keys come from their own route,
+   * which reads only wallets in V4's hand-off record — they now belong to the tab that
+   * claimed them, so V4's ordinary key export no longer reaches them — and only after the
+   * typed EXPORT confirmation this sits behind. Straight from the response into the Blob:
+   * the keys never touch the DOM. A wallet the claiming tab has since archived is not in
+   * the file, and the report says so.
+   */
+  async function exportHandoffKeys(rows) {
+    setBusy('handoffKeys');
+    try {
+      const out = await api('/v4/handoffs/keys', 'POST', { ids: rows.map((g) => g.id), confirm: true });
+      const body = buildXlsx(
+        [
+          ['Address', 'Tab', 'Handed off at', 'Private key'],
+          ...out.wallets.map((w) => [w.address, w.toTab || 'unknown', w.at, w.privateKey]),
+        ],
+        { sheetName: 'Handoff keys', colWidths: [46, 10, 26, 70] }
+      );
+      const name = `${out.wallets.length}pcs-V4-handoffs${handoffTag}-keys-${new Date().toISOString().slice(0, 10)}.xlsx`;
+      const url = URL.createObjectURL(new Blob([body], { type: XLSX_MIME }));
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = name;
+      a.click();
+      URL.revokeObjectURL(url);
+      const left = out.missing.length
+        ? ` ${out.missing.length} not in the file — ${out.missing[0].reason}.`
+        : '';
+      report(`Wrote ${out.wallets.length} handed-off private key(s) to ${name} — store it offline.${left}`);
+    } catch (err) {
+      report(`ERROR: ${err.message}`);
+    } finally {
+      setBusy('');
+    }
   }
 
   return (
@@ -1032,6 +1077,19 @@ export default function V4SeedPanel({ step, wallets, masters, facts, explorer, r
               >
                 Download {handoffRows.length} as XLSX
               </button>
+              {/* The keyed file: .ghost like every key export — it moves no money, but it is
+                  the dangerous one — and behind the typed EXPORT dialog further down. */}
+              <Busy
+                busy={busy === 'handoffKeys'}
+                className="ghost"
+                disabled={handoffRows.length === 0}
+                onClick={() => {
+                  setKeysTyped('');
+                  setKeysFor(handoffRows);
+                }}
+              >
+                Download {handoffRows.length} with keys
+              </Busy>
             </span>
           </div>
 
@@ -1156,6 +1214,41 @@ export default function V4SeedPanel({ step, wallets, masters, facts, explorer, r
           </p>
         </div>
       )}
+
+      {/* Keys of wallets that now belong to another tab. The same typed confirmation as
+          every key export: this hands over live private keys, and a mis-click must not be
+          enough to do it. */}
+      <Modal
+        open={Boolean(keysFor)}
+        danger
+        title={`This downloads the PRIVATE KEY of ${keysFor ? keysFor.length : 0} handed-off wallet${keysFor && keysFor.length === 1 ? '' : 's'}.`}
+        question={null}
+        confirmLabel="Download XLSX"
+        confirmDisabled={keysTyped !== 'EXPORT'}
+        onConfirm={() => {
+          const rows = keysFor;
+          setKeysFor(null);
+          exportHandoffKeys(rows);
+        }}
+        onCancel={() => setKeysFor(null)}
+      >
+        <p>
+          Anyone who opens that file can spend every one of them. These wallets now belong to
+          the tab that claimed each one. The file is exactly the {keysFor ? keysFor.length : 0}{" "}
+          row(s) shown{handoffSearch.trim() ? ' for the current filter' : ''}: address, tab,
+          hand-off time and private key.
+        </p>
+        <label className="modal-type">
+          Type EXPORT to continue.
+          <input
+            data-autofocus
+            value={keysTyped}
+            autoComplete="off"
+            spellCheck="false"
+            onChange={(e) => setKeysTyped(e.target.value)}
+          />
+        </label>
+      </Modal>
 
       {/* A seed wallet is worth something only for having sat untouched since
           it was funded, so the dialog leads with what deleting actually throws

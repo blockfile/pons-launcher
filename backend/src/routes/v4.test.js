@@ -727,3 +727,71 @@ test('a busy funder is never in a batch, named or not', () => {
     ['f2']
   );
 });
+
+// ── handoffKeys: keys of handed-off wallets, and never anything else ──────────
+
+function handoffFixture() {
+  const decrypted = [];
+  const ks = {
+    list: () => [
+      { id: 'h1', address: '0xAAAA000000000000000000000000000000000001', role: 'v2bundle' },
+      { id: 'h2', address: '0xAAAA000000000000000000000000000000000002', role: 'v3bundle' },
+      { id: 'v2own', address: '0xBBBB000000000000000000000000000000000003', role: 'v2bundle' },
+      { id: 'moved', address: '0xCCCC000000000000000000000000000000000009', role: 'v2bundle' },
+    ],
+    exportKey: (id) => {
+      decrypted.push(id);
+      return { address: 'ignored', privateKey: `key-of-${id}` };
+    },
+  };
+  const graduated = [
+    { id: 'h1', address: '0xaaaa000000000000000000000000000000000001', toTab: 'v2', at: '2026-09-11T10:00:00.000Z' },
+    { id: 'h2', address: '0xAAAA000000000000000000000000000000000002', toTab: 'v3', at: '2026-09-12T10:00:00.000Z' },
+    { id: 'gone', address: '0xDDDD000000000000000000000000000000000004', toTab: 'v2', at: '2026-09-12T11:00:00.000Z' },
+    { id: 'moved', address: '0xEEEE000000000000000000000000000000000005', toTab: 'v5', at: '2026-09-12T12:00:00.000Z' },
+  ];
+  return { ks, graduated, decrypted };
+}
+
+test('handoffKeys returns the key of every requested handed-off wallet', () => {
+  const { ks, graduated } = handoffFixture();
+  const out = guards.handoffKeys(ks, graduated, ['h1', 'h2', 'h1']);
+  assert.deepEqual(
+    out.wallets.map((w) => [w.id, w.toTab, w.privateKey]),
+    [
+      ['h1', 'v2', 'key-of-h1'],
+      ['h2', 'v3', 'key-of-h2'],
+    ],
+    'deduplicated, in request order, address matched case-insensitively'
+  );
+  assert.deepEqual(out.missing, []);
+});
+
+test('handoffKeys refuses a wallet V4 did not hand off — before any key is decrypted', () => {
+  const { ks, graduated, decrypted } = handoffFixture();
+  // 'v2own' is a real V2 bundle wallet in the keystore, but V4 never handed it off.
+  assert.throws(() => guards.handoffKeys(ks, graduated, ['h1', 'v2own']), /not in V4's hand-off record/);
+  assert.throws(() => guards.handoffKeys(ks, graduated, ['nope']), /not in V4's hand-off record/);
+  assert.deepEqual(decrypted, [], 'a refused request decrypts nothing, not even the valid ids in it');
+});
+
+test('handoffKeys needs a non-empty id list', () => {
+  const { ks, graduated } = handoffFixture();
+  for (const ids of [undefined, [], 'h1']) {
+    assert.throws(() => guards.handoffKeys(ks, graduated, ids), /ids\[\] is required/);
+  }
+});
+
+test('handoffKeys reports archived or mismatched wallets as missing and exports the rest', () => {
+  const { ks, graduated, decrypted } = handoffFixture();
+  const out = guards.handoffKeys(ks, graduated, ['h1', 'gone', 'moved']);
+  assert.deepEqual(out.wallets.map((w) => w.id), ['h1']);
+  assert.deepEqual(
+    out.missing.map((m) => [m.id, /archived/.test(m.reason) ? 'archived' : /no longer matches/.test(m.reason) ? 'mismatch' : m.reason]),
+    [
+      ['gone', 'archived'],
+      ['moved', 'mismatch'],
+    ]
+  );
+  assert.deepEqual(decrypted, ['h1'], 'no key is decrypted for a wallet that is not exported');
+});

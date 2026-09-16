@@ -801,6 +801,51 @@ router.post('/v4/wallets/import', requireApiKey, requireAuthConfigured, (req, re
   }
 });
 
+/**
+ * The private keys of wallets V4 handed off to another tab — and ONLY those.
+ *
+ * A claim re-roles a seed into the claiming tab's bundle role, so V4's own key export
+ * (v4master / v4seed only) no longer reaches it: the key moved on with the wallet. The
+ * hand-off record is the one list V4 still keeps of them, and it is the whole of what
+ * this reads. Every id must be in `graduated`, or the request is refused by name before
+ * a single key is decrypted — so this can never pull the key of a wallet V4 did not hand
+ * off, such as a V2 bundle wallet generated on V2.
+ *
+ * Checked against the keystore list first (addresses, no keys), then decrypted. A wallet
+ * the claiming tab has since archived is gone from the keystore, and one whose stored
+ * address no longer matches the record is not the wallet the row is about: both are
+ * returned in `missing` with the reason, and the rest are still exported.
+ */
+function handoffKeys(ks, graduated, ids) {
+  if (!Array.isArray(ids) || ids.length === 0) {
+    throw new Error('ids[] is required — the handed-off wallets whose keys to export');
+  }
+  const record = new Map((graduated || []).map((g) => [g.id, g]));
+  const unique = [...new Set(ids)];
+  for (const id of unique) {
+    if (!record.has(id)) {
+      throw new Error(`wallet ${id} is not in V4's hand-off record — only wallets V4 handed off can be exported here`);
+    }
+  }
+  const inKeystore = new Map(ks.list().map((w) => [w.id, w]));
+  const wallets = [];
+  const missing = [];
+  for (const id of unique) {
+    const g = record.get(id);
+    const row = { id, address: g.address, toTab: g.toTab || null, at: g.at || null };
+    const held = inKeystore.get(id);
+    if (!held) {
+      missing.push({ ...row, reason: 'no longer in the keystore — archived by the tab that claimed it' });
+      continue;
+    }
+    if (String(held.address).toLowerCase() !== String(g.address).toLowerCase()) {
+      missing.push({ ...row, reason: 'the keystore address no longer matches the hand-off record' });
+      continue;
+    }
+    wallets.push({ ...row, privateKey: ks.exportKey(id).privateKey });
+  }
+  return { wallets, missing };
+}
 // POST /api/v4/wallets/backup — every V4 key at once, for an offline backup.
 // Same two locks as routes/wallets.js's whole-keystore backup, because the
 // risk is identical: whoever holds the file this produces controls every
@@ -902,6 +947,41 @@ router.post(
             ? ''
             : ' This file has NO funding wallets — those hold the ETH, so make sure they are backed up somewhere else.'),
         wallets,
+      });
+    } catch (err) {
+      next(err);
+    }
+  }
+);
+
+// POST /api/v4/handoffs/keys — the private keys of wallets V4 handed off to another tab,
+// for the hand-off record's keyed download. The same two locks as the V4 backup above
+// (an explicit confirm, and a configured credential), and it reads nothing but ids in
+// V4's own hand-off record — see handoffKeys.
+router.post(
+  '/v4/handoffs/keys',
+  requireApiKey,
+  requireAuthConfigured,
+  (req, res, next) => {
+    try {
+      assertConfirmed(req.body);
+      const ks = keystoreFor(req.user.id);
+      const store = storeFor(req.user.id);
+      const { wallets, missing } = handoffKeys(ks, store.graduated(), (req.body || {}).ids);
+
+      console.warn(`[pons-launcher] V4 HAND-OFF KEYS EXPORTED — ${wallets.length} private keys`);
+      // The count and the fact, never the keys.
+      activityFor(req.user.id).record('export', `[v4] downloaded ${wallets.length} handed-off private key(s)`, {
+        count: wallets.length,
+        missing: missing.length,
+      });
+
+      res.json({
+        exportedAt: new Date().toISOString(),
+        chainId: config.chainId,
+        count: wallets.length,
+        wallets,
+        missing,
       });
     } catch (err) {
       next(err);
@@ -1243,6 +1323,7 @@ module.exports._private = {
   assertNotBusy,
   divideSeeds,
   batchFunders,
+  handoffKeys,
   fundingFacts,
   seedCampaigns,
   assertGenerateCount,
