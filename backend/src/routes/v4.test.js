@@ -743,12 +743,24 @@ function handoffFixture() {
       decrypted.push(id);
       return { address: 'ignored', privateKey: `key-of-${id}` };
     },
+    // Deleted by the tab that claimed them: the key moved into the archive.
+    archived: () => [
+      { id: 'arch1', address: '0xFFFF000000000000000000000000000000000007', role: 'v2bundle' },
+      { id: 'broken', address: '0xFFFF000000000000000000000000000000000008', role: 'v3bundle' },
+    ],
+    exportArchivedKey: (id) => {
+      if (id === 'broken') throw new Error('archived key for 0xFFFF…0008 does not match its address');
+      decrypted.push(`archive:${id}`);
+      return { address: 'ignored', privateKey: `archived-key-of-${id}` };
+    },
   };
   const graduated = [
     { id: 'h1', address: '0xaaaa000000000000000000000000000000000001', toTab: 'v2', at: '2026-09-11T10:00:00.000Z' },
     { id: 'h2', address: '0xAAAA000000000000000000000000000000000002', toTab: 'v3', at: '2026-09-12T10:00:00.000Z' },
     { id: 'gone', address: '0xDDDD000000000000000000000000000000000004', toTab: 'v2', at: '2026-09-12T11:00:00.000Z' },
     { id: 'moved', address: '0xEEEE000000000000000000000000000000000005', toTab: 'v5', at: '2026-09-12T12:00:00.000Z' },
+    { id: 'arch1', address: '0xffff000000000000000000000000000000000007', toTab: 'v2', at: '2026-09-13T10:00:00.000Z' },
+    { id: 'broken', address: '0xFFFF000000000000000000000000000000000008', toTab: 'v3', at: '2026-09-13T11:00:00.000Z' },
   ];
   return { ks, graduated, decrypted };
 }
@@ -757,14 +769,30 @@ test('handoffKeys returns the key of every requested handed-off wallet', () => {
   const { ks, graduated } = handoffFixture();
   const out = guards.handoffKeys(ks, graduated, ['h1', 'h2', 'h1']);
   assert.deepEqual(
-    out.wallets.map((w) => [w.id, w.toTab, w.privateKey]),
+    out.wallets.map((w) => [w.id, w.toTab, w.privateKey, w.archived]),
     [
-      ['h1', 'v2', 'key-of-h1'],
-      ['h2', 'v3', 'key-of-h2'],
+      ['h1', 'v2', 'key-of-h1', false],
+      ['h2', 'v3', 'key-of-h2', false],
     ],
     'deduplicated, in request order, address matched case-insensitively'
   );
   assert.deepEqual(out.missing, []);
+});
+
+test('handoffKeys finds a wallet the claiming tab deleted, in the archive', () => {
+  // The case that produced an empty file in production: bundle wallets are deleted after
+  // use, which archives the key rather than destroying it.
+  const { ks, graduated, decrypted } = handoffFixture();
+  const out = guards.handoffKeys(ks, graduated, ['h1', 'arch1']);
+  assert.deepEqual(
+    out.wallets.map((w) => [w.id, w.privateKey, w.archived]),
+    [
+      ['h1', 'key-of-h1', false],
+      ['arch1', 'archived-key-of-arch1', true],
+    ]
+  );
+  assert.deepEqual(out.missing, []);
+  assert.deepEqual(decrypted, ['h1', 'archive:arch1']);
 });
 
 test('handoffKeys refuses a wallet V4 did not hand off — before any key is decrypted', () => {
@@ -782,16 +810,13 @@ test('handoffKeys needs a non-empty id list', () => {
   }
 });
 
-test('handoffKeys reports archived or mismatched wallets as missing and exports the rest', () => {
+test('handoffKeys reports what it cannot export, with the reason, and exports the rest', () => {
   const { ks, graduated, decrypted } = handoffFixture();
-  const out = guards.handoffKeys(ks, graduated, ['h1', 'gone', 'moved']);
+  const out = guards.handoffKeys(ks, graduated, ['h1', 'gone', 'moved', 'broken']);
   assert.deepEqual(out.wallets.map((w) => w.id), ['h1']);
-  assert.deepEqual(
-    out.missing.map((m) => [m.id, /archived/.test(m.reason) ? 'archived' : /no longer matches/.test(m.reason) ? 'mismatch' : m.reason]),
-    [
-      ['gone', 'archived'],
-      ['moved', 'mismatch'],
-    ]
-  );
-  assert.deepEqual(decrypted, ['h1'], 'no key is decrypted for a wallet that is not exported');
+  const why = Object.fromEntries(out.missing.map((m) => [m.id, m.reason]));
+  assert.match(why.gone, /no longer on this server/, 'in neither the keystore nor the archive');
+  assert.match(why.moved, /no longer matches/, 'the stored address is not the recorded one');
+  assert.match(why.broken, /could not be read/, 'an archived key that fails its own check');
+  assert.deepEqual(decrypted, ['h1'], 'no key is decrypted for a wallet whose address does not match');
 });

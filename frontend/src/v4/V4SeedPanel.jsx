@@ -727,6 +727,14 @@ export default function V4SeedPanel({ step, wallets, masters, facts, explorer, r
     setBusy('handoffKeys');
     try {
       const out = await api('/v4/handoffs/keys', 'POST', { ids: rows.map((g) => g.id), confirm: true });
+      // Nothing exportable is said, never written: a header-only key file looks like a
+      // backup and holds nothing, which is the one thing a key export must not do.
+      if (!out.wallets.length) {
+        const why = out.missing[0] ? out.missing[0].reason : 'the server returned none';
+        report(`ERROR: no key could be exported for ${rows.length} wallet(s) — ${why}. No file was written.`);
+        return;
+      }
+      const fromArchive = out.wallets.filter((w) => w.archived).length;
       const body = buildXlsx(
         [
           ['Address', 'Tab', 'Handed off at', 'Private key'],
@@ -744,7 +752,7 @@ export default function V4SeedPanel({ step, wallets, masters, facts, explorer, r
       const left = out.missing.length
         ? ` ${out.missing.length} not in the file — ${out.missing[0].reason}.`
         : '';
-      report(`Wrote ${out.wallets.length} handed-off private key(s) to ${name} — store it offline.${left}`);
+      report(`Wrote ${out.wallets.length} handed-off private key(s)${fromArchive ? ` (${fromArchive} from the archive — deleted by the tab that claimed them)` : ""} to ${name} — store it offline.${left}`);
     } catch (err) {
       report(`ERROR: ${err.message}`);
     } finally {

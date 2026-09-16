@@ -811,10 +811,17 @@ router.post('/v4/wallets/import', requireApiKey, requireAuthConfigured, (req, re
  * a single key is decrypted — so this can never pull the key of a wallet V4 did not hand
  * off, such as a V2 bundle wallet generated on V2.
  *
- * Checked against the keystore list first (addresses, no keys), then decrypted. A wallet
- * the claiming tab has since archived is gone from the keystore, and one whose stored
- * address no longer matches the record is not the wallet the row is about: both are
- * returned in `missing` with the reason, and the rest are still exported.
+ * A handed-off wallet is usually DELETED by the tab that claimed it once it has been
+ * used, and a delete moves the key into the encrypted archive rather than destroying it
+ * (keystore.remove). So each wallet is looked for in the live keystore, then in the
+ * archive. The first production run looked only in the live keystore and exported 0 of
+ * 384, all of them archived.
+ *
+ * Checked against the lists first (addresses, no keys), then decrypted. A wallet in
+ * neither place is gone for good; one whose stored address no longer matches the record
+ * is not the wallet the row is about; an archived key that fails its own address check
+ * is refused. All three come back in `missing` with the reason, and the rest are still
+ * exported. `archived` on a row says where its key came from.
  */
 function handoffKeys(ks, graduated, ids) {
   if (!Array.isArray(ids) || ids.length === 0) {
@@ -828,21 +835,28 @@ function handoffKeys(ks, graduated, ids) {
     }
   }
   const inKeystore = new Map(ks.list().map((w) => [w.id, w]));
+  const inArchive = new Map(ks.archived().map((w) => [w.id, w]));
   const wallets = [];
   const missing = [];
   for (const id of unique) {
     const g = record.get(id);
     const row = { id, address: g.address, toTab: g.toTab || null, at: g.at || null };
-    const held = inKeystore.get(id);
+    const live = inKeystore.get(id);
+    const held = live || inArchive.get(id);
     if (!held) {
-      missing.push({ ...row, reason: 'no longer in the keystore — archived by the tab that claimed it' });
+      missing.push({ ...row, reason: 'its key is no longer on this server — deleted, and not in the archive' });
       continue;
     }
     if (String(held.address).toLowerCase() !== String(g.address).toLowerCase()) {
-      missing.push({ ...row, reason: 'the keystore address no longer matches the hand-off record' });
+      missing.push({ ...row, reason: 'the stored address no longer matches the hand-off record' });
       continue;
     }
-    wallets.push({ ...row, privateKey: ks.exportKey(id).privateKey });
+    try {
+      const privateKey = live ? ks.exportKey(id).privateKey : ks.exportArchivedKey(id).privateKey;
+      wallets.push({ ...row, privateKey, archived: !live });
+    } catch (err) {
+      missing.push({ ...row, reason: `its archived key could not be read — ${err.message}` });
+    }
   }
   return { wallets, missing };
 }
@@ -973,6 +987,7 @@ router.post(
       // The count and the fact, never the keys.
       activityFor(req.user.id).record('export', `[v4] downloaded ${wallets.length} handed-off private key(s)`, {
         count: wallets.length,
+        fromArchive: wallets.filter((w) => w.archived).length,
         missing: missing.length,
       });
 
