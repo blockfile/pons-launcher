@@ -4,6 +4,7 @@ import Modal from '../components/Modal.jsx';
 import Step from '../components/Step.jsx';
 import { Busy } from '../components/Section.jsx';
 import Address from '../components/Address.jsx';
+import { XLSX_MIME, buildXlsx } from '../components/xlsx.js';
 import { LuTrash2, LuUndo2 } from 'react-icons/lu';
 import IconButton from './IconButton.jsx';
 import V4BackupControls from './V4BackupControls.jsx';
@@ -663,27 +664,41 @@ export default function V4SeedPanel({ step, wallets, masters, facts, explorer, r
    * files: a partial export that looks complete a month later is the one way
    * this record could mislead the audit it exists for.
    */
-  function exportHandoffs(rows) {
-    // RFC4180 quoting. The three fields are hex, a short tab name and an ISO
-    // timestamp, so nothing should ever need it — which is precisely why it is
-    // here rather than trusted to stay true.
-    const cell = (v) => {
-      const s = String(v ?? '');
-      return /[",\n\r]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s;
-    };
-    // `toTab || 'unknown'` mirrors what the table and the tally already draw for a
-    // row missing its destination, so the file and the view cannot disagree on the
-    // same row — which is the whole promise this export makes.
-    const body = ['address,tab,handed_off_at']
-      .concat(rows.map((g) => [g.address, g.toTab || 'unknown', g.at].map(cell).join(',')))
-      .join('\n');
+  function exportHandoffs(rows, format = 'csv') {
+    // One set of columns for both formats. `toTab || 'unknown'` mirrors what the table
+    // and the tally already draw for a row missing its destination, so the file and the
+    // view cannot disagree on the same row — which is the whole promise this export makes.
+    const header = ['address', 'tab', 'handed_off_at'];
+    const table = rows.map((g) => [g.address, g.toTab || 'unknown', g.at]);
+    let body;
+    let type;
+    if (format === 'xlsx') {
+      // The XLSX writer V2 uses: every cell an inline string, so an address or a
+      // timestamp is never reinterpreted by Excel. Headers in words, for a sheet a person
+      // opens rather than a file a script parses.
+      body = buildXlsx([['Address', 'Tab', 'Handed off at'], ...table], {
+        sheetName: 'Handoffs',
+        colWidths: [46, 10, 26],
+      });
+      type = XLSX_MIME;
+    } else {
+      // RFC4180 quoting. The three fields are hex, a short tab name and an ISO
+      // timestamp, so nothing should ever need it — which is precisely why it is
+      // here rather than trusted to stay true.
+      const cell = (v) => {
+        const s = String(v ?? '');
+        return /[",\n\r]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s;
+      };
+      body = [header.join(',')].concat(table.map((r) => r.map(cell).join(','))).join('\n');
+      type = 'text/csv';
+    }
     // The QUERY goes in the name, not a generic "-filtered": exporting v3 and then
     // v1 would otherwise write the same filename twice, the browser would silently
     // rename the second, and a month later the two partials are indistinguishable
     // without opening them — exactly the mislead the tag exists to prevent.
     const tag = gq ? `-${gq.replace(/[^a-z0-9]/gi, '').slice(0, 12).toLowerCase()}` : '';
-    const name = `${rows.length}pcs-V4-handoffs${tag}-${new Date().toISOString().slice(0, 10)}.csv`;
-    const url = URL.createObjectURL(new Blob([body], { type: 'text/csv' }));
+    const name = `${rows.length}pcs-V4-handoffs${tag}-${new Date().toISOString().slice(0, 10)}.${format}`;
+    const url = URL.createObjectURL(new Blob([body], { type }));
     const a = document.createElement('a');
     a.href = url;
     a.download = name;
@@ -1008,6 +1023,15 @@ export default function V4SeedPanel({ step, wallets, masters, facts, explorer, r
               >
                 Download {handoffRows.length} as CSV
               </button>
+              {/* The same rows as a spreadsheet: identical columns, count and filter tag. */}
+              <button
+                type="button"
+                className="quiet"
+                disabled={handoffRows.length === 0}
+                onClick={() => exportHandoffs(handoffRows, 'xlsx')}
+              >
+                Download {handoffRows.length} as XLSX
+              </button>
             </span>
           </div>
 
@@ -1127,7 +1151,7 @@ export default function V4SeedPanel({ step, wallets, masters, facts, explorer, r
           <p className="hint" style={{ marginTop: 8 }}>
             A handed-off wallet is no longer a seed — the tab that claimed it (V1, V3, V5, V6 or V7)
             re-roled it, and it is spent from there now, so there is no Restore for one and this pool
-            cannot take it back. Withdraw, on the rows above, is the reversible one. The CSV holds
+            cannot take it back. Withdraw, on the rows above, is the reversible one. The CSV and XLSX hold
             addresses, tabs and times only — no keys.
           </p>
         </div>
