@@ -68,6 +68,7 @@ export default function V4BackupControls({
   const [busy, setBusy] = useState(false);
   const [open, setOpen] = useState(false);
   const [typed, setTyped] = useState('');
+  const [format, setFormat] = useState('json');
   // Blank means every wallet. A number means only seeds that have been sitting
   // at least that long — see the note beside the field for what it is for.
   const [minAge, setMinAge] = useState('');
@@ -102,10 +103,10 @@ export default function V4BackupControls({
       report(
         await downloadV4Backup(
           fundersOnly
-            ? { fundersOnly: true }
+            ? { fundersOnly: true, format }
             : selecting
-              ? { walletIds: exportIds, includeFunders: funderIn }
-              : { minAgeDays: age || undefined, includeFunders: funderIn }
+              ? { walletIds: exportIds, includeFunders: funderIn, format }
+              : { minAgeDays: age || undefined, includeFunders: funderIn, format }
         )
       );
       // RELOAD, or the gate goes on refusing wallets it now has on record.
@@ -132,6 +133,7 @@ export default function V4BackupControls({
         disabled={selecting ? !wouldExport : !exported}
         onClick={() => {
           setTyped('');
+          setFormat('json');
           setOpen(true);
         }}
       >
@@ -149,7 +151,7 @@ export default function V4BackupControls({
               : `This downloads the PRIVATE KEY of all ${exported} V4 wallets.`
         }
         question={null}
-        confirmLabel="Download"
+        confirmLabel={format === 'xlsx' ? 'Download XLSX' : 'Download'}
         confirmDisabled={typed !== 'EXPORT'}
         onConfirm={() => {
           setOpen(false);
@@ -229,6 +231,16 @@ export default function V4BackupControls({
           </label>
         )}
 
+        {/* The same keys, as JSON (the full record) or as an Excel sheet. Starts at JSON
+            every time the dialog opens, so a format picked for one file is never carried
+            silently into the next. */}
+        <label>
+          File format
+          <select value={format} onChange={(e) => setFormat(e.target.value)}>
+            <option value="json">JSON — the full record: address, key, role, label, funding date</option>
+            <option value="xlsx">XLSX — Excel sheet: public address, private key, type, funding date</option>
+          </select>
+        </label>
         <label className="modal-type">
           Type EXPORT to continue.
           <input

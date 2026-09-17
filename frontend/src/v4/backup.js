@@ -1,5 +1,7 @@
 import { getApiKey } from '../api.js';
 import { v4ExportName } from './exportName.js';
+import { XLSX_MIME, buildXlsx } from '../components/xlsx.js';
+import { v4XlsxRows } from './backupRows.js';
 
 /**
  * Download the private keys of V4's wallets only.
@@ -8,7 +10,7 @@ import { v4ExportName } from './exportName.js';
  * A V4 operator backing up a campaign should not be handed v1's dev key in the
  * same file — and the campaign gate only needs V4's wallets on record.
  */
-export async function downloadV4Backup({ minAgeDays, walletIds, includeFunders = true, fundersOnly = false } = {}) {
+export async function downloadV4Backup({ minAgeDays, walletIds, includeFunders = true, fundersOnly = false, format = 'json' } = {}) {
   // fundersOnly is the funding-wallet-only export — no seeds. An explicit seed set (a
   // per-section export — "the usable wallets in THIS pool") otherwise takes precedence
   // over the age filter. A withdrawn seed is simply never in the set, so a per-section
@@ -30,7 +32,14 @@ export async function downloadV4Backup({ minAgeDays, walletIds, includeFunders =
   const json = await res.json();
   if (!res.ok) throw new Error(json.error || 'backup failed');
 
-  const blob = new Blob([JSON.stringify(json, null, 2)], { type: 'application/json' });
+  // The same wallets either way. XLSX is the sheet an operator opens in Excel: public
+  // address and private key first, then type and funding date (see backupRows.js).
+  const xlsx = format === 'xlsx';
+  const blob = xlsx
+    ? new Blob([buildXlsx(v4XlsxRows(json.wallets), { sheetName: 'V4 wallets', colWidths: [46, 70, 10, 26, 18] })], {
+        type: XLSX_MIME,
+      })
+    : new Blob([JSON.stringify(json, null, 2)], { type: 'application/json' });
   const url = URL.createObjectURL(blob);
   const a = document.createElement('a');
   a.href = url;
@@ -45,7 +54,7 @@ export async function downloadV4Backup({ minAgeDays, walletIds, includeFunders =
   // funding wallet. The filter that narrowed it leads ("selected", "seasoned-1d");
   // the funders-only export needs none, its contents already say "funding".
   const qualifier = fundersOnly ? '' : ids ? 'selected' : minAgeDays ? `seasoned-${minAgeDays}d` : '';
-  a.download = v4ExportName({ wallets: json.wallets, qualifier });
+  a.download = v4ExportName({ wallets: json.wallets, qualifier, ext: xlsx ? 'xlsx' : 'json' });
   a.click();
   URL.revokeObjectURL(url);
   if (fundersOnly) {
