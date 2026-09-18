@@ -20,6 +20,7 @@ const { LIMITS, rateLimit } = require('../tp/limits');
 const venue = require('../tp/venue');
 const state = require('../tp/state');
 const quote = require('../tp/quote');
+const broadcast = require('../tp/broadcast');
 const { broadcastCost } = require('../tp/limits'); // own line: later tasks' edits anchor on the line above
 
 const router = express.Router();
@@ -119,7 +120,54 @@ router.post(
     res.json(await quote.quotePairToEth(body.pairToken, body.amount));
   })
 );
-router.post('/broadcast', broadcastLimit, notYet); // broadcast.broadcast
+// {token, txs: [rawHex]} (<= 100) -> {results}. tp/broadcast.js validates EVERY
+// transaction against this token's venue before it sends ANY. The send path:
+// venue.cachedVenue costs no chain read on a hit, and the body is checked before
+// even that. A token can graduate between the page's load and this click; the page
+// then re-arms for Permit2, which the cached curve venue refuses as bad_tx. So on
+// a bad_tx, re-read the phase ONCE and re-validate. The happy path never pays for
+// that read.
+router.post(
+  '/broadcast',
+  broadcastLimit,
+  wrap(async (req, res) => {
+    const body = req.body;
+    if (!body || typeof body !== 'object' || Array.isArray(body)) {
+      throw new TpError('bad_request', 'expected a JSON body {token, txs}');
+    }
+    if (typeof body.token !== 'string' || !/^0x[0-9a-fA-F]{40}$/.test(body.token)) {
+      throw new TpError('bad_address', 'token is not an address');
+    }
+    if (!Array.isArray(body.txs) || body.txs.length === 0) {
+      throw new TpError('bad_request', 'txs must be a non-empty list of signed transactions');
+    }
+    if (body.txs.length > broadcast.MAX_TXS) {
+      throw new TpError('too_many', `at most ${broadcast.MAX_TXS} transactions per broadcast`);
+    }
+
+    let v = await venue.cachedVenue(body.token.toLowerCase());
+    let results;
+    try {
+      results = await broadcast.broadcast(v, body.txs);
+    } catch (err) {
+      if (!(err instanceof TpError) || err.code !== 'bad_tx') throw err;
+      const fresh = await venue.refreshPhase(v);
+      if (!fresh || fresh === v) throw err;
+      v = fresh;
+      results = await broadcast.broadcast(v, body.txs);
+    }
+
+    // Fire and forget: the receipts reach the page on the token's stream (receiptBus).
+    const sent = results.filter((r) => r.ok).map((r) => r.hash);
+    if (sent.length) {
+      const token = v.token;
+      Promise.resolve()
+        .then(() => broadcast.watchReceipts(token, sent))
+        .catch((e) => console.error('[tp] receipt watch failed:', e && e.message));
+    }
+    res.json({ results });
+  })
+);
 router.get('/stream', notYet); // stream.handleStream (limited by streamSlots, not readLimit)
 
 // ── the end of the line for every /api/tp request ────────────────────────────
