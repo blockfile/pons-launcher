@@ -491,3 +491,15 @@ test('a broadcast body refuses a malformed sid, without echoing it', async () =>
   const sid = 'ab'.repeat(16);
   assert.equal(buildBody('broadcast', { token: TOKEN, txs: [raw], sid }), JSON.stringify({ token: TOKEN, txs: [raw], sid }));
 });
+
+test("a 409 'migrating' (a graduation in progress) is retried, never final", async () => {
+  const timers = fakeTimers();
+  const events = [];
+  const fetch = fakeFetch([jsonAnswer(409, { error: 'mid-migration — try again shortly', code: 'migrating' }), sseAnswer([], { keepOpen: true })]);
+  const close = openStream(TOKEN, 1, (name, data) => events.push([name, data]), { fetch, ...timers, idleMs: 0, backoffMs: [10] });
+  await until(() => timers.queue.length === 1);
+  assert.deepEqual(events.map(([n]) => n), ['stream:retry']);
+  timers.runNext();
+  await until(() => fetch.calls.length === 2);
+  close();
+});

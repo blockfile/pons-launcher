@@ -169,7 +169,9 @@ function Chart({ hub, venue, interval, onInterval, quoteUsd, own }) {
 
     const offs = [
       hub.on('snapshot', (d) => {
-        if (!d) return;
+        // A snapshot of a timeframe the visitor has already left never paints
+        // (its live bars would all be dropped against intervalRef below).
+        if (!d || (d.interval !== undefined && Number(d.interval) !== intervalRef.current)) return;
         queueRef.current.clear();
         rawRef.current = cleanBars(d.bars);
         recentRef.current = Array.isArray(d.trades) ? d.trades.slice(-RECENT) : [];

@@ -1,9 +1,9 @@
 import { Suspense, lazy, useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { LazyMotion, MotionConfig, domAnimation } from 'framer-motion';
-import { LuShieldAlert } from 'react-icons/lu';
+import { LuLock, LuShieldAlert } from 'react-icons/lu';
 import * as api from '../api.js';
 import { addresses as storedAddresses, clearWallets } from '../keys/walletStore.js';
-import { hasVault, wipeVault } from '../keys/vault.js';
+import { VAULT_KEY, hasVault, wipeVault } from '../keys/vault.js';
 import { USDG } from '../chain/constants.js';
 import { createHub } from './hub.js';
 import { createSession } from './session.js';
@@ -24,8 +24,13 @@ import './dapp.css';
 // three.js lives in its own lazy chunk and is only requested while no token is open.
 const EmptyScene = lazy(() => import('./EmptyScene.jsx'));
 
-const EMPTY_VIEW = { rows: [], totals: { tokens: '0', ticked: 0, sellable: 0, arming: 0, failedArm: 0 } };
+const EMPTY_VIEW = { rows: [], totals: { tokens: '0', ticked: 0, sellable: 0, arming: 0, failedArm: 0, convertible: 0 } };
 const FEES_EVERY_MS = 15_000;
+// While no stream is live (refused, reconnecting, a shared NAT's 429), the mark
+// and the venue are polled instead: a curve floor is never priced from a mark
+// frozen at page load, and a graduation is still followed.
+const MARK_POLL_MS = 3_000;
+const OFFLINE_STATUS = { state: 'reconnecting', detail: 'live data paused — the price refreshes every 3 s' };
 
 function safeHasVault() {
   try {
@@ -49,6 +54,8 @@ export default function App() {
   const own = useRef({ txs: new Set(), addrs: new Set() });
   const sessionRef = useRef(null);
   const streamsRef = useRef([]);
+  const streamLiveRef = useRef(false);
+  const tfRef = useRef(1);
   const markRef = useRef(null);
   const [venue, setVenue] = useState(null);
   const [opening, setOpening] = useState(false);
@@ -102,8 +109,19 @@ export default function App() {
         closeSession();
         markRef.current = mark;
         own.current.txs = new Set();
-        const s = createSession({ venue: v, mark, fees: f, slippageBps: slippageToBps(slippage), own: own.current, hub, deps: realDeps, onView: setView });
+        const s = createSession({
+          venue: v,
+          mark,
+          fees: f,
+          slippageBps: slippageToBps(slippage),
+          own: own.current,
+          hub,
+          deps: realDeps,
+          onView: setView,
+          onVenue: setVenue, // a graduation the session followed (stream, /wallets, poll)
+        });
         sessionRef.current = s;
+        s.setLive(streamLiveRef.current); // the same token re-opened keeps its live stream
         s.start();
         setFees(f);
         setVenue(v);
@@ -125,21 +143,47 @@ export default function App() {
     setTokenError('');
   }, [closeSession]);
 
+  // The session follows a venue the server reports (a graduation): the stream's
+  // snapshot and phase event, the /wallets answers and the offline poll.
+  const followVenue = useCallback(
+    (v) => {
+      const session = sessionRef.current;
+      if (session && v) session.applyVenue(v).catch((e) => toast(`Re-arming after the venue change failed: ${errText(e)}`, 'error'));
+    },
+    [toast]
+  );
+
+  const setStreamLive = useCallback(
+    (on) => {
+      if (streamLiveRef.current === on) return;
+      streamLiveRef.current = on;
+      if (sessionRef.current) sessionRef.current.setLive(on);
+      if (!on) hub.emit('status', OFFLINE_STATUS);
+    },
+    [hub]
+  );
+
   // Close every stream when the token changes or the page unmounts.
   useEffect(() => {
     if (!token) return undefined;
     return () => {
       for (const s of streamsRef.current) s.close();
       streamsRef.current = [];
+      streamLiveRef.current = false;
     };
   }, [token]);
 
   // One stream per (token, timeframe). Make-before-break: the old stream keeps
   // feeding the page until the new one's snapshot arrives, so a timeframe
-  // switch opens no gap in which a receipt could be missed.
+  // switch opens no gap in which a receipt could be missed. Only the live
+  // stream and the NEWEST pending one exist: a pending stream for a timeframe
+  // the visitor has already left is closed, never promoted.
   useEffect(() => {
     if (!token) return;
-    const entry = { close: () => {}, live: false };
+    tfRef.current = tf;
+    for (const other of streamsRef.current) if (!other.live) other.close();
+    streamsRef.current = streamsRef.current.filter((e) => e.live);
+    const entry = { close: () => {}, live: false, interval: tf };
     entry.close = api.openStream(token, tf, (name, data) => {
       const session = sessionRef.current;
       if (name === 'receipt') {
@@ -148,20 +192,28 @@ export default function App() {
       }
       if (name === 'snapshot') {
         if (!entry.live) {
+          if (tfRef.current !== entry.interval) return; // a timeframe already left
           entry.live = true;
           for (const other of streamsRef.current) if (other !== entry) other.close();
           streamsRef.current = [entry];
         } else if (session) {
           session.onReconnect(); // an auto-reconnect: settle what the gap swallowed
         }
+        setStreamLive(true);
       }
-      if (!entry.live) return;
+      if (!entry.live) {
+        // The first stream of the token is refused or retrying: say so on the chart.
+        const down = name === 'stream:retry' || name === 'stream:error';
+        if (down && !streamLiveRef.current && tfRef.current === entry.interval) hub.emit('status', OFFLINE_STATUS);
+        return;
+      }
       switch (name) {
         case 'snapshot':
           if (data && data.mark) {
             markRef.current = data.mark;
             if (session) session.onMark(data.mark);
           }
+          if (data && data.venue) followVenue(data.venue); // a graduation while the stream was away
           hub.emit('snapshot', data);
           break;
         case 'mark':
@@ -170,13 +222,15 @@ export default function App() {
           hub.emit('mark', data);
           break;
         case 'phase':
-          if (data) {
-            setVenue(data);
-            if (session) session.onPhase(data).catch((e) => toast(`Re-arming after the venue change failed: ${errText(e)}`, 'error'));
-          }
+          if (data) followVenue(data);
           hub.emit('phase', data);
           break;
+        case 'stream:retry':
+        case 'stream:error':
+          setStreamLive(false);
+          break;
         case 'trades':
+          if (session) session.onTrades(data); // a mark older than these trades is behind the curve
           hub.emit('trades', data);
           break;
         case 'bar':
@@ -190,7 +244,33 @@ export default function App() {
       }
     });
     streamsRef.current.push(entry);
-  }, [token, tf, hub, toast]);
+  }, [token, tf, hub, followVenue, setStreamLive]);
+
+  // No live stream: poll the mark and the venue so the session never prices a
+  // curve floor from a frozen mark and still follows a graduation.
+  useEffect(() => {
+    if (!token) return undefined;
+    let dead = false;
+    const id = setInterval(async () => {
+      if (streamLiveRef.current) return;
+      try {
+        const { venue: v, mark } = await api.getToken(token);
+        if (dead) return;
+        if (mark) {
+          markRef.current = mark;
+          if (sessionRef.current) sessionRef.current.onMark(mark);
+          hub.emit('mark', mark);
+        }
+        followVenue(v);
+      } catch {
+        // the next poll (or the stream coming back) catches up
+      }
+    }, MARK_POLL_MS);
+    return () => {
+      dead = true;
+      clearInterval(id);
+    };
+  }, [token, hub, followVenue]);
 
   // Gas price (and the backend's ETH/USD) stay warm: the click path never fetches them.
   useEffect(() => {
@@ -286,6 +366,8 @@ export default function App() {
   const onTick = useCallback((address, on) => sessionRef.current && sessionRef.current.setTicked(address, on), []);
   const onTickAll = useCallback((on) => sessionRef.current && sessionRef.current.setAllTicked(on), []);
   const onRetryArm = useCallback(() => sessionRef.current && sessionRef.current.arm({ retry: true }), []);
+  // Pair-token proceeds (AMZN, SPCX...) -> ETH now: one wallet, or every wallet with some.
+  const onConvert = useCallback((address) => sessionRef.current && sessionRef.current.convertPair(address), []);
 
   const onRefresh = useCallback(async () => {
     const s = sessionRef.current;
@@ -300,24 +382,52 @@ export default function App() {
     }
   }, [syncOwnAddrs, toast]);
 
+  // Clear empties this tab. A copy saved on this device is NOT this tab: say so,
+  // and offer to delete it too — otherwise it unlocks again on the next visit.
   const onClear = useCallback(() => {
     if (!window.confirm('Remove every wallet from this tab? You will need the keys again to sell.')) return;
     clearWallets();
     syncOwnAddrs();
     if (sessionRef.current) sessionRef.current.reset();
-  }, [syncOwnAddrs]);
+    if (!safeHasVault()) return;
+    if (window.confirm('Also delete the encrypted copy of your wallets saved on this device? Otherwise it unlocks again on the next visit.')) {
+      wipeVault();
+      setVault('none');
+      toast('Wallets removed from this tab and deleted from this device', 'ok');
+    } else {
+      // This tab no longer holds the saved wallets: a save now would replace them.
+      setVault('locked');
+      toast('The encrypted copy stays on this device — Forget deletes it', 'info');
+    }
+  }, [syncOwnAddrs, toast]);
 
   const onImported = useCallback(
-    ({ added, duplicates, rejected, saved }) => {
+    ({ added, duplicates, rejected, saved = 0, saveError = '' }) => {
       const list = syncOwnAddrs();
-      if (saved) setVault('unlocked');
+      if (saved > 0) setVault('unlocked');
       const dup = duplicates ? `, ${duplicates} already here` : '';
       const bad = rejected ? `, ${rejected} rows refused` : '';
-      toast(`${added} wallet${added === 1 ? '' : 's'} added${dup}${bad}${saved ? ' · saved on this device' : ''}`, rejected ? 'error' : 'ok');
+      const kept = saved > 0 ? ` · ${saved} saved on this device` : saveError ? ' · NOT saved on this device' : '';
+      toast(`${added} wallet${added === 1 ? '' : 's'} added${dup}${bad}${kept}`, rejected || saveError ? 'error' : 'ok');
       loadInto(sessionRef.current, list);
     },
     [loadInto, syncOwnAddrs, toast]
   );
+
+  // Another tab of this page saved, replaced or deleted the vault.
+  useEffect(() => {
+    const onStorage = (e) => {
+      if (e.key !== null && e.key !== VAULT_KEY) return;
+      const has = safeHasVault();
+      setVault((prev) => {
+        if (!has) return 'none';
+        if (prev === 'none' || e.key === VAULT_KEY) return 'locked'; // unlocked here is no longer what is stored
+        return prev;
+      });
+    };
+    window.addEventListener('storage', onStorage);
+    return () => window.removeEventListener('storage', onStorage);
+  }, []);
 
   const onUnlocked = useCallback(
     (n) => {
@@ -347,6 +457,15 @@ export default function App() {
             <LuShieldAlert aria-hidden="true" /> Keys stay in this browser tab. Use trading wallets. A browser extension can read this page.
           </p>
           {vault === 'locked' && <VaultBar onUnlocked={onUnlocked} onForget={onForget} />}
+          {vault === 'unlocked' && (
+            <div className="vaultbar pane" role="status">
+              <LuLock aria-hidden="true" />
+              <span>These wallets are also saved on this device, encrypted with your passphrase.</span>
+              <button type="button" className="ghost danger" onClick={onForget}>
+                Forget saved wallets
+              </button>
+            </div>
+          )}
           <TokenBar
             venue={venue}
             opening={opening}
@@ -395,6 +514,7 @@ export default function App() {
                       onTickAll={onTickAll}
                       onRefresh={onRefresh}
                       onRetryArm={onRetryArm}
+                      onConvert={onConvert}
                       onImport={openImport}
                       onClear={onClear}
                       refreshing={refreshing}
@@ -428,7 +548,7 @@ export default function App() {
               tradingview.com
             </a>
           </footer>
-          {importOpen && <ImportDialog vaultLocked={vault === 'locked'} onClose={closeImport} onImported={onImported} />}
+          {importOpen && <ImportDialog vault={vault} walletCount={walletCount} onClose={closeImport} onImported={onImported} />}
           <Toasts hub={hub} />
         </div>
       </MotionConfig>

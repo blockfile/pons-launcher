@@ -312,8 +312,8 @@ export function parseSse(chunkText, state) {
  * three of its own:
  *   'stream:open'  {}                     a connection is up (a snapshot follows)
  *   'stream:retry' {attempt, delayMs}     the connection dropped; reconnecting
- *   'stream:error' {message, code, status} refused for good (4xx other than 429)
- * Reconnects with backoff on a drop, a network error, a 429 or a 5xx, and when
+ *   'stream:error' {message, code, status} refused for good (4xx other than 409 and 429)
+ * Reconnects with backoff on a drop, a network error, a 409, a 429 or a 5xx, and when
  * nothing (not even a ping, sent every 15 s) arrives for idleMs. Each reconnect
  * gets a fresh snapshot and, carrying the same sid, the receipts the gap
  * missed. A snapshot naming another well-formed sid (a server that did not keep
@@ -397,7 +397,8 @@ export function openStream(token, interval, onEvent, opts = {}) {
     }
     if (closed) return;
     if (!res.ok || !res.body) {
-      if (res.ok || res.status === 429 || res.status >= 500) {
+      // 409 is the server's 'migrating': a graduation in progress, "try again shortly".
+      if (res.ok || res.status === 409 || res.status === 429 || res.status >= 500) {
         retry();
         return;
       }
