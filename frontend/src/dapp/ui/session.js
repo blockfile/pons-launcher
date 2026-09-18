@@ -814,9 +814,11 @@ export function createSession({
   async function confirmArms() {
     let keys = [...armQueue].filter((k) => W.has(k));
     armQueue.clear();
+    const armedFor = venue;
     let lastError = null;
     for (let attempt = 0; attempt < 4 && keys.length; attempt += 1) {
       if (attempt) await sleep(500 * attempt);
+      if (venue !== armedFor) return; // a graduation re-arms every wallet for the new spender
       let states;
       try {
         states = await readStates(keys);
@@ -843,6 +845,7 @@ export function createSession({
       keys = short;
       emit();
     }
+    if (venue !== armedFor) return;
     for (const k of keys) {
       const w = W.get(k);
       if (!w || w.ops !== 0) continue;

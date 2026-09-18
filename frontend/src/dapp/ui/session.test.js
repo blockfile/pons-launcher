@@ -1086,3 +1086,22 @@ test('a Refresh read a block behind cannot hand back tokens a sell just took', a
   await h.s.reload(); // the node still says 1000
   assert.equal(h.s.view().rows[0].tokens, '500');
 });
+
+test('an approval confirmed across a graduation is re-armed for the pool, never marked failed', async () => {
+  const h = harness({ venue: REAL_CURVE, real: true, states: [wallet(A, { tokenBalance: '1000', allowance: '0', nonce: 3 })] });
+  await h.s.loadWallets([A]);
+  assert.equal(h.log.broadcast.length, 1, 'approve(curve)');
+  // The curve approval lands, but by the time the page re-reads, the token has graduated.
+  const onPool = wallet(A, { tokenBalance: '1000', allowance: '0', permit2: null, nonce: 4 });
+  h.api.postWallets = async (token, addrs) => {
+    h.log.wallets.push(addrs);
+    return { venue: REAL_POOL, wallets: [{ ...onPool }] };
+  };
+  h.s.onReceipt({ hash: `h:${h.log.broadcast[0][0]}`, status: 'landed', block: 7, gasUsed: '1' });
+  await h.runTimers();
+  assert.equal(h.s.venue.kind, 'graduated');
+  const row = h.s.view().rows[0];
+  assert.notEqual(row.status, 'failed', row.detail);
+  assert.equal(h.log.broadcast.length, 2, 'Permit2 approvals for the pool');
+  assert.ok(h.log.broadcast[1][0].startsWith(`raw|${A}|4|0x095ea7b3`));
+});
