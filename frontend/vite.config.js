@@ -30,34 +30,43 @@ function sharedCommonJs() {
   };
 }
 
-// In dev the console runs on :5173 and the API on :3100, so /api is proxied.
-// In production `npm run build` emits dist/ and the backend serves it, keeping
-// the whole thing one origin behind one nginx block.
-export default defineConfig({
-  plugins: [sharedCommonJs(), react()],
-  server: {
-    port: 5173,
-    proxy: {
-      '/api': {
-        target: process.env.API_TARGET || 'http://127.0.0.1:3100',
-        changeOrigin: true,
+export const CONSOLE_ENTRY = fileURLToPath(new URL('./index.html', import.meta.url));
+export const DAPP_ENTRY = fileURLToPath(new URL('./dapp/index.html', import.meta.url));
+
+/**
+ * The config for one build of one page. `npm run build` runs TWO: the console
+ * (this file, which empties dist/ first) and then the take-profit dApp
+ * (vite.dapp.config.js: dapp/index.html -> dist/dapp/index.html, adding to
+ * dist/assets/). Two builds, not one with two inputs: a module both pages import
+ * (react-icons, framer-motion) would otherwise land in ONE shared chunk holding
+ * the union of what each page uses, so the key-holding dApp page would load the
+ * console's icons and animation features, and the console the dApp's. The dApp
+ * is served on its own host by the server.js host gate; see
+ * docs/superpowers/specs/2026-09-19-tp-dapp-design.md.
+ */
+export function pageConfig(input, { emptyOutDir }) {
+  return defineConfig({
+    plugins: [sharedCommonJs(), react()],
+    server: {
+      port: 5173,
+      proxy: {
+        '/api': {
+          target: process.env.API_TARGET || 'http://127.0.0.1:3100',
+          changeOrigin: true,
+        },
       },
     },
-  },
-  // Two pages, one build: the console (index.html) and the take-profit dApp
-  // (dapp/index.html -> dist/dapp/index.html), sharing dist/assets/. The dApp is
-  // served on its own host by the server.js host gate; see
-  // docs/superpowers/specs/2026-09-19-tp-dapp-design.md.
-  // `rolldownOptions` is Vite 8's name; `rollupOptions` is its deprecated alias
-  // (node_modules/vite/dist/node/index.d.ts:2170-2178).
-  build: {
-    outDir: 'dist',
-    emptyOutDir: true,
-    rolldownOptions: {
-      input: {
-        main: fileURLToPath(new URL('./index.html', import.meta.url)),
-        dapp: fileURLToPath(new URL('./dapp/index.html', import.meta.url)),
-      },
+    // `rolldownOptions` is Vite 8's name; `rollupOptions` is its deprecated alias
+    // (node_modules/vite/dist/node/index.d.ts:2170-2178).
+    build: {
+      outDir: 'dist',
+      emptyOutDir,
+      rolldownOptions: { input },
     },
-  },
-});
+  });
+}
+
+// In dev the console runs on :5173 (the dApp at /dapp/) and the API on :3100, so
+// /api is proxied. In production `npm run build` emits dist/ and the backend
+// serves it, keeping the whole thing one origin behind one nginx block.
+export default pageConfig({ main: CONSOLE_ENTRY }, { emptyOutDir: true });

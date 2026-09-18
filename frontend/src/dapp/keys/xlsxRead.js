@@ -20,7 +20,7 @@
  * stored entries and inline strings; Excel and LibreOffice re-save as deflate and
  * shared strings. Both are covered.
  */
-import { crc32 } from '../../components/xlsx.js';
+import { crc32 } from './crc32.js';
 
 const dec = new TextDecoder('utf-8', { fatal: false });
 

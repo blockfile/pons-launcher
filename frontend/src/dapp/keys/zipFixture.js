@@ -3,7 +3,7 @@
  * apart and pack it again, stored or deflated, so the XLSX reader is tested
  * against both entry kinds without a binary fixture checked into the repo.
  */
-import { crc32 } from '../../components/xlsx.js';
+import { crc32 } from './crc32.js';
 
 const enc = new TextEncoder();
 const dec = new TextDecoder();
