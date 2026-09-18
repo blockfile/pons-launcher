@@ -226,3 +226,23 @@ test('dApp host with no dApp build → 404 JSON naming the build step', async ()
 test('dappHostGate needs a dist directory', () => {
   assert.throws(() => dappHostGate({ host: DAPP }), /dist/);
 });
+
+// nginx sets these at server level, but a later add_header inside a location silently
+// drops that whole set. The gate's copy survives it; duplicate identical headers are
+// harmless (two CSPs intersect).
+test('the dApp page and its assets carry the CSP and anti-framing headers themselves', async () => {
+  const { DAPP_CSP } = require('./hostGate');
+  assert.match(DAPP_CSP, /script-src 'self'/);
+  assert.match(DAPP_CSP, /frame-ancestors 'none'/);
+  for (const p of ['/', '/token/0xabc', '/assets/app-abc123.js']) {
+    const r = await request(server, { path: p, host: DAPP });
+    assert.equal(r.status, 200, p);
+    assert.equal(r.headers['content-security-policy'], DAPP_CSP, p);
+    assert.equal(r.headers['x-frame-options'], 'DENY', p);
+    assert.equal(r.headers['referrer-policy'], 'no-referrer', p);
+    assert.equal(r.headers['x-content-type-options'], 'nosniff', p);
+  }
+  // the console host is untouched
+  const c = await request(server, { path: '/', host: CONSOLE });
+  assert.equal(c.headers['content-security-policy'], undefined);
+});

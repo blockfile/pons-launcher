@@ -159,6 +159,7 @@ test('it listens on 443 with TLS and HTTP/2 on IPv4 and IPv6, on the rhbond.xyz 
 test('the security headers are set once, at server level, with always', () => {
   const h = new Map(direct(dapp.block, 'add_header').map((a) => [a[0], a.slice(1)]));
   assert.deepEqual(h.get('Content-Security-Policy'), [CSP, 'always']);
+  assert.equal(require('./hostGate').DAPP_CSP, CSP, 'the host gate sends the same policy as nginx');
   assert.deepEqual(h.get('Strict-Transport-Security'), ['max-age=31536000', 'always']);
   assert.deepEqual(h.get('X-Frame-Options'), ['DENY', 'always']);
   assert.deepEqual(h.get('X-Content-Type-Options'), ['nosniff', 'always']);

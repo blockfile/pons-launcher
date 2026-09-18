@@ -32,6 +32,22 @@ const express = require('express');
 
 const DEFAULT_DAPP_HOST = 'dapp.rhbond.xyz';
 
+// The key-holding page's Content-Security-Policy — the same string as the server-level
+// add_header in deploy/nginx-rhbond.conf (deploy.test.js checks they agree). nginx drops
+// its whole server-level header set for any location that declares an add_header of
+// its own, so the gate sends these too: the copy that survives a mis-edited nginx file.
+// A duplicated identical CSP is harmless (browsers enforce the intersection).
+const DAPP_CSP =
+  "default-src 'self'; script-src 'self'; connect-src 'self'; img-src 'self' data:; " +
+  "style-src 'self' 'unsafe-inline'; frame-ancestors 'none'; base-uri 'none'; form-action 'none'";
+
+function setPageHeaders(res) {
+  res.set('Content-Security-Policy', DAPP_CSP);
+  res.set('X-Frame-Options', 'DENY');
+  res.set('Referrer-Policy', 'no-referrer');
+  res.set('X-Content-Type-Options', 'nosniff');
+}
+
 /**
  * True when a request on a NON-dApp host would reach dist/dapp/**. Judged on the path
  * the way express.static will see it: percent-decoded, backslashes as slashes, dot
@@ -94,6 +110,7 @@ function dappHostGate({ host = process.env.DAPP_HOST || DEFAULT_DAPP_HOST, dist 
     if (p === '/api/tp' || p.startsWith('/api/tp/')) return next();
     if (p.toLowerCase() === '/api' || p.toLowerCase().startsWith('/api/')) return notFound(res);
     if (req.method !== 'GET' && req.method !== 'HEAD') return notFound(res);
+    setPageHeaders(res);
     if (p.startsWith('/assets/')) return serveStatic(req, res, () => notFound(res));
     if (!fs.existsSync(index)) {
       return res.status(404).json({ error: 'no dApp build — run `npm run build` in frontend/' });
@@ -105,4 +122,4 @@ function dappHostGate({ host = process.env.DAPP_HOST || DEFAULT_DAPP_HOST, dist 
   };
 }
 
-module.exports = { dappHostGate, hostOf, normaliseHost, isDappPath, DEFAULT_DAPP_HOST };
+module.exports = { dappHostGate, hostOf, normaliseHost, isDappPath, DEFAULT_DAPP_HOST, DAPP_CSP };
