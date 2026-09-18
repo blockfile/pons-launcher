@@ -15,6 +15,10 @@
 const express = require('express');
 const { TpError, sendError } = require('../tp/errors');
 const { LIMITS, rateLimit } = require('../tp/limits');
+// Called through the module objects (venue.resolveVenue, never destructured) so
+// routes/tp.reads.test.js can stub them per test.
+const venue = require('../tp/venue');
+const state = require('../tp/state');
 const { broadcastCost } = require('../tp/limits'); // own line: later tasks' edits anchor on the line above
 
 const router = express.Router();
@@ -40,9 +44,39 @@ const notYet = wrap(async () => {
 });
 
 // ── routes ───────────────────────────────────────────────────────────────────
-router.get('/token/:ca', readLimit, notYet); // venue.resolveVenue + state.readMark
-router.post('/wallets', readLimit, notYet); // state.readWallets
-router.get('/fees', readLimit, notYet); // state.feeParams
+// {venue, mark}. The mark is best effort: a venue whose price will not read
+// answers mark: null — nothing, rather than a wrong number.
+router.get(
+  '/token/:ca',
+  readLimit,
+  wrap(async (req, res) => {
+    const v = await venue.resolveVenue(req.params.ca);
+    let mark = null;
+    try {
+      mark = await state.readMark(v);
+    } catch (err) {
+      console.warn(`[tp] mark unavailable for ${v.token}: ${err.message}`);
+    }
+    res.json({ venue: v, mark });
+  })
+);
+// {token, addresses} -> {venue, wallets}. The addresses (<= 100, each
+// checksummable) are validated BEFORE any chain read; the venue rides along so
+// the page knows which spender `allowance` refers to after a graduation.
+router.post(
+  '/wallets',
+  readLimit,
+  wrap(async (req, res) => {
+    const body = req.body;
+    if (!body || typeof body !== 'object' || Array.isArray(body)) {
+      throw new TpError('bad_request', 'expected a JSON body {token, addresses}');
+    }
+    const addresses = state.normalizeAddresses(body.addresses);
+    const v = await venue.resolveVenue(body.token);
+    res.json({ venue: v, wallets: await state.readWallets(v, addresses) });
+  })
+);
+router.get('/fees', readLimit, wrap(async (req, res) => res.json(await state.feeParams())));
 router.post('/quote', readLimit, notYet); // quote.quoteSells
 router.post('/quote/pair', readLimit, notYet); // quote.quotePairToEth
 router.post('/broadcast', broadcastLimit, notYet); // broadcast.broadcast
