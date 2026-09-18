@@ -22,6 +22,7 @@ const state = require('../tp/state');
 const quote = require('../tp/quote');
 const broadcast = require('../tp/broadcast');
 const { broadcastCost } = require('../tp/limits'); // own line: later tasks' edits anchor on the line above
+const { handleStream } = require('../tp/stream');
 
 const router = express.Router();
 
@@ -37,13 +38,6 @@ const broadcastLimit = rateLimit({
 // Express 4 does not catch a rejected promise from an async handler; route every
 // handler through this so a throw (TpError or not) reaches the error handler below.
 const wrap = (fn) => (req, res, next) => Promise.resolve().then(() => fn(req, res, next)).catch(next);
-
-// Placeholder for a route whose module has not landed yet. The task that builds each
-// module replaces exactly one `notYet` line below with its real handler, and the last
-// one deletes `notYet` itself.
-const notYet = wrap(async () => {
-  throw new TpError('unavailable', 'not available yet', 501);
-});
 
 // ── routes ───────────────────────────────────────────────────────────────────
 // {venue, mark}. The mark is best effort: a venue whose price will not read
@@ -168,7 +162,9 @@ router.post(
     res.json({ results });
   })
 );
-router.get('/stream', notYet); // stream.handleStream (limited by streamSlots, not readLimit)
+// GET /api/tp/stream?token=&interval=&sid= -> Server-Sent Events (tp/stream.js). No
+// readLimit: open streams are capped per visitor by streamSlots inside handleStream.
+router.get('/stream', wrap(handleStream));
 
 // ── the end of the line for every /api/tp request ────────────────────────────
 router.use((req, res) => res.status(404).json({ error: 'not found' }));
@@ -178,6 +174,5 @@ router.use((err, req, res, next) => sendError(res, err));
 
 // Exposed for routes/tp.test.js only.
 router.limiters = { readLimit, broadcastLimit };
-router.notYet = notYet;
 
 module.exports = router;
