@@ -522,3 +522,27 @@ test('golden selectors', () => {
     unwrapWETH9: '0x49404b7c',
   });
 });
+
+// ── receipts scoped to the stream that asked for them (plan Task 7) ─────────────
+test('watchReceipts: a well-formed sid tags every receipt; a malformed one tags none', async () => {
+  const H = '0x' + 'f1'.repeat(32);
+  const rpc = {
+    async getTransactionReceipt() {
+      return { from: '0x' + 'cd'.repeat(20), status: 1, blockNumber: 9, gasUsed: 21000n };
+    },
+  };
+  const events = [];
+  const on = (e) => events.push(e);
+  receiptBus.on('receipt', on);
+  try {
+    await watchReceipts(TOKEN, [H], { provider: rpc, pollMs: 1, timeoutMs: 100, sid: 'ab'.repeat(16) });
+    await watchReceipts(TOKEN, [H], { provider: rpc, pollMs: 1, timeoutMs: 100, sid: 'NOT-A-SID' });
+    await watchReceipts(TOKEN, [H], { provider: rpc, pollMs: 1, timeoutMs: 100 });
+  } finally {
+    receiptBus.off('receipt', on);
+  }
+  assert.equal(events.length, 3);
+  assert.equal(events[0].sid, 'ab'.repeat(16));
+  assert.equal('sid' in events[1], false, 'a malformed sid is dropped: that receipt reaches no stream');
+  assert.equal('sid' in events[2], false, 'no sid: the event keeps its Task 5 shape');
+});

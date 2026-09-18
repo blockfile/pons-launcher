@@ -22,7 +22,7 @@ const state = require('../tp/state');
 const quote = require('../tp/quote');
 const broadcast = require('../tp/broadcast');
 const { broadcastCost } = require('../tp/limits'); // own line: later tasks' edits anchor on the line above
-const { handleStream } = require('../tp/stream');
+const { handleStream, parseSid } = require('../tp/stream');
 
 const router = express.Router();
 
@@ -114,7 +114,7 @@ router.post(
     res.json(await quote.quotePairToEth(body.pairToken, body.amount));
   })
 );
-// {token, txs: [rawHex]} (<= 100) -> {results}. tp/broadcast.js validates EVERY
+// {token, txs: [rawHex], sid?} (<= 100) -> {results}. tp/broadcast.js validates EVERY
 // transaction against this token's venue before it sends ANY. The send path:
 // venue.cachedVenue costs no chain read on a hit, and the body is checked before
 // even that. A token can graduate between the page's load and this click; the page
@@ -138,6 +138,9 @@ router.post(
     if (body.txs.length > broadcast.MAX_TXS) {
       throw new TpError('too_many', `at most ${broadcast.MAX_TXS} transactions per broadcast`);
     }
+    // The chart stream that will show these receipts (tp/stream.js sends its sid in the
+    // snapshot); no other viewer of the token hears them. Checked before the venue.
+    const sid = parseSid(body.sid);
 
     let v = await venue.cachedVenue(body.token.toLowerCase());
     let results;
@@ -156,7 +159,7 @@ router.post(
     if (sent.length) {
       const token = v.token;
       Promise.resolve()
-        .then(() => broadcast.watchReceipts(token, sent))
+        .then(() => broadcast.watchReceipts(token, sent, { sid }))
         .catch((e) => console.error('[tp] receipt watch failed:', e && e.message));
     }
     res.json({ results });

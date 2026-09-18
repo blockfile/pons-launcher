@@ -114,7 +114,7 @@ const SEL = {
   unwrapWETH9: swapRouterIface.getFunction('unwrapWETH9').selector, // 0x49404b7c
 };
 
-/** Every receipt the watcher sees: {token, hash, from, status, block, gasUsed}. */
+/** Every receipt the watcher sees: {token, hash, from, status, block, gasUsed, sid?}. */
 const receiptBus = new EventEmitter();
 receiptBus.setMaxListeners(0); // one listener per open stream
 
@@ -597,7 +597,7 @@ async function broadcast(venue, raws, deps = {}) {
  *
  * @param {string} token the venue's token (the stream filters on it)
  * @param {string[]} hashes
- * @param {{provider?: object, pollMs?: number, timeoutMs?: number}} [deps]
+ * @param {{provider?: object, pollMs?: number, timeoutMs?: number, sid?: string}} [deps]
  */
 function watchReceipts(token, hashes, deps = {}) {
   const rpc = deps.provider || providers.tpSendProvider();
@@ -606,6 +606,10 @@ function watchReceipts(token, hashes, deps = {}) {
   const waiting = new Set((hashes || []).map(lc));
   const deadline = Date.now() + timeoutMs;
   const tokenLc = lc(token);
+  // The chart stream that asked for these receipts (plan Task 7, tp/stream.js). Only
+  // that stream forwards them, so no other viewer of the token can link this
+  // visitor's wallets. Anything but 32 lower-case hex is dropped: no stream hears it.
+  const sid = typeof deps.sid === 'string' && /^[0-9a-f]{32}$/.test(deps.sid) ? deps.sid : null;
 
   return (async () => {
     while (waiting.size) {
@@ -627,6 +631,7 @@ function watchReceipts(token, hashes, deps = {}) {
               status: Number(receipt.status) === 1 ? 'landed' : 'reverted',
               block: Number(receipt.blockNumber),
               gasUsed: String(receipt.gasUsed),
+              ...(sid ? { sid } : {}),
             });
           } catch (_err) {
             // a listener's failure must not stop the other receipts

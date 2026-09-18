@@ -182,3 +182,47 @@ test('POST /broadcast answers 502 unavailable for an unexpected failure (the rou
   assert.deepEqual(r.body, { error: 'the chain did not answer in time — try again', code: 'unavailable' });
   assert.equal(chain.sent.length, 0);
 });
+
+// ── receipts scoped to the stream that asked for them (plan Task 7) ─────────────
+// The route looks the venue up through venue.cachedVenue (Part 02); resolveVenue is set
+// too, so these tests do not depend on which of the two the route calls.
+const useVenue = (fn) => {
+  venueMod.cachedVenue = fn;
+  venueMod.resolveVenue = fn;
+};
+
+test('POST /broadcast tags the receipts with the sid of the stream that will show them', async () => {
+  useVenue(async () => curveVenue);
+  const SID = 'ab'.repeat(16);
+  const w = Wallet.createRandom();
+  const raw = await signed(w, CURVE, curveI.encodeFunctionData('sell', [10n ** 18n, 1n, w.address]));
+  const hash = Transaction.from(raw).hash.toLowerCase();
+  const landed = new Promise((resolve) => {
+    const on = (e) => {
+      if (e.hash !== hash) return;
+      receiptBus.off('receipt', on);
+      resolve(e);
+    };
+    receiptBus.on('receipt', on);
+  });
+  const r = await post({ token: TOKEN, txs: [raw], sid: SID });
+  assert.equal(r.status, 200);
+  assert.equal(r.body.results[0].ok, true);
+  const e = await landed;
+  assert.equal(e.sid, SID);
+  assert.equal(e.token, TOKEN);
+});
+
+test('POST /broadcast refuses a malformed sid before the venue lookup, and sends nothing', async () => {
+  useVenue(async () => {
+    throw new Error('must not be called');
+  });
+  const w = Wallet.createRandom();
+  const raw = await signed(w, CURVE, curveI.encodeFunctionData('sell', [1n, 1n, w.address]));
+  for (const sid of ['AB'.repeat(16), 'ab'.repeat(15), 'zz'.repeat(16), 42, ['ab'.repeat(16)]]) {
+    const r = await post({ token: TOKEN, txs: [raw], sid });
+    assert.equal(r.status, 400, JSON.stringify(sid));
+    assert.equal(r.body.code, 'bad_request');
+  }
+  assert.equal(chain.sent.length, 0);
+});
