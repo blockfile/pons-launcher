@@ -158,6 +158,9 @@ router.post(
     const sent = results.filter((r) => r.ok).map((r) => r.hash);
     if (sent.length) {
       const token = v.token;
+      // The page may not have a stream open yet (its approvals go out on load): its
+      // receipts wait in the per-sid replay log, which must be listening first.
+      if (sid) handleStream.recordReceipts();
       Promise.resolve()
         .then(() => broadcast.watchReceipts(token, sent, { sid }))
         .catch((e) => console.error('[tp] receipt watch failed:', e && e.message));

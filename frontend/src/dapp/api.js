@@ -18,11 +18,23 @@
 //
 // The stream is SSE read with fetch + ReadableStream (not EventSource), so it can
 // be aborted cleanly and reconnected with our own backoff.
+//
+// RECEIPTS ARE KEYED BY A STREAM ID (sid). The server forwards a broadcast's
+// receipts only to the stream whose sid the POST /broadcast body carried
+// (backend tp/stream.js), so no other viewer of the token can link this
+// visitor's wallets. This tab makes ONE sid per token, up front, from
+// crypto.getRandomValues, and every stream of that token (the first, each
+// reconnect, a timeframe switch) and every broadcast for it carry it. It is made
+// in the browser rather than taken from the first snapshot because the approvals
+// the page signs on load can go out before any stream has connected: their
+// receipts wait in the server's per-sid replay (150 s) until the stream opens.
+// The sid lives in this module's memory only: never the URL bar, storage or a log.
 
 const BASE = '/api/tp';
 export const INTERVALS = [1, 15, 60, 300, 3600];
 
 const ADDRESS_RE = /^0x[0-9a-fA-F]{40}$/;
+const SID_RE = /^[0-9a-f]{32}$/;
 const DECIMAL_RE = /^[0-9]+$/;
 const KEY_SHAPE_RE = /(0x)?[0-9a-fA-F]{64}/;
 const RAW_TX_RE = /^0x02[0-9a-fA-F]+$/;
@@ -38,6 +50,28 @@ const LF = String.fromCharCode(10);
 const CR = String.fromCharCode(13);
 
 const has = (obj, key) => Object.prototype.hasOwnProperty.call(obj, key);
+
+// lower-case token -> the sid this tab's streams and broadcasts of it share.
+const streamSids = new Map();
+
+function newSid() {
+  const bytes = new Uint8Array(16);
+  globalThis.crypto.getRandomValues(bytes);
+  let out = '';
+  for (const b of bytes) out += b.toString(16).padStart(2, '0');
+  return out;
+}
+
+/** The sid this tab uses for `token`: made on first use, then kept for the tab's life. */
+export function sidFor(token) {
+  const k = String(token).toLowerCase();
+  let s = streamSids.get(k);
+  if (!s) {
+    s = newSid();
+    streamSids.set(k, s);
+  }
+  return s;
+}
 
 function apiError(message, code, status = 0) {
   return new Error(message, { cause: { code, status } });
@@ -80,6 +114,13 @@ function sellList(value, name) {
   });
 }
 
+/** Optional: absent is left out of the body; anything but 32 lower-case hex is refused. */
+function sid(value, name) {
+  if (value === undefined || value === null) return undefined;
+  if (typeof value !== 'string' || !SID_RE.test(value)) throw apiError(`${name} is not a stream id`, 'bad_request');
+  return value;
+}
+
 function rawTxList(value, name) {
   return list(value, name).map((raw, i) => {
     const ok =
@@ -97,7 +138,7 @@ const SCHEMAS = {
   wallets: { token: address, addresses: addressList },
   quote: { token: address, sells: sellList },
   pairQuote: { pairToken: address, amount },
-  broadcast: { token: address, txs: rawTxList },
+  broadcast: { token: address, txs: rawTxList, sid },
 };
 
 /** Throw if any string (or object key) in `value` is shaped like a private key. */
@@ -123,7 +164,7 @@ function assertNoKey(value, path) {
  *   wallets:   {token, addresses}
  *   quote:     {token, sells: [{address, amount}]}
  *   pairQuote: {pairToken, amount}
- *   broadcast: {token, txs}
+ *   broadcast: {token, txs, sid?}
  * Throws on an unknown kind, any other field, a bad value, or a key-shaped value.
  */
 export function buildBody(kind, fields) {
@@ -202,9 +243,12 @@ export async function postPairQuote(pairToken, amountIn, opts) {
   return request('POST', '/quote/pair', buildBody('pairQuote', { pairToken, amount: amountIn }), opts);
 }
 
-/** POST /broadcast {token, txs} -> {results} */
+/** POST /broadcast {token, txs, sid} -> {results}. The sid is this tab's for the token (sidFor). */
 export async function broadcast(token, txs, opts) {
-  return request('POST', '/broadcast', buildBody('broadcast', { token, txs }), opts);
+  let s;
+  if (opts && opts.sid !== undefined) s = opts.sid;
+  else if (typeof token === 'string' && ADDRESS_RE.test(token)) s = sidFor(token);
+  return request('POST', '/broadcast', buildBody('broadcast', { token, txs, sid: s }), opts);
 }
 
 // ── SSE ──────────────────────────────────────────────────────────────────────
@@ -262,7 +306,8 @@ export function parseSse(chunkText, state) {
 }
 
 /**
- * GET /stream?token=&interval= as SSE. Calls onEvent(name, data) for every
+ * GET /stream?token=&interval=&sid= as SSE, the sid being sidFor(token) on every
+ * connect. Calls onEvent(name, data) for every
  * server event (snapshot, trades, bar, mark, receipt, phase, status, ping) plus
  * three of its own:
  *   'stream:open'  {}                     a connection is up (a snapshot follows)
@@ -270,7 +315,10 @@ export function parseSse(chunkText, state) {
  *   'stream:error' {message, code, status} refused for good (4xx other than 429)
  * Reconnects with backoff on a drop, a network error, a 429 or a 5xx, and when
  * nothing (not even a ping, sent every 15 s) arrives for idleMs. Each reconnect
- * gets a fresh snapshot. Returns close().
+ * gets a fresh snapshot and, carrying the same sid, the receipts the gap
+ * missed. A snapshot naming another well-formed sid (a server that did not keep
+ * ours) is adopted for this token's later streams and broadcasts.
+ * Returns close().
  *
  * opts (all optional, for tests): fetch, setTimeout, clearTimeout,
  * backoffMs (default [500, 1000, 2000, 5000, 10000, 20000]), idleMs (default
@@ -284,7 +332,8 @@ export function openStream(token, interval, onEvent, opts = {}) {
   const clearT = opts.clearTimeout || ((id) => globalThis.clearTimeout(id));
   const backoff = opts.backoffMs || [500, 1000, 2000, 5000, 10000, 20000];
   const idleMs = opts.idleMs == null ? 45000 : opts.idleMs;
-  const url = `${BASE}/stream?token=${tokenAddr}&interval=${Number(interval)}`;
+  const base = `${BASE}/stream?token=${tokenAddr}&interval=${Number(interval)}`;
+  const url = () => `${base}&sid=${sidFor(tokenAddr)}`;
 
   let closed = false;
   let controller = null;
@@ -334,7 +383,7 @@ export function openStream(token, interval, onEvent, opts = {}) {
     controller = ctl;
     let res;
     try {
-      res = await f(url, {
+      res = await f(url(), {
         method: 'GET',
         headers: { accept: 'text/event-stream' },
         cache: 'no-store',
@@ -378,6 +427,9 @@ export function openStream(token, interval, onEvent, opts = {}) {
         armIdle(ctl);
         for (const ev of parseSse(decoder.decode(value, { stream: true }), state)) {
           attempt = 0; // a delivered event proves this connection works
+          if (ev.event === 'snapshot' && ev.data && typeof ev.data.sid === 'string' && SID_RE.test(ev.data.sid)) {
+            streamSids.set(tokenAddr, ev.data.sid);
+          }
           emit(ev.event, ev.data);
         }
       }

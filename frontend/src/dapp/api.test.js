@@ -12,6 +12,7 @@ import {
   postQuote,
   postPairQuote,
   broadcast,
+  sidFor,
 } from './api.js';
 
 // No escape sequences in this file on purpose (memory: write-tool-escapes).
@@ -215,7 +216,7 @@ test('each wrapper calls its route with its method and allowlisted body', async 
     ['GET', '/api/tp/fees', undefined],
     ['POST', '/api/tp/quote', JSON.stringify({ token: TOKEN, sells: [{ address: a.toLowerCase(), amount: '7' }] })],
     ['POST', '/api/tp/quote/pair', JSON.stringify({ pairToken: PAIR, amount: '9' })],
-    ['POST', '/api/tp/broadcast', JSON.stringify({ token: TOKEN, txs: [raw] })],
+    ['POST', '/api/tp/broadcast', JSON.stringify({ token: TOKEN, txs: [raw], sid: sidFor(TOKEN) })],
   ]);
   assert.equal(fetch.calls[1].init.headers['content-type'], 'application/json');
   assert.equal(fetch.calls[0].init.credentials, 'same-origin');
@@ -333,7 +334,7 @@ test('openStream delivers events across chunks in order; close() aborts and stop
     ['trades', [1, 2]],
   ]);
   const { url, init } = fetch.calls[0];
-  assert.equal(url, `/api/tp/stream?token=${TOKEN}&interval=15`);
+  assert.equal(url, `/api/tp/stream?token=${TOKEN}&interval=15&sid=${sidFor(TOKEN)}`);
   assert.equal(init.headers.accept, 'text/event-stream');
   close();
   assert.equal(init.signal.aborted, true);
@@ -422,4 +423,71 @@ test('a multi-byte character split across byte chunks decodes intact', async () 
 test('openStream refuses a bad token or interval up front', () => {
   assert.throws(() => openStream('nope', 1, () => {}), /not an address/);
   assert.throws(() => openStream(TOKEN, 7, () => {}), /interval/);
+});
+
+// ── the stream id (sid): receipts reach only the stream that names it ────────
+
+test('a token gets ONE sid, fixed before any stream opens: broadcasts, the first stream and every reconnect carry it', async () => {
+  const T = '0x' + 'e'.repeat(40);
+  const raw = await signedTx();
+  const sid = sidFor(T);
+  assert.match(sid, /^[0-9a-f]{32}$/);
+  assert.equal(sidFor(T.toUpperCase().replace('0X', '0x')), sid, 'the same token, whatever its case');
+  assert.notEqual(sidFor('0x' + 'd'.repeat(40)), sid, 'another token has its own sid');
+
+  // An approval signed on load can go out before any stream is open.
+  const f1 = fakeFetch([jsonAnswer(200, { results: [] })]);
+  await broadcast(T, [raw], { fetch: f1 });
+  assert.equal(JSON.parse(f1.calls[0].init.body).sid, sid);
+
+  const fetch = fakeFetch([sseAnswer([]), sseAnswer([], { keepOpen: true }), sseAnswer([], { keepOpen: true })]);
+  const timers = fakeTimers();
+  const close = openStream(T, 1, () => {}, { fetch, ...timers, idleMs: 0, backoffMs: [10] });
+  await until(() => timers.queue.length === 1);
+  timers.runNext(); // the server closed: reconnect
+  await until(() => fetch.calls.length === 2);
+  const close2 = openStream(T, 60, () => {}, { fetch, ...fakeTimers(), idleMs: 0 }); // a timeframe switch
+  await until(() => fetch.calls.length === 3);
+  for (const c of fetch.calls) assert.ok(c.url.endsWith(`&sid=${sid}`), c.url);
+  close();
+  close2();
+});
+
+test("a snapshot's well-formed sid is adopted for the token; a malformed one is ignored", async () => {
+  const T = '0x' + 'c'.repeat(40);
+  const mine = sidFor(T);
+  const theirs = 'ab'.repeat(16);
+  const fetch = fakeFetch([
+    sseAnswer(['event: snapshot' + LF + 'data: {"sid":"NOT-A-SID"}' + LF + LF]),
+    sseAnswer(['event: snapshot' + LF + `data: {"sid":"${theirs}"}` + LF + LF]),
+    sseAnswer([], { keepOpen: true }),
+  ]);
+  const timers = fakeTimers();
+  const events = [];
+  const close = openStream(T, 1, (n) => events.push(n), { fetch, ...timers, idleMs: 0, backoffMs: [10] });
+  await until(() => timers.queue.length === 1);
+  assert.equal(sidFor(T), mine, 'a malformed sid is not stored');
+  timers.runNext();
+  await until(() => timers.queue.length === 1);
+  assert.equal(sidFor(T), theirs);
+  timers.runNext();
+  await until(() => fetch.calls.length === 3);
+  assert.ok(fetch.calls[2].url.endsWith(`&sid=${theirs}`));
+  close();
+});
+
+test('a broadcast body refuses a malformed sid, without echoing it', async () => {
+  const raw = await signedTx();
+  for (const bad of ['nope', 'AB'.repeat(16), 'ab'.repeat(17), 7]) {
+    let err;
+    try {
+      buildBody('broadcast', { token: TOKEN, txs: [raw], sid: bad });
+    } catch (e) {
+      err = e;
+    }
+    assert.ok(err, `sid ${bad} must be refused`);
+    assert.equal(err.cause.code, 'bad_request');
+  }
+  const sid = 'ab'.repeat(16);
+  assert.equal(buildBody('broadcast', { token: TOKEN, txs: [raw], sid }), JSON.stringify({ token: TOKEN, txs: [raw], sid }));
 });

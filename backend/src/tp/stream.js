@@ -150,7 +150,7 @@ function createStreamHandler(overrides = {}) {
     return bus;
   };
 
-  return async function handleStream(req, res) {
+  async function handleStream(req, res) {
     const q = req.query || {};
     const token = typeof q.token === 'string' ? q.token.trim().toLowerCase() : '';
     if (!isAddress(token)) {
@@ -287,7 +287,16 @@ function createStreamHandler(overrides = {}) {
     res.on('close', finish);
     res.on('error', finish);
     return undefined;
+  }
+
+  // Start the replay log before the first stream opens. The page signs its approvals
+  // on load, and they can reach POST /broadcast before its stream has connected; on a
+  // freshly started server no stream would have attached the recorder yet, and those
+  // receipts would be lost. routes/tp.js calls this before it watches a sid's receipts.
+  handleStream.recordReceipts = () => {
+    receiptBus();
   };
+  return handleStream;
 }
 
 const handleStream = createStreamHandler();
