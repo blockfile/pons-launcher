@@ -1,0 +1,537 @@
+/*
+ * dapp.rhbond.xyz — take-profit page. CELL & CARET, the dApp's own copy.
+ *
+ * The tokens below are COPIED from the console (frontend/src/styles.css:141-464 dark, 497-562 light)
+ * and owned here: the dApp never imports the console's stylesheet (tab-isolation
+ * rule), so a console restyle cannot silently restyle a page that sells.
+ *
+ * THE MONEY LAW holds here exactly as in the console (memory: frontend-cell-and-caret):
+ *   amber      the ONE spending action of the panel you are on — here, the sell
+ *              chips; exactly one amber object per panel
+ *   vermilion  live / irreversible / over a cap — nothing else
+ *   jade       already true (a landed sell)
+ *   indigo     neutral forward action that moves no money (Open, Import, focus)
+ *   grey       everything else
+ * and the two defects every styling pass reintroduces:
+ *   1. button.spend is HOTTER and heavier than button.ghost, never quieter;
+ *   2. one amber object per panel — a dialog counts as a panel.
+ *
+ * CANDLES ARE NOT MONEY COLOURS. Up/down candles take their own hues
+ * (--candle-up / --candle-down) because vermilion and jade already mean
+ * "irreversible" and "done" on this page.
+ *
+ * THEME. Dark is the default. The OS preference picks light when the visitor has
+ * not chosen; <html data-theme="light|dark"> (set by main.jsx from localStorage
+ * 'tp.theme') overrides both ways. No inline script sets it: the page runs under
+ * `script-src 'self'`.
+ */
+
+:root {
+  /* surfaces — styles.css:146-149 */
+  --void: #0b0b0d;
+  --panel: #131318;
+  --panel-2: #0e0e12;
+  --panel-hi: #1c1c23;
+
+  /* hairlines — styles.css:161-163 */
+  --rule-strong: #6e6e7c;
+  --rule: #45454f;
+  --rule-soft: #26262d;
+
+  /* title band — styles.css:184-185 */
+  --band-bg: #26262f;
+  --band-bg-later: #1f1f27;
+
+  /* inks — styles.css:194-196 */
+  --ink: #ececf2;
+  --dim: #a2a2b0;
+  --dimmer: #8c8c9c;
+
+  /* money inks (flip with the theme) — styles.css:209-214, 219 */
+  --amber: #ffb020;
+  --vermilion: #ff6a55;
+  --jade: #3ddc91;
+  --sky: #6bb6ff;
+  --indigo: #7b8cff;
+  --indigo-bright: #9aa6ff;
+  --ink-danger: #ffb3a6;
+
+  /* money lamps (do NOT flip) — styles.css:250-273 */
+  --amber-fill: #f5a623;
+  --amber-fill-hi: #ffc24d;
+  --jade-fill: #17a66b;
+  --jade-fill-hi: #2abf80;
+  --vermilion-fill: #d8321a;
+  --vermilion-fill-hi: #b62410;
+  --indigo-fill: #4a52e0;
+  --indigo-fill-hi: #383fce;
+  --on-fill: #0b0b0d;
+  --on-fill-hot: #ffffff;
+  --on-fill-cool: #ffffff;
+  --fill-edge: rgba(11, 11, 13, 0.5);
+
+  /* hue hairlines — styles.css:282-285 */
+  --amber-dim: #8f6a20;
+  --vermilion-dim: #aa4234;
+  --jade-dim: #2c7a5a;
+  --indigo-dim: #5157bc;
+
+  /* tints — styles.css:294-299 */
+  --tint-amber: rgba(255, 176, 32, 0.12);
+  --tint-jade: rgba(61, 220, 145, 0.12);
+  --tint-vermilion: rgba(255, 106, 85, 0.12);
+  --tint-sky: rgba(107, 182, 255, 0.12);
+  --tint-indigo: rgba(123, 140, 255, 0.12);
+  --tint-grey: rgba(162, 162, 176, 0.12);
+
+  /* aliases — styles.css:308-313 */
+  --danger: var(--vermilion);
+  --focus: var(--indigo);
+  --scrim: rgba(6, 6, 8, 0.82);
+
+  /* candles — the dApp's own; deliberately neither jade nor vermilion */
+  --candle-up: #3fb8c9;
+  --candle-down: #e05d9b;
+
+  /* typefaces — styles.css:320-322 */
+  --mono: 'JetBrains Mono', ui-monospace, 'SF Mono', Menlo, Consolas, monospace;
+  --sans: 'Inter', system-ui, -apple-system, 'Segoe UI', sans-serif;
+  --display: var(--mono);
+
+  /* type scale — styles.css:346-357 */
+  --t-micro: 700 10px/16px;
+  --t-small: 400 11px/16px;
+  --t-base: 400 13px/20px;
+  --t-mid: 500 15px/20px;
+  --t-fig: 700 20px/24px;
+  --t-hero: 700 28px/32px;
+  --fs-micro: 10px;
+  --fs-small: 11px;
+  --fs-base: 13px;
+  --fs-mid: 15px;
+  --fs-fig: 20px;
+  --fs-hero: 28px;
+
+  /* trackings — styles.css:362-364 */
+  --ls-caps: 0.12em;
+  --ls-wide: 0.04em;
+  --ls-body: 0.01em;
+
+  /* space — styles.css:371-383 */
+  --s1: 4px;
+  --s2: 8px;
+  --s3: 12px;
+  --s4: 16px;
+  --s5: 20px;
+  --s6: 24px;
+  --s8: 32px;
+  --s10: 40px;
+  --lh: 20px;
+  --pad: 16px;
+  --band: 30px;
+  --row: 28px;
+
+  /* controls — styles.css:395-399 */
+  --control-h: 34px;
+  --control-h-dense: 26px;
+  --box: 16px;
+
+  /* shape — styles.css:421-428 */
+  --radius: 0;
+  --radius-lg: 0;
+  --radius-dot: 50%;
+  --shadow-card: none;
+
+  /* motion — styles.css:445-449 */
+  --ease: cubic-bezier(0.2, 0, 0, 1);
+  --dur-fast: 0.16s;
+  --dur: 0.18s;
+  --dur-slow: 0.22s;
+  --caret-blink: 530ms;
+
+  /* dApp layout metrics */
+  --tp-top-h: 44px;
+  --tp-panel-w: 360px;
+  --tp-measure: 1440px;
+
+  color-scheme: dark;
+}
+
+/* ── LIGHT, BY OS PREFERENCE (when the visitor has not chosen) ─────────────
+   Values copied from styles.css:498-561. The lamps are NOT here: they are
+   theme-independent by design (the polarity break). */
+@media (prefers-color-scheme: light) {
+  :root:not([data-theme='dark']) {
+    color-scheme: light;
+    --void: #ececf0;
+    --panel: #ffffff;
+    --panel-2: #f6f6fa;
+    --panel-hi: #e7e7ee;
+    --rule-strong: #7e7e8b;
+    --rule: #bdbdcb;
+    --rule-soft: #e6e6ee;
+    --band-bg: #e7e7ee;
+    --band-bg-later: #f2f2f7;
+    --ink: #101014;
+    --dim: #4e4e5c;
+    --dimmer: #61617a;
+    --amber: #8a5100;
+    --vermilion: #bf2c19;
+    --jade: #06724a;
+    --sky: #1a5fd0;
+    --indigo: #3f4fd6;
+    --indigo-bright: #2f3bb8;
+    --ink-danger: #a32115;
+    --amber-dim: #a87a2c;
+    --vermilion-dim: #be6a5c;
+    --jade-dim: #3e8e6e;
+    --indigo-dim: #7a84d8;
+    --tint-amber: rgba(138, 81, 0, 0.1);
+    --tint-jade: rgba(6, 114, 74, 0.1);
+    --tint-vermilion: rgba(191, 44, 25, 0.1);
+    --tint-sky: rgba(26, 95, 208, 0.1);
+    --tint-indigo: rgba(63, 79, 214, 0.1);
+    --tint-grey: rgba(78, 78, 92, 0.1);
+    --scrim: rgba(20, 20, 28, 0.55);
+    --candle-up: #127f8f;
+    --candle-down: #b3306f;
+  }
+}
+
+/* ── LIGHT, BY EXPLICIT CHOICE ─────────────────────────────────────────────
+   The same values again, because a media query cannot be combined with an
+   attribute selector into one block. Keep the two lists identical. */
+:root[data-theme='light'] {
+  color-scheme: light;
+  --void: #ececf0;
+  --panel: #ffffff;
+  --panel-2: #f6f6fa;
+  --panel-hi: #e7e7ee;
+  --rule-strong: #7e7e8b;
+  --rule: #bdbdcb;
+  --rule-soft: #e6e6ee;
+  --band-bg: #e7e7ee;
+  --band-bg-later: #f2f2f7;
+  --ink: #101014;
+  --dim: #4e4e5c;
+  --dimmer: #61617a;
+  --amber: #8a5100;
+  --vermilion: #bf2c19;
+  --jade: #06724a;
+  --sky: #1a5fd0;
+  --indigo: #3f4fd6;
+  --indigo-bright: #2f3bb8;
+  --ink-danger: #a32115;
+  --amber-dim: #a87a2c;
+  --vermilion-dim: #be6a5c;
+  --jade-dim: #3e8e6e;
+  --indigo-dim: #7a84d8;
+  --tint-amber: rgba(138, 81, 0, 0.1);
+  --tint-jade: rgba(6, 114, 74, 0.1);
+  --tint-vermilion: rgba(191, 44, 25, 0.1);
+  --tint-sky: rgba(26, 95, 208, 0.1);
+  --tint-indigo: rgba(63, 79, 214, 0.1);
+  --tint-grey: rgba(78, 78, 92, 0.1);
+  --scrim: rgba(20, 20, 28, 0.55);
+  --candle-up: #127f8f;
+  --candle-down: #b3306f;
+}
+
+/* ── BASE ──────────────────────────────────────────────────────────────── */
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body {
+  margin: 0;
+  min-height: 100%;
+}
+
+body {
+  background: var(--void);
+  color: var(--ink);
+  font: var(--t-base) var(--mono);
+  letter-spacing: var(--ls-body);
+  -webkit-font-smoothing: antialiased;
+}
+
+.num,
+td,
+input,
+select {
+  font-variant-numeric: tabular-nums;
+}
+
+/* ── CONTROLS — styles.css:923-1004 ────────────────────────────────────── */
+
+input,
+select,
+textarea {
+  background: var(--panel-2);
+  color: var(--ink);
+  border: 1px solid var(--rule-strong);
+  border-radius: var(--radius);
+  padding: 6px var(--s2);
+  font: var(--t-base) var(--mono);
+  letter-spacing: var(--ls-body);
+}
+select {
+  min-height: var(--control-h);
+}
+input[type='checkbox'],
+input[type='radio'] {
+  width: var(--box);
+  height: var(--box);
+  margin: 0;
+  padding: 0;
+  vertical-align: middle;
+}
+input:hover:not(:disabled),
+select:hover:not(:disabled),
+textarea:hover:not(:disabled) {
+  border-color: var(--dimmer);
+}
+input:focus-visible,
+select:focus-visible,
+textarea:focus-visible,
+button:focus-visible,
+a:focus-visible,
+summary:focus-visible {
+  outline: 2px solid var(--focus);
+  outline-offset: 1px;
+}
+input::placeholder,
+textarea::placeholder {
+  color: var(--dimmer);
+}
+textarea {
+  resize: vertical;
+  width: 100%;
+}
+
+/* ── THE AMPLITUDE LADDER — styles.css:1047-1255 ───────────────────────────
+   amber block (dark label)      the panel's own spend — one per panel
+   vermilion block (white label) armed and live
+   2px vermilion frame + tint    spends on chain with NO dialog behind it
+   1px grey outline, raised      changes something, a dialog asks
+   bare text                     reads, or backs out
+   The fill rung is reserved to the two tiers that move money. */
+button {
+  cursor: pointer;
+  font: var(--t-base) var(--sans);
+  font-weight: 600;
+  letter-spacing: var(--ls-body);
+  padding: 6px var(--s3);
+  border-radius: var(--radius);
+  background: var(--amber-fill);
+  color: var(--on-fill);
+  border: 1px solid var(--fill-edge);
+  transition:
+    background-color var(--dur-fast) var(--ease),
+    color var(--dur-fast) var(--ease),
+    border-color var(--dur-fast) var(--ease),
+    transform 0.06s ease;
+}
+button:hover:where(:not(:disabled)) {
+  background: var(--amber-fill-hi);
+}
+button:active:where(:not(:disabled)) {
+  transform: translateY(1px);
+}
+button.danger {
+  background: var(--vermilion-fill);
+  border-color: var(--vermilion);
+  color: var(--on-fill-hot);
+}
+button.danger:hover:not(:disabled) {
+  background: var(--vermilion-fill-hi);
+  border-color: var(--vermilion);
+}
+button.spend {
+  background: var(--tint-vermilion);
+  color: var(--ink);
+  border: 2px solid var(--vermilion);
+  padding: 5px 11px;
+  font-weight: 700;
+}
+button.spend:hover:not(:disabled) {
+  background: var(--vermilion-dim);
+  border-color: var(--vermilion);
+  color: var(--ink);
+}
+button.ghost {
+  background: var(--panel-hi);
+  color: var(--ink);
+  border: 1px solid var(--rule-strong);
+  font-weight: 600;
+}
+button.ghost:hover:not(:disabled) {
+  background: var(--panel-hi);
+  border-color: var(--indigo);
+  color: var(--indigo-bright);
+}
+/* The neutral forward action (Open a CA, Import wallets). An indigo FRAME, never
+   a filled block: the fill rung belongs to the money tiers (shell.css .btn-primary). */
+button.go {
+  background: transparent;
+  color: var(--indigo-bright);
+  border: 1px solid var(--indigo);
+  font-weight: 600;
+}
+button.go:hover:not(:disabled) {
+  background: var(--tint-indigo);
+  border-color: var(--indigo-bright);
+  color: var(--indigo-bright);
+}
+button.quiet {
+  background: transparent;
+  color: var(--dim);
+  border: 1px solid var(--rule);
+  font-weight: 500;
+}
+button.quiet:hover:not(:disabled) {
+  background: var(--panel-hi);
+  border-color: var(--dimmer);
+  color: var(--ink);
+}
+button.link {
+  background: none;
+  border: none;
+  color: var(--dim);
+  padding: 0;
+  font-weight: 500;
+  text-decoration: underline;
+  text-underline-offset: 3px;
+}
+button.link:hover:not(:disabled) {
+  background: none;
+  color: var(--ink);
+}
+button[disabled]:disabled {
+  background: var(--panel-hi);
+  color: var(--dimmer);
+  border: 1px solid var(--rule);
+  cursor: not-allowed;
+}
+button.link[disabled]:disabled {
+  background: none;
+  border: none;
+}
+button.spend[disabled]:disabled {
+  padding: 6px var(--s3);
+}
+
+/* ── SHELL ─────────────────────────────────────────────────────────────── */
+
+.tp-app {
+  min-height: 100vh;
+  display: grid;
+  grid-template-rows: var(--tp-top-h) 1fr;
+}
+
+.tp-top {
+  display: flex;
+  align-items: center;
+  gap: var(--s4);
+  padding: 0 var(--pad);
+  background: var(--panel-2);
+  border-bottom: 1px solid var(--rule-strong);
+  min-width: 0;
+}
+.tp-brand {
+  font: var(--t-mid) var(--mono);
+  white-space: nowrap;
+}
+.tp-brand b {
+  color: var(--dim);
+  font-weight: 500;
+}
+.tp-chain {
+  margin-left: auto;
+  font: var(--t-micro) var(--mono);
+  letter-spacing: var(--ls-caps);
+  text-transform: uppercase;
+  color: var(--dimmer);
+  white-space: nowrap;
+}
+
+/* ── EMPTY STATE ("paste a CA") ─────────────────────────────────────────── */
+
+.tp-empty {
+  position: relative;
+  display: grid;
+  align-content: center;
+  justify-items: center;
+  gap: var(--s6);
+  padding: var(--s10) var(--pad);
+  min-width: 0;
+}
+.tp-empty-title {
+  margin: 0;
+  font: var(--t-fig) var(--mono);
+  font-weight: 500;
+  text-align: center;
+}
+.tp-ca {
+  width: min(640px, 100%);
+  display: grid;
+  gap: var(--s2);
+}
+.tp-ca-label {
+  font: var(--t-micro) var(--mono);
+  letter-spacing: var(--ls-caps);
+  text-transform: uppercase;
+  color: var(--dim);
+}
+.tp-ca-row {
+  display: flex;
+  gap: var(--s2);
+  min-width: 0;
+}
+.tp-ca-row input {
+  flex: 1 1 auto;
+  min-width: 0;
+  height: var(--control-h);
+}
+.tp-ca-row button {
+  flex: 0 0 auto;
+  height: var(--control-h);
+}
+.tp-ca-hint {
+  min-height: var(--lh);
+  font: var(--t-small) var(--mono);
+  letter-spacing: var(--ls-wide);
+  color: var(--dimmer);
+}
+.tp-warning {
+  width: min(640px, 100%);
+  margin: 0;
+  padding: var(--s3) var(--s4);
+  border: 1px solid var(--rule-strong);
+  background: var(--panel);
+  font: var(--t-base) var(--sans);
+  color: var(--dim);
+}
+.tp-warning b {
+  color: var(--ink);
+  font-weight: 600;
+}
+
+@media (max-width: 640px) {
+  .tp-chain {
+    display: none;
+  }
+  .tp-empty {
+    align-content: start;
+    padding-top: var(--s8);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  * {
+    transition: none !important;
+    animation: none !important;
+  }
+}

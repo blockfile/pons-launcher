@@ -1,0 +1,25 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+    <meta name="referrer" content="no-referrer" />
+    <meta name="color-scheme" content="dark light" />
+    <meta name="description" content="Take profit on a pons token from your own wallets. Keys stay in this browser tab." />
+    <title>rhbond take-profit</title>
+    <link
+      rel="icon"
+      href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'><rect width='16' height='16' fill='%230b0b0d'/><path d='M3 12l3.5-4 2.5 2.5L13 5' stroke='%23f5a623' stroke-width='1.8' fill='none'/></svg>"
+    />
+  </head>
+  <body>
+    <noscript>This page needs JavaScript. It signs with your keys inside this tab.</noscript>
+    <div id="root"></div>
+    <!-- The ONLY script: an external module. No inline script anywhere, so the page
+         runs under nginx's `script-src 'self'` (spec: Security). Do not add a
+         <meta http-equiv="Content-Security-Policy"> here: the header comes from
+         nginx, and a meta CSP would break `vite` dev (the React refresh preamble
+         is an inline script in dev only). -->
+    <script type="module" src="/src/dapp/main.jsx"></script>
+  </body>
+</html>
