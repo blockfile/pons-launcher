@@ -6,6 +6,7 @@ const { EventEmitter } = require('events');
 
 const { createStreamHandler, parseSid, frame, PING_MS, REPLAY_MS } = require('./stream');
 const { TpError } = require('./errors');
+const { createTokenSlots } = require('./limits');
 
 const LF = String.fromCharCode(10); // never typed as an escape (memory: write-tool-escapes)
 const TOKEN = '0x1111111111111111111111111111111111111111';
@@ -133,6 +134,7 @@ function setup(over = {}) {
     release: (t) => released.push(t),
     receiptBus: bus,
     streamSlots: slots,
+    tokenSlots: createTokenSlots({ perIp: 3 }),
     setInterval: (fn, ms) => {
       intervals.push({ fn, ms, cleared: false });
       return intervals.length - 1;
@@ -481,4 +483,54 @@ test('a client that leaves during the lookup is released and never sent headers'
   assert.equal(res.headersSent, false);
   assert.deepEqual(s.released, [TOKEN]);
   assert.equal(s.slots.open.get('203.0.113.7'), 0);
+});
+
+test('one IP streams at most 3 DISTINCT tokens: a 4th is refused 429 before any lookup; closing one frees it', async () => {
+  let lookups = 0;
+  const s = setup({
+    resolveVenue: async (ca) => {
+      lookups += 1;
+      return { ...venue, token: ca };
+    },
+  });
+  const tok = (n) => '0x' + String(n).repeat(40);
+  const open = [];
+  for (const n of [4, 5, 6]) {
+    const res = fakeRes();
+    await s.handler(fakeReq({ token: tok(n) }), res);
+    assert.equal(res.statusCode, 200);
+    open.push(res);
+  }
+  const again = fakeRes();
+  await s.handler(fakeReq({ token: tok(5), interval: '60' }), again);
+  assert.equal(again.statusCode, 200, 'a second stream of a token it already streams is not a new token');
+  const res = fakeRes();
+  await s.handler(fakeReq({ token: tok(7) }), res);
+  assert.equal(res.statusCode, 429);
+  assert.equal(res.body.code, 'rate_limited');
+  assert.match(res.body.error, /tokens/);
+  assert.equal(lookups, 4, 'refused before the venue lookup');
+  assert.equal(s.slots.open.get('203.0.113.7'), 4, 'the refused stream holds no stream slot');
+  // another visitor is unaffected
+  const other = fakeRes();
+  await s.handler(fakeReq({ token: tok(7) }, '198.51.100.9'), other);
+  assert.equal(other.statusCode, 200);
+  // closing the only stream of a token frees that token
+  open[0].emit('close');
+  const later = fakeRes();
+  await s.handler(fakeReq({ token: tok(7) }), later);
+  assert.equal(later.statusCode, 200);
+});
+
+test('a refused venue frees the token slot too', async () => {
+  const s = setup({
+    resolveVenue: async () => {
+      throw new TpError('not_pons', 'not a pons token');
+    },
+  });
+  for (let n = 1; n <= 5; n++) {
+    const res = fakeRes();
+    await s.handler(fakeReq({ token: '0x' + String(n).repeat(40) }), res);
+    assert.equal(res.statusCode, 400, 'never 429: each refusal released its token');
+  }
 });

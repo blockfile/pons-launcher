@@ -14,6 +14,9 @@ const {
   txSelector,
   createStreamSlots,
   streamSlots,
+  createTokenSlots,
+  ipKey,
+  readCost,
 } = require('./limits');
 const { TpError } = require('./errors');
 const C = require('./constants');
@@ -263,4 +266,58 @@ test('stream slots: 5 per IP, released one at a time', () => {
   assert.equal(slots.count('ip'), 0);
   assert.equal(typeof streamSlots.acquire, 'function');
   assert.equal(typeof streamSlots.release, 'function');
+});
+
+test('defaults: 120 quotes/min in their own bucket, 3 distinct tokens streamed per IP', () => {
+  if (!process.env.TP_QUOTES_PER_MIN) assert.equal(LIMITS.quotesPerMin, 120);
+  if (!process.env.TP_TOKENS_PER_IP) assert.equal(LIMITS.tokensPerIp, 3);
+});
+
+test('ipKey: an IPv6 visitor is keyed by its /64 (one allocation is one visitor); IPv4 is itself', () => {
+  assert.equal(ipKey('198.51.100.4'), '198.51.100.4');
+  assert.equal(ipKey('2001:db8:aa:bb::1'), '2001:db8:aa:bb::/64');
+  assert.equal(ipKey('2001:0db8:00aa:00bb:1:2:3:4'), '2001:db8:aa:bb::/64');
+  assert.equal(ipKey('2001:DB8:AA:BB:ffff:ffff:ffff:ffff'), '2001:db8:aa:bb::/64', 'every address of the /64 shares a key');
+  assert.equal(ipKey('2001:db8::'), '2001:db8:0:0::/64');
+  assert.equal(ipKey('::ffff:198.51.100.7'), '198.51.100.7', 'an IPv4-mapped address is its IPv4');
+  assert.equal(ipKey('2001:db8:aa:bb:0:0:198.51.100.7'), '2001:db8:aa:bb::/64', 'an embedded IPv4 tail');
+  assert.equal(ipKey('fe80::1%eth0'), 'fe80:0:0:0::/64', 'a zone id is dropped');
+  assert.equal(ipKey('not an ip'), 'not an ip', 'anything unparsable is its own key');
+  assert.equal(ipKey('::1'), '::1', 'loopback stays itself');
+});
+
+test('clientIp keys an IPv6 visitor behind nginx by its /64', () => {
+  const a = clientIp({ socket: { remoteAddress: '127.0.0.1' }, headers: { 'x-real-ip': '2001:db8:1:2::abcd' } });
+  const b = clientIp({ socket: { remoteAddress: '127.0.0.1' }, headers: { 'x-real-ip': '2001:db8:1:2:ffff::9' } });
+  assert.equal(a, b);
+  assert.equal(a, '2001:db8:1:2::/64');
+  assert.equal(clientIp({ socket: { remoteAddress: '2001:db8:9:9::5' }, headers: {} }), '2001:db8:9:9::/64');
+});
+
+test('token slots: at most N DISTINCT tokens per IP; more streams of a held token are free', () => {
+  const slots = createTokenSlots({ perIp: 2 });
+  assert.equal(slots.acquire('ip', '0xa'), true);
+  assert.equal(slots.acquire('ip', '0xA'), true, 'the same token (any case) again');
+  assert.equal(slots.acquire('ip', '0xb'), true);
+  assert.equal(slots.acquire('ip', '0xc'), false, 'a third distinct token is refused');
+  assert.equal(slots.acquire('other', '0xc'), true);
+  slots.release('ip', '0xa');
+  assert.equal(slots.acquire('ip', '0xc'), false, '0xa is still held once');
+  slots.release('ip', '0xa');
+  assert.equal(slots.acquire('ip', '0xc'), true, 'released twice: 0xa is gone');
+  assert.deepEqual(slots.tokens('ip').sort(), ['0xb', '0xc']);
+  for (let i = 0; i < 5; i++) slots.release('ip', '0xb'); // over-release never goes negative
+  assert.deepEqual(slots.tokens('ip'), ['0xc']);
+});
+
+test('readCost: a /wallets read pays by fan-out (one token per 20 addresses); other reads pay one', () => {
+  const w = (n) => ({ path: '/wallets', body: { addresses: new Array(n).fill('0x') } });
+  assert.equal(readCost(w(1)), 1);
+  assert.equal(readCost(w(20)), 1);
+  assert.equal(readCost(w(21)), 2);
+  assert.equal(readCost(w(100)), 5);
+  assert.equal(readCost(w(5000)), 5, 'capped at what one request may carry (the route refuses more)');
+  assert.equal(readCost({ path: '/wallets', body: {} }), 1);
+  assert.equal(readCost({ path: '/fees' }), 1);
+  assert.equal(readCost({ path: '/quote/pair', body: { amount: '1' } }), 1);
 });

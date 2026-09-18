@@ -65,6 +65,8 @@ const MAX_RAW_HEX = 2 + 2 * 8192;
 const MAX_GAS_LIMIT = 1_000_000n;
 const RECEIPT_POLL_MS = 250;
 const RECEIPT_TIMEOUT_MS = 120_000;
+// Hashes watched at once, process-wide (TP_WATCH_MAX): a few dozen 100-wallet clicks.
+const MAX_WATCHED = Number(process.env.TP_WATCH_MAX) > 0 ? Number(process.env.TP_WATCH_MAX) : 2000;
 // How long a refused-by-the-primary send waits for the sequencer's answer.
 const SEQUENCER_TIMEOUT_MS = 5000;
 // At most one "[tp] sequencer send failed" log line per minute.
@@ -288,7 +290,12 @@ function checkRouterMulticall(d, venue) {
     const [p] = canonicalCall(swapRouterIface, 'exactInputSingle', swapData, 'v1 sell');
     if (lc(p.tokenIn) !== lc(venue.token)) throw bad('v1 sell spends a different token');
     if (lc(p.tokenOut) !== lc(C.WETH)) throw bad('v1 sell must pay WETH');
-    if (!V1_FEE_TIERS.includes(Number(p.fee))) throw bad('v1 sell names an unknown fee tier');
+    // The launch's own pool: anyone can seed a token/WETH pool at another tier at any
+    // price, so a sell there could fill for dust. venue.js always records poolFee for v1.
+    const pinnedFee = venue.poolFee == null ? null : Number(venue.poolFee);
+    if (Number.isInteger(pinnedFee) ? Number(p.fee) !== pinnedFee : !V1_FEE_TIERS.includes(Number(p.fee))) {
+      throw bad("v1 sell names a fee tier that is not the launch pool's");
+    }
     if (lc(p.recipient) !== router) throw bad('v1 sell must leave the WETH in the router for the unwrap');
     if (BigInt(p.amountIn) <= 0n) throw bad('v1 sell of 0 tokens');
     if (BigInt(p.sqrtPriceLimitX96) !== 0n) throw bad('v1 sell must not set a price limit');
@@ -590,20 +597,33 @@ async function broadcast(venue, raws, deps = {}) {
   return results;
 }
 
+// Hashes being watched right now, over every watchReceipts call in the process.
+let watchedNow = 0;
+
 /**
  * Poll each hash's receipt every 250 ms for at most 120 s and announce each one on
  * receiptBus as it lands. Fire-and-forget for the route; the returned promise
  * (resolving to the hashes that never landed) exists for tests.
  *
+ * The polls are READS (tpReadProvider: its own socket pool and the process-wide read
+ * cap), and at most TP_WATCH_MAX hashes are watched at once across ALL calls. A hash
+ * over the cap is simply not watched: the page settles it from its wallet's nonce and
+ * balance (its missed-receipt sweep), so dropping it costs latency, never a wrong row.
+ *
  * @param {string} token the venue's token (the stream filters on it)
  * @param {string[]} hashes
- * @param {{provider?: object, pollMs?: number, timeoutMs?: number, sid?: string}} [deps]
+ * @param {{provider?: object, pollMs?: number, timeoutMs?: number, sid?: string, maxWatched?: number}} [deps]
  */
 function watchReceipts(token, hashes, deps = {}) {
-  const rpc = deps.provider || providers.tpSendProvider();
+  const rpc = deps.provider || providers.tpReadProvider();
   const pollMs = deps.pollMs ?? RECEIPT_POLL_MS;
   const timeoutMs = deps.timeoutMs ?? RECEIPT_TIMEOUT_MS;
-  const waiting = new Set((hashes || []).map(lc));
+  const cap = deps.maxWatched ?? MAX_WATCHED;
+  const all = [...new Set((hashes || []).map(lc))];
+  const room = Math.max(0, cap - watchedNow);
+  const waiting = new Set(all.slice(0, room));
+  const unwatched = all.slice(room);
+  watchedNow += waiting.size;
   const deadline = Date.now() + timeoutMs;
   const tokenLc = lc(token);
   // The chart stream that asked for these receipts (plan Task 7, tp/stream.js). Only
@@ -612,6 +632,15 @@ function watchReceipts(token, hashes, deps = {}) {
   const sid = typeof deps.sid === 'string' && /^[0-9a-f]{32}$/.test(deps.sid) ? deps.sid : null;
 
   return (async () => {
+    try {
+      await pollUntilDone();
+    } finally {
+      watchedNow -= waiting.size;
+    }
+    return [...waiting, ...unwatched];
+  })();
+
+  async function pollUntilDone() {
     while (waiting.size) {
       await Promise.all(
         [...waiting].map(async (hash) => {
@@ -621,8 +650,9 @@ function watchReceipts(token, hashes, deps = {}) {
           } catch (_err) {
             return; // a blip mid-poll is not a failure; the next tick retries
           }
-          if (!receipt) return;
+          if (!receipt || !waiting.has(hash)) return;
           waiting.delete(hash);
+          watchedNow -= 1;
           try {
             receiptBus.emit('receipt', {
               token: tokenLc,
@@ -641,8 +671,7 @@ function watchReceipts(token, hashes, deps = {}) {
       if (!waiting.size || Date.now() >= deadline) break;
       await sleep(pollMs);
     }
-    return [...waiting];
-  })();
+  }
 }
 
 module.exports = {

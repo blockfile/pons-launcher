@@ -14,7 +14,7 @@
 
 const express = require('express');
 const { TpError, sendError } = require('../tp/errors');
-const { LIMITS, rateLimit } = require('../tp/limits');
+const { LIMITS, rateLimit, readCost } = require('../tp/limits');
 // Called through the module objects (venue.resolveVenue, never destructured) so
 // routes/tp.reads.test.js can stub them per test.
 const venue = require('../tp/venue');
@@ -26,7 +26,11 @@ const { handleStream, parseSid } = require('../tp/stream');
 
 const router = express.Router();
 
-const readLimit = rateLimit({ windowMs: 60_000, max: LIMITS.readsPerMin });
+// A /wallets read pays by fan-out (limits.readCost): ~one RPC per address it reads.
+const readLimit = rateLimit({ windowMs: 60_000, max: LIMITS.readsPerMin, cost: readCost });
+// POST /quote in its own bucket: a pool click needs one exact quote, and the page's
+// preview refresh or its wallet reads must never be what spends it.
+const quoteLimit = rateLimit({ windowMs: 60_000, max: LIMITS.quotesPerMin });
 // Approvals (arming) and everything else draw from SEPARATE per-IP buckets, charged per
 // raw tx: arming 100 wallets can never spend the budget a sell click needs (limits.js).
 const broadcastLimit = rateLimit({
@@ -80,7 +84,7 @@ router.get('/fees', readLimit, wrap(async (req, res) => res.json(await state.fee
 // "Graduation mid-session").
 router.post(
   '/quote',
-  readLimit,
+  quoteLimit,
   wrap(async (req, res) => {
     const body = req.body;
     if (!body || typeof body !== 'object' || Array.isArray(body)) {
@@ -179,6 +183,6 @@ router.use((req, res) => res.status(404).json({ error: 'not found' }));
 router.use((err, req, res, next) => sendError(res, err));
 
 // Exposed for routes/tp.test.js only.
-router.limiters = { readLimit, broadcastLimit };
+router.limiters = { readLimit, quoteLimit, broadcastLimit };
 
 module.exports = router;

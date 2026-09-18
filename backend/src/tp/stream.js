@@ -30,12 +30,15 @@
 // body, before any header was sent) — that is not the visitor leaving.
 //
 // Open streams are capped per visitor by limits.streamSlots, keyed by clientIp(req) —
-// never req.ip, which is nginx's 127.0.0.1 for everyone (Task 1 contract note 1).
+// never req.ip, which is nginx's 127.0.0.1 for everyone (Task 1 contract note 1) — and
+// so are the DISTINCT tokens one visitor streams (limits.tokenSlots): the indexer
+// registry holds TP_MAX_TOKENS for the whole process and cannot evict a token while a
+// stream holds it, so one visitor must not be able to pin every entry.
 
 const { randomBytes } = require('crypto');
 const { isAddress } = require('ethers');
 const { TpError, sendError: sendJsonError } = require('./errors');
-const { clientIp, streamSlots } = require('./limits');
+const { clientIp, streamSlots, tokenSlots } = require('./limits');
 const { INTERVALS } = require('./candles');
 
 // Built from a char code, never typed as an escape (memory: write-tool-escapes).
@@ -131,6 +134,7 @@ function createStreamHandler(overrides = {}) {
     release: (token) => require('./indexer').release(token),
     receiptBus: null,
     streamSlots: null,
+    tokenSlots: null,
     setInterval: (fn, ms) => setInterval(fn, ms),
     clearInterval: (h) => clearInterval(h),
     newSid: () => randomBytes(16).toString('hex'),
@@ -173,11 +177,17 @@ function createStreamHandler(overrides = {}) {
     if (!slots.acquire(ip)) {
       return sendError(res, new TpError('rate_limited', 'too many open charts from this address', 429));
     }
+    const tokens = deps.tokenSlots || tokenSlots;
+    if (!tokens.acquire(ip, token)) {
+      slots.release(ip);
+      return sendError(res, new TpError('rate_limited', 'too many different tokens charted from this address — close one first', 429));
+    }
     let slotHeld = true;
     const releaseSlot = () => {
       if (!slotHeld) return;
       slotHeld = false;
       slots.release(ip);
+      tokens.release(ip, token);
     };
 
     // The client may leave while the venue is being resolved.

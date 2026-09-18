@@ -65,12 +65,14 @@ const saved = {
   cachedVenue: venueMod.cachedVenue,
   refreshPhase: venueMod.refreshPhase,
   tpSendProvider: providersMod.tpSendProvider,
+  tpReadProvider: providersMod.tpReadProvider,
 };
 let server;
 let base;
 
 test.before(async () => {
   providersMod.tpSendProvider = () => chain;
+  providersMod.tpReadProvider = () => chain; // the receipt polls
   const app = express();
   app.use(express.json({ limit: '1mb' }));
   app.use('/api/tp', tpRoutes);
@@ -82,6 +84,7 @@ test.before(async () => {
 test.after(() => {
   Object.assign(venueMod, { cachedVenue: saved.cachedVenue, refreshPhase: saved.refreshPhase });
   providersMod.tpSendProvider = saved.tpSendProvider;
+  providersMod.tpReadProvider = saved.tpReadProvider;
   server.close();
   server.closeAllConnections();
 });

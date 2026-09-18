@@ -109,11 +109,14 @@ const post = async (path, body) => {
   return { status: r.status, body: await r.json() };
 };
 
-test('POST /quote and /quote/pair are wired: readLimit first, no longer the notYet placeholder', () => {
-  for (const p of ['/quote', '/quote/pair']) {
+test('POST /quote (its own quoteLimit) and /quote/pair (readLimit) are wired, no longer the notYet placeholder', () => {
+  for (const [p, limiter] of [
+    ['/quote', 'quoteLimit'],
+    ['/quote/pair', 'readLimit'],
+  ]) {
     const layer = tpRoutes.stack.find((l) => l.route && l.route.path === p && l.route.methods.post);
     assert.ok(layer, `POST ${p} is registered`);
-    assert.equal(layer.route.stack[0].handle, tpRoutes.limiters.readLimit, `POST ${p}: readLimit is the first handler`);
+    assert.equal(layer.route.stack[0].handle, tpRoutes.limiters[limiter], `POST ${p}: ${limiter} is the first handler`);
     const last = layer.route.stack[layer.route.stack.length - 1].handle;
     if (tpRoutes.notYet) assert.notEqual(last, tpRoutes.notYet, `POST ${p} is no longer the placeholder`);
   }

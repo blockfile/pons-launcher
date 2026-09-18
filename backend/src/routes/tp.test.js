@@ -52,7 +52,7 @@ const CONTRACT_ROUTES = [
   ['get', '/token/:ca', 'readLimit'],
   ['post', '/wallets', 'readLimit'],
   ['get', '/fees', 'readLimit'],
-  ['post', '/quote', 'readLimit'],
+  ['post', '/quote', 'quoteLimit'],
   ['post', '/quote/pair', 'readLimit'],
   ['post', '/broadcast', 'broadcastLimit'],
   ['get', '/stream', null],
@@ -140,4 +140,24 @@ test('approvals have their own 300/min bucket: arming 100 wallets never spends t
   assert.ok(armRefused instanceof TpError, 'a 4th hundred approvals inside the minute is refused');
   // the same visitor's sell clicks still get the whole sell budget
   for (let i = 0; i < 6; i++) assert.equal(runLimiter(mw, fakeReq('203.0.113.51', sells(100))), 'next', `sell click ${i + 1}`);
+});
+
+const READS_FROM_ENV = Boolean(process.env.TP_READS_PER_MIN || process.env.TP_QUOTES_PER_MIN) && 'TP_READS_PER_MIN or TP_QUOTES_PER_MIN is set';
+
+test('a /wallets read is charged by fan-out: 24 reads of 100 wallets a minute, then 429', { skip: READS_FROM_ENV }, () => {
+  const mw = router.limiters.readLimit;
+  const req = (n) => ({ path: '/wallets', socket: { remoteAddress: '203.0.113.60' }, headers: {}, body: { token: '0x01', addresses: new Array(n).fill('0x') } });
+  for (let i = 0; i < 24; i++) assert.equal(runLimiter(mw, req(100)), 'next', `read ${i + 1}`);
+  const refused = runLimiter(mw, req(100));
+  assert.ok(refused instanceof TpError);
+  assert.equal(refused.code, 'rate_limited');
+});
+
+test('POST /quote has its own bucket: a page that spent its reads can still quote a click', { skip: READS_FROM_ENV }, () => {
+  const ip = '203.0.113.61';
+  const read = { path: '/fees', socket: { remoteAddress: ip }, headers: {}, body: {} };
+  for (let i = 0; i < 120; i++) runLimiter(router.limiters.readLimit, read);
+  assert.ok(runLimiter(router.limiters.readLimit, read) instanceof TpError, 'reads are spent');
+  const quote = { path: '/quote', socket: { remoteAddress: ip }, headers: {}, body: {} };
+  assert.equal(runLimiter(router.limiters.quoteLimit, quote), 'next');
 });

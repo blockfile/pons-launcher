@@ -546,3 +546,59 @@ test('watchReceipts: a well-formed sid tags every receipt; a malformed one tags 
   assert.equal('sid' in events[1], false, 'a malformed sid is dropped: that receipt reaches no stream');
   assert.equal('sid' in events[2], false, 'no sid: the event keeps its Task 5 shape');
 });
+
+// ── receipt polls are reads, capped process-wide (review: tp reads share the console pool) ──
+test('watchReceipts polls on the READ provider by default, never the send one', async () => {
+  const providers = require('./providers');
+  const saved = { read: providers.tpReadProvider, send: providers.tpSendProvider };
+  const used = [];
+  providers.tpReadProvider = () => ({
+    async getTransactionReceipt() {
+      used.push('read');
+      return { from: '0x' + 'cd'.repeat(20), status: 1, blockNumber: 3, gasUsed: 21000n };
+    },
+  });
+  providers.tpSendProvider = () => ({
+    async getTransactionReceipt() {
+      used.push('send');
+      return null;
+    },
+  });
+  try {
+    const left = await watchReceipts(TOKEN, ['0x' + 'a7'.repeat(32)], { pollMs: 1, timeoutMs: 100 });
+    assert.deepEqual(left, []);
+  } finally {
+    providers.tpReadProvider = saved.read;
+    providers.tpSendProvider = saved.send;
+  }
+  assert.deepEqual(used, ['read']);
+});
+
+test('watchReceipts watches at most maxWatched hashes across ALL calls; the rest are left to the page sweep', async () => {
+  const polled = new Set();
+  const rpc = {
+    async getTransactionReceipt(hash) {
+      polled.add(hash);
+      return null; // never mined
+    },
+  };
+  const h = (n) => '0x' + n.toString(16).padStart(64, '0');
+  const first = watchReceipts(TOKEN, [h(1), h(2)], { provider: rpc, pollMs: 1, timeoutMs: 60, maxWatched: 3 });
+  const second = watchReceipts(TOKEN, [h(3), h(4), h(5)], { provider: rpc, pollMs: 1, timeoutMs: 60, maxWatched: 3 });
+  assert.deepEqual(await second, [h(3), h(4), h(5)], 'every hash that did not land is reported, watched or not');
+  await first;
+  assert.deepEqual([...polled].sort(), [h(1), h(2), h(3)], 'only three were ever polled');
+  // Both watches ended: the room is back.
+  polled.clear();
+  await watchReceipts(TOKEN, [h(6), h(7), h(8)], { provider: rpc, pollMs: 1, timeoutMs: 10, maxWatched: 3 });
+  assert.deepEqual([...polled].sort(), [h(6), h(7), h(8)]);
+});
+
+// ── v1: the launch's own pool tier only (review: v1 sell fee tier not pinned) ──
+test('refused — a v1 sell at a fee tier other than the launch pool the venue names', async () => {
+  const pinned = { ...v1Venue, poolFee: 10000 };
+  await ok(pinned, { to: C.SWAP_ROUTER02, data: (me) => v1Sell({ recipient: me, fee: 10000 }) });
+  for (const fee of [100, 500, 3000]) {
+    await refused(pinned, { to: C.SWAP_ROUTER02, data: (me) => v1Sell({ recipient: me, fee }) }, /fee tier/);
+  }
+});

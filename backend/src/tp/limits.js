@@ -8,6 +8,17 @@
 //   approvals  300 tx / min per IP  (TP_APPROVE_TX_PER_MIN) — ERC-20 approve and
 //                                    Permit2 approve; a SEPARATE bucket
 //   streams    5 open per IP         (TP_STREAMS_PER_IP)
+//   tokens     3 distinct tokens streamed at once per IP (TP_TOKENS_PER_IP): the
+//              indexer registry holds TP_MAX_TOKENS for the WHOLE process, so one
+//              visitor must not be able to pin all of it and freeze everyone's chart
+//   quotes     120 / min per IP     (TP_QUOTES_PER_MIN) — POST /quote in its OWN bucket:
+//              a pool click needs one exact quote, and the page's background preview
+//              refresh or its wallet reads must never spend it
+//
+// A /wallets read is charged by fan-out (readCost): it costs ~one RPC per address.
+//
+// IPv6: a visitor is keyed by its /64 (ipKey). One subscriber is routinely handed a
+// whole /64, so keying per /128 would give one visitor 2^64 buckets.
 //
 // WHY TWO BROADCAST BUCKETS, AND WHY 600. One 100-wallet visitor arming a graduated
 // token sends 200 approvals (token -> Permit2, Permit2 -> router); a token-quoted curve
@@ -41,9 +52,47 @@ const LIMITS = Object.freeze({
   broadcastTxPerMin: posNum(process.env.TP_BROADCAST_TX_PER_MIN, 600),
   approveTxPerMin: posNum(process.env.TP_APPROVE_TX_PER_MIN, 300),
   streamsPerIp: posNum(process.env.TP_STREAMS_PER_IP, 5),
+  tokensPerIp: posNum(process.env.TP_TOKENS_PER_IP, 3),
+  quotesPerMin: posNum(process.env.TP_QUOTES_PER_MIN, 120),
 });
 
 const LOOPBACK = new Set(['127.0.0.1', '::1', '::ffff:127.0.0.1']);
+
+const IPV4_TAIL = /(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/;
+const IPV4_MAPPED = /^::ffff:(\d{1,3}(?:\.\d{1,3}){3})$/;
+const HEXTET = /^[0-9a-f]{1,4}$/;
+
+/**
+ * The rate-limit key for an address: IPv4 as is; IPv6 as its /64 prefix
+ * ('2001:db8:aa:bb::/64'), expanded first so every spelling of one prefix is one key;
+ * an IPv4-mapped IPv6 as its IPv4. Loopback and anything unparsable are their own key.
+ */
+function ipKey(ip) {
+  const raw = String(ip == null ? '' : ip).trim();
+  if (!raw.includes(':')) return raw;
+  let a = raw.split('%')[0].toLowerCase();
+  if (LOOPBACK.has(a)) return a;
+  const mapped = IPV4_MAPPED.exec(a);
+  if (mapped) return mapped[1];
+  const v4 = IPV4_TAIL.exec(a);
+  if (v4) {
+    const o = v4.slice(1).map(Number);
+    if (o.some((n) => n > 255)) return raw;
+    a = a.slice(0, v4.index) + ((o[0] << 8) | o[1]).toString(16) + ':' + ((o[2] << 8) | o[3]).toString(16);
+  }
+  const halves = a.split('::');
+  if (halves.length > 2) return raw;
+  const head = halves[0] ? halves[0].split(':') : [];
+  const tail = halves.length === 2 && halves[1] ? halves[1].split(':') : [];
+  let groups = head;
+  if (halves.length === 2) {
+    const fill = 8 - head.length - tail.length;
+    if (fill < 1) return raw;
+    groups = [...head, ...new Array(fill).fill('0'), ...tail];
+  }
+  if (groups.length !== 8 || !groups.every((g) => HEXTET.test(g))) return raw;
+  return groups.slice(0, 4).map((g) => parseInt(g, 16).toString(16)).join(':') + '::/64';
+}
 
 function clientIp(req) {
   const peer = String((req.socket && req.socket.remoteAddress) || req.ip || '');
@@ -51,10 +100,21 @@ function clientIp(req) {
     const real = req.headers && req.headers['x-real-ip'];
     if (typeof real === 'string') {
       const ip = real.trim();
-      if (ip && ip.length <= 64) return ip;
+      if (ip && ip.length <= 64) return ipKey(ip);
     }
   }
-  return peer || 'unknown';
+  return peer ? ipKey(peer) : 'unknown';
+}
+
+// A /wallets read costs about one RPC per address (the nonces) plus two multicalls,
+// so it pays one read token per this many addresses (at most 100 per request).
+const WALLETS_PER_READ_TOKEN = 20;
+
+/** cost() for the read limiter: a /wallets read by fan-out, anything else one. */
+function readCost(req) {
+  const list = req && req.path === '/wallets' && req.body && Array.isArray(req.body.addresses) ? req.body.addresses : null;
+  if (!list) return 1;
+  return Math.max(1, Math.ceil(Math.min(list.length, 100) / WALLETS_PER_READ_TOKEN));
 }
 
 /**
@@ -224,6 +284,41 @@ function createStreamSlots({ perIp = LIMITS.streamsPerIp } = {}) {
 
 const streamSlots = createStreamSlots();
 
+/**
+ * Distinct tokens streamed per IP. acquire(ip, token) is true when the IP already
+ * streams that token (a reconnect, a timeframe switch, a second tab of it) or holds
+ * fewer than perIp tokens; release(ip, token) exactly once per true.
+ */
+function createTokenSlots({ perIp = LIMITS.tokensPerIp } = {}) {
+  const held = new Map(); // ip -> Map(lower token -> refs)
+  return {
+    acquire(ip, token) {
+      const k = String(ip);
+      const t = String(token).toLowerCase();
+      const m = held.get(k) || new Map();
+      if (!m.has(t) && m.size >= perIp) return false;
+      m.set(t, (m.get(t) || 0) + 1);
+      held.set(k, m);
+      return true;
+    },
+    release(ip, token) {
+      const k = String(ip);
+      const t = String(token).toLowerCase();
+      const m = held.get(k);
+      if (!m || !m.has(t)) return;
+      const n = m.get(t);
+      if (n <= 1) m.delete(t);
+      else m.set(t, n - 1);
+      if (m.size === 0) held.delete(k);
+    },
+    tokens(ip) {
+      return [...(held.get(String(ip)) || new Map()).keys()];
+    },
+  };
+}
+
+const tokenSlots = createTokenSlots();
+
 module.exports = {
   LIMITS,
   clientIp,
@@ -234,4 +329,8 @@ module.exports = {
   APPROVE_SELECTORS,
   createStreamSlots,
   streamSlots,
+  createTokenSlots,
+  tokenSlots,
+  ipKey,
+  readCost,
 };
