@@ -34,6 +34,11 @@ const v8Routes = require('./src/routes/v8');
 // and the keystore — see src/routes/holderFees.js. Unrelated to distributorRoutes
 // above, which is the launcher's own bundle distributor.
 const holderFeeRoutes = require('./src/routes/holderFees');
+// The take-profit dApp (dapp.rhbond.xyz): a PUBLIC, key-less router under /api/tp and
+// the host gate that keeps the dApp's hostname away from every console route. Its
+// own modules under src/tp; unmounting these lines removes the dApp whole.
+const tpRoutes = require('./src/routes/tp');
+const { dappHostGate } = require('./src/tp/hostGate');
 const v4Runner = require('./src/v4/runner');
 const { rpcMessage } = require('./src/evm/errors');
 
@@ -46,6 +51,10 @@ app.use(express.json({ limit: '1mb' }));
 // :5173 proxies /api back to this process and dist/ does not exist yet.
 const dist = path.join(__dirname, '..', 'frontend', 'dist');
 const hasBuild = fs.existsSync(path.join(dist, 'index.html'));
+// BEFORE static and every router: the dApp's hostname gets dist/dapp and /api/tp only,
+// every other /api path answers 404 for it; every OTHER host answers 404 for /dapp/*,
+// so the key-holding page never runs on the console's origin. See src/tp/hostGate.js.
+app.use(dappHostGate({ host: process.env.DAPP_HOST || 'dapp.rhbond.xyz', dist }));
 if (hasBuild) app.use(express.static(dist));
 
 app.get('/api/health', (req, res) => {
@@ -74,6 +83,9 @@ app.get('/api/health', (req, res) => {
   });
 });
 
+// Public: mounted BEFORE identify, so it never needs an API key and never sees req.user.
+// It holds no keys and cannot reach the keystore (src/tp/isolation.test.js).
+app.use('/api/tp', tpRoutes);
 app.use('/api', identify);
 app.use('/api', walletRoutes);
 app.use('/api', launchRoutes);
