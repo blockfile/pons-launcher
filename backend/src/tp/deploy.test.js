@@ -220,7 +220,7 @@ test('/api/tp/ is rate limited; every other /api path is a 404, in any letter ca
   assert.ok(anyCase, 'location ~* ^/api(/|$) — Express routes case-insensitively, nginx prefixes do not');
   assert.deepEqual(direct(anyCase.block, 'return'), [['404', '{"error":"not found"}']]);
 
-  assert.ok(location(dapp, '/'), 'location / serves the dApp page and /assets');
+  assert.ok(location(dapp, '/'), 'location / serves the dApp page and /dapp/assets');
 });
 
 test('the rate-limit zone lives at http level (conf.d), documented here but not defined here', () => {

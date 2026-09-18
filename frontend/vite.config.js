@@ -43,8 +43,12 @@ export const DAPP_ENTRY = fileURLToPath(new URL('./dapp/index.html', import.meta
  * console's icons and animation features, and the console the dApp's. The dApp
  * is served on its own host by the server.js host gate; see
  * docs/superpowers/specs/2026-09-19-tp-dapp-design.md.
+ *
+ * `assetsDir` keeps each page's files apart: the console's in dist/assets/, the
+ * dApp's in dist/dapp/assets/. The host gate serves the dApp host /dapp/assets/*
+ * only, so the console page's bundle is never public on the password-less dApp host.
  */
-export function pageConfig(input, { emptyOutDir }) {
+export function pageConfig(input, { emptyOutDir, assetsDir = 'assets' }) {
   return defineConfig({
     plugins: [sharedCommonJs(), react()],
     server: {
@@ -61,6 +65,7 @@ export function pageConfig(input, { emptyOutDir }) {
     build: {
       outDir: 'dist',
       emptyOutDir,
+      assetsDir,
       rolldownOptions: { input },
     },
   });

@@ -5,11 +5,17 @@
 // key-export routes on a public, password-less hostname. This middleware runs before
 // express.static and before every router, and for the dApp's hostname allows exactly:
 //
-//   /api/tp, /api/tp/*   → next()  (the public, key-less tp router)
-//   any other /api/*     → 404 {error:'not found'}
-//   GET|HEAD /assets/*   → the built bundle's static files (404 JSON if missing)
-//   GET|HEAD anything    → dist/dapp/index.html, no-cache (404 JSON when not built)
-//   anything else        → 404 JSON
+//   /api/tp, /api/tp/*        → next()  (the public, key-less tp router)
+//   any other /api/*          → 404 {error:'not found'}
+//   GET|HEAD /dapp/assets/*   → the dApp's OWN bundle (dist/dapp/assets, 404 JSON if missing)
+//   /assets, /assets/*        → 404 JSON: that is the CONSOLE page's bundle (dist/assets)
+//   GET|HEAD anything else    → dist/dapp/index.html, no-cache (404 JSON when not built)
+//   anything else             → 404 JSON
+//
+// The two pages build separately (frontend/vite.config.js): the console's files land in
+// dist/assets/, the dApp's in dist/dapp/assets/ (vite.dapp.config.js assetsDir). So the
+// dApp host serves the dApp's files and nothing of the console: the console's code sits
+// behind basic auth on its own host, and this host has no password.
 //
 // EVERY OTHER HOST (the console) is unchanged except for one path: /dapp and /dapp/*
 // answer 404 JSON, whatever the method. Without that, express.static would serve the
@@ -31,6 +37,8 @@ const path = require('path');
 const express = require('express');
 
 const DEFAULT_DAPP_HOST = 'dapp.rhbond.xyz';
+// Where the dApp build puts its JS, CSS and fonts (frontend/vite.dapp.config.js).
+const DAPP_ASSETS = '/dapp/assets/';
 
 // The key-holding page's Content-Security-Policy — the same string as the server-level
 // add_header in deploy/nginx-rhbond.conf (deploy.test.js checks they agree). nginx drops
@@ -111,15 +119,18 @@ function dappHostGate({ host = process.env.DAPP_HOST || DEFAULT_DAPP_HOST, dist 
     if (p.toLowerCase() === '/api' || p.toLowerCase().startsWith('/api/')) return notFound(res);
     if (req.method !== 'GET' && req.method !== 'HEAD') return notFound(res);
     setPageHeaders(res);
-    if (p.startsWith('/assets/')) return serveStatic(req, res, () => notFound(res));
+    if (p.startsWith(DAPP_ASSETS)) return serveStatic(req, res, () => notFound(res));
+    // The console page's bundle: never on this host, in any letter case.
+    const lower = p.toLowerCase();
+    if (lower === '/assets' || lower.startsWith('/assets/')) return notFound(res);
     if (!fs.existsSync(index)) {
       return res.status(404).json({ error: 'no dApp build — run `npm run build` in frontend/' });
     }
     // Always revalidate the page itself: a stale index.html points at hashed assets the
-    // last build deleted. The hashed /assets/* files are immutable and cache normally.
+    // last build deleted. The hashed /dapp/assets/* files are immutable and cache normally.
     res.set('Cache-Control', 'no-cache');
     return res.sendFile(index);
   };
 }
 
-module.exports = { dappHostGate, hostOf, normaliseHost, isDappPath, DEFAULT_DAPP_HOST, DAPP_CSP };
+module.exports = { dappHostGate, hostOf, normaliseHost, isDappPath, DEFAULT_DAPP_HOST, DAPP_CSP, DAPP_ASSETS };

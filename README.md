@@ -330,8 +330,9 @@ one click. Design: `docs/superpowers/specs/2026-09-19-tp-dapp-design.md`.
 - **One process.** It runs inside the same pm2 process as the console
   (`ecosystem.config.js` forbids a second one); the chart indexer uses its own RPC
   connection, never the console's send path.
-- **Fenced twice.** On the dApp hostname only the dApp page, `/assets` and
-  `/api/tp/*` answer; every other `/api` path is a 404. nginx enforces that
+- **Fenced twice.** On the dApp hostname only the dApp page, its own
+  `/dapp/assets` and `/api/tp/*` answer; every other `/api` path is a 404, and so
+  is the console page's bundle (`/assets`). nginx enforces that
   (`deploy/nginx-rhbond.conf`) and so does the server itself, by Host
   (`DAPP_HOST`), so a mis-edit of either one alone does not expose the console.
 - `backend/.env` needs nothing new. `DAPP_HOST`, `TP_MAX_TOKENS` and

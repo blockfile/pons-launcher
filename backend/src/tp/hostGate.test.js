@@ -13,15 +13,18 @@ const { dappHostGate, normaliseHost, isDappPath, DEFAULT_DAPP_HOST } = require('
 const DAPP = 'dapp.test.invalid';
 const CONSOLE = 'console.test.invalid';
 
-// A fake frontend build: the console's index, the dApp's index, one hashed asset.
+// A fake frontend build, laid out as `npm run build` lays it out: the console's index
+// and its hashed bundle in dist/assets/, the dApp's index and its OWN bundle in
+// dist/dapp/assets/ (vite.dapp.config.js assetsDir).
 function makeDist({ withDapp = true } = {}) {
   const dist = fs.mkdtempSync(path.join(os.tmpdir(), 'tp-gate-'));
   fs.writeFileSync(path.join(dist, 'index.html'), '<html>CONSOLE</html>');
   fs.mkdirSync(path.join(dist, 'assets'));
   fs.writeFileSync(path.join(dist, 'assets', 'app-abc123.js'), 'console.log("asset")');
   if (withDapp) {
-    fs.mkdirSync(path.join(dist, 'dapp'));
+    fs.mkdirSync(path.join(dist, 'dapp', 'assets'), { recursive: true });
     fs.writeFileSync(path.join(dist, 'dapp', 'index.html'), '<html>DAPP</html>');
+    fs.writeFileSync(path.join(dist, 'dapp', 'assets', 'dapp-def456.js'), 'console.log("dapp asset")');
   }
   return dist;
 }
@@ -122,13 +125,38 @@ test('dApp host + / and any page path → dist/dapp/index.html, never the consol
   }
 });
 
-test('dApp host + /assets/* → the static file; a missing asset → 404 JSON', async () => {
-  const ok = await request(server, { path: '/assets/app-abc123.js', host: DAPP });
+test("dApp host + /dapp/assets/* → the dApp's own static file; a missing one → 404 JSON", async () => {
+  const ok = await request(server, { path: '/dapp/assets/dapp-def456.js', host: DAPP });
   assert.equal(ok.status, 200);
-  assert.equal(ok.body, 'console.log("asset")');
-  const missing = await request(server, { path: '/assets/nope.js', host: DAPP });
+  assert.equal(ok.body, 'console.log("dapp asset")');
+  const missing = await request(server, { path: '/dapp/assets/nope.js', host: DAPP });
   assert.equal(missing.status, 404);
   assert.deepEqual(JSON.parse(missing.body), { error: 'not found' });
+});
+
+// The console PAGE is its HTML and the bundle that HTML loads from dist/assets/. On
+// the public, password-less dApp host neither may be served: the console's code sits
+// behind basic auth on its own host.
+test('dApp host + /assets/* (the console page bundle) → 404 JSON, never the console code', async () => {
+  for (const p of ['/assets/app-abc123.js', '/assets/nope.js', '/ASSETS/app-abc123.js', '/assets/']) {
+    for (const method of ['GET', 'HEAD']) {
+      const r = await request(server, { method, path: p, host: DAPP });
+      assert.equal(r.status, 404, `${method} ${p}`);
+      assert.doesNotMatch(r.body, /asset|CONSOLE|DAPP/, `${method} ${p}`);
+    }
+  }
+});
+
+test('dApp host + a /dapp path that is not an asset → the dApp page (it is a page path), never a file listing', async () => {
+  for (const p of ['/dapp/', '/dapp/index.html', '/dapp/assets/']) {
+    const r = await request(server, { path: p, host: DAPP });
+    if (p === '/dapp/assets/') {
+      assert.equal(r.status, 404, p);
+    } else {
+      assert.equal(r.status, 200, p);
+      assert.equal(r.body, '<html>DAPP</html>', p);
+    }
+  }
 });
 
 test('dApp host + a non-GET page request → 404', async () => {
@@ -164,6 +192,9 @@ test('any other host is untouched — the console is unchanged', async () => {
   assert.equal(health.status, 200);
   const asset = await request(server, { path: '/assets/app-abc123.js', host: CONSOLE });
   assert.equal(asset.body, 'console.log("asset")');
+  // and the dApp's bundle is not on the console origin either (it is under /dapp)
+  const dappAsset = await request(server, { path: '/dapp/assets/dapp-def456.js', host: CONSOLE });
+  assert.equal(dappAsset.status, 404);
 });
 
 // Without the gate, express.static serves dist/dapp/index.html for every one of these
@@ -234,7 +265,7 @@ test('the dApp page and its assets carry the CSP and anti-framing headers themse
   const { DAPP_CSP } = require('./hostGate');
   assert.match(DAPP_CSP, /script-src 'self'/);
   assert.match(DAPP_CSP, /frame-ancestors 'none'/);
-  for (const p of ['/', '/token/0xabc', '/assets/app-abc123.js']) {
+  for (const p of ['/', '/token/0xabc', '/dapp/assets/dapp-def456.js']) {
     const r = await request(server, { path: p, host: DAPP });
     assert.equal(r.status, 200, p);
     assert.equal(r.headers['content-security-policy'], DAPP_CSP, p);
