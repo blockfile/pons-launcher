@@ -2,10 +2,12 @@
 // lazy three.js chunk, stays under 250 KB gzipped).
 //
 // First load = the module script dist/dapp/index.html names, every chunk it
-// imports STATICALLY (transitively), and every <link rel="modulepreload"> the
-// HTML lists. Dynamic import() chunks (the EmptyScene / three.js chunk) are left
-// out. Gzip level 6: the level the dApp's nginx block serves at (Task 14,
-// gzip_comp_level 6). The stylesheet is printed for information only.
+// imports STATICALLY (transitively), every <link rel="modulepreload"> the HTML
+// lists, and the stylesheets it links (the page does not paint without them).
+// Dynamic import() chunks (the EmptyScene / three.js chunk) are left out. Gzip
+// level 6: the level the dApp's nginx block serves at (Task 14,
+// gzip_comp_level 6). Fonts are not counted: woff2 is compressed already and a
+// browser fetches only the unicode ranges it draws.
 //
 // Run after `npm run build`, from frontend/:   node scripts/dapp-size.mjs
 // Exit 0 = within budget; exit 1 = over budget, three.js in the first load, or
@@ -54,8 +56,12 @@ for (const file of [...first].sort()) {
   if (three) failed = true;
   console.log(`${path.relative(DIST, file).split(path.sep).join('/').padEnd(44)} ${kb(size).padStart(10)} gz${three ? '   <- three.js: must be lazy' : ''}`);
 }
-for (const href of styles) console.log(`${href.replace(/^\//, '').padEnd(44)} ${kb(gz(fs.readFileSync(fromHref(href)))).padStart(10)} gz   (css, not counted)`);
-console.log(`first-load JS: ${kb(total)} gzipped (level 6) of ${kb(LIMIT)} budget`);
+for (const href of styles) {
+  const size = gz(fs.readFileSync(fromHref(href)));
+  total += size;
+  console.log(`${href.replace(/^\//, '').padEnd(44)} ${kb(size).padStart(10)} gz   (css)`);
+}
+console.log(`first load (JS + CSS): ${kb(total)} = ${total} bytes gzipped (level 6) of ${kb(LIMIT)} = ${LIMIT} bytes budget`);
 if (total >= LIMIT) {
   console.error('OVER BUDGET');
   failed = true;

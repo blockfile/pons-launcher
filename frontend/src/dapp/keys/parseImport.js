@@ -17,7 +17,7 @@
  *                  (frontend/src/api.js:133, v4/backupRows.js:16, v4/V4SeedPanel.jsx:740),
  *                  matched case-insensitively; without one, any 64-hex cell is the key.
  *
- * VALIDATION. Every key must derive a real secp256k1 address (ethers Wallet). When
+ * VALIDATION. Every key must derive a real secp256k1 address (ethers SigningKey). When
  * the row also names an address, the key must derive THAT address: a key pasted
  * against the wrong row is refused, never imported under the wrong label.
  * Duplicates (same address) keep the first row.
@@ -29,7 +29,7 @@
  * Row numbers: 1-based line (paste/CSV), sheet row (XLSX), array position (JSON).
  * Row 0 means the input as a whole.
  */
-import { Wallet } from 'ethers';
+import { SigningKey, computeAddress } from 'ethers';
 import { readXlsxRows } from './xlsxRead.js';
 
 const KEY_RE = /^(?:0x)?([0-9a-fA-F]{64})$/;
@@ -211,7 +211,9 @@ function finish(candidates, rejects) {
     }
     let wallet;
     try {
-      wallet = new Wallet(`0x${c.key.toLowerCase()}`);
+      // SigningKey + computeAddress, not an ethers Wallet (walletStore.js says why).
+      const key = new SigningKey(`0x${c.key.toLowerCase()}`);
+      wallet = { address: computeAddress(key.publicKey), privateKey: key.privateKey };
     } catch {
       rejects.push({ row: c.row, reason: REASON.badKey });
       continue;

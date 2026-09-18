@@ -100,3 +100,37 @@ test('_exportForVault round-trips through addWallets', () => {
   clearWallets();
   assert.deepEqual(addWallets(out), { added: 3, duplicates: 0 });
 });
+
+// The store signs with a SigningKey + Transaction rather than an ethers Wallet (a
+// Wallet pulls the JSON keystore, HD wallet and wordlist into the page's first load).
+// ECDSA here is deterministic (RFC 6979), so the SAME bytes as Wallet.signTransaction
+// prove the two are one signer.
+test('signTx produces byte-for-byte what ethers Wallet.signTransaction produces', async () => {
+  clearWallets();
+  const [a] = fresh(1);
+  addWallets([a]);
+  const txs = [
+    { to: '0x0000000000000000000000000000000000000001', data: '0x095ea7b3', value: 0n, nonce: 0, gasLimit: 100000n, maxFeePerGas: 20000000n, maxPriorityFeePerGas: 0n, chainId: 4663, type: 2 },
+    { to: '0x8876789976decbfcbbbe364623c63652db8c0904', data: '0x3593564c' + '00'.repeat(96), value: 0n, nonce: 41, gasLimit: 500000n, maxFeePerGas: 1n, maxPriorityFeePerGas: 0n, chainId: 4663, type: 2 },
+  ];
+  for (const tx of txs) {
+    assert.equal(await signTx(a.address, tx), await new Wallet(a.privateKey).signTransaction(tx));
+  }
+});
+
+test('signTx refuses a request whose from is another wallet, and accepts its own', async () => {
+  clearWallets();
+  const [a, b] = fresh(2);
+  addWallets([a]);
+  const base = { to: '0x0000000000000000000000000000000000000001', data: '0x', value: 0n, nonce: 1, gasLimit: 21000n, maxFeePerGas: 1n, maxPriorityFeePerGas: 0n, chainId: 4663, type: 2 };
+  await assert.rejects(signTx(a.address, { ...base, from: b.address }), /cannot be signed by/);
+  assert.equal(Transaction.from(await signTx(a.address, { ...base, from: a.address.toLowerCase() })).from, a.address);
+});
+
+test('a key without its 0x prefix derives the same wallet', () => {
+  clearWallets();
+  const [a] = fresh(1);
+  assert.deepEqual(addWallets([{ address: a.address, privateKey: a.privateKey.slice(2) }]), { added: 1, duplicates: 0 });
+  assert.deepEqual(_exportForVault(), [a]);
+  clearWallets();
+});

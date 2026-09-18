@@ -11,15 +11,20 @@
  * bad key are replaced with fixed text, because some secp256k1 libraries print the
  * offending scalar in their range errors.
  */
-import { Wallet, getAddress } from 'ethers';
+import { SigningKey, Transaction, computeAddress, getAddress } from 'ethers';
 
-/** lower-case address -> ethers Wallet (no provider: signing only). Insertion order = import order. */
+/** lower-case address -> {address, key: SigningKey}. Insertion order = import order. */
 const store = new Map();
 
+// A SigningKey and a Transaction, not an ethers Wallet: a Wallet drags the JSON
+// keystore (scrypt, AES), the HD wallet and the mnemonic wordlist into the page's
+// first load, and none of that is used here.
 function toWallet(item, index) {
   let wallet;
   try {
-    wallet = new Wallet(String(item.privateKey));
+    const raw = String(item.privateKey);
+    const key = new SigningKey(raw.startsWith('0x') || raw.startsWith('0X') ? `0x${raw.slice(2)}` : `0x${raw}`);
+    wallet = { address: computeAddress(key.publicKey), key };
   } catch {
     throw new Error(`wallet ${index + 1}: not a valid private key`);
   }
@@ -82,12 +87,18 @@ export function clearWallets() {
 export async function signTx(address, txRequest) {
   const wallet = store.get(String(address).toLowerCase());
   if (!wallet) throw new Error(`no key loaded for ${address}`);
-  return wallet.signTransaction(txRequest);
+  if (txRequest && txRequest.from != null && getAddress(String(txRequest.from)) !== wallet.address) {
+    throw new Error(`transaction from ${txRequest.from} cannot be signed by ${wallet.address}`);
+  }
+  const { from: _from, ...fields } = txRequest || {};
+  const tx = Transaction.from(fields);
+  tx.signature = wallet.key.sign(tx.unsignedHash);
+  return tx.serialized;
 }
 
 /** vault.js ONLY. @returns {{address: string, privateKey: string}[]} */
 export function _exportForVault() {
-  return [...store.values()].map((w) => ({ address: w.address, privateKey: w.privateKey }));
+  return [...store.values()].map((w) => ({ address: w.address, privateKey: w.key.privateKey }));
 }
 
 /** vault.js ONLY. */
