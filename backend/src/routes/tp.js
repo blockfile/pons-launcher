@@ -19,6 +19,7 @@ const { LIMITS, rateLimit } = require('../tp/limits');
 // routes/tp.reads.test.js can stub them per test.
 const venue = require('../tp/venue');
 const state = require('../tp/state');
+const quote = require('../tp/quote');
 const { broadcastCost } = require('../tp/limits'); // own line: later tasks' edits anchor on the line above
 
 const router = express.Router();
@@ -77,8 +78,47 @@ router.post(
   })
 );
 router.get('/fees', readLimit, wrap(async (req, res) => res.json(await state.feeParams())));
-router.post('/quote', readLimit, notYet); // quote.quoteSells
-router.post('/quote/pair', readLimit, notYet); // quote.quotePairToEth
+// {token, sells: [{address, amount}]} -> {quotes}: cumulative, in the order the
+// click sends (tp/quote.js). The send path: venue.cachedVenue costs no chain read
+// on a hit. A curve that graduated since the venue was cached answers every row
+// reason 'graduated'; re-read the phase ONCE and quote the pool instead (spec:
+// "Graduation mid-session").
+router.post(
+  '/quote',
+  readLimit,
+  wrap(async (req, res) => {
+    const body = req.body;
+    if (!body || typeof body !== 'object' || Array.isArray(body)) {
+      throw new TpError('bad_request', 'expected a JSON body {token, sells}');
+    }
+    if (typeof body.token !== 'string' || !/^0x[0-9a-fA-F]{40}$/.test(body.token)) {
+      throw new TpError('bad_address', 'token is not an address');
+    }
+    let v = await venue.cachedVenue(body.token.toLowerCase());
+    let quotes = await quote.quoteSells(v, body.sells);
+    if (v.kind === 'curve' && quotes.some((q) => q.reason === 'graduated')) {
+      const fresh = await venue.refreshPhase(v);
+      if (fresh && fresh !== v) {
+        v = fresh;
+        quotes = await quote.quoteSells(v, body.sells);
+      }
+    }
+    res.json({ quotes });
+  })
+);
+// {pairToken, amount} -> quotePairToEth(): the pair -> USDG -> WETH leg that turns
+// a token-quoted sell's proceeds into ETH. quote.js validates both fields.
+router.post(
+  '/quote/pair',
+  readLimit,
+  wrap(async (req, res) => {
+    const body = req.body;
+    if (!body || typeof body !== 'object' || Array.isArray(body)) {
+      throw new TpError('bad_request', 'expected a JSON body {pairToken, amount}');
+    }
+    res.json(await quote.quotePairToEth(body.pairToken, body.amount));
+  })
+);
 router.post('/broadcast', broadcastLimit, notYet); // broadcast.broadcast
 router.get('/stream', notYet); // stream.handleStream (limited by streamSlots, not readLimit)
 
