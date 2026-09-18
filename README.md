@@ -318,6 +318,69 @@ sudo ln -s /etc/nginx/sites-available/pons-launcher /etc/nginx/sites-enabled/
 sudo nginx -t && sudo systemctl reload nginx
 ```
 
+## Take-profit dApp
+
+`dapp.rhbond.xyz` is a **public** sell page for pons tokens: paste a CA, import
+bundle wallets, watch live 1 s candles, sell a % from every selected wallet with
+one click. Design: `docs/superpowers/specs/2026-09-19-tp-dapp-design.md`.
+
+- **Keys stay in the visitor's browser.** The page signs locally and sends only
+  signed transactions. The backend module behind it (`backend/src/tp`, mounted at
+  `/api/tp`, no API key) holds no key and cannot reach the keystore.
+- **One process.** It runs inside the same pm2 process as the console
+  (`ecosystem.config.js` forbids a second one); the chart indexer uses its own RPC
+  connection, never the console's send path.
+- **Fenced twice.** On the dApp hostname only the dApp page, `/assets` and
+  `/api/tp/*` answer; every other `/api` path is a 404. nginx enforces that
+  (`deploy/nginx-rhbond.conf`) and so does the server itself, by Host
+  (`DAPP_HOST`), so a mis-edit of either one alone does not expose the console.
+- `backend/.env` needs nothing new. `DAPP_HOST`, `TP_MAX_TOKENS` and
+  `TP_SEQUENCER_URL` are optional; see `backend/.env.example`.
+
+**First deploy** (DNS already points `dapp` at the droplet). On the droplet, in
+the repo checkout, not during a live launch:
+
+```bash
+# 1. Code, dependencies, build, restart. The lockfile is at the repo root, so
+#    npm ci runs there; it installs the dApp's new frontend dependencies.
+git pull
+npm ci
+npm run build                  # frontend/dist (console) + frontend/dist/dapp (dApp)
+pm2 restart pons-launcher      # loads /api/tp and the host gate
+
+# 2. The rate-limit zone. It is http-level, so it gets its own conf.d file.
+echo 'limit_req_zone $binary_remote_addr zone=tp:10m rate=10r/s;' | sudo tee /etc/nginx/conf.d/tp-limits.conf
+
+# 3. The dApp server blocks. The repo copy mirrors the live site file; check that
+#    the ONLY differences are the new dapp blocks and comments before copying.
+nginx -v                       # 1.25.1 or newer: see the HTTP/2 note in the file
+SITE=$(grep -l 'server_name rhbond.xyz' /etc/nginx/sites-enabled/*)
+sudo cp "$SITE" ~/nginx-rhbond.$(date +%F).bak
+sudo diff "$SITE" deploy/nginx-rhbond.conf
+sudo cp deploy/nginx-rhbond.conf "$SITE"
+sudo nginx -t && sudo systemctl reload nginx
+
+# 4. TLS: add dapp.rhbond.xyz to the existing certificate. --no-redirect because
+#    the port-80 redirects are already in the file.
+sudo certbot --nginx --cert-name rhbond.xyz -d rhbond.xyz -d www.rhbond.xyz -d api.rhbond.xyz -d dapp.rhbond.xyz --no-redirect
+sudo nginx -t && sudo systemctl reload nginx
+```
+
+Check it from anywhere:
+
+```bash
+curl -sI https://dapp.rhbond.xyz/ | grep -i -E '^HTTP/2|content-security-policy|strict-transport-security'
+for p in /api/health /api/wallets /API/wallets /api/wallets/export; do
+  echo "$p $(curl -s -o /dev/null -w '%{http_code}' https://dapp.rhbond.xyz$p)"      # every one: 404
+done
+curl -s https://dapp.rhbond.xyz/api/tp/fees                                     # JSON fee params
+echo "console $(curl -s -o /dev/null -w '%{http_code}' https://rhbond.xyz/)"   # 401: the console still asks for its password
+curl -sN --max-time 5 'https://dapp.rhbond.xyz/api/tp/stream?token=<a pons CA>&interval=1' | head -c 200   # a snapshot event at once
+```
+
+**Later updates:** `git pull && npm ci && npm run build && pm2 restart pons-launcher`.
+nginx needs touching again only if `deploy/nginx-rhbond.conf` changed.
+
 ## Verified on-chain
 
 Checked against the live contracts on 2026-07-25, not assumed:
