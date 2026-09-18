@@ -55,7 +55,9 @@ function previewText(pct, pv, venue) {
   // which the session then swaps to ETH (sellMath.hasPairLeg = plan.js pairLegGas's rule).
   const tail = hasPairLeg(venue) ? ', then swapped to ETH' : '';
   const skipped = pv.skipped ? ` · ${pv.skipped} skipped` : '';
-  return `${pct}% ≈ ${fmtUnits(pv.total, quoteDecimals(venue), 4)} ${quoteSymbol(venue)}${tail} · ${pv.count} wallet${pv.count === 1 ? '' : 's'}${skipped}`;
+  // A pool preview is scaled down from a quote of every wallet's full balance: a lower bound.
+  const approx = pv.atLeast ? '≥' : '≈';
+  return `${pct}% ${approx} ${fmtUnits(pv.total, quoteDecimals(venue), 4)} ${quoteSymbol(venue)}${tail} · ${pv.count} wallet${pv.count === 1 ? '' : 's'}${skipped}`;
 }
 
 function SellPanel({ view, venue, fees, presets, onPresets, slippage, onSlippage, onSell, preview, hub, getMark }) {

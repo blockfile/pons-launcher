@@ -29,11 +29,13 @@ function StatusCell({ row }) {
   );
 }
 
-function WalletTable({ view, venue, getMark, walletCount, onTick, onTickAll, onRefresh, onRetryArm, onImport, onClear, refreshing }) {
+function WalletTable({ view, venue, getMark, walletCount, onTick, onTickAll, onRefresh, onRetryArm, onConvert, onImport, onClear, refreshing }) {
   const mark = getMark();
   const price = mark && Number.isFinite(mark.price) ? mark.price : null;
   const sym = quoteSymbol(venue);
   const allTicked = view.rows.length > 0 && view.rows.every((r) => r.ticked);
+  const pairSym = venue.pairSymbol || 'pair';
+  const convertible = view.totals.convertible || 0;
   return (
     <div className="wallets" data-testid="wallet-table">
       <div className="wallets-head">
@@ -44,6 +46,12 @@ function WalletTable({ view, venue, getMark, walletCount, onTick, onTickAll, onR
           {view.totals.failedArm > 0 && (
             <button type="button" className="amber" onClick={onRetryArm}>
               Retry approvals ({view.totals.failedArm})
+            </button>
+          )}
+          {convertible > 0 && (
+            // Swaps on chain with no dialog: the vermilion frame (money law), never a second amber.
+            <button type="button" className="spend" onClick={() => onConvert()} title={`Swap the ${pairSym} these sells paid into ETH now`}>
+              Convert {pairSym} → ETH ({convertible})
             </button>
           )}
           <button type="button" className="quiet" onClick={onRefresh} disabled={refreshing}>
@@ -98,6 +106,11 @@ function WalletTable({ view, venue, getMark, walletCount, onTick, onTickAll, onR
                     </td>
                     <td className="st">
                       <StatusCell row={r} />
+                      {r.canConvert && (
+                        <button type="button" className="spend" onClick={() => onConvert(r.address)} aria-label={`Convert this wallet's ${pairSym} to ETH`}>
+                          {fmtUnits(r.pairPending, venue.pairDecimals ?? 18, 4)} {pairSym} → ETH
+                        </button>
+                      )}
                     </td>
                   </tr>
                 );

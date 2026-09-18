@@ -368,6 +368,9 @@ async function gasParams(deps) {
     maxPriorityFeePerGas: '0',
     baseFeePerGas: baseFee.toString(),
     block: Number(head.number),
+    // The head block's unix time. The page signs deadlines and Permit2 expiries from it
+    // rather than the visitor's PC clock, which can be off by minutes or days.
+    timestamp: head.timestamp != null && Number.isFinite(Number(head.timestamp)) ? Number(head.timestamp) : null,
     gasLimits: { ...GAS_LIMITS },
   };
   if (!deps.provider) feeMemo = { at: now, value };

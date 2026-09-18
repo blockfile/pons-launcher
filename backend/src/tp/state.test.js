@@ -331,14 +331,16 @@ test('readMark: an unreadable venue is TpError unavailable, never a made-up pric
 // the exchanges, and these tests run offline.
 const PRICE = async () => ({ usd: 3150.25, source: 'coinbase', at: 1 });
 
-test('feeParams: 2 x base fee, priority 0, gas caps copied from the repo, ETH/USD alongside', async () => {
-  const fc = fakeChain({ baseFee: 20000000n, block: 99 });
+test('feeParams: 2 x base fee, priority 0, gas caps copied from the repo, the head block time, ETH/USD alongside', async () => {
+  const fc = fakeChain({ baseFee: 20000000n, block: 99, timestamp: 1_760_000_123 });
   const f = await state.feeParams({ provider: fc.provider, ethPrice: PRICE });
   assert.deepEqual(f, {
     maxFeePerGas: '40000000',
     maxPriorityFeePerGas: '0',
     baseFeePerGas: '20000000',
     block: 99,
+    // the page's clock for deadlines and Permit2 expiries (a visitor's PC clock may be off)
+    timestamp: 1_760_000_123,
     gasLimits: {
       approve: '100000',
       permit2Approve: '100000',

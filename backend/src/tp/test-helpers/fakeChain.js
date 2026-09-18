@@ -22,7 +22,7 @@ const AGGREGATE3 = mcIface.getFunction('aggregate3').selector;
 
 const lc = (a) => String(a).toLowerCase();
 
-function fakeChain({ block = 5000, baseFee = 20000000n } = {}) {
+function fakeChain({ block = 5000, baseFee = 20000000n, timestamp = 1_700_000_000 } = {}) {
   const table = new Map();
   const code = new Map();
   const nonces = new Map();
@@ -68,7 +68,7 @@ function fakeChain({ block = 5000, baseFee = 20000000n } = {}) {
     },
     async getBlock(tag) {
       log.push({ name: 'getBlock', tag });
-      return { number: block, baseFeePerGas: baseFee };
+      return { number: block, baseFeePerGas: baseFee, timestamp };
     },
     async getTransactionCount(address, tag) {
       log.push({ name: 'getTransactionCount', address: lc(address), tag });

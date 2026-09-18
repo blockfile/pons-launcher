@@ -3,13 +3,22 @@
  * page uses this one. The only door to a key is walletStore.signTx, which
  * returns a signed raw transaction — nothing here can read a key.
  */
-import { keccak256 } from 'ethers';
+import { id, keccak256 } from 'ethers';
 import * as api from '../api.js';
 import { signTx, addresses } from '../keys/walletStore.js';
 import { planArm, planSell } from '../chain/plan.js';
 import { approveTx, pairToEthTx } from '../chain/build.js';
 import { NonceBook } from '../chain/nonces.js';
 import { SWAP_ROUTER02 } from '../chain/constants.js';
+import { createPairLedger } from './pairLedger.js';
+
+function localStore() {
+  try {
+    return globalThis.localStorage || null;
+  } catch {
+    return null; // a sandboxed or private window can throw on the mere access
+  }
+}
 
 export const realDeps = {
   api,
@@ -28,4 +37,6 @@ export const realDeps = {
   clearTimeout: (id) => clearTimeout(id),
   sleep: (ms) => new Promise((resolve) => setTimeout(resolve, ms)),
   isHidden: () => typeof document !== 'undefined' && document.hidden === true,
+  // Unconverted pair proceeds across reloads: hashed ids and amounts only.
+  pairLedger: createPairLedger({ storage: localStore(), hash: id }),
 };
