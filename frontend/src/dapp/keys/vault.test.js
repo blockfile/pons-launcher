@@ -92,7 +92,8 @@ test('every save uses a fresh salt and IV', async () => {
 test('refuses a short passphrase and an empty store', async () => {
   useStorage(fakeStorage());
   clearWallets();
-  await assert.rejects(saveVault('short'), /at least 8 characters/);
+  await assert.rejects(saveVault('short'), /at least 10 characters/);
+  await assert.rejects(saveVault('nine-char'), /at least 10 characters/, 'the vault enforces the dialog minimum');
   await assert.rejects(saveVault(PASS), /no wallets to remember/);
   assert.equal(hasVault(), false);
 });

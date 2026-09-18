@@ -19,7 +19,7 @@ import { _exportForVault, _importFromVault } from './walletStore.js';
 
 export const VAULT_KEY = 'tp.vault.v1';
 export const PBKDF2_ITERATIONS = 600000;
-export const MIN_PASSPHRASE = 8;
+export const MIN_PASSPHRASE = 10; // the import dialog asks for the same
 
 const enc = new TextEncoder();
 const dec = new TextDecoder();

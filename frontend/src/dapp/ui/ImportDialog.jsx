@@ -2,7 +2,7 @@ import { useEffect, useRef, useState } from 'react';
 import { LuLock, LuLockOpen, LuUpload, LuX } from 'react-icons/lu';
 import { parseImport } from '../keys/parseImport.js';
 import { addWallets } from '../keys/walletStore.js';
-import { saveVault, unlockVault } from '../keys/vault.js';
+import { MIN_PASSPHRASE, hasVault, saveVault, unlockVault } from '../keys/vault.js';
 import { errText } from './format.js';
 
 /**
@@ -11,8 +11,13 @@ import { errText } from './format.js';
  * click handler), the parsed list goes straight into walletStore, and every
  * field is cleared before the handler returns. What React keeps is counts and
  * the rejected ROW NUMBERS with their reasons — parseImport never echoes a key.
+ *
+ * "Remember" saves EVERY wallet in the tab (vault.js), not only these: the label
+ * says so, with the count. It never replaces a saved copy this tab has not
+ * unlocked (another tab's save, or one kept after Clear): that is refused.
  */
-export default function ImportDialog({ vaultLocked, onClose, onImported }) {
+export default function ImportDialog({ vault = 'none', walletCount = 0, onClose, onImported }) {
+  const vaultLocked = vault === 'locked';
   const textRef = useRef(null);
   const fileRef = useRef(null);
   const passRef = useRef(null);
@@ -52,8 +57,13 @@ export default function ImportDialog({ vaultLocked, onClose, onImported }) {
     let pass = '';
     if (remember) {
       pass = passRef.current ? passRef.current.value : '';
-      if (pass.length < 10) {
-        setError('Use a passphrase of at least 10 characters.');
+      if (pass.length < MIN_PASSPHRASE) {
+        setError(`Use a passphrase of at least ${MIN_PASSPHRASE} characters.`);
+        return;
+      }
+      // Checked again at save time: another tab may have saved since this page loaded.
+      if (vault !== 'unlocked' && safeHasVault()) {
+        setError('Wallets are already saved on this device. Unlock them first — saving now would replace them.');
         return;
       }
       if (pass !== (pass2Ref.current ? pass2Ref.current.value : '')) {
@@ -79,12 +89,22 @@ export default function ImportDialog({ vaultLocked, onClose, onImported }) {
       }
       const { added, duplicates } = addWallets(found);
       found.length = 0;
-      if (remember && added + duplicates > 0) await saveVault(pass);
+      // The keys are in the tab now, whatever happens to the save: report both.
+      let saved = 0;
+      let saveError = '';
+      if (remember && added + duplicates > 0) {
+        try {
+          saved = await saveVault(pass);
+        } catch (e) {
+          saveError = errText(e);
+        }
+      }
       pass = '';
       clearFields();
       setRejects(bad);
-      onImported({ added, duplicates, rejected: bad.length, saved: remember });
-      if (!bad.length) onClose();
+      onImported({ added, duplicates, rejected: bad.length, saved, saveError });
+      if (saveError) setError(`Imported for this tab only — not saved on this device: ${saveError}`);
+      else if (!bad.length) onClose();
     } catch (e) {
       clearFields();
       setError(errText(e));
@@ -131,12 +151,12 @@ export default function ImportDialog({ vaultLocked, onClose, onImported }) {
           </label>
           <label className="check">
             <input type="checkbox" checked={remember} disabled={vaultLocked} onChange={(e) => setRemember(e.target.checked)} />
-            Remember on this device (encrypted with a passphrase)
+            Remember on this device — every wallet in this tab ({walletCount} already here, plus these), encrypted with a passphrase
           </label>
           {vaultLocked && <p className="hint">Unlock the wallets saved on this device first — saving now would replace them.</p>}
           {remember && !vaultLocked && (
             <div className="pass-pair">
-              <input ref={passRef} type="password" autoComplete="new-password" placeholder="passphrase (10+ characters)" aria-label="Passphrase" />
+              <input ref={passRef} type="password" autoComplete="new-password" placeholder={`passphrase (${MIN_PASSPHRASE}+ characters)`} aria-label="Passphrase" />
               <input ref={pass2Ref} type="password" autoComplete="new-password" placeholder="repeat the passphrase" aria-label="Repeat the passphrase" />
             </div>
           )}
@@ -166,6 +186,14 @@ export default function ImportDialog({ vaultLocked, onClose, onImported }) {
       </div>
     </div>
   );
+}
+
+function safeHasVault() {
+  try {
+    return hasVault();
+  } catch {
+    return false;
+  }
 }
 
 /** Shown on load when an encrypted vault exists and is still locked. */

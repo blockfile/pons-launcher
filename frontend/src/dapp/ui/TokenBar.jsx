@@ -2,6 +2,7 @@ import { memo, useState } from 'react';
 import { LuCircleX, LuKeyRound, LuLoaderCircle, LuSearch, LuX } from 'react-icons/lu';
 import { useLiveMark } from './useLiveMark.js';
 import { addressUrl, fmtPrice, fmtUsd, quoteSymbol, shortAddr, toNumber, venueLabel } from './format.js';
+import { looksLikeKey } from './keyGuard.js';
 
 const CA = /^0x[0-9a-fA-F]{40}$/;
 
@@ -59,8 +60,21 @@ function TokenFacts({ venue, hub, getMark, quoteUsd, onClose }) {
 
 function TokenBar({ venue, opening, error, onOpen, onClose, hub, getMark, quoteUsd, walletCount, onImport }) {
   const [ca, setCa] = useState('');
+  const [keyPasted, setKeyPasted] = useState(false);
   const trimmed = ca.trim();
   const valid = CA.test(trimmed);
+  // A private key pasted here by mistake is never kept in state or shown.
+  function onCa(e) {
+    const value = e.target.value;
+    if (looksLikeKey(value)) {
+      e.target.value = '';
+      setCa('');
+      setKeyPasted(true);
+      return;
+    }
+    setKeyPasted(false);
+    setCa(value);
+  }
   function submit(e) {
     e.preventDefault();
     if (valid && !opening) onOpen(trimmed);
@@ -77,7 +91,7 @@ function TokenBar({ venue, opening, error, onOpen, onClose, hub, getMark, quoteU
             data-testid="ca-input"
             className="ca-input"
             value={ca}
-            onChange={(e) => setCa(e.target.value)}
+            onChange={onCa}
             placeholder="0x… paste a pons token CA"
             spellCheck={false}
             autoComplete="off"
@@ -89,6 +103,11 @@ function TokenBar({ venue, opening, error, onOpen, onClose, hub, getMark, quoteU
           </button>
         </div>
         {trimmed && !valid && <p className="hint">A contract address is 0x followed by 40 hex characters.</p>}
+        {keyPasted && (
+          <p className="refusal" role="alert">
+            That looked like a private key. It was cleared and never sent — keys go in Import wallets.
+          </p>
+        )}
       </form>
       {error && (
         <p className="refusal" role="alert" data-testid="ca-refusal">
