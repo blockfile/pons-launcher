@@ -44,5 +44,20 @@ export default defineConfig({
       },
     },
   },
-  build: { outDir: 'dist', emptyOutDir: true },
+  // Two pages, one build: the console (index.html) and the take-profit dApp
+  // (dapp/index.html -> dist/dapp/index.html), sharing dist/assets/. The dApp is
+  // served on its own host by the server.js host gate; see
+  // docs/superpowers/specs/2026-09-19-tp-dapp-design.md.
+  // `rolldownOptions` is Vite 8's name; `rollupOptions` is its deprecated alias
+  // (node_modules/vite/dist/node/index.d.ts:2170-2178).
+  build: {
+    outDir: 'dist',
+    emptyOutDir: true,
+    rolldownOptions: {
+      input: {
+        main: fileURLToPath(new URL('./index.html', import.meta.url)),
+        dapp: fileURLToPath(new URL('./dapp/index.html', import.meta.url)),
+      },
+    },
+  },
 });
