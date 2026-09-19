@@ -13,6 +13,7 @@ import {
   chunkByWallet,
   summarizeSkips,
   stageOf,
+  blockedReason,
 } from './sellMath.js';
 
 const A = '0x' + 'a'.repeat(40);
@@ -152,4 +153,20 @@ test('summarizeSkips and stageOf', () => {
   assert.equal(stageOf({ venue: {}, rows: [] }), 'token');
   assert.equal(stageOf({ venue: {}, rows: [{ ticked: true, canSell: false }] }), 'wallets');
   assert.equal(stageOf({ venue: {}, rows: [{ ticked: true, canSell: true }] }), 'armed');
+});
+
+test('blockedReason says why no chip can sell; a ticked set that holds nothing is not an approval problem', () => {
+  const FEES = { maxFeePerGas: '1' };
+  const view = (totals, rows = [{}]) => ({ rows, totals: { tokens: '0', ticked: 0, sellable: 0, arming: 0, ...totals } });
+  assert.equal(blockedReason(view({ tokens: '5', ticked: 1 }), null), 'Gas price unavailable — retrying.');
+  assert.equal(blockedReason(view({}, []), FEES), 'Import the wallets that hold this token.');
+  assert.equal(blockedReason(view({ tokens: '5', ticked: 0 }), FEES), 'Tick at least one wallet.');
+  // Live fork run: after a 100 % click every row stays listed with 0 tokens, and the
+  // panel said "check approvals and ETH for gas" — the wallets simply hold nothing.
+  assert.equal(blockedReason(view({ tokens: '0', ticked: 3 }), FEES), 'The ticked wallets hold none of this token.');
+  assert.equal(blockedReason(view({ tokens: '7', ticked: 2, arming: 1 }), FEES), 'Approvals are landing — selling unlocks per wallet.');
+  assert.equal(
+    blockedReason(view({ tokens: '7', ticked: 2 }), FEES),
+    'No ticked wallet can sell: check approvals and ETH for gas.'
+  );
 });

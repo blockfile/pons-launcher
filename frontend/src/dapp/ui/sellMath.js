@@ -218,3 +218,17 @@ export function stageOf({ venue, rows }) {
   if (!rows || rows.length === 0) return 'token';
   return rows.some((r) => r.ticked && r.canSell) ? 'armed' : 'wallets';
 }
+
+/**
+ * Why no chip can sell, for the sell panel (session.view() shape). Rows stay listed
+ * after a 100 % click, so a ticked set holding 0 tokens is reported as such, not
+ * as an approval or gas problem.
+ */
+export function blockedReason(view, fees) {
+  if (!fees) return 'Gas price unavailable — retrying.';
+  if (view.rows.length === 0) return 'Import the wallets that hold this token.';
+  if (view.totals.ticked === 0) return 'Tick at least one wallet.';
+  if (BigInt(view.totals.tokens || '0') === 0n) return 'The ticked wallets hold none of this token.';
+  if (view.totals.arming > 0) return 'Approvals are landing — selling unlocks per wallet.';
+  return 'No ticked wallet can sell: check approvals and ETH for gas.';
+}

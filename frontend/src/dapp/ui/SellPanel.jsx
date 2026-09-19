@@ -3,7 +3,7 @@ import { LuCheck, LuPencil, LuX } from 'react-icons/lu';
 import { useLiveMark } from './useLiveMark.js';
 import { fmtPct, fmtPrice, fmtUnits, pctOfSupply, quoteDecimals, quoteSymbol, toNumber } from './format.js';
 import { parsePct, parseSlippage } from './prefs.js';
-import { hasPairLeg } from './sellMath.js';
+import { blockedReason, hasPairLeg } from './sellMath.js';
 
 /**
  * THE MONEY LAW (memory frontend-cell-and-caret), as this panel applies it:
@@ -38,14 +38,6 @@ function Position({ view, venue, hub, getMark }) {
       </div>
     </dl>
   );
-}
-
-function blockedReason(view, fees) {
-  if (!fees) return 'Gas price unavailable — retrying.';
-  if (view.rows.length === 0) return 'Import the wallets that hold this token.';
-  if (view.totals.ticked === 0) return 'Tick at least one wallet.';
-  if (view.totals.arming > 0) return 'Approvals are landing — selling unlocks per wallet.';
-  return 'No ticked wallet can sell: check approvals and ETH for gas.';
 }
 
 function previewText(pct, pv, venue) {
