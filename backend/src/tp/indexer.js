@@ -190,6 +190,8 @@ class Indexer extends EventEmitter {
     this._lastTickAt = -Infinity;
     this._timerDueAt = null;
     this._wantBlock = 0; // newest block a WSS push announced for this token
+    this._ingested = 0; // trades charted so far: the stats memo's version
+    this._statsMemo = null; // { key, value } — one ring scan per second per ingest
     this._wantUntil = 0;
     this._unwatch = null;
   }
@@ -210,6 +212,36 @@ class Indexer extends EventEmitter {
 
   status() {
     return { ...this._status };
+  }
+
+  /**
+   * The token header's 5 m / 1 h / 24 h change and volume (CandleRing.stats), ending at
+   * the later of the wall clock and the newest charted second, over the history indexed
+   * so far. `launch` = {ts, price} of a v2 curve launch (tokenInfo.launchRef) or null.
+   * Memoised per second and per ingest: every stream of the token shares one scan.
+   */
+  stats(launch = null) {
+    const nowSec = Math.max(Math.floor(this._ctx.deps.now() / 1000), this._ring.head);
+    const since = this._coveredSince(nowSec);
+    const launchTs = launch && launch.ts != null ? Number(launch.ts) : null;
+    const launchPrice = launch && launch.price != null ? Number(launch.price) : null;
+    const key = [nowSec, this._ingested, since, launchTs, launchPrice].join('|');
+    if (this._statsMemo && this._statsMemo.key === key) return this._statsMemo.value;
+    const value = this._ring.stats(nowSec, { since, launchTs, launchPrice });
+    this._statsMemo = { key, value };
+    return value;
+  }
+
+  /**
+   * The unix second the indexed history reaches back to (null before the first read).
+   * The history loop reads by BLOCK; at the chain's ~10 blocks per second (the same
+   * BLOCKS_PER_SECOND the 1 h / 24 h floors are counted in) blocks read = seconds covered.
+   */
+  _coveredSince(nowSec) {
+    if (this._histLow === null || this._lastHead === null) return null;
+    if (this._history >= 86400) return nowSec - 86400;
+    const blocks = Math.max(0, this._lastHead - this._histLow + 1);
+    return nowSec - Math.min(86400, Math.floor(blocks / BLOCKS_PER_SECOND));
   }
 
   start() {
@@ -481,6 +513,7 @@ class Indexer extends EventEmitter {
       if (this._seen.size > DEDUP_MAX) this._seen.delete(this._seen.values().next().value);
       this._ring.add(t);
     }
+    this._ingested += trades.length;
     this._recent = this._recent.concat(trades).sort(byChainOrder);
     if (this._recent.length > RECENT_MAX) this._recent = this._recent.slice(-RECENT_MAX);
     if (!live) return; // history is silent: it reaches the browser in a snapshot

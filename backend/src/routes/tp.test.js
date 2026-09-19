@@ -50,6 +50,7 @@ function routeLayer(method, p) {
 // The interface contract's route table.
 const CONTRACT_ROUTES = [
   ['get', '/token/:ca', 'readLimit'],
+  ['get', '/logo/:ca', 'readLimit'],
   ['post', '/wallets', 'readLimit'],
   ['get', '/fees', 'readLimit'],
   ['post', '/quote', 'quoteLimit'],
@@ -79,6 +80,15 @@ test('a route whose module has not landed answers 501 {error, code: unavailable}
     assert.equal(r.status, 501, url);
     assert.deepEqual(r.json, { error: 'not available yet', code: 'unavailable' }, url);
   }
+});
+
+test('/api/tp/account is mounted before the catch-all: GET /me without a cookie → 401 no_session', async () => {
+  const r = await call('GET', '/api/tp/account/me');
+  assert.equal(r.status, 401);
+  assert.equal(r.json.code, 'no_session');
+  const unknown = await call('GET', '/api/tp/account/nope');
+  assert.equal(unknown.status, 404);
+  assert.deepEqual(unknown.json, { error: 'not found' });
 });
 
 test('an unknown /api/tp path is answered 404 by the tp router itself — never the console', async () => {

@@ -4,10 +4,13 @@
 // (spec: backend unit stream.js). Public and key-less: it carries chain data, plus the
 // receipts of the visitor's OWN broadcasts.
 //
-//   snapshot {venue, interval, bars, trades, mark, status, sid}   first, and again
+//   snapshot {venue, interval, bars, trades, mark, status, sid, stats}   first, and again
 //            whenever the indexer's history grows (1 h → 24 h), so the chart can setData
 //   trades   Trade[]            bar {interval, bar}   (one per bucket a batch touched)
 //   mark     Mark               phase Venue           status {state, detail, historySeconds}
+//   stats    the token header's live numbers (tokenInfo.streamStats): 5 m / 1 h / 24 h
+//            change and volume, curve progress or pool liquidity. At most one per second,
+//            after trades or a mark, and with every ping so the windows roll forward
 //   receipt  {hash, from, status, block, gasUsed}     (receiptBus: this token AND this sid)
 //   ping     {}  every 15 s — under nginx's read timeout, and it detects a dead socket
 //
@@ -44,6 +47,8 @@ const { INTERVALS } = require('./candles');
 // Built from a char code, never typed as an escape (memory: write-tool-escapes).
 const LF = String.fromCharCode(10);
 const PING_MS = 15_000;
+// At most one 'stats' frame per stream per second (a trailing timer, never on the click path).
+const STATS_MS = 1_000;
 // Bars per snapshot: a day at every interval except 1 s, which sends its last hour
 // (86,400 one-second bars would be ~8 MB of JSON).
 const SNAPSHOT_BARS = Object.freeze({ 1: 3600, 15: 5760, 60: 1440, 300: 288, 3600: 24 });
@@ -137,6 +142,9 @@ function createStreamHandler(overrides = {}) {
     tokenSlots: null,
     setInterval: (fn, ms) => setInterval(fn, ms),
     clearInterval: (h) => clearInterval(h),
+    setTimeout: (fn, ms) => setTimeout(fn, ms),
+    clearTimeout: (h) => clearTimeout(h),
+    statsFor: (indexer) => require('./tokenInfo').streamStats(indexer),
     newSid: () => randomBytes(16).toString('hex'),
     now: () => Date.now(),
     ...overrides,
@@ -218,11 +226,15 @@ function createStreamHandler(overrides = {}) {
     const sid = givenSid || deps.newSid();
     let done = false;
     let pinger = null;
+    let statsTimer = null;
+    let lastStatsAt = -Infinity;
 
     const finish = () => {
       if (done) return;
       done = true;
       if (pinger !== null) deps.clearInterval(pinger);
+      if (statsTimer !== null) deps.clearTimeout(statsTimer);
+      statsTimer = null;
       indexer.removeListener('trades', onTrades);
       indexer.removeListener('mark', onMark);
       indexer.removeListener('phase', onPhase);
@@ -241,6 +253,27 @@ function createStreamHandler(overrides = {}) {
       }
     };
 
+    // A figure must never fail the stream: a throw is no stats.
+    const statsNow = () => {
+      lastStatsAt = deps.now();
+      try {
+        return deps.statsFor(indexer) || null;
+      } catch (_err) {
+        return null;
+      }
+    };
+    const sendStats = () => {
+      statsTimer = null;
+      if (done) return;
+      const s = statsNow();
+      if (s) send('stats', s);
+    };
+    // Trailing and throttled: a burst of trades and marks is ONE frame with the newest numbers.
+    const scheduleStats = () => {
+      if (done || statsTimer !== null) return;
+      statsTimer = deps.setTimeout(sendStats, Math.max(0, lastStatsAt + STATS_MS - deps.now()));
+    };
+
     const snapshot = () =>
       send('snapshot', {
         venue: indexer.venue,
@@ -250,6 +283,7 @@ function createStreamHandler(overrides = {}) {
         mark: indexer.mark || null,
         status: indexer.status(),
         sid,
+        stats: statsNow(),
       });
 
     let historySent = indexer.status().historySeconds || 0;
@@ -261,9 +295,11 @@ function createStreamHandler(overrides = {}) {
         const bar = indexer.barAt(interval, time);
         if (bar) send('bar', { interval, bar });
       }
+      scheduleStats();
     }
     function onMark(mark) {
       send('mark', mark);
+      scheduleStats();
     }
     function onPhase(next) {
       send('phase', next);
@@ -293,7 +329,10 @@ function createStreamHandler(overrides = {}) {
     indexer.on('phase', onPhase);
     indexer.on('status', onStatus);
     bus.on('receipt', onReceipt);
-    pinger = deps.setInterval(() => send('ping', {}), PING_MS);
+    pinger = deps.setInterval(() => {
+      send('ping', {});
+      scheduleStats();
+    }, PING_MS);
     res.on('close', finish);
     res.on('error', finish);
     return undefined;
@@ -311,4 +350,4 @@ function createStreamHandler(overrides = {}) {
 
 const handleStream = createStreamHandler();
 
-module.exports = { handleStream, createStreamHandler, parseSid, frame, SSE_HEADERS, PING_MS, SNAPSHOT_BARS, REPLAY_MS };
+module.exports = { handleStream, createStreamHandler, parseSid, frame, SSE_HEADERS, PING_MS, SNAPSHOT_BARS, REPLAY_MS, STATS_MS };

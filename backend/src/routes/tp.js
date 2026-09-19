@@ -23,6 +23,9 @@ const quote = require('../tp/quote');
 const broadcast = require('../tp/broadcast');
 const { broadcastCost } = require('../tp/limits'); // own line: later tasks' edits anchor on the line above
 const { handleStream, parseSid } = require('../tp/stream');
+const tokenInfo = require('../tp/tokenInfo'); // module object: routes/tp.reads.test.js stubs it
+const logo = require('../tp/logo'); // module object: routes/tp.logo.test.js stubs getLogo
+const { createAccountRouter } = require('../tp/account');
 
 const router = express.Router();
 
@@ -44,20 +47,66 @@ const broadcastLimit = rateLimit({
 const wrap = (fn) => (req, res, next) => Promise.resolve().then(() => fn(req, res, next)).catch(next);
 
 // ── routes ───────────────────────────────────────────────────────────────────
-// {venue, mark}. The mark is best effort: a venue whose price will not read
-// answers mark: null — nothing, rather than a wrong number.
+// {venue, mark, info, figures}. The venue and the mark are v1's: the mark is best effort
+// (a price that will not read is mark: null — nothing, rather than a wrong number), and
+// after the venue it is ALL this route waits for. The route is also the sell click's
+// stale-mark fallback (the page's ui/session.js sell -> api.getToken), so the header's
+// reads never ride on it: the token info (tokenInfo.js, cached forever) and a v1 pool's
+// balances (memoised 15 s) are started, or joined, beside the mark read, and go out only
+// as far as they have answered when the mark does. A token's first load usually has its
+// info (one multicall against the mark's two round trips); when not, info is null and
+// the header's one re-read finds it cached. figures is the header's live half from this
+// mark (curve progress, pool liquidity), which the stream's 'stats' keeps current.
 router.get(
   '/token/:ca',
   readLimit,
   wrap(async (req, res) => {
     const v = await venue.resolveVenue(req.params.ca);
+    // The mark read starts first, so the read provider's queue (providers.js) serves it
+    // ahead of the header's reads when every slot is busy.
+    const marking = (async () => state.readMark(v))();
+    tokenInfo.peekInfo(v); // starts or joins the info read; never waited for
+    tokenInfo.peekPoolBalances(v); // v1 only; the same
     let mark = null;
     try {
-      mark = await state.readMark(v);
+      mark = await marking;
     } catch (err) {
       console.warn(`[tp] mark unavailable for ${v.token}: ${err.message}`);
     }
-    res.json({ venue: v, mark });
+    // Whatever of them has answered by now; neither call reads the chain.
+    const info = tokenInfo.cachedInfo(v.token);
+    const pool = tokenInfo.cachedPoolBalances(v);
+    res.json({ venue: v, mark, info, figures: tokenInfo.figures(v, mark, info, pool) });
+  })
+);
+// GET /logo/:ca -> the token's logo image, or 404 {error} (the page then draws an
+// identicon). The request names a TOKEN, never a URL: the venue gate admits genuine pons
+// tokens only (cachedVenue: no chain read once the token is known), and the source is
+// what tokenInfo reduced the token's own logo text to: a CID, which tp/logo.js fetches
+// from fixed IPFS gateways only, or an https URL (never sent to the page), which it
+// fetches through the SSRF-safe tp/safeFetch.js. Either way it checks size and magic
+// bytes and caches it. Served from this origin, so the page's CSP keeps img-src 'self' data:.
+router.get(
+  '/logo/:ca',
+  readLimit,
+  wrap(async (req, res) => {
+    const v = await venue.cachedVenue(req.params.ca);
+    const info = await tokenInfo.readTokenInfo(v);
+    const source = info && info.logo ? info.logo : null;
+    let got = { ok: false, permanent: true, reason: 'no_logo' };
+    if (source && source.cid) got = await logo.getLogo(source.cid);
+    else if (source && source.url) got = await logo.getHttpsLogo(source.url);
+    res.set(logo.LOGO_HEADERS);
+    if (!got.ok) {
+      res.set('Cache-Control', got.permanent ? logo.CACHE_NONE_FINAL : logo.CACHE_NONE_RETRY);
+      return res.status(404).json({ error: 'this token has no logo that can be shown' });
+    }
+    res.set('Content-Type', got.type);
+    // Immutable only for bytes that hash to their CID. A dag-pb logo is the gateway's
+    // word, and an https host's logo its host's: browsers keep it a day, as the server
+    // does (tp/logo.js UNVERIFIED_TTL_MS).
+    res.set('Cache-Control', got.verified === true ? logo.CACHE_HIT : logo.CACHE_HIT_UNVERIFIED);
+    return res.status(200).send(got.bytes);
   })
 );
 // {token, addresses} -> {venue, wallets}. The addresses (<= 100, each
@@ -177,6 +226,10 @@ router.post(
 // GET /api/tp/stream?token=&interval=&sid= -> Server-Sent Events (tp/stream.js). No
 // readLimit: open streams are capped per visitor by streamSlots inside handleStream.
 router.get('/stream', wrap(handleStream));
+// /api/tp/account/*: SIWE login, the session cookie and (tp/vaultStore.js) the
+// encrypted wallet list. Its own limits, CSRF guard, 404 and error handler
+// (tp/account.js); it holds ciphertext only and never a key.
+router.use('/account', createAccountRouter());
 
 // ── the end of the line for every /api/tp request ────────────────────────────
 router.use((req, res) => res.status(404).json({ error: 'not found' }));

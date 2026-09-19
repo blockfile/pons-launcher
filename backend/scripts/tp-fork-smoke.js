@@ -31,7 +31,13 @@
 //      from stops serving the fork block's state within minutes, so it runs FIRST and a
 //      failed SETUP skips it with a note;
 //   6. /broadcast refuses what is not a sell (a plain transfer, a foreign chain id, a
-//      stranger spender, more than 100 transactions) and none of it reaches the chain.
+//      stranger spender, more than 100 transactions) and none of it reaches the chain;
+//   7. the dApp account (spec Addendum v2 A) on the real server: sign-in with a
+//      throwaway wallet, the encrypted-list round trip, a racing save answered 409,
+//      the host gate, and the DELETE that signs every session out. Its state lives in
+//      the scratch dir (TP_ACCOUNTS_DIR), never in backend/data, and the sign-in
+//      message names this page's own origin (TP_SIWE_ORIGIN), so a --hold browser run
+//      can sign in on it as well.
 // Venues: a live pons v2 ETH-quoted curve token, and a graduated (Uniswap v4) one
 // when the scan finds one — SKIPPED otherwise; --require-graduated fails instead.
 //
@@ -331,6 +337,12 @@ function startServer() {
     TP_CHART_RPC_URL: FORK_RPC,
     TP_CHART_WSS_URL: '',
     TP_MAX_TOKENS: '8',
+    // The dApp account: its encrypted lists, session secret and revocations go in the
+    // scratch dir (removed with it), never in backend/data; and the sign-in message
+    // names this page's own origin. Chromium takes the __Host- Secure cookie over plain
+    // http on 127.0.0.1, so a --hold browser run signs in here too.
+    TP_ACCOUNTS_DIR: path.join(SCRATCH, 'tp-accounts'),
+    TP_SIWE_ORIGIN: APP,
     RELAY_API_KEY: '',
     ADMIN_USERS: '',
   };
@@ -1149,6 +1161,91 @@ async function gate() {
   check(dappOnConsole.status === 404, 'gate: the dApp page is 404 on the console host');
 }
 
+// The dApp account (spec Addendum v2 A) over the REAL server. A throwaway owner
+// wallet made here signs in on the server-built message, saves a list (random bytes
+// stand in for the ciphertext: the server never looks inside one), reads it back,
+// loses a racing save with 409, and deletes it, which signs every session out. The
+// account API is 404 on the console host. Prints booleans only: never the wallet,
+// the signature or the cookie.
+function accountRequest(method, route, { body, cookie, host = `127.0.0.1:${APP_PORT}` } = {}) {
+  const text = body === undefined ? undefined : JSON.stringify(body);
+  const headers = { host, 'x-real-ip': SCRIPT_IP, 'sec-fetch-site': 'same-origin' };
+  if (method !== 'GET') {
+    headers.origin = APP;
+    headers['content-type'] = 'application/json';
+  }
+  if (cookie) headers.cookie = cookie;
+  if (text !== undefined) headers['content-length'] = Buffer.byteLength(text);
+  return new Promise((resolve, reject) => {
+    const req = http.request({ host: '127.0.0.1', port: APP_PORT, path: route, method, headers }, (res) => {
+      let out = '';
+      res.setEncoding('utf8');
+      res.on('data', (chunk) => {
+        out += chunk;
+      });
+      res.on('end', () => {
+        let json = null;
+        try {
+          json = out ? JSON.parse(out) : null;
+        } catch (_err) {
+          json = null;
+        }
+        resolve({ status: res.statusCode, headers: res.headers, json });
+      });
+    });
+    req.on('error', reject);
+    if (text !== undefined) req.write(text);
+    req.end();
+  });
+}
+
+async function account() {
+  const owner = Wallet.createRandom();
+  const challenge = await accountRequest('POST', '/api/tp/account/nonce', { body: { address: owner.address } });
+  check(challenge.status === 200, 'account: POST /api/tp/account/nonce answers on the dApp host');
+  const lines = String(challenge.json.message).split(String.fromCharCode(10));
+  check(
+    lines[0] === `127.0.0.1:${APP_PORT} wants you to sign in with your Ethereum account:` &&
+      lines.includes(`URI: ${APP}`) &&
+      lines.includes('Chain ID: 4663'),
+    'account: the sign-in message names this page (TP_SIWE_ORIGIN) and chain 4663'
+  );
+  const login = await accountRequest('POST', '/api/tp/account/login', {
+    body: { nonce: challenge.json.nonce, signature: await owner.signMessage(challenge.json.message) },
+  });
+  const setCookie = (login.headers['set-cookie'] || []).find((c) => c.startsWith('__Host-tp_session='));
+  check(login.status === 200 && Boolean(setCookie), 'account: login with the throwaway wallet sets the session cookie');
+  check(
+    ['HttpOnly', 'Secure', 'SameSite=Strict', 'Path=/'].every((a) => setCookie.includes(a)),
+    'account: the cookie is __Host-, HttpOnly, Secure, SameSite=Strict, Path=/'
+  );
+  const cookie = setCookie.split(';')[0];
+  const session = await accountRequest('GET', '/api/tp/account/me', { cookie });
+  check(
+    session.status === 200 && session.json.address === owner.address && session.json.vault === null,
+    'account: GET /me knows the signed-in wallet, which has no saved list yet'
+  );
+
+  const b64 = (n) => crypto.randomBytes(n).toString('base64');
+  const keyId = `0x${crypto.randomBytes(16).toString('hex')}`;
+  const envelope = (baseRev) => ({ baseRev, kv: 1, keyId, iv: b64(12), ct: b64(512) });
+  const first = envelope(0);
+  const created = await accountRequest('PUT', '/api/tp/account/vault', { body: first, cookie });
+  check(created.status === 200 && created.json.rev === 1, 'account: the first save creates the list (rev 1)');
+  const read = await accountRequest('GET', '/api/tp/account/vault', { cookie });
+  check(read.status === 200 && read.json.vault.ct === first.ct && read.json.vault.keyId === keyId, 'account: the list reads back byte for byte');
+  const file = path.join(SCRATCH, 'tp-accounts', 'vaults', `${lc(owner.address)}.json`);
+  check(fs.existsSync(file), 'account: the list is stored under TP_ACCOUNTS_DIR, in the scratch dir');
+  const racing = await Promise.all([1, 1].map((rev) => accountRequest('PUT', '/api/tp/account/vault', { body: envelope(rev), cookie })));
+  check(racing.map((r) => r.status).sort().join(',') === '200,409', 'account: two saves racing on one rev: one lands, the other is 409 conflict');
+  const consoleSide = await accountRequest('GET', '/api/tp/account/me', { cookie, host: `localhost:${APP_PORT}` });
+  check(consoleSide.status === 404, 'account: the account API is 404 on the console host');
+  const del = await accountRequest('DELETE', '/api/tp/account/vault', { body: { baseRev: 2 }, cookie });
+  check(del.status === 200 && del.json.deleted === true && !fs.existsSync(file), 'account: DELETE removes the list');
+  const after = await accountRequest('GET', '/api/tp/account/me', { cookie });
+  check(after.status === 401 && after.json.code === 'no_session', 'account: after the DELETE that session is signed out');
+}
+
 // Spec, Testing: the dApp's first load, without the lazy three.js chunk, stays
 // under 250 KB gzipped. The gate is Part 07's frontend/scripts/dapp-size.mjs
 // (first-load JS, gzip level 6 = nginx's gzip_comp_level). This adds the JS + CSS
@@ -1400,6 +1497,7 @@ async function main() {
   }
 
   await gate();
+  await account();
   await runVenue(ctx, curve.token, 'curve', { curve: curve.curve, lastTradeBlock: curveBuyBlock });
   await refusals(ctx, curve.token, curve.curve);
   if (graduated) await runVenue(ctx, graduated, 'graduated', { lastTradeBlock: graduatedBuyBlock });
@@ -1407,7 +1505,7 @@ async function main() {
   if (HOLD) await hold(ctx, curve, graduated);
 
   console.log(
-    `PASS ${passed} checks — curve: 25/50/100% from 3 wallets; graduated: ${graduated ? 'PASS' : 'SKIPPED (none found)'}` +
+    `PASS ${passed} checks — account: sign-in and the saved-list round trip; curve: 25/50/100% from 3 wallets; graduated: ${graduated ? 'PASS' : 'SKIPPED (none found)'}` +
       `; token-quoted: ${pairCurve ? `PASS (${pairCurve.pairSymbol})` : PAIR ? 'SKIPPED (setup)' : 'not run (--pair)'}` +
       (HOLD ? '; ui: 25/50/100% on both venues, checked on-chain' : '')
   );

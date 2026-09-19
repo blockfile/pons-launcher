@@ -104,6 +104,7 @@ test('ABI has every contract key, each a frozen list that ethers parses', () => 
     'UNIVERSAL_ROUTER',
     'PERMIT2',
     'EVENTS',
+    'PONS_TOKEN',
   ];
   assert.deepEqual(Object.keys(C.ABI).sort(), [...keys].sort());
   assert.ok(Object.isFrozen(C.ABI));
@@ -155,4 +156,16 @@ test('EVENTS decodes all four trade topics', () => {
     assert.equal(iface.getEvent(topic).topicHash, topic);
   }
   assert.equal(new Interface(C.ABI.V3_POOL).getEvent('Swap').topicHash, C.TOPICS.V3_SWAP);
+});
+
+test('golden selectors — the token header reads (tokenInfo.js)', () => {
+  const sel = (abiKey, sig) => new Interface(C.ABI[abiKey]).getFunction(sig).selector;
+  assert.equal(sel('PONS_TOKEN', 'getTokenInfo()'), '0xabb1dc44');
+  assert.equal(sel('CURVE', 'launchedAt()'), '0xbf56b371');
+  assert.equal(sel('CURVE', 'phantomQuote()'), '0xc57eadfc');
+  assert.equal(sel('CURVE', 'launchSupply()'), '0x3f7ed6b7');
+  // the socials come back as ONE tuple of five strings, in this order
+  const out = new Interface(C.ABI.PONS_TOKEN).getFunction('getTokenInfo').outputs;
+  assert.deepEqual(out.map((p) => p.name), ['deployer', 'logo', 'description', 'socials']);
+  assert.deepEqual(out[3].components.map((p) => p.name), ['twitter', 'telegram', 'discord', 'website', 'farcaster']);
 });

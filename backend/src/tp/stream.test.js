@@ -4,7 +4,7 @@ const test = require('node:test');
 const assert = require('node:assert/strict');
 const { EventEmitter } = require('events');
 
-const { createStreamHandler, parseSid, frame, PING_MS, REPLAY_MS } = require('./stream');
+const { createStreamHandler, parseSid, frame, PING_MS, REPLAY_MS, STATS_MS } = require('./stream');
 const { TpError } = require('./errors');
 const { createTokenSlots } = require('./limits');
 
@@ -124,6 +124,7 @@ function setup(over = {}) {
   const slots = fakeSlots();
   const released = [];
   const intervals = [];
+  const timeouts = [];
   const clock = { t: 1_000_000 };
   let sids = 0;
   const handler = createStreamHandler({
@@ -142,9 +143,16 @@ function setup(over = {}) {
     clearInterval: (h) => {
       intervals[h].cleared = true;
     },
+    setTimeout: (fn, ms) => {
+      timeouts.push({ fn, ms, cleared: false });
+      return timeouts.length - 1;
+    },
+    clearTimeout: (h) => {
+      timeouts[h].cleared = true;
+    },
     ...over,
   });
-  return { ix, bus, slots, released, intervals, handler, clock };
+  return { ix, bus, slots, released, intervals, timeouts, handler, clock };
 }
 
 // ── framing ─────────────────────────────────────────────────────────────────────
@@ -175,7 +183,7 @@ test('SSE headers, then a snapshot first', async () => {
   const [first, ...rest] = frames(res);
   assert.equal(rest.length, 0);
   assert.equal(first.event, 'snapshot');
-  assert.deepEqual(Object.keys(first.data).sort(), ['bars', 'interval', 'mark', 'sid', 'status', 'trades', 'venue']);
+  assert.deepEqual(Object.keys(first.data).sort(), ['bars', 'interval', 'mark', 'sid', 'stats', 'status', 'trades', 'venue']);
   assert.equal(first.data.sid, sidOf(1), 'a fresh sid for a stream opened without one');
   assert.equal(first.data.interval, 15);
   assert.deepEqual(s.ix.barsCalls, [[15, 5760]], 'a day of 15 s bars');
@@ -533,4 +541,103 @@ test('a refused venue frees the token slot too', async () => {
     await s.handler(fakeReq({ token: '0x' + String(n).repeat(40) }), res);
     assert.equal(res.statusCode, 400, 'never 429: each refusal released its token');
   }
+});
+
+// ── stats: the token header's live numbers ────────────────────────────────────
+
+const STATS = { at: 1, since: 0, price: 2e-9, change: { m5: 0, h1: 0, h24: 0 }, volume: { m5: 0, h1: 0, h24: 0 }, complete: { m5: true, h1: true, h24: true }, figures: { progress: 0.5, raised: '1', liquidity: null } };
+
+/** A setup whose statsFor answers STATS (with a call count) unless told otherwise. */
+function statsSetup(statsFor) {
+  const calls = [];
+  const s = setup({
+    statsFor:
+      statsFor ||
+      ((ix) => {
+        calls.push(ix);
+        return { ...STATS, n: calls.length };
+      }),
+  });
+  return { ...s, calls };
+}
+
+const statsFrames = (res) => frames(res).filter((f) => f.event === 'stats');
+const pending = (s) => s.timeouts.filter((t) => !t.cleared && !t.fired);
+function fire(s) {
+  const [t] = pending(s);
+  t.fired = true;
+  t.fn();
+}
+
+test('the snapshot carries stats from the indexer', async () => {
+  const s = statsSetup();
+  const res = fakeRes();
+  await s.handler(fakeReq({ token: TOKEN }), res);
+  const [snap] = frames(res);
+  assert.deepEqual(snap.data.stats, { ...STATS, n: 1 });
+  assert.equal(s.calls[0], s.ix, "asked about this stream's indexer");
+});
+
+test('trades and marks schedule ONE stats frame, at most one per second, trailing', async () => {
+  const s = statsSetup();
+  const res = fakeRes();
+  await s.handler(fakeReq({ token: TOKEN }), res);
+  res.chunks.length = 0;
+  s.ix.emit('trades', [{ block: 1, logIndex: 0, ts: T0, side: 'buy', price: 1 }]);
+  s.ix.emit('mark', { block: 2, price: 1 });
+  s.ix.emit('mark', { block: 3, price: 1 });
+  assert.equal(pending(s).length, 1, 'one timer for the whole burst');
+  assert.equal(pending(s)[0].ms, STATS_MS, 'a second after the snapshot sent its stats');
+  assert.equal(STATS_MS, 1000);
+  assert.deepEqual(statsFrames(res), [], 'nothing is sent synchronously');
+  s.clock.t += STATS_MS;
+  fire(s);
+  assert.deepEqual(statsFrames(res).map((f) => f.data.n), [2]);
+  s.clock.t += 300;
+  s.ix.emit('mark', { block: 4, price: 1 });
+  assert.equal(pending(s)[0].ms, 700, 'the next one waits out the rest of the second');
+  fire(s);
+  assert.deepEqual(statsFrames(res).map((f) => f.data.n), [2, 3]);
+});
+
+test('a ping schedules stats too, so the windows roll forward without trades', async () => {
+  const s = statsSetup();
+  const res = fakeRes();
+  await s.handler(fakeReq({ token: TOKEN }), res);
+  res.chunks.length = 0;
+  s.intervals[0].fn();
+  assert.deepEqual(frames(res).map((f) => f.event), ['ping']);
+  assert.equal(pending(s).length, 1);
+  fire(s);
+  assert.deepEqual(frames(res).map((f) => f.event), ['ping', 'stats']);
+});
+
+test('stats that cannot be computed send nothing and never break the stream', async () => {
+  for (const statsFor of [() => null, () => { throw new Error('boom'); }]) {
+    const s = statsSetup(statsFor);
+    const res = fakeRes();
+    await s.handler(fakeReq({ token: TOKEN }), res);
+    assert.equal(frames(res)[0].data.stats, null);
+    res.chunks.length = 0;
+    s.ix.emit('mark', { block: 2, price: 1 });
+    fire(s);
+    assert.deepEqual(frames(res).map((f) => f.event), ['mark']);
+  }
+});
+
+test('closing the stream cancels a pending stats frame', async () => {
+  const s = statsSetup();
+  const res = fakeRes();
+  await s.handler(fakeReq({ token: TOKEN }), res);
+  s.ix.emit('mark', { block: 2, price: 1 });
+  assert.equal(pending(s).length, 1);
+  res.emit('close');
+  assert.equal(pending(s).length, 0, 'the timer was cleared');
+});
+
+test('by default an indexer without stats() streams stats: null (tokenInfo.streamStats)', async () => {
+  const s = setup();
+  const res = fakeRes();
+  await s.handler(fakeReq({ token: TOKEN }), res);
+  assert.equal(frames(res)[0].data.stats, null);
 });

@@ -13,8 +13,21 @@ const { getAddress, hexlify, randomBytes } = require('ethers');
 
 const venue = require('../tp/venue');
 const state = require('../tp/state');
+const tokenInfo = require('../tp/tokenInfo');
+const providers = require('../tp/providers');
+const C = require('../tp/constants');
+const { fakeChain } = require('../tp/test-helpers/fakeChain');
 const { TpError } = require('../tp/errors');
 const router = require('./tp');
+
+// GET /token/:ca also starts the token-info read (and a v1 pool's balance read) in the
+// background, through the dApp's read provider. Offline by default in this file: that
+// provider refuses every call, so such a read fails at once and caches nothing. A test
+// that wants a chain stubs tpReadProvider itself (stub() restores this default after it).
+const refuse = async () => {
+  throw new Error('offline test: no chain');
+};
+providers.tpReadProvider = () => ({ call: refuse, getBlockNumber: refuse });
 
 const TOKEN = '0xd8865aa9052a5e2f59641bb613ca84ec9377b101';
 const CURVE = '0x03ef670d7ec0e1c93e1a6cfa3bc24883c3492d81';
@@ -147,6 +160,157 @@ test('an unexpected failure is 502 unavailable (errors.js sendError) and leaks n
     assert.equal(body.code, 'unavailable');
     assert.equal(JSON.stringify(body).includes('secret-internal-host'), false);
   });
+});
+
+// What tokenInfo.readTokenInfo reads for VENUE (a v2 curve), and a v1 venue of the same token.
+const PHANTOM = 168n * 10n ** 16n;
+const THRESHOLD = 42n * 10n ** 17n;
+const DEPLOYER = '0xf50a3fb0ab1ec4c6d5bff7d59be3e9c1e1b6d3a1';
+const POOL = '0x2d0e0c8b1fdf4cb2b1f4a5ad0e1c4f5a6b7c8d9e';
+const ZERO = '0x0000000000000000000000000000000000000000';
+const V1_VENUE = { ...VENUE, kind: 'v1', curve: null, pool: POOL };
+const BALANCE_OF = 'function balanceOf(address) view returns (uint256)';
+
+const later = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+
+/** getJson, or 'waited' when no answer comes within `ms`. */
+async function getJsonWithin(url, ms) {
+  let timer;
+  const late = new Promise((resolve) => {
+    timer = setTimeout(() => resolve('waited'), ms);
+  });
+  try {
+    return await Promise.race([getJson(url), late]);
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+/** A chain that answers VENUE's token-info multicall. */
+function infoChain() {
+  const chain = fakeChain();
+  const curveSig = (name) => C.ABI.CURVE.find((s) => s.startsWith(`function ${name}(`));
+  chain.on(TOKEN, C.ABI.PONS_TOKEN[0], () => [DEPLOYER, '', 'A token.', ['', '', '', '', '']]);
+  chain.on(C.PONS_V2_FACTORY, C.ABI.V2_FACTORY[0], () => [
+    [TOKEN, CURVE, DEPLOYER, DEPLOYER, ZERO, THRESHOLD, 10000, 200, 100, false, 0, 0n, 0n, 0n, true],
+  ]);
+  chain.on(CURVE, curveSig('launchedAt'), () => [1789821655n]);
+  chain.on(CURVE, curveSig('phantomQuote'), () => [PHANTOM]);
+  chain.on(CURVE, curveSig('launchSupply'), () => [10n ** 27n]);
+  return chain;
+}
+
+test('GET /token/:ca also answers {info, figures}: the info as far as it has read when the mark answers', async (t) => {
+  tokenInfo._clearCache();
+  t.after(() => tokenInfo._clearCache());
+  const chain = infoChain();
+  stub(t, providers, 'tpReadProvider', () => chain.provider);
+  stub(t, venue, 'resolveVenue', async () => VENUE);
+  let marks = 0;
+  stub(t, state, 'readMark', async (v) => {
+    assert.equal(v, VENUE);
+    marks += 1;
+    await later(20); // the mark's own round trips: the info's one multicall answers first
+    return { block: 7, price: 2e-9, quoteReserve: (PHANTOM + 21n * 10n ** 17n).toString(), tokenReserve: '1', feeBps: 100 };
+  });
+  await withServer(async (base) => {
+    let { status, body } = await getJson(`${base}/token/${TOKEN}`);
+    assert.equal(status, 200);
+    assert.deepEqual(body.venue, VENUE, 'the venue is unchanged');
+    assert.equal(body.mark.block, 7, 'the mark is unchanged');
+    assert.deepEqual(body.info, JSON.parse(JSON.stringify(tokenInfo.cachedInfo(TOKEN))));
+    assert.equal(body.info.description, 'A token.');
+    assert.equal(body.info.launchedAt, 1789821655);
+    assert.deepEqual(body.figures, { progress: 0.5, raised: (21n * 10n ** 17n).toString(), liquidity: null });
+    ({ status, body } = await getJson(`${base}/token/${TOKEN}`));
+    assert.equal(status, 200);
+    assert.equal(body.info.description, 'A token.');
+    assert.equal(chain.count('aggregate3'), 1, 'cached forever: a second load reads only the mark');
+    assert.equal(marks, 2);
+  });
+});
+
+test("GET /token/:ca waits for nothing but the venue and the mark: it is the sell click's stale-mark fallback", async (t) => {
+  tokenInfo._clearCache();
+  let calls = 0;
+  const order = [];
+  let release;
+  const hung = new Promise((resolve, reject) => {
+    release = () => reject(new Error('released'));
+  });
+  hung.catch(() => {});
+  // Every chain read hangs until the test ends: an info read and a pool read that never answer.
+  stub(t, providers, 'tpReadProvider', () => ({
+    call: () => {
+      calls += 1;
+      order.push('header read');
+      return hung;
+    },
+  }));
+  t.after(async () => {
+    release();
+    await new Promise((resolve) => setImmediate(resolve));
+    tokenInfo._clearCache();
+  });
+  stub(t, venue, 'resolveVenue', async () => V1_VENUE);
+  stub(t, state, 'readMark', async () => {
+    order.push('mark');
+    return { block: 7, price: 1e-9, sqrtPriceX96: '1', liquidity: '1', tick: 0 };
+  });
+  await withServer(async (base) => {
+    for (const round of [1, 2]) {
+      const r = await getJsonWithin(`${base}/token/${TOKEN}`, 2000);
+      assert.notEqual(r, 'waited', `load ${round}: GET /token waited on a read that has not answered`);
+      assert.equal(r.status, 200);
+      assert.equal(r.body.mark.block, 7, 'the mark answered without them');
+      assert.equal(r.body.info, null);
+      assert.deepEqual(r.body.figures, { progress: null, raised: null, liquidity: null });
+    }
+    assert.equal(calls, 2, 'the info read and the pool read each started once, then joined');
+    assert.deepEqual(order.slice(0, 2), ['mark', 'header read'], "the mark read starts first, ahead of the header's reads");
+  });
+});
+
+test("GET /token/:ca: a v1 token's liquidity is its pool's balances, once read", async (t) => {
+  tokenInfo._clearCache();
+  t.after(() => tokenInfo._clearCache());
+  const chain = fakeChain();
+  chain.on(C.WETH, BALANCE_OF, () => [5096n * 10n ** 14n]);
+  chain.on(TOKEN, BALANCE_OF, () => [7363n * 10n ** 23n]);
+  stub(t, providers, 'tpReadProvider', () => chain.provider);
+  stub(t, venue, 'resolveVenue', async () => V1_VENUE);
+  stub(t, state, 'readMark', async () => {
+    await later(20);
+    return { block: 7, price: 1e-9, sqrtPriceX96: '1', liquidity: '1', tick: 0 };
+  });
+  await withServer(async (base) => {
+    const { status, body } = await getJson(`${base}/token/${TOKEN}`);
+    assert.equal(status, 200);
+    assert.deepEqual(body.figures, {
+      progress: null,
+      raised: null,
+      liquidity: { quote: (5096n * 10n ** 14n).toString(), token: (7363n * 10n ** 23n).toString() },
+    });
+  });
+});
+
+test('GET /token/:ca: an info that will not read is info: null; the venue and the mark still answer', async (t) => {
+  tokenInfo._clearCache();
+  // This file's offline provider: the info read fails.
+  stub(t, venue, 'resolveVenue', async () => VENUE);
+  stub(t, state, 'readMark', async () => {
+    await later(20); // the failed read has long answered
+    return { block: 7, price: 1e-9, quoteReserve: '1', tokenReserve: '2', feeBps: 100 };
+  });
+  await withServer(async (base) => {
+    const { status, body } = await getJson(`${base}/token/${TOKEN}`);
+    assert.equal(status, 200);
+    assert.equal(body.info, null);
+    assert.deepEqual(body.figures, { progress: null, raised: null, liquidity: null });
+    assert.equal(body.mark.block, 7);
+    assert.deepEqual(body.venue, VENUE);
+  });
+  assert.equal(tokenInfo.cachedInfo(TOKEN), null, 'a failed read is not cached: the next load reads again');
 });
 
 // ── POST /wallets ───────────────────────────────────────────────────────────

@@ -115,6 +115,18 @@ const ABI = Object.freeze({
     'function creatorTaxBps() view returns (uint256)', // evm/v2/abi.js:148
     // The launch's frozen fee policy == its V4 hook — evm/v3/poolswap.js:143.
     'function feePolicy() view returns (address)',
+    // Launch constants for the token header (tokenInfo.js). NOT in the repo before it:
+    // selectors read off live curve bytecode and matched in the openchain signature DB
+    // (2026-09-19); readable on all 278 sampled v2 curves, graduated ones included.
+    'function launchedAt() view returns (uint256)', // 0xbf56b371: unix s == the launch block's timestamp
+    'function phantomQuote() view returns (uint256)', // 0xc57eadfc: the virtual quote reserve
+    'function launchSupply() view returns (uint256)', // 0x3f7ed6b7: tokens on the curve at launch
+  ]),
+  // The pons TOKEN's own metadata getter: one selector on v1 and v2, curve and graduated
+  // (0xabb1dc44; the decode round-trips on 428 sampled tokens, 2026-09-19). NOT in the
+  // repo before tokenInfo.js. The token has no setter, so the answer never changes.
+  PONS_TOKEN: freeze([
+    'function getTokenInfo() view returns (address deployer, string logo, string description, tuple(string twitter, string telegram, string discord, string website, string farcaster) socials)',
   ]),
   ERC20: freeze([
     'function name() view returns (string)',

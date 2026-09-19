@@ -172,7 +172,7 @@ test('the security headers are set once, at server level, with always', () => {
 
 test('every proxying location forwards the same, non-spoofable client headers', () => {
   const proxied = dapp.block.filter((d) => d.name === 'location' && direct(d.block, 'proxy_pass').length);
-  assert.equal(proxied.length, 3, 'stream, /api/tp/ and / are the only proxied locations');
+  assert.equal(proxied.length, 4, 'stream, account, /api/tp/ and / are the only proxied locations');
   for (const loc of proxied) {
     const where = loc.args.join(' ');
     assert.deepEqual(direct(loc.block, 'proxy_pass'), [['http://127.0.0.1:3100']], where);
@@ -223,6 +223,16 @@ test('/api/tp/ is rate limited; every other /api path is a 404, in any letter ca
   assert.ok(location(dapp, '/'), 'location / serves the dApp page and /dapp/assets');
 });
 
+test('the account API has its own location: a tighter burst, a body cap that fits one vault PUT', () => {
+  const acct = location(dapp, '^~', '/api/tp/account/');
+  assert.ok(acct, 'location ^~ /api/tp/account/');
+  assert.deepEqual(direct(acct.block, 'limit_req'), [['zone=tp', 'burst=10', 'nodelay']]);
+  assert.deepEqual(direct(acct.block, 'client_max_body_size'), [['400k']]);
+  assert.deepEqual(direct(acct.block, 'proxy_pass'), [['http://127.0.0.1:3100']]);
+  // TP_VAULT_MAX_BYTES (256 KiB) of ciphertext as base64, plus the envelope's other fields.
+  assert.ok(4 * Math.ceil(262144 / 3) + 1024 <= 400 * 1024);
+});
+
 test('the rate-limit zone lives at http level (conf.d), documented here but not defined here', () => {
   assert.equal(everything(tree).filter((d) => d.name === 'limit_req_zone').length, 0);
   const documented = raw
@@ -255,6 +265,101 @@ test('backend/.env.example documents the three dApp settings', () => {
   assert.ok(lines.includes('DAPP_HOST=dapp.rhbond.xyz'));
   assert.ok(lines.includes('TP_MAX_TOKENS=30'));
   assert.ok(lines.includes('TP_SEQUENCER_URL='));
+});
+
+test('backend/.env.example documents the account settings, at the defaults the code uses', () => {
+  const lines = fs.readFileSync(ENV_EXAMPLE, 'utf8').split(LF).map((l) => l.trimEnd());
+  for (const l of [
+    '# TP_ACCOUNTS_DIR=',
+    '# TP_SIWE_ORIGIN=https://dapp.rhbond.xyz',
+    '# TP_VAULT_MAX_BYTES=262144',
+    '# TP_VAULT_MAX_ACCOUNTS=5000',
+    '# TP_VAULT_MAX_TOTAL_BYTES=536870912',
+    '# TP_VAULT_KEEP_DELETED_DAYS=30',
+    '# TP_ACCOUNT_NONCES_PER_MIN=10',
+    '# TP_ACCOUNT_LOGINS_PER_MIN=10',
+    '# TP_ACCOUNT_READS_PER_MIN=60',
+    '# TP_ACCOUNT_WRITES_PER_MIN_IP=60',
+    '# TP_ACCOUNT_WRITES_PER_MIN=30',
+    '# TP_ACCOUNT_CREATES_PER_HOUR=5',
+  ]) {
+    assert.ok(lines.includes(l), `.env.example lacks: ${l}`);
+  }
+  if (!Object.keys(process.env).some((k) => k.startsWith('TP_ACCOUNT_'))) {
+    assert.deepEqual(
+      { ...require('./account').ACCOUNT_LIMITS },
+      { noncesPerMin: 10, loginsPerMin: 10, readsPerMin: 60, writesPerMinPerIp: 60, writesPerMinPerAccount: 30, createsPerHour: 5 }
+    );
+  }
+});
+
+test('README covers the dApp account: the nginx re-copy, the backups, the settings', () => {
+  const text = fs.readFileSync(README, 'utf8');
+  for (const s of [
+    'location ^~ /api/tp/account/',
+    'sudo cp deploy/nginx-rhbond.conf "$SITE"',
+    'backend/data/tp-accounts/',
+    'tar czf ~/tp-accounts.$(date +%F).tgz -C backend/data tp-accounts',
+    'curl -s https://dapp.rhbond.xyz/api/tp/account/me',
+    '`TP_ACCOUNTS_DIR`',
+    '`TP_SIWE_ORIGIN`',
+  ]) {
+    assert.ok(text.includes(s), `README is missing: ${s}`);
+  }
+});
+
+test('README carries the v2 update: code, nginx re-copy and checks in order, backups, settings, where logos come from', () => {
+  const text = fs.readFileSync(README, 'utf8');
+  const at = text.indexOf('**The v2 update**');
+  assert.ok(at > 0, 'README has "The v2 update"');
+  const v2 = text.slice(at, text.indexOf('**Restoring a visitor', at));
+  const order = [
+    'git pull',
+    'npm ci',
+    'npm run build',
+    'pm2 restart pons-launcher',
+    'sudo diff "$SITE" deploy/nginx-rhbond.conf',
+    'sudo cp deploy/nginx-rhbond.conf "$SITE"',
+    'sudo nginx -t && sudo systemctl reload nginx',
+    'curl -s https://dapp.rhbond.xyz/api/tp/account/me',
+    '# 403: no Origin, the CSRF guard',
+  ];
+  let from = 0;
+  for (const step of order) {
+    const i = v2.indexOf(step, from);
+    assert.ok(i >= 0, `The v2 update is missing, or has out of order: ${step}`);
+    from = i + step.length;
+  }
+  assert.ok(v2.includes('backend/data/tp-accounts/'), 'the v2 update names the backup');
+  for (const s of [
+    '**Token logos are fetched by the server.**',
+    '`TP_LOGO_GATEWAYS`',
+    '`backend/src/tp/safeFetch.js`',
+    '`TP_LOGO_MAX_BYTES`, 3 MiB',
+    'https://dapp.rhbond.xyz/api/tp/token/<a pons CA>',
+    'https://dapp.rhbond.xyz/api/tp/logo/<a pons CA>',
+    '`revoked.json`',
+    '`TP_VAULT_KEEP_DELETED_DAYS`',
+    'nginx password exactly as it is: the account is a wallet sign-in on the dApp host',
+  ]) {
+    assert.ok(text.includes(s), `README is missing: ${s}`);
+  }
+});
+
+test('README: a deleted or overwritten saved list can be restored by hand', () => {
+  const text = fs.readFileSync(README, 'utf8');
+  for (const s of [
+    '`deleted/`',
+    'TP_VAULT_KEEP_DELETED_DAYS',
+    'cp deleted/<address>.<ms>/<address>.json vaults/',
+    'cp deleted/<address>.<ms>/<address>.json.prev vaults/<address>.json',
+    'the first deletion (never replaced',
+    'the latest (each new deletion replaces it',
+    'cp vaults/<address>.json.prev vaults/<address>.json',
+    'chmod 600 vaults/<address>.json',
+  ]) {
+    assert.ok(text.includes(s), `README is missing: ${s}`);
+  }
 });
 
 test('README has the Take-profit dApp deploy section with the exact commands', () => {
