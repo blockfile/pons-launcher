@@ -15,8 +15,12 @@ import { errText } from './format.js';
  * "Remember" saves EVERY wallet in the tab (vault.js), not only these: the label
  * says so, with the count. It never replaces a saved copy this tab has not
  * unlocked (another tab's save, or one kept after Clear): that is refused.
+ *
+ * With the account unlocked (accountSaves) the import is saved to the account's
+ * encrypted copy on its own (account/vaultSync.js follows walletStore), so the
+ * passphrase option is not offered: one saved copy, not two.
  */
-export default function ImportDialog({ vault = 'none', walletCount = 0, onClose, onImported }) {
+export default function ImportDialog({ vault = 'none', walletCount = 0, accountSaves = false, onClose, onImported }) {
   const vaultLocked = vault === 'locked';
   const textRef = useRef(null);
   const fileRef = useRef(null);
@@ -55,7 +59,7 @@ export default function ImportDialog({ vault = 'none', walletCount = 0, onClose,
       return;
     }
     let pass = '';
-    if (remember) {
+    if (remember && !accountSaves) {
       pass = passRef.current ? passRef.current.value : '';
       if (pass.length < MIN_PASSPHRASE) {
         setError(`Use a passphrase of at least ${MIN_PASSPHRASE} characters.`);
@@ -92,7 +96,7 @@ export default function ImportDialog({ vault = 'none', walletCount = 0, onClose,
       // The keys are in the tab now, whatever happens to the save: report both.
       let saved = 0;
       let saveError = '';
-      if (remember && added + duplicates > 0) {
+      if (remember && !accountSaves && added + duplicates > 0) {
         try {
           saved = await saveVault(pass);
         } catch (e) {
@@ -149,12 +153,18 @@ export default function ImportDialog({ vault = 'none', walletCount = 0, onClose,
               data-testid="import-file"
             />
           </label>
-          <label className="check">
-            <input type="checkbox" checked={remember} disabled={vaultLocked} onChange={(e) => setRemember(e.target.checked)} />
-            Remember on this device — every wallet in this tab ({walletCount} already here, plus these), encrypted with a passphrase
-          </label>
-          {vaultLocked && <p className="hint">Unlock the wallets saved on this device first — saving now would replace them.</p>}
-          {remember && !vaultLocked && (
+          {accountSaves ? (
+            <p className="hint" data-testid="import-account-saves">
+              Saved to your account automatically, encrypted in this browser before it is sent.
+            </p>
+          ) : (
+            <label className="check">
+              <input type="checkbox" checked={remember} disabled={vaultLocked} onChange={(e) => setRemember(e.target.checked)} />
+              Remember on this device — every wallet in this tab ({walletCount} already here, plus these), encrypted with a passphrase
+            </label>
+          )}
+          {vaultLocked && !accountSaves && <p className="hint">Unlock the wallets saved on this device first — saving now would replace them.</p>}
+          {remember && !vaultLocked && !accountSaves && (
             <div className="pass-pair">
               <input ref={passRef} type="password" autoComplete="new-password" placeholder={`passphrase (${MIN_PASSPHRASE}+ characters)`} aria-label="Passphrase" />
               <input ref={pass2Ref} type="password" autoComplete="new-password" placeholder="repeat the passphrase" aria-label="Repeat the passphrase" />

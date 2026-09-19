@@ -4,8 +4,15 @@
  * The Map below is module-private: nothing outside this file can reach it, and no
  * export returns a Wallet or a key — the UI gets addresses, and signing happens
  * here (spec: "UI reads addresses only; signing goes through sign(address, tx)").
- * The two underscore exports exist for vault.js alone (encrypted "Remember on this
- * device"); nothing else may import them.
+ * The two underscore exports exist for vault.js (encrypted "Remember on this
+ * device") and account/vaultSync.js (the account's encrypted copy) alone;
+ * nothing else may import them (keys/privateExports.test.js enforces it).
+ *
+ * subscribe(fn) reports every change as {type: 'add' | 'duplicate' | 'remove' |
+ * 'clear', addresses} — checksummed addresses only, never a key — so the account
+ * copy can follow imports and removals without the UI remembering to tell it.
+ * 'duplicate' is an import of wallets already here: nothing changes in the tab,
+ * but the account copy counts it as a new import (account/vaultSync.js).
  *
  * Keys are never logged and never put in an error message. Library errors from a
  * bad key are replaced with fixed text, because some secp256k1 libraries print the
@@ -15,6 +22,34 @@ import { SigningKey, Transaction, computeAddress, getAddress } from 'ethers';
 
 /** lower-case address -> {address, key: SigningKey}. Insertion order = import order. */
 const store = new Map();
+
+/** Change listeners: fn({type, addresses}). */
+const listeners = new Set();
+
+function notify(type, list) {
+  if (!list.length) return;
+  const event = { type, addresses: list };
+  for (const fn of [...listeners]) {
+    try {
+      fn(event);
+    } catch {
+      // A listener's bug must not undo or block a key change.
+    }
+  }
+}
+
+/**
+ * Follow changes to the store. fn({type: 'add' | 'duplicate' | 'remove' | 'clear',
+ * addresses}) runs synchronously after the change, only when something was
+ * imported, removed or cleared.
+ * @returns {() => void} unsubscribe
+ */
+export function subscribe(fn) {
+  listeners.add(fn);
+  return () => {
+    listeners.delete(fn);
+  };
+}
 
 // A SigningKey and a Transaction, not an ethers Wallet: a Wallet drags the JSON
 // keystore (scrypt, AES), the HD wallet and the mnemonic wordlist into the page's
@@ -49,18 +84,20 @@ function toWallet(item, index) {
 export function addWallets(list) {
   if (!Array.isArray(list)) throw new Error('addWallets expects a list');
   const wallets = list.map(toWallet);
-  let added = 0;
-  let duplicates = 0;
+  const fresh = [];
+  const again = [];
   for (const wallet of wallets) {
     const k = wallet.address.toLowerCase();
     if (store.has(k)) {
-      duplicates += 1;
+      again.push(store.get(k).address);
       continue;
     }
     store.set(k, wallet);
-    added += 1;
+    fresh.push(wallet.address);
   }
-  return { added, duplicates };
+  notify('add', fresh);
+  notify('duplicate', again);
+  return { added: fresh.length, duplicates: again.length };
 }
 
 /** @returns {string[]} checksummed addresses, in import order */
@@ -70,11 +107,18 @@ export function addresses() {
 
 /** @returns {boolean} whether a wallet was removed */
 export function removeWallet(address) {
-  return store.delete(String(address).toLowerCase());
+  const k = String(address).toLowerCase();
+  const wallet = store.get(k);
+  if (!wallet) return false;
+  store.delete(k);
+  notify('remove', [wallet.address]);
+  return true;
 }
 
 export function clearWallets() {
+  const list = addresses();
   store.clear();
+  notify('clear', list);
 }
 
 /**
@@ -96,12 +140,12 @@ export async function signTx(address, txRequest) {
   return tx.serialized;
 }
 
-/** vault.js ONLY. @returns {{address: string, privateKey: string}[]} */
+/** vault.js and account/vaultSync.js ONLY. @returns {{address: string, privateKey: string}[]} */
 export function _exportForVault() {
   return [...store.values()].map((w) => ({ address: w.address, privateKey: w.key.privateKey }));
 }
 
-/** vault.js ONLY. */
+/** vault.js and account/vaultSync.js ONLY. */
 export function _importFromVault(list) {
   return addWallets(list);
 }

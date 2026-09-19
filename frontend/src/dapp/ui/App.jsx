@@ -3,7 +3,11 @@ import { LazyMotion, MotionConfig, domAnimation } from 'framer-motion';
 import { LuLock, LuShieldAlert } from 'react-icons/lu';
 import * as api from '../api.js';
 import { addresses as storedAddresses, clearWallets } from '../keys/walletStore.js';
-import { VAULT_KEY, hasVault, wipeVault } from '../keys/vault.js';
+import { VAULT_KEY, hasVault, unlockVault, wipeVault } from '../keys/vault.js';
+import { createAccount } from '../account/account.js';
+import { createDiscovery } from '../account/discover.js';
+import { createKeyCache } from '../account/keyCache.js';
+import { createVaultSync } from '../account/vaultSync.js';
 import { USDG } from '../chain/constants.js';
 import { createHub } from './hub.js';
 import { createSession } from './session.js';
@@ -19,6 +23,8 @@ import TradesFeed from './TradesFeed.jsx';
 import SellPanel from './SellPanel.jsx';
 import WalletTable from './WalletTable.jsx';
 import ImportDialog, { VaultBar } from './ImportDialog.jsx';
+import AccountBar from './AccountBar.jsx';
+import { useStore } from './useStore.js';
 import Toasts from './Toasts.jsx';
 import './dapp.css';
 
@@ -66,6 +72,16 @@ export default function App() {
     });
   }
   const feed = feedRef.current;
+  // The account (spec Addendum A): wallet discovery, the SIWE session and the
+  // unlock key. Made once per page. The key never reaches React: the sync gets
+  // it from account.keyFor(); React sees the account's state and keyEpoch only.
+  const discovery = useMemo(() => createDiscovery(), []);
+  const account = useMemo(() => createAccount({ api, discovery, keyCache: createKeyCache() }), [discovery]);
+  const acct = useStore(account);
+  const discovered = useStore(discovery);
+  const syncRef = useRef(null);
+  const [sync, setSync] = useState(null);
+  const [syncGen, setSyncGen] = useState(0); // +1 restarts the sync for the same key
   const [venue, setVenue] = useState(null);
   const [opening, setOpening] = useState(false);
   const [tokenError, setTokenError] = useState('');
@@ -290,7 +306,11 @@ export default function App() {
   // Clear empties this tab. A copy saved on this device is NOT this tab: say so,
   // and offer to delete it too — otherwise it unlocks again on the next visit.
   const onClear = useCallback(() => {
-    if (!window.confirm('Remove every wallet from this tab? You will need the keys again to sell.')) return;
+    const fromAccount = account.get().status === 'unlocked';
+    const ask = fromAccount
+      ? "Remove every wallet from this tab AND from your account's saved copy? You will need the keys again to sell."
+      : 'Remove every wallet from this tab? You will need the keys again to sell.';
+    if (!window.confirm(ask)) return;
     clearWallets();
     realDeps.pairLedger.clear(); // what the page remembered about these wallets goes with them
     syncOwnAddrs();
@@ -305,7 +325,7 @@ export default function App() {
       setVault('locked');
       toast('The encrypted copy stays on this device — Forget deletes it', 'info');
     }
-  }, [syncOwnAddrs, toast]);
+  }, [account, syncOwnAddrs, toast]);
 
   const onImported = useCallback(
     ({ added, duplicates, rejected, saved = 0, saveError = '' }) => {
@@ -353,6 +373,141 @@ export default function App() {
     toast('Saved wallets deleted from this device', 'ok');
   }, [toast]);
 
+  // ── the account ─────────────────────────────────────────────────────────────
+  useEffect(() => {
+    discovery.start();
+    account.resume();
+    return () => {
+      discovery.stop();
+      account.dispose();
+    };
+  }, [account, discovery]);
+
+  // The account copy changed this tab's wallets (another device's import or removal).
+  const onSyncApplied = useCallback(
+    ({ added, removed, unreadable }) => {
+      const list = syncOwnAddrs();
+      const s = sessionRef.current;
+      if (s && removed) s.reset(); // rows of removed wallets go; the reload below lists the rest
+      loadInto(s, list);
+      const n = (k) => `${k} wallet${k === 1 ? '' : 's'}`;
+      if (added) toast(`${n(added)} from your account`, 'ok');
+      if (removed) toast(`${n(removed)} removed on another device`, 'info');
+      if (unreadable) toast(`${n(unreadable)} in your account could not be read and were skipped`, 'error');
+    },
+    [loadInto, syncOwnAddrs, toast]
+  );
+
+  // One sync per unlock key: started when a key appears, stopped when it goes.
+  useEffect(() => {
+    const k = account.keyFor();
+    if (!k) {
+      setSync(null);
+      return undefined;
+    }
+    const s = createVaultSync({ api, owner: k.address, key: k.key, keyId: k.keyId, hub, onStatus: setSync, onApplied: onSyncApplied });
+    syncRef.current = s;
+    s.load();
+    return () => {
+      s.stop();
+      if (syncRef.current === s) syncRef.current = null;
+    };
+  }, [account, acct.keyEpoch, syncGen, hub, onSyncApplied]);
+
+  const connectFlow = useCallback(
+    async (walletId) => {
+      if ((await account.signIn(walletId)) && account.get().status === 'locked') await account.unlock(walletId);
+    },
+    [account]
+  );
+
+  /**
+   * Lock or disconnect. The account's wallets leave the tab, after the last
+   * changes are saved (or the visitor accepts that they are not). Wallets of a
+   * tab that was never unlocked are the visitor's own import: they stay. The
+   * sync's stop() tells the positions book to stop saving ('account:locked').
+   */
+  const leaveAccount = useCallback(
+    async (how) => {
+      const wasOpen = account.get().status === 'unlocked';
+      const s = syncRef.current;
+      if (s) {
+        const r = await s.flush();
+        if (!r.ok && !window.confirm(`Your latest changes are not saved to your account (${r.error || 'not saved'}). Continue? The wallets leave this tab.`)) {
+          return false;
+        }
+        s.stop();
+        syncRef.current = null;
+      }
+      if (how === 'disconnect') await account.disconnect();
+      else await account.lock();
+      if (wasOpen) {
+        clearWallets();
+        // The %-left bars' starting sizes (ui/positions.js, Task 34; absent before it)
+        // name these wallets too: they go with them. The account copy keeps its own.
+        if (realDeps.positions) realDeps.positions.clear();
+        syncOwnAddrs();
+        if (sessionRef.current) sessionRef.current.reset();
+      }
+      return true;
+    },
+    [account, syncOwnAddrs]
+  );
+
+  const onAccountAction = useCallback(
+    async (id, walletId) => {
+      if (id === 'connect') await connectFlow(walletId);
+      else if (id === 'unlock') await account.unlock(walletId);
+      else if (id === 'lock') await leaveAccount('lock');
+      else if (id === 'disconnect') await leaveAccount('disconnect');
+      else if (id === 'retry' && syncRef.current) await syncRef.current.retry();
+      else if (id === 'signin-again') {
+        if ((await account.signIn(walletId, { expect: account.get().address })) && syncRef.current) await syncRef.current.retry();
+      } else if (id === 'switch') {
+        const wid = account.get().walletId;
+        if (await leaveAccount('lock')) await connectFlow(wid);
+      } else if (id === 'delete') {
+        const typed = window.prompt('This deletes the encrypted copy of your wallets from your account and signs it out here and on every other device. The server keeps the deleted copy, still encrypted, for 30 days in case you ask for it back. The wallets stay in this tab until you close it. Type DELETE to confirm.');
+        if (typed !== 'DELETE') return;
+        const s = syncRef.current;
+        if (s) {
+          s.stop();
+          syncRef.current = null;
+        }
+        // Deleted = signed out (the server revoked every session of the account):
+        // the key is gone, so the sync stays stopped; the wallets stay in this tab.
+        if (await account.deleteSaved()) toast('Saved copy deleted and signed out. The wallets stay in this tab until you close it.', 'ok');
+        else setSyncGen((g) => g + 1); // not deleted: still signed in, and an unlocked account keeps saving
+      }
+    },
+    [account, connectFlow, leaveAccount, toast]
+  );
+
+  // A passphrase vault on this device -> the account. The device copy is deleted
+  // only after the account has saved the wallets (a revision came back).
+  const onMigrate = useCallback(
+    async (pass) => {
+      const s = syncRef.current;
+      if (!s) return 'Unlock your account first.';
+      let n = walletCount;
+      if (vault === 'locked') {
+        try {
+          n = await unlockVault(pass);
+        } catch {
+          return 'Wrong passphrase, or the saved data is damaged.';
+        }
+        loadInto(sessionRef.current, syncOwnAddrs());
+      }
+      const r = await s.flush();
+      if (!r.ok || r.rev < 1) return `Not moved: ${r.error || 'the account did not save'}. The copy on this device was kept.`;
+      wipeVault();
+      setVault('none');
+      toast(`${n} wallet${n === 1 ? '' : 's'} moved into your account; the copy on this device was deleted`, 'ok');
+      return '';
+    },
+    [loadInto, syncOwnAddrs, toast, vault, walletCount]
+  );
+
   const openImport = useCallback(() => setImportOpen(true), []);
   const closeImport = useCallback(() => setImportOpen(false), []);
 
@@ -363,8 +518,9 @@ export default function App() {
           <p className="notice" role="note">
             <LuShieldAlert aria-hidden="true" /> Keys stay in this browser tab. Use trading wallets. A browser extension can read this page.
           </p>
-          {vault === 'locked' && <VaultBar onUnlocked={onUnlocked} onForget={onForget} />}
-          {vault === 'unlocked' && (
+          <AccountBar acct={acct} sync={sync} wallets={discovered} legacy={vault} onAction={onAccountAction} onMigrate={onMigrate} />
+          {vault === 'locked' && acct.status !== 'unlocked' && <VaultBar onUnlocked={onUnlocked} onForget={onForget} />}
+          {vault === 'unlocked' && acct.status !== 'unlocked' && (
             <div className="vaultbar pane" role="status">
               <LuLock aria-hidden="true" />
               <span>These wallets are also saved on this device, encrypted with your passphrase.</span>
@@ -455,7 +611,9 @@ export default function App() {
               tradingview.com
             </a>
           </footer>
-          {importOpen && <ImportDialog vault={vault} walletCount={walletCount} onClose={closeImport} onImported={onImported} />}
+          {importOpen && (
+            <ImportDialog vault={vault} walletCount={walletCount} accountSaves={acct.status === 'unlocked' && !!sync && sync.state !== 'blocked'} onClose={closeImport} onImported={onImported} />
+          )}
           <Toasts hub={hub} />
         </div>
       </MotionConfig>

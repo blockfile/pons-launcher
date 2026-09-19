@@ -503,6 +503,73 @@ button.live:disabled {
   padding: var(--s2) var(--s3);
 }
 
+/* ── the account strip (spec Addendum A) ───────────────────────────────────
+ * Moves no money: indigo 'go' frames and quiet buttons only, never amber. The
+ * banner for a visitor who has not connected is the grey notice tint. */
+.accountbar {
+  display: flex;
+  flex-direction: column;
+  gap: var(--s2);
+  padding: var(--s2) var(--s3);
+}
+
+.accountbar.is-banner {
+  background: var(--tint-grey);
+}
+
+.acct-row,
+.acct-pick,
+.acct-move {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--s2);
+}
+
+.acct-text {
+  font: var(--t-small) var(--mono);
+  color: var(--ink);
+}
+
+.accountbar.is-banner .acct-text {
+  font-family: var(--sans);
+}
+
+.acct-actions {
+  display: inline-flex;
+  flex-wrap: wrap;
+  gap: var(--s2);
+  margin-left: auto;
+}
+
+.acct-sync {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--dim);
+  font: var(--t-small) var(--mono);
+}
+
+.acct-sync.is-saved {
+  color: var(--jade);
+}
+
+.acct-sync.is-error,
+.acct-sync.is-blocked {
+  color: var(--ink-danger);
+}
+
+.acct-pick img {
+  width: 16px;
+  height: 16px;
+}
+
+.acct-move {
+  padding-top: var(--s2);
+  border-top: 1px solid var(--rule);
+  font: var(--t-small) var(--sans);
+}
+
 /* ── token bar ─────────────────────────────────────────────────────────────── */
 .tokenbar {
   display: grid;

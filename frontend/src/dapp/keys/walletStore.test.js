@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { Wallet, Transaction } from 'ethers';
 import * as store from './walletStore.js';
-import { addWallets, addresses, removeWallet, clearWallets, signTx, _exportForVault } from './walletStore.js';
+import { addWallets, addresses, removeWallet, clearWallets, signTx, subscribe, _exportForVault } from './walletStore.js';
 
 function fresh(n) {
   return Array.from({ length: n }, () => {
@@ -20,7 +20,48 @@ test('the module exports addresses and signing — nothing that hands out a Wall
     'clearWallets',
     'removeWallet',
     'signTx',
+    'subscribe',
   ]);
+});
+
+test('subscribe reports imports, re-imports, removals and clears by address only, and only when one happened', () => {
+  clearWallets();
+  const events = [];
+  const off = subscribe((e) => events.push(e));
+  const [a, b] = fresh(2);
+  addWallets([a, b]);
+  addWallets([{ privateKey: a.privateKey }]); // already here: nothing added, reported as a re-import
+  removeWallet(a.address.toLowerCase());
+  removeWallet(a.address); // already gone: no event
+  clearWallets();
+  clearWallets(); // empty: no event
+  off();
+  addWallets([a]); // unsubscribed
+  assert.deepEqual(events, [
+    { type: 'add', addresses: [a.address, b.address] },
+    { type: 'duplicate', addresses: [a.address] },
+    { type: 'remove', addresses: [a.address] },
+    { type: 'clear', addresses: [b.address] },
+  ]);
+  const text = JSON.stringify(events).toLowerCase();
+  for (const w of [a, b]) assert.ok(!text.includes(w.privateKey.slice(2).toLowerCase()), 'no event carries a key');
+  clearWallets();
+});
+
+test("a listener that throws neither blocks the change nor the other listeners", () => {
+  clearWallets();
+  const seen = [];
+  const off1 = subscribe(() => {
+    throw new Error('listener bug');
+  });
+  const off2 = subscribe((e) => seen.push(e.type));
+  const [a] = fresh(1);
+  assert.deepEqual(addWallets([a]), { added: 1, duplicates: 0 });
+  assert.deepEqual(addresses(), [a.address]);
+  assert.deepEqual(seen, ['add']);
+  off1();
+  off2();
+  clearWallets();
 });
 
 test('addWallets stores in import order, counts duplicates, and addresses() returns only addresses', () => {
