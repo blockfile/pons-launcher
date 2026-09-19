@@ -298,6 +298,201 @@ async function pollReceipt(getReceipt, hash, { timeoutMs = 60_000, pollMs = 200,
   }
 }
 
+// ── v2: the account's cookie, the logo route, the token header's facts ────────
+
+/**
+ * A one-origin cookie jar for the smoke's account requests (Node's fetch keeps
+ * none). take() reads Set-Cookie lines: name=value before the first ';'; an
+ * empty value, Max-Age of 0 or less, or an Expires in the past removes the
+ * cookie. header() writes the Cookie request header. Path, Secure, HttpOnly and
+ * SameSite are not enforced: the smoke talks to one origin, over plain http on
+ * 127.0.0.1, exactly as the page does in Chromium there.
+ */
+function createCookieJar() {
+  const jar = new Map();
+  return {
+    take(setCookie) {
+      const lines = setCookie === undefined || setCookie === null ? [] : Array.isArray(setCookie) ? setCookie : [setCookie];
+      for (const line of lines) {
+        const parts = String(line).split(';');
+        const eq = parts[0].indexOf('=');
+        if (eq <= 0) continue;
+        const name = parts[0].slice(0, eq).trim();
+        const value = parts[0].slice(eq + 1).trim();
+        const attrs = parts.slice(1).map((p) => p.trim());
+        const gone =
+          value === '' ||
+          attrs.some((a) => {
+            const lower = a.toLowerCase();
+            if (lower.startsWith('max-age=')) return !(Number(a.slice(8)) > 0);
+            if (lower.startsWith('expires=')) return Date.parse(a.slice(8)) <= Date.now();
+            return false;
+          });
+        if (gone) jar.delete(name);
+        else jar.set(name, value);
+      }
+    },
+    header() {
+      return [...jar].map(([k, v]) => `${k}=${v}`).join('; ');
+    },
+    has(name) {
+      return jar.has(name);
+    },
+    names() {
+      return [...jar.keys()];
+    },
+  };
+}
+
+/** How many of `needles` (hex strings, with or without 0x) occur in `text`, ignoring case. */
+function countHexIn(text, needles) {
+  const hay = String(text).toLowerCase();
+  return needles.filter((n) => {
+    const hex = String(n).toLowerCase();
+    return hay.includes(hex.startsWith('0x') ? hex.slice(2) : hex);
+  }).length;
+}
+
+const IMAGE_TYPES = { png: 'image/png', jpeg: 'image/jpeg', gif: 'image/gif', webp: 'image/webp' };
+
+/** 'png' | 'jpeg' | 'gif' | 'webp' by magic bytes, else null (an SVG is null). */
+function imageKind(bytes) {
+  const b = bytes;
+  if (!b || b.length < 12) return null;
+  const at = (i, list) => list.every((x, j) => b[i + j] === x);
+  if (at(0, [0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a])) return 'png';
+  if (at(0, [0xff, 0xd8, 0xff])) return 'jpeg';
+  if (at(0, [0x47, 0x49, 0x46, 0x38])) return 'gif';
+  if (at(0, [0x52, 0x49, 0x46, 0x46]) && at(8, [0x57, 0x45, 0x42, 0x50])) return 'webp';
+  return null;
+}
+
+/**
+ * GET /api/tp/logo/:ca's answer against the route's contract, as a list of what
+ * it breaks (empty = fine). Every answer: nosniff, CSP default-src 'none', CORP
+ * same-origin. A 200: a PNG/JPEG/GIF/WebP body whose Content-Type matches its
+ * magic bytes. A 404 is a valid answer (no usable logo, or the gateways failed):
+ * the page draws its identicon.
+ *
+ * `info` (GET /token's info, optional) sets the caching a served logo must carry:
+ * a raw CID (bafkrei..., the file's own sha-256) is verified and cached immutable;
+ * a dag-pb CID or a logo on an https host is only a gateway's or a host's word,
+ * cached for exactly a day (tp/logo.js UNVERIFIED_TTL_MS). Without info either of
+ * the two is accepted.
+ * @param {{status: number, headers: object, bytes: Uint8Array|null}} res  headers with lower-case names
+ */
+function logoProblems({ status, headers, bytes }, info) {
+  const out = [];
+  const h = (k) => String((headers && headers[k]) || '');
+  if (status !== 200 && status !== 404) out.push(`status ${status}`);
+  if (h('x-content-type-options').toLowerCase() !== 'nosniff') out.push('no X-Content-Type-Options: nosniff');
+  if (!h('content-security-policy').includes("default-src 'none'")) out.push("CSP is not default-src 'none'");
+  if (h('cross-origin-resource-policy') !== 'same-origin') out.push('CORP is not same-origin');
+  if (status === 200) {
+    const kind = imageKind(bytes);
+    if (!kind) out.push('the body is not a PNG, JPEG, GIF or WebP');
+    else if (h('content-type') !== IMAGE_TYPES[kind]) out.push(`content-type ${h('content-type')} for a ${kind}`);
+    const cc = h('cache-control');
+    const logo = info && info.logo ? info.logo : null;
+    const raw = Boolean(logo && typeof logo.cid === 'string' && logo.cid.startsWith('bafkrei'));
+    const day = cc === 'public, max-age=86400';
+    if (logo && raw && !cc.includes('immutable')) out.push('a raw-CID logo is not cached immutable');
+    else if (logo && !raw && !day) out.push('an unverified logo is not cached for exactly a day');
+    else if (!logo && !cc.includes('immutable') && !day) out.push('a logo is cached neither immutable nor for a day');
+  }
+  return out;
+}
+
+const INFO_KEYS = [
+  'token',
+  'version',
+  'name',
+  'symbol',
+  'description',
+  'socials',
+  'logo',
+  'creator',
+  'creatorFeeRecipient',
+  'launchedAt',
+  'launchedBefore',
+  'graduationThreshold',
+  'phantomQuote',
+  'launchSupply',
+];
+const SOCIAL_KEYS = ['x', 'telegram', 'discord', 'website', 'farcaster'];
+const DECIMAL = /^[0-9]+$/;
+const ADDRESS = /^0x[0-9a-fA-F]{40}$/;
+
+/** What GET /api/tp/token/:ca's `info` breaks of Part 02's TokenInfo, as a list (empty = fine). */
+function tokenInfoProblems(info, token) {
+  if (!info || typeof info !== 'object') return ['info is missing'];
+  const ca = String(token).toLowerCase();
+  const out = [];
+  for (const k of INFO_KEYS) if (!(k in info)) out.push(`info.${k} is missing`);
+  if (info.token !== ca) out.push('info.token is not the CA');
+  if (info.version !== 'v2' && info.version !== 'v1') out.push('info.version is not v2 or v1');
+  for (const k of ['name', 'symbol', 'description']) if (typeof info[k] !== 'string') out.push(`info.${k} is not text`);
+  if (typeof info.description === 'string' && info.description.length > 1000) out.push('info.description is over 1000 characters');
+  const socials = info.socials && typeof info.socials === 'object' ? info.socials : {};
+  for (const k of SOCIAL_KEYS) {
+    const v = socials[k];
+    if (v !== null && !(typeof v === 'string' && v.startsWith('https://'))) out.push(`info.socials.${k} is not an https URL or null`);
+  }
+  // An IPFS logo is {cid, path}; one on an https host is {path} alone (its URL never
+  // leaves the server). Nothing else, and never a URL the page could load.
+  const logoKeys = info.logo && typeof info.logo === 'object' ? Object.keys(info.logo).sort().join(',') : '';
+  const logoOk =
+    info.logo === null ||
+    (info.logo.path === `/api/tp/logo/${ca}` && (logoKeys === 'path' || (logoKeys === 'cid,path' && typeof info.logo.cid === 'string')));
+  if (!logoOk) out.push('info.logo is not {cid?, path: /api/tp/logo/<ca>} or null');
+  if (info.creator !== null && !ADDRESS.test(String(info.creator))) out.push('info.creator is not an address or null');
+  if (info.version === 'v2') {
+    if (!Number.isSafeInteger(info.launchedAt) || info.launchedAt <= 0) out.push('info.launchedAt is not a unix time (v2)');
+    for (const k of ['graduationThreshold', 'phantomQuote', 'launchSupply']) {
+      if (!DECIMAL.test(String(info[k]))) out.push(`info.${k} is not a decimal string (v2)`);
+    }
+  }
+  return out;
+}
+
+/** What `figures` breaks for this venue kind ('curve' | 'graduated'), as a list (empty = fine). */
+function figuresProblems(figures, kind) {
+  if (!figures || typeof figures !== 'object') return ['figures are missing'];
+  const out = [];
+  if (kind === 'curve') {
+    if (!(typeof figures.progress === 'number' && figures.progress >= 0 && figures.progress <= 1)) out.push('curve progress is not 0..1');
+    if (!DECIMAL.test(String(figures.raised))) out.push('curve raised is not a decimal string');
+  } else {
+    if (figures.progress !== 1) out.push('a graduated token is not at progress 1');
+    const q = figures.liquidity && figures.liquidity.quote;
+    if (!DECIMAL.test(String(q)) || BigInt(q) <= 0n) out.push('pool liquidity (quote side) is not above 0');
+  }
+  return out;
+}
+
+const WINDOWS = ['m5', 'h1', 'h24'];
+
+/** What a stream `stats` payload breaks of Part 02's Stats, as a list (empty = fine). */
+function statsProblems(stats) {
+  if (!stats || typeof stats !== 'object') return ['stats are missing'];
+  const out = [];
+  if (!Number.isSafeInteger(stats.at)) out.push('stats.at is not a unix time');
+  for (const group of ['change', 'volume', 'complete']) {
+    const g = stats[group];
+    if (!g || typeof g !== 'object') {
+      out.push(`stats.${group} is missing`);
+      continue;
+    }
+    for (const k of WINDOWS) if (!(k in g)) out.push(`stats.${group}.${k} is missing`);
+  }
+  const change = stats.change && typeof stats.change === 'object' ? stats.change : {};
+  for (const k of WINDOWS) {
+    if (k in change && change[k] !== null && !Number.isFinite(change[k])) out.push(`stats.change.${k} is not a number or null`);
+  }
+  if (!stats.figures || typeof stats.figures !== 'object') out.push('stats.figures is missing');
+  return out;
+}
+
 module.exports = {
   isUpstreamHiccup,
   withRetry,
@@ -312,4 +507,11 @@ module.exports = {
   createSseParser,
   cspProblems,
   firstLoadFiles,
+  createCookieJar,
+  countHexIn,
+  imageKind,
+  logoProblems,
+  tokenInfoProblems,
+  figuresProblems,
+  statsProblems,
 };

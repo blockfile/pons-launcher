@@ -24,6 +24,13 @@ const {
   isUpstreamHiccup,
   withRetry,
   pollReceipt,
+  createCookieJar,
+  countHexIn,
+  imageKind,
+  logoProblems,
+  tokenInfoProblems,
+  figuresProblems,
+  statsProblems,
 } = require('./tpSmoke');
 
 const LF = String.fromCharCode(10);
@@ -286,4 +293,147 @@ test('pollReceipt returns the receipt as soon as the node has one, with no block
     (err) => err.message.includes('0xef') && err.message.includes('1 s')
   );
   assert.ok(t >= 1_000 && t < 1_300);
+});
+
+// ── v2 (Addendum A, C, D): the account's cookie, the logo route, the header's facts ──
+
+test('createCookieJar keeps what Set-Cookie sets and drops what it clears', () => {
+  const jar = createCookieJar();
+  assert.equal(jar.header(), '');
+  jar.take('__Host-tp_session=v1.abc.1.2.mac; Max-Age=86400; Path=/; HttpOnly; Secure; SameSite=Strict');
+  jar.take(['other=1; Path=/', 'junk', '=novalue']);
+  assert.equal(jar.header(), '__Host-tp_session=v1.abc.1.2.mac; other=1');
+  jar.take('__Host-tp_session=; Path=/; Expires=Thu, 01 Jan 1970 00:00:00 GMT; HttpOnly; Secure; SameSite=Strict');
+  assert.equal(jar.has('__Host-tp_session'), false, "express's clearCookie form");
+  jar.take('other=2; Max-Age=0');
+  assert.equal(jar.header(), '');
+  jar.take(undefined);
+  assert.deepEqual(jar.names(), []);
+});
+
+test('countHexIn finds hex needles with or without 0x, in any case', () => {
+  const key = '0x' + 'ab'.repeat(32);
+  const addr = '0x' + 'CD'.repeat(20);
+  assert.equal(countHexIn(`{"ct":"xyz","k":"${key.slice(2).toUpperCase()}"}`, [key, addr]), 1);
+  assert.equal(countHexIn(`addr ${addr.toLowerCase()} and ${key}`, [key, addr]), 2);
+  assert.equal(countHexIn('nothing here', [key, addr]), 0);
+});
+
+test('imageKind reads PNG, JPEG, GIF and WebP by their magic bytes, and nothing else', () => {
+  const pad = (head) => Uint8Array.from([...head, ...new Array(16).fill(0)]);
+  assert.equal(imageKind(pad([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a])), 'png');
+  assert.equal(imageKind(pad([0xff, 0xd8, 0xff, 0xe0])), 'jpeg');
+  assert.equal(imageKind(pad([0x47, 0x49, 0x46, 0x38, 0x39, 0x61])), 'gif');
+  assert.equal(imageKind(pad([0x52, 0x49, 0x46, 0x46, 1, 2, 3, 4, 0x57, 0x45, 0x42, 0x50])), 'webp');
+  assert.equal(imageKind(pad([0x52, 0x49, 0x46, 0x46, 1, 2, 3, 4, 0x41, 0x56, 0x49, 0x20])), null, 'a RIFF that is not WebP');
+  assert.equal(imageKind(Buffer.from('<svg xmlns="http://www.w3.org/2000/svg"></svg>')), null);
+  assert.equal(imageKind(new Uint8Array(3)), null);
+});
+
+test("logoProblems holds the logo route to its contract: nosniff, CSP default-src 'none', CORP, a sniffed image type", () => {
+  const safe = { 'x-content-type-options': 'nosniff', 'content-security-policy': "default-src 'none'; sandbox", 'cross-origin-resource-policy': 'same-origin' };
+  const png = Uint8Array.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0, 0, 0, 0, 0]);
+  const immutable = 'public, max-age=31536000, immutable';
+  assert.deepEqual(logoProblems({ status: 404, headers: { ...safe, 'cache-control': 'no-store' }, bytes: Buffer.from('{}') }), []);
+  assert.deepEqual(logoProblems({ status: 200, headers: { ...safe, 'content-type': 'image/png', 'cache-control': immutable }, bytes: png }), []);
+  assert.deepEqual(logoProblems({ status: 200, headers: { ...safe, 'content-type': 'image/jpeg', 'cache-control': immutable }, bytes: png }), [
+    'content-type image/jpeg for a png',
+  ]);
+  assert.deepEqual(logoProblems({ status: 200, headers: { ...safe, 'content-type': 'image/svg+xml', 'cache-control': 'no-store' }, bytes: Buffer.from('<svg/>') }), [
+    'the body is not a PNG, JPEG, GIF or WebP',
+    'a logo is cached neither immutable nor for a day',
+  ]);
+  // The caching a served logo must carry follows what the token's info says the logo is.
+  const day = 'public, max-age=86400';
+  const ok = (cc) => ({ status: 200, headers: { ...safe, 'content-type': 'image/png', 'cache-control': cc }, bytes: png });
+  const rawCid = { logo: { cid: 'bafkreif2nctwv7yv2iuqzw3jfrpe6iq6ko4vqxe7valfgejqtaox26pms4', path: '/api/tp/logo/0x1' } };
+  const dagPb = { logo: { cid: 'QmPmVbpMQzDW5kA84Q3N7hRyuz43xTf329DGNP8W1xULGQ', path: '/api/tp/logo/0x1' } };
+  const httpsHost = { logo: { path: '/api/tp/logo/0x1' } }; // the URL is never in the JSON
+  assert.deepEqual(logoProblems(ok(immutable), rawCid), []);
+  assert.deepEqual(logoProblems(ok(day), rawCid), ['a raw-CID logo is not cached immutable']);
+  assert.deepEqual(logoProblems(ok(day), dagPb), []);
+  assert.deepEqual(logoProblems(ok(immutable), dagPb), ['an unverified logo is not cached for exactly a day']);
+  assert.deepEqual(logoProblems(ok(day), httpsHost), []);
+  assert.deepEqual(logoProblems(ok(immutable), httpsHost), ['an unverified logo is not cached for exactly a day']);
+  assert.deepEqual(logoProblems(ok(day)), [], 'no info: a day is accepted');
+  assert.deepEqual(logoProblems({ status: 500, headers: {}, bytes: null }), [
+    'status 500',
+    'no X-Content-Type-Options: nosniff',
+    "CSP is not default-src 'none'",
+    'CORP is not same-origin',
+  ]);
+});
+
+const T = '0x' + '7'.repeat(40);
+const INFO = {
+  token: T,
+  version: 'v2',
+  name: 'Token',
+  symbol: 'TKN',
+  description: 'a line',
+  socials: { x: 'https://x.com/tkn', telegram: null, discord: null, website: 'https://tkn.example', farcaster: null },
+  logo: { cid: 'bafkreibm2hpxyz', path: `/api/tp/logo/${T}` },
+  creator: '0x' + 'aB'.repeat(20),
+  creatorFeeRecipient: null,
+  launchedAt: 1789821655,
+  launchedBefore: null,
+  graduationThreshold: '4200000000000000000',
+  phantomQuote: '1680000000000000000',
+  launchSupply: '1000000000000000000000000000',
+};
+
+test("tokenInfoProblems holds GET /token's info to Part 02's shape", () => {
+  assert.deepEqual(tokenInfoProblems(INFO, T.toUpperCase().replace('0X', '0x')), []);
+  assert.deepEqual(tokenInfoProblems({ ...INFO, logo: null, creator: null }, T), []);
+  assert.deepEqual(tokenInfoProblems({ ...INFO, logo: { path: `/api/tp/logo/${T}` } }, T), [], 'a logo on an https host: {path} alone');
+  assert.deepEqual(tokenInfoProblems({ ...INFO, logo: { path: `/api/tp/logo/${T}`, url: 'https://x.example/a.png' } }, T), [
+    'info.logo is not {cid?, path: /api/tp/logo/<ca>} or null',
+  ]);
+  assert.deepEqual(tokenInfoProblems(null, T), ['info is missing']);
+  const bad = {
+    ...INFO,
+    socials: { ...INFO.socials, x: 'http://x.com/tkn', telegram: 'javascript:alert(1)' },
+    logo: { cid: 'x', path: 'https://evil.example/x.png' },
+    launchedAt: null,
+  };
+  delete bad.launchSupply;
+  assert.deepEqual(tokenInfoProblems(bad, T), [
+    'info.launchSupply is missing',
+    'info.socials.x is not an https URL or null',
+    'info.socials.telegram is not an https URL or null',
+    'info.logo is not {cid?, path: /api/tp/logo/<ca>} or null',
+    'info.launchedAt is not a unix time (v2)',
+    'info.launchSupply is not a decimal string (v2)',
+  ]);
+});
+
+test('figuresProblems: a curve has progress 0..1 and a raised amount; a pool has progress 1 and quote liquidity', () => {
+  assert.deepEqual(figuresProblems({ progress: 0.27, raised: '11640000000000000', liquidity: null }, 'curve'), []);
+  assert.deepEqual(figuresProblems({ progress: 1, raised: null, liquidity: { quote: '3230600000000000000', token: '1' } }, 'graduated'), []);
+  assert.deepEqual(figuresProblems({ progress: 1.2, raised: 'x', liquidity: null }, 'curve'), ['curve progress is not 0..1', 'curve raised is not a decimal string']);
+  assert.deepEqual(figuresProblems({ progress: null, raised: null, liquidity: { quote: '0', token: '0' } }, 'graduated'), [
+    'a graduated token is not at progress 1',
+    'pool liquidity (quote side) is not above 0',
+  ]);
+  assert.deepEqual(figuresProblems(undefined, 'curve'), ['figures are missing']);
+});
+
+test("statsProblems holds the stream's stats to Part 02's shape", () => {
+  const ok = {
+    at: 1789821700,
+    since: 1789821000,
+    price: 0.0000012,
+    change: { m5: 0.12, h1: null, h24: -0.5 },
+    volume: { m5: 0.3, h1: 0.3, h24: 0.3 },
+    complete: { m5: true, h1: false, h24: false },
+    figures: { progress: 0.3, raised: '1', liquidity: null },
+  };
+  assert.deepEqual(statsProblems(ok), []);
+  assert.deepEqual(statsProblems({ ...ok, at: 'now', change: { m5: 'x', h1: 0 }, figures: null }), [
+    'stats.at is not a unix time',
+    'stats.change.h24 is missing',
+    'stats.change.m5 is not a number or null',
+    'stats.figures is missing',
+  ]);
+  assert.deepEqual(statsProblems(null), ['stats are missing']);
 });

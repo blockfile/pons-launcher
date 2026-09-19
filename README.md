@@ -463,7 +463,15 @@ touches the real chain): `cd frontend && npm run build`, then
 `npm run tp:smoke -- --size-only` checks only the 250 KB first-load budget (no fork);
 `-- --hold` keeps the fork and the server up for a browser run and checks that run's
 sells on-chain when you create the STOP file it names; `-- --pair` adds a
-token-quoted curve and its pair -> ETH leg. The public RPC the fork reads from stops
+token-quoted curve and its pair -> ETH leg. Every run also checks the v2 account
+twice: on the API with a throwaway owner (sign-in, save, a racing save, the host
+gate, the DELETE that signs every session out), and through the page's own modules
+on two "devices" (wallets and saved position sizes come back, nothing readable
+reaches the server); each venue also checks the token header (`/token`'s info and
+figures, the stream's `stats`, `/logo`). The UI run connects a throwaway browser
+wallet from the script (`HOLD signer`). The smoke's own helpers are tested offline:
+`cd backend && node --test scripts/lib/tpSmoke.test.js scripts/lib/tpSmokeAccount.test.mjs`.
+The public RPC the fork reads from stops
 serving the fork block's state within minutes, so a run that has to read much new
 state late can fail on the fork's side ("historical state ... is not available" in
 `anvil.log`, kept with `-- --keep`): run it again.

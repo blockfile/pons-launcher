@@ -346,6 +346,22 @@ test('README carries the v2 update: code, nginx re-copy and checks in order, bac
   }
 });
 
+test('README says what the fork smoke checks of v2, and how to run its helpers offline', () => {
+  const text = fs.readFileSync(README, 'utf8');
+  const at = text.indexOf('**Local end-to-end check**');
+  assert.ok(at > 0);
+  const para = text.slice(at, text.indexOf('## ', at));
+  for (const s of [
+    'the v2 account',
+    'through the page\'s own modules',
+    'the token header',
+    '`HOLD signer`',
+    'node --test scripts/lib/tpSmoke.test.js scripts/lib/tpSmokeAccount.test.mjs',
+  ]) {
+    assert.ok(para.includes(s), `README's local end-to-end check is missing: ${s}`);
+  }
+});
+
 test('README: a deleted or overwritten saved list can be restored by hand', () => {
   const text = fs.readFileSync(README, 'utf8');
   for (const s of [

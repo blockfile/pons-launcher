@@ -37,7 +37,20 @@
 //      the host gate, and the DELETE that signs every session out. Its state lives in
 //      the scratch dir (TP_ACCOUNTS_DIR), never in backend/data, and the sign-in
 //      message names this page's own origin (TP_SIWE_ORIGIN), so a --hold browser run
-//      can sign in on it as well.
+//      can sign in on it as well;
+//   8. v2 token header (spec Addendum D, plan Part 02), on every venue: GET /token's
+//      `info` and `figures` hold their contract, the stream's snapshot carries
+//      `stats` and a `stats` event follows the sells, and GET /api/tp/logo/:ca
+//      answers an image or a 404 — with nosniff, CSP default-src 'none' and CORP
+//      same-origin either way, immutable only for a raw CID (the backend asks the
+//      public IPFS gateways for the CID, or the token's https host through its
+//      SSRF-safe fetch: public data, no key, no address);
+//   9. v2 account (Addendum A + C): scripts/lib/tpSmokeAccount.mjs signs a
+//      throwaway owner in on two "devices" through the page's OWN api.js, account,
+//      vaultSync and positions modules — 3 signatures, then 2 — and device 2 gets
+//      every wallet AND every recorded starting size back; no request body, no
+//      file under TP_ACCOUNTS_DIR and no backend log line holds a bundle key or a
+//      bundle address; a write from a foreign Origin is refused (403).
 // Venues: a live pons v2 ETH-quoted curve token, and a graduated (Uniswap v4) one
 // when the scan finds one — SKIPPED otherwise; --require-graduated fails instead.
 //
@@ -50,6 +63,15 @@
 // exactly those shares of what each wallet held, that every sell paid ETH into its
 // wallet, and that the page sent nothing but approvals and sells; then it stops both
 // processes and removes the scratch dir, key file included.
+//
+// v2 in the UI run: the page also connects a browser wallet. That wallet is a
+// throwaway owner key living in THIS process behind a local signer URL (HOLD
+// signer ...); Playwright's Node side bridges the page's EIP-1193 calls to it
+// (page.exposeFunction), and the page's own CSP keeps the page itself from
+// reaching it. At STOP the script also checks the wallet was asked for exactly
+// UI_SIGNATURES signatures, and reads the account's copy back as that owner: the
+// 3 wallets, and on both tokens each wallet's saved starting size (the %-left
+// bar's 100 %), ended after the 100 % click.
 //
 // --attach uses an anvil already listening on 127.0.0.1:8546 (and leaves it running);
 // --keep keeps the scratch dir (logs) — its key file is removed either way.
@@ -110,6 +132,7 @@ const {
   formatEther,
   formatUnits,
   getAddress,
+  getBytes,
   solidityPacked,
   zeroPadValue,
 } = require('ethers');
@@ -129,6 +152,13 @@ const {
   isUpstreamHiccup,
   withRetry,
   pollReceipt,
+  createCookieJar,
+  countHexIn,
+  imageKind,
+  logoProblems,
+  tokenInfoProblems,
+  figuresProblems,
+  statsProblems,
 } = require('./lib/tpSmoke');
 
 const ARGS = new Set(process.argv.slice(2));
@@ -206,6 +236,10 @@ const SCAN_WINDOWS = Number(process.env.TP_SMOKE_SCAN_WINDOWS) || 30;
 const MIN_AGE_BLOCKS = 600; // skip launches younger than ~1 min (snipe tax lasts 3 s)
 const CANDIDATE_CAP = 40;
 const UI_PCTS = [25, 50, 100]; // the UI run's clicks, in this order, on each venue
+// The UI run's wallet signatures: sign-in + unlock + unlock again on the first
+// visit, none on a reload (the session cookie and the cached key), one unlock
+// after Lock. Any other count means the page asked the wallet for something else.
+const UI_SIGNATURES = 4;
 // Part 07's one first-load size measurement (250 KB gzipped budget).
 const SIZE_SCRIPT = path.join(FRONTEND, 'scripts', 'dapp-size.mjs');
 
@@ -214,6 +248,7 @@ const TRANSFER_TOPIC = erc20Iface.getEvent('Transfer').topicHash;
 
 let anvil = null;
 let server = null;
+let signer = null; // the UI run's throwaway owner wallet (startSigner)
 let provider = null;
 let interrupted = false;
 let passed = 0;
@@ -1011,8 +1046,19 @@ async function sellStep(ctx, venue, stream, pct, afterBlock, minNonces) {
 
 async function runVenue(ctx, token, kind, extra) {
   const tag = extra.label || kind;
-  const { venue, mark } = await apiOk('GET', `/api/tp/token/${token}`);
+  let { venue, mark, info, figures } = await apiOk('GET', `/api/tp/token/${token}`);
+  // GET /token waits for the mark alone (the sell click's fallback): a first answer
+  // may come before the info read has; the page re-reads, and so does this.
+  for (let i = 0; i < 5 && info === null; i += 1) {
+    await sleep(2000);
+    ({ venue, mark, info, figures } = await apiOk('GET', `/api/tp/token/${token}`));
+  }
   venue.label = tag;
+  const infoWrong = tokenInfoProblems(info, token);
+  check(infoWrong.length === 0, `${tag}: /token's info holds its contract${infoWrong.length ? ' — ' + infoWrong.join('; ') : ''}`);
+  const figWrong = figuresProblems(figures, kind);
+  check(figWrong.length === 0, `${tag}: /token's figures hold for a ${kind}${figWrong.length ? ' — ' + figWrong.join('; ') : ''}`);
+  await logoCheck(tag, token, info);
   check(venue.kind === kind, `${tag}: /token resolves the venue as '${kind}'`);
   check(lc(venue.token) === lc(token), `${tag}: venue.token is the pasted CA`);
   check(venue.nativeQuote === !extra.pair, `${tag}: the venue is ${extra.pair ? 'token' : 'ETH'}-quoted`);
@@ -1030,6 +1076,7 @@ async function runVenue(ctx, token, kind, extra) {
     check(stream.events[0].event === 'snapshot', `${tag}: the snapshot is the first event`);
     check(snap.sid === sid, `${tag}: the snapshot carries the page's own sid back`);
     check(Array.isArray(snap.bars) && Array.isArray(snap.trades), `${tag}: the snapshot carries bars and trades`);
+    check('stats' in snap, `${tag}: the snapshot carries stats (null until the indexer has any)`);
     await stranger.waitFor((evs) => evs.some((e) => e.event === 'snapshot'), 30_000, `${tag}: a second viewer's stream opened`);
     const strangerSid = stranger.events.find((e) => e.event === 'snapshot').data.sid;
     check(/^[0-9a-f]{32}$/.test(strangerSid) && strangerSid !== sid, `${tag}: the second viewer got a sid of its own`);
@@ -1049,6 +1096,11 @@ async function runVenue(ctx, token, kind, extra) {
     check([...left.values()].every((b) => b.token === 0n), `${tag}: after 100% every wallet holds 0 tokens`);
     if (extra.pair) check([...left.values()].every((b) => b.pair === 0n), `${tag}: and 0 ${venue.pairSymbol} — every sell's proceeds went on to ETH`);
     await stream.waitFor(barsSeen, 60_000, `${tag}: the stream delivered candles`);
+    await stream.waitFor(
+      (evs) => evs.some((e) => e.event === 'stats' && statsProblems(e.data).length === 0),
+      30_000,
+      `${tag}: a stats event followed the sells, in its contract`
+    );
     check(
       !stranger.events.some((e) => e.event === 'receipt'),
       `${tag}: the second viewer's stream saw none of the page's receipts (${stranger.events.filter((e) => e.event === 'trades').length} trades batches, 0 receipts)`
@@ -1335,6 +1387,206 @@ async function verifyUiVenue(ctx, { kind, token, target, start, txs }) {
   }
 }
 
+// ── v2: the logo route, the account, the UI run's wallet ────────────────────
+
+// One request with an explicit Host, keeping the body as bytes (a logo).
+function rawBytes(method, route, host) {
+  return new Promise((resolve, reject) => {
+    const req = http.request(
+      { host: '127.0.0.1', port: APP_PORT, path: route, method, headers: { host, 'x-real-ip': SCRIPT_IP } },
+      (res) => {
+        const chunks = [];
+        res.on('data', (chunk) => chunks.push(chunk));
+        res.on('end', () => resolve({ status: res.statusCode, headers: res.headers, bytes: Buffer.concat(chunks) }));
+      }
+    );
+    req.on('error', reject);
+    req.end();
+  });
+}
+
+// GET /api/tp/logo/:ca on the dApp host (Part 02): an image, or a 404 the page
+// turns into an identicon — never anything a browser could run. A 404 because
+// every gateway (or the https host) was slow is a valid answer. `info` (GET
+// /token's) sets the caching a served logo must carry (tpSmoke.logoProblems).
+async function logoCheck(tag, token, info) {
+  const r = await rawBytes('GET', `/api/tp/logo/${lc(token)}`, `127.0.0.1:${APP_PORT}`);
+  const wrong = logoProblems(r, info);
+  const what = r.status === 200 ? `a ${imageKind(r.bytes)}` : `${r.status}`;
+  check(wrong.length === 0, `${tag}: /logo answered ${what}, within its contract${wrong.length ? ' — ' + wrong.join('; ') : ''}`);
+}
+
+// One browser's view of the dApp host, for the page's own api.js: a cookie jar of
+// its own, the page's Origin on every request (a same-origin POST carries it) and
+// this script's x-real-ip. A fetch-shaped function over node:http, which lets the
+// script set Origin and Cookie itself, as the browser would.
+function deviceTransport({ origin = APP } = {}) {
+  const jar = createCookieJar();
+  return (url, init = {}) =>
+    new Promise((resolve, reject) => {
+      const u = new URL(url, APP);
+      const headers = { ...(init.headers || {}), host: u.host, origin, 'x-real-ip': SCRIPT_IP };
+      const cookie = jar.header();
+      if (cookie) headers.cookie = cookie;
+      const req = http.request(
+        { host: u.hostname, port: u.port, path: u.pathname + u.search, method: init.method || 'GET', headers },
+        (res) => {
+          let text = '';
+          res.setEncoding('utf8');
+          res.on('data', (chunk) => {
+            text += chunk;
+          });
+          res.on('end', () => {
+            jar.take(res.headers['set-cookie']);
+            resolve({ ok: res.statusCode >= 200 && res.statusCode < 300, status: res.statusCode, headers: res.headers, json: async () => JSON.parse(text) });
+          });
+        }
+      );
+      req.on('error', reject);
+      if (init.body !== undefined) req.write(init.body);
+      req.end();
+    });
+}
+
+const loadDapp = (rel) => import(pathToFileURL(path.join(FRONTEND, 'src', 'dapp', rel)).href);
+const loadAccountLib = () => import(pathToFileURL(path.join(__dirname, 'lib', 'tpSmokeAccount.mjs')).href);
+const plainWallets = (ctx) => ctx.wallets.map((w) => ({ address: w.address, privateKey: w.privateKey }));
+
+// What reached the server's disk and log: ciphertext only. No bundle key and no
+// bundle address, in any case, in any file under TP_ACCOUNTS_DIR; no key in the log.
+function diskClean(what, wallets) {
+  const root = path.join(SCRATCH, 'tp-accounts');
+  const files = [];
+  const walk = (dir) => {
+    for (const e of fs.readdirSync(dir, { withFileTypes: true })) {
+      const p = path.join(dir, e.name);
+      if (e.isDirectory()) walk(p);
+      else files.push(p);
+    }
+  };
+  if (fs.existsSync(root)) walk(root);
+  const needles = wallets.flatMap((w) => [w.privateKey, w.address]);
+  const found = files.reduce((n, f) => n + countHexIn(fs.readFileSync(f, 'latin1'), needles), 0);
+  check(files.length > 0, `${what}: the account store wrote ${files.length} file(s) under TP_ACCOUNTS_DIR`);
+  check(found === 0, `${what}: no file under TP_ACCOUNTS_DIR holds a bundle key or a bundle address`);
+  const log = fs.readFileSync(path.join(SCRATCH, 'server.log'), 'latin1');
+  check(countHexIn(log, wallets.map((w) => w.privateKey)) === 0, `${what}: the backend log holds no bundle key`);
+}
+
+// Spec Addendum A + C through the page's own modules, against this backend: a
+// throwaway owner on two devices (scripts/lib/tpSmokeAccount.mjs), then a write
+// from another site, then what reached the disk. Chain-free.
+async function accountRun(ctx, token) {
+  const lib = await loadAccountLib();
+  const wallets = plainWallets(ctx);
+  const r = await lib.accountRoundTrip({ load: loadDapp, transport: () => deviceTransport(), owner: Wallet.createRandom(), wallets, token, origin: APP });
+  check(r.signedIn1 && r.unlocked1, `account: device 1 signed in and unlocked through the page's modules${r.error ? ' — ' + r.error : ''}`);
+  check(r.signatures1 === 3, `account: a first visit asks the wallet for 3 signatures: sign-in, unlock, unlock again (${r.signatures1})`);
+  check(r.saved, `account: device 1 saved the encrypted copy (rev ${r.rev})`);
+  check(r.signedIn2 && r.unlocked2, `account: device 2 signed in and unlocked${r.error ? ' — ' + r.error : ''}`);
+  check(r.signatures2 === 2, `account: device 2 needed 2 signatures: sign-in, one unlock (${r.signatures2})`);
+  check(r.sameKey, 'account: both devices derived the same key id from the same wallet');
+  check(r.walletsBack, 'account: device 2 got every wallet back, each key matching its address');
+  check(r.positionsBack, "account: device 2 got every wallet's saved starting size back (the %-left bar's 100 %)");
+  check(r.bodiesClean, `account: none of the ${r.requests} request bodies carries a bundle key or a bundle address`);
+  const api = await loadDapp('api.js');
+  let refused = '';
+  try {
+    await api.putVault(
+      { baseRev: 0, kv: 1, keyId: '0x' + '0'.repeat(32), iv: 'AAAAAAAAAAAAAAAA', ct: 'A'.repeat(24) },
+      { fetch: deviceTransport({ origin: 'https://evil.example' }) }
+    );
+  } catch (e) {
+    refused = String((e && e.cause && e.cause.status) || (e && e.message) || e);
+  }
+  check(refused === '403', `account: a write carrying another site's Origin is refused 403 (got ${refused || 'no refusal'})`);
+  diskClean('account', wallets);
+}
+
+// The UI run's browser wallet: a throwaway owner key that lives in THIS process.
+// It answers eth_requestAccounts / eth_accounts and personal_sign only, counts the
+// signatures, and never sends a key anywhere. The page cannot reach it (its CSP
+// allows connect-src 'self'): Playwright's Node side forwards the page's calls.
+function startSigner(owner) {
+  const counts = { signatures: 0, calls: 0 };
+  const srv = http.createServer((req, res) => {
+    let body = '';
+    req.setEncoding('utf8');
+    req.on('data', (chunk) => {
+      body += chunk;
+      if (body.length > 65536) req.destroy();
+    });
+    req.on('end', async () => {
+      const reply = (status, obj) => {
+        res.writeHead(status, { 'content-type': 'application/json' });
+        res.end(JSON.stringify(obj));
+      };
+      if (req.method !== 'POST' || req.url !== '/rpc') return reply(404, { error: { code: 4200, message: 'not found' } });
+      counts.calls += 1;
+      let msg = null;
+      try {
+        msg = JSON.parse(body);
+      } catch (_err) {
+        return reply(400, { error: { code: -32700, message: 'not JSON' } });
+      }
+      const method = msg && msg.method;
+      const params = Array.isArray(msg && msg.params) ? msg.params : [];
+      if (method === 'eth_requestAccounts' || method === 'eth_accounts') return reply(200, { result: [owner.address] });
+      if (method === 'personal_sign') {
+        if (lc(params[1]) !== lc(owner.address)) return reply(200, { error: { code: 4100, message: 'not this wallet' } });
+        try {
+          const signature = await owner.signMessage(getBytes(params[0]));
+          counts.signatures += 1;
+          return reply(200, { result: signature });
+        } catch (_err) {
+          return reply(200, { error: { code: -32602, message: 'not a hex message' } });
+        }
+      }
+      return reply(200, { error: { code: 4200, message: 'unsupported method' } });
+    });
+  });
+  return new Promise((resolve, reject) => {
+    srv.once('error', reject);
+    srv.listen(0, '127.0.0.1', () => resolve({ srv, counts, url: `http://127.0.0.1:${srv.address().port}/rpc` }));
+  });
+}
+
+async function stopSigner() {
+  if (!signer) return;
+  const s = signer;
+  signer = null;
+  if (typeof s.srv.closeAllConnections === 'function') s.srv.closeAllConnections();
+  await new Promise((resolve) => s.srv.close(() => resolve()));
+}
+
+// The UI run's account, read back as the owner the page signed in with: the
+// signature count, the 3 wallets, and on both tokens each wallet's saved starting
+// size — the %-left bar's 100 % — ended (empty) after the 100 % click.
+async function verifyUiAccount(ctx, { owner, curve, graduated, start }) {
+  check(
+    signer.counts.signatures === UI_SIGNATURES,
+    `ui account: the page asked the wallet for ${UI_SIGNATURES} signatures (sign-in, unlock twice, one unlock after Lock; none on reloads) — got ${signer.counts.signatures}`
+  );
+  const lib = await loadAccountLib();
+  const wallets = plainWallets(ctx);
+  const copy = await lib.readAccountCopy({ load: loadDapp, transport: () => deviceTransport(), owner, origin: APP, expect: wallets });
+  check(copy.error === '', `ui account: the owner reads the saved copy back${copy.error ? ' — ' + copy.error : ''}`);
+  check(copy.sameWallets, 'ui account: the saved copy holds exactly the 3 imported wallets, each key matching');
+  for (const [kind, token] of [
+    ['curve', curve.token],
+    ['graduated', graduated],
+  ]) {
+    const group = copy.positions[lc(token)] || {};
+    for (const a of ctx.addresses.map(lc)) {
+      const rec = group[a];
+      const want = start[kind].get(a).token.toString();
+      check(!!rec && rec.hwm === want, `ui account ${kind} ${label(a)}: the saved starting size is the balance the page first saw${rec ? '' : ' (no record)'}`);
+      check(!!rec && rec.empty === true, `ui account ${kind} ${label(a)}: after the 100% click the saved position is ended (empty)`);
+    }
+  }
+  diskClean('ui account', wallets);
+}
+
 async function hold(ctx, curve, graduated) {
   // Fresh positions for the page. The API run sold everything, and planArm
   // approves exactly the balance, which those sells used up — so the page has to
@@ -1351,10 +1603,14 @@ async function hold(ctx, curve, graduated) {
   }
   fs.rmSync(STOP_FILE, { force: true });
   fs.writeFileSync(KEYS_FILE, ctx.wallets.map((w) => w.privateKey).join(os.EOL) + os.EOL, { mode: 0o600 });
+  // The page's Connect wallet: a throwaway owner, never one of the bundle keys.
+  const owner = Wallet.createRandom();
+  signer = await startSigner(owner);
   console.log(`HOLD dApp ${APP}/`);
   console.log(`HOLD curve token ${curve.token}`);
   console.log(`HOLD graduated token ${graduated}`);
   console.log(`HOLD keys file (3 throwaway fork keys, removed on stop): ${slash(KEYS_FILE)}`);
+  console.log(`HOLD signer (the page's Connect wallet, a throwaway owner key in this process): ${signer.url}`);
   console.log(`HOLD to finish, create: ${slash(STOP_FILE)}`);
   while (!fs.existsSync(STOP_FILE) && !interrupted) await sleep(1000);
   fs.rmSync(KEYS_FILE, { force: true });
@@ -1367,6 +1623,8 @@ async function hold(ctx, curve, graduated) {
   check(txs.every((t) => t.receipt.status === 1), 'ui: none of the transactions the page sent reverted');
   await verifyUiVenue(ctx, { kind: 'curve', token: curve.token, target: curve.curve, start: start.curve, txs });
   await verifyUiVenue(ctx, { kind: 'graduated', token: graduated, target: UNIVERSAL_ROUTER, start: start.graduated, txs });
+  await verifyUiAccount(ctx, { owner, curve, graduated, start });
+  await stopSigner();
 }
 
 // ── main ─────────────────────────────────────────────────────────────────────
@@ -1498,6 +1756,7 @@ async function main() {
 
   await gate();
   await account();
+  await accountRun(ctx, curve.token);
   await runVenue(ctx, curve.token, 'curve', { curve: curve.curve, lastTradeBlock: curveBuyBlock });
   await refusals(ctx, curve.token, curve.curve);
   if (graduated) await runVenue(ctx, graduated, 'graduated', { lastTradeBlock: graduatedBuyBlock });
@@ -1507,7 +1766,8 @@ async function main() {
   console.log(
     `PASS ${passed} checks — account: sign-in and the saved-list round trip; curve: 25/50/100% from 3 wallets; graduated: ${graduated ? 'PASS' : 'SKIPPED (none found)'}` +
       `; token-quoted: ${pairCurve ? `PASS (${pairCurve.pairSymbol})` : PAIR ? 'SKIPPED (setup)' : 'not run (--pair)'}` +
-      (HOLD ? '; ui: 25/50/100% on both venues, checked on-chain' : '')
+      '; account: 2 devices, wallets and positions back' +
+      (HOLD ? '; ui: 25/50/100% on both venues (chips on the curve, row buttons on the pool) and the account, checked on-chain' : '')
   );
 }
 
@@ -1518,6 +1778,7 @@ async function cleanup() {
   } catch (_err) {
     // best effort; the cleanup step removes the folder too
   }
+  await stopSigner();
   await stopChild(server);
   await stopChild(anvil);
   if (provider) provider.destroy();
