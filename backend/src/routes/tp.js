@@ -24,6 +24,7 @@ const broadcast = require('../tp/broadcast');
 const { broadcastCost } = require('../tp/limits'); // own line: later tasks' edits anchor on the line above
 const { handleStream, parseSid } = require('../tp/stream');
 const tokenInfo = require('../tp/tokenInfo'); // module object: routes/tp.reads.test.js stubs it
+const logo = require('../tp/logo'); // module object: routes/tp.logo.test.js stubs getLogo
 const { createAccountRouter } = require('../tp/account');
 
 const router = express.Router();
@@ -66,6 +67,30 @@ router.get(
       Promise.resolve().then(() => tokenInfo.poolBalances(v)).catch(quiet('pool balances')),
     ]);
     res.json({ venue: v, mark, info, figures: tokenInfo.figures(v, mark, info, pool) });
+  })
+);
+// GET /logo/:ca -> the token's logo image, or 404 {error} (the page then draws an
+// identicon). The request names a TOKEN, never a URL: the venue gate admits genuine pons
+// tokens only (cachedVenue: no chain read once the token is known), the CID is the one
+// tokenInfo reduced the token's own logo text to, and tp/logo.js fetches it from fixed
+// IPFS gateways only, checks size and magic bytes and caches it. Served from this origin,
+// so the page's CSP keeps img-src 'self' data:.
+router.get(
+  '/logo/:ca',
+  readLimit,
+  wrap(async (req, res) => {
+    const v = await venue.cachedVenue(req.params.ca);
+    const info = await tokenInfo.readTokenInfo(v);
+    const cid = info && info.logo ? info.logo.cid : null;
+    const got = cid ? await logo.getLogo(cid) : { ok: false, permanent: true, reason: 'no_logo' };
+    res.set(logo.LOGO_HEADERS);
+    if (!got.ok) {
+      res.set('Cache-Control', got.permanent ? logo.CACHE_NONE_FINAL : logo.CACHE_NONE_RETRY);
+      return res.status(404).json({ error: 'this token has no logo that can be shown' });
+    }
+    res.set('Content-Type', got.type);
+    res.set('Cache-Control', logo.CACHE_HIT);
+    return res.status(200).send(got.bytes);
   })
 );
 // {token, addresses} -> {venue, wallets}. The addresses (<= 100, each

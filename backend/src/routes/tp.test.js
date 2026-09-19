@@ -50,6 +50,7 @@ function routeLayer(method, p) {
 // The interface contract's route table.
 const CONTRACT_ROUTES = [
   ['get', '/token/:ca', 'readLimit'],
+  ['get', '/logo/:ca', 'readLimit'],
   ['post', '/wallets', 'readLimit'],
   ['get', '/fees', 'readLimit'],
   ['post', '/quote', 'quoteLimit'],
