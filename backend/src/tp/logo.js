@@ -16,7 +16,11 @@
 // by their MAGIC BYTES — never SVG, and never whatever Content-Type a gateway claimed.
 // A raw-codec CIDv1 (bafkrei..., ~half of all pons logos) IS the sha2-256 of the file,
 // so those bytes are verified and a lying gateway cannot swap the image. dag-pb CIDs
-// (Qm..., bafybei...) wrap the file in a UnixFS node and are not verified.
+// (Qm..., bafybei...) wrap the file in a UnixFS node and are not verified: their bytes
+// are only a gateway's word, so they are trusted for UNVERIFIED_TTL_MS (a day) and no
+// longer. The server then drops them and asks the gateways again, and GET /logo tells
+// browsers max-age=86400 (CACHE_HIT_UNVERIFIED). Only verified bytes stay held until
+// evicted and are served immutable (CACHE_HIT).
 //
 // Gateways (server-side, measured 2026-09-19): ponsfamily's own worker — where
 // ponsfamily uploads logos (config.ipfsUploadUrl) — answers in 0.3-1.5 s, Filebase in
@@ -27,10 +31,11 @@
 // A 451 (Unavailable For Legal Reasons — the pons worker's answer for moderated
 // content) is FINAL: the logo is not shown and no other gateway is asked for it.
 //
-// Caches, per CID (content-addressed, so a hit never goes stale): the bytes in an LRU
-// bounded by TP_LOGO_CACHE_BYTES (default 64 MiB); a failed CID is not retried for
-// TP_LOGO_RETRY_MS (default 10 min), a 451 never. One fetch per CID at a time and at
-// most TP_LOGO_CONCURRENCY (default 3) gateway requests in flight process-wide.
+// Caches, per CID: the bytes in an LRU bounded by TP_LOGO_CACHE_BYTES (default 64 MiB),
+// where a verified hit never goes stale and an unverified one expires after
+// UNVERIFIED_TTL_MS; a failed CID is not retried for TP_LOGO_RETRY_MS (default 10 min),
+// a 451 never. One fetch per CID at a time and at most TP_LOGO_CONCURRENCY (default 3)
+// gateway requests in flight process-wide.
 //
 // Node's global fetch (undici): no new dependency. Requiring this module starts nothing.
 
@@ -58,7 +63,12 @@ const LOGO_HEADERS = Object.freeze({
   'Content-Security-Policy': "default-src 'none'; sandbox",
   'Cross-Origin-Resource-Policy': 'same-origin',
 });
-const CACHE_HIT = 'public, max-age=31536000, immutable'; // a CA's logo never changes
+// How long bytes that could NOT be checked against their CID (dag-pb) are trusted: the
+// server holds them this long, and browsers cache them this long, so a wrong answer
+// from a gateway is gone within two days.
+const UNVERIFIED_TTL_MS = 86_400_000;
+const CACHE_HIT = 'public, max-age=31536000, immutable'; // bytes that hash to their CID never change
+const CACHE_HIT_UNVERIFIED = `public, max-age=${UNVERIFIED_TTL_MS / 1000}`; // a gateway's word: a day
 const CACHE_NONE_FINAL = 'public, max-age=86400'; // no logo, and there never will be
 const CACHE_NONE_RETRY = 'no-store'; // no logo right now: the gateways failed
 
@@ -164,7 +174,7 @@ function createLogoStore(overrides = {}) {
   const gateways = deps.gateways || (fromEnv.length ? fromEnv : parseGateways(DEFAULT_GATEWAYS.join(',')));
   const limit = createLimiter(deps.concurrency);
 
-  const hits = new Map(); // cid -> {bytes, type}, oldest first
+  const hits = new Map(); // cid -> {bytes, type, verified, expires}, oldest first
   let held = 0;
   const misses = new Map(); // cid -> {until, permanent, reason}
   const inflight = new Map(); // cid -> Promise
@@ -185,7 +195,7 @@ function createLogoStore(overrides = {}) {
     misses.set(cid, { until: r.permanent ? Infinity : deps.now() + deps.retryMs, permanent: r.permanent, reason: r.reason });
   }
 
-  /** One gateway, one attempt: {ok, bytes, type} or {reason, final?}. Never throws. */
+  /** One gateway, one attempt: {ok, bytes, type, verified} or {reason, final?}. Never throws. */
   async function fromGateway(gw, parsed) {
     const controller = new AbortController();
     const timer = deps.setTimeout(() => controller.abort(), gw.timeoutMs);
@@ -212,11 +222,12 @@ function createLogoStore(overrides = {}) {
       if (!bytes) return { reason: 'too_large' };
       const type = sniffImage(bytes);
       if (!type) return { reason: 'not_image' };
-      if (parsed.codec === 'raw') {
+      const verified = parsed.codec === 'raw'; // the only CIDs that are the file's own hash
+      if (verified) {
         const digest = crypto.createHash('sha256').update(bytes).digest();
         if (!digest.equals(parsed.digest)) return { reason: 'hash_mismatch' };
       }
-      return { ok: true, bytes, type };
+      return { ok: true, bytes, type, verified };
     } catch (_err) {
       return { reason: controller.signal.aborted ? 'timeout' : 'fetch_failed' };
     } finally {
@@ -236,7 +247,8 @@ function createLogoStore(overrides = {}) {
   }
 
   /**
-   * A CID's image: {ok: true, bytes: Buffer, type} or {ok: false, permanent, reason}.
+   * A CID's image: {ok: true, bytes: Buffer, type, verified} or {ok: false, permanent, reason}.
+   * `verified`: the bytes hash to the CID (a raw CID), so they may be cached for good.
    * `permanent`: there will never be an image for this CID (a bad CID, a 451).
    */
   function getLogo(cidText) {
@@ -245,9 +257,12 @@ function createLogoStore(overrides = {}) {
     const key = parsed.cid;
     const hit = hits.get(key);
     if (hit) {
-      hits.delete(key); // most recently used goes last
-      hits.set(key, hit);
-      return Promise.resolve({ ok: true, bytes: hit.bytes, type: hit.type });
+      hits.delete(key);
+      if (hit.expires > deps.now()) {
+        hits.set(key, hit); // most recently used goes last
+        return Promise.resolve({ ok: true, bytes: hit.bytes, type: hit.type, verified: hit.verified });
+      }
+      held -= hit.bytes.length; // unverified bytes had their day: ask the gateways again
     }
     const miss = misses.get(key);
     if (miss && miss.until > deps.now()) {
@@ -258,8 +273,9 @@ function createLogoStore(overrides = {}) {
       .then((r) => {
         if (r.ok) {
           misses.delete(key);
-          remember(key, { bytes: r.bytes, type: r.type });
-          return { ok: true, bytes: r.bytes, type: r.type };
+          const expires = r.verified ? Infinity : deps.now() + UNVERIFIED_TTL_MS;
+          remember(key, { bytes: r.bytes, type: r.type, verified: r.verified, expires });
+          return { ok: true, bytes: r.bytes, type: r.type, verified: r.verified };
         }
         rememberMiss(key, r);
         return r;
@@ -288,6 +304,8 @@ module.exports = {
   DEFAULTS,
   LOGO_HEADERS,
   CACHE_HIT,
+  CACHE_HIT_UNVERIFIED,
   CACHE_NONE_FINAL,
   CACHE_NONE_RETRY,
+  UNVERIFIED_TTL_MS,
 };

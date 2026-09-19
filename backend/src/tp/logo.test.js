@@ -6,7 +6,17 @@ const crypto = require('node:crypto');
 const fs = require('node:fs');
 const path = require('node:path');
 
-const { createLogoStore, parseGateways, sniffImage, DEFAULT_GATEWAYS, DEFAULTS, LOGO_HEADERS } = require('./logo');
+const {
+  createLogoStore,
+  parseGateways,
+  sniffImage,
+  DEFAULT_GATEWAYS,
+  DEFAULTS,
+  LOGO_HEADERS,
+  CACHE_HIT,
+  CACHE_HIT_UNVERIFIED,
+  UNVERIFIED_TTL_MS,
+} = require('./logo');
 
 const GW = [
   { prefix: 'https://gw-a.test/ipfs/', timeoutMs: 1000 },
@@ -132,6 +142,7 @@ test('a logo comes from the first gateway, as <prefix><cid>, with redirects NOT 
   const r = await store({ fetch }).getLogo(V0);
   assert.equal(r.ok, true);
   assert.equal(r.type, 'image/png', 'the sniffed type, not the one the gateway claimed');
+  assert.equal(r.verified, false, 'a dag-pb CID cannot be checked against its bytes');
   assert.ok(r.bytes.equals(bytes));
   assert.equal(fetch.calls.length, 1);
   assert.equal(fetch.calls[0].init.redirect, 'manual');
@@ -211,6 +222,7 @@ test('a raw CID is VERIFIED: bytes whose sha256 differs are refused and the next
   const fetch = fakeFetch({ ['https://gw-a.test/ipfs/' + cid]: ok(png()), ['https://gw-b.test/ipfs/' + cid]: ok(real) });
   const r = await store({ fetch }).getLogo(cid);
   assert.equal(r.ok, true);
+  assert.equal(r.verified, true, 'the bytes hash to the CID');
   assert.ok(r.bytes.equals(real));
   assert.equal(fetch.calls.length, 2);
 
@@ -292,4 +304,50 @@ test('at most `concurrency` gateway requests are in flight at once', async () =>
   const results = await Promise.all(imgs.map((img) => s.getLogo(rawCidOf(img))));
   assert.ok(results.every((r) => r.ok));
   assert.equal(peak, 2);
+});
+
+// ── how long bytes are trusted ───────────────────────────────────────────────
+
+test('Cache-Control: immutable only for bytes that hash to their CID; unverified bytes a day', () => {
+  assert.equal(CACHE_HIT, 'public, max-age=31536000, immutable');
+  assert.equal(CACHE_HIT_UNVERIFIED, 'public, max-age=86400');
+  assert.equal(UNVERIFIED_TTL_MS, 86_400_000, 'the server trusts unverified bytes exactly as long as a browser may');
+});
+
+test('unverified (dag-pb) bytes are held a day, then fetched again; verified (raw) bytes stay held', async () => {
+  let now = 0;
+  const first = png();
+  const second = png();
+  let answer = first;
+  const real = png();
+  const raw = rawCidOf(real);
+  const fetch = fakeFetch({
+    ['https://gw-a.test/ipfs/' + V0]: () => new Response(answer, { status: 200 }),
+    ['https://gw-a.test/ipfs/' + raw]: ok(real),
+  });
+  const s = store({ fetch, now: () => now, gateways: [GW[0]] });
+  let r = await s.getLogo(V0);
+  assert.equal(r.verified, false);
+  assert.ok(r.bytes.equals(first));
+  assert.equal((await s.getLogo(raw)).verified, true);
+
+  answer = second; // the gateway now answers other bytes for the same dag-pb CID
+  now += UNVERIFIED_TTL_MS - 1;
+  r = await s.getLogo(V0);
+  assert.ok(r.bytes.equals(first), 'inside its day: held, not fetched');
+  assert.equal(r.verified, false);
+  assert.equal(fetch.calls.length, 2);
+
+  now += 1;
+  r = await s.getLogo(V0);
+  assert.ok(r.bytes.equals(second), 'a day on, the gateway is asked again');
+  assert.equal(r.verified, false);
+  assert.equal(fetch.calls.length, 3);
+  assert.equal(s.heldBytes(), second.length + real.length, 'the expired bytes left the byte budget');
+
+  now += 10 * 365 * 86_400_000;
+  r = await s.getLogo(raw);
+  assert.equal(r.verified, true);
+  assert.ok(r.bytes.equals(real));
+  assert.equal(fetch.calls.length, 3, 'verified bytes are never fetched again while held');
 });

@@ -89,7 +89,9 @@ router.get(
       return res.status(404).json({ error: 'this token has no logo that can be shown' });
     }
     res.set('Content-Type', got.type);
-    res.set('Cache-Control', logo.CACHE_HIT);
+    // Immutable only for bytes that hash to their CID. A dag-pb logo is the gateway's
+    // word: browsers keep it a day, as the server does (tp/logo.js UNVERIFIED_TTL_MS).
+    res.set('Cache-Control', got.verified === true ? logo.CACHE_HIT : logo.CACHE_HIT_UNVERIFIED);
     return res.status(200).send(got.bytes);
   })
 );

@@ -45,7 +45,7 @@ async function withServer(fn) {
   }
 }
 
-function stubChain(t, { info = INFO, got = { ok: true, bytes: PNG, type: 'image/png' } } = {}) {
+function stubChain(t, { info = INFO, got = { ok: true, bytes: PNG, type: 'image/png', verified: true } } = {}) {
   const asked = [];
   stub(t, venue, 'cachedVenue', async (ca) => {
     assert.equal(ca, TOKEN);
@@ -90,14 +90,15 @@ test('a token with no IPFS logo is a 404 cached for a day, and no gateway is ask
 });
 
 test('a logo the gateways could not serve is a 404 not cached; a blocked (451) one is cached a day', async (t) => {
-  let got = { ok: false, permanent: false, reason: 'timeout' };
-  stubChain(t, { got: { ok: false } });
-  stub(t, logo, 'getLogo', async () => got);
+  // One stub, whose answer changes in place: stubbing getLogo twice in one test would
+  // leave the first stub installed afterwards (t.after runs its hooks first-in first-out).
+  const got = { ok: false, permanent: false, reason: 'timeout' };
+  stubChain(t, { got });
   await withServer(async (base) => {
     let r = await fetch(`${base}/logo/${TOKEN}`);
     assert.equal(r.status, 404);
     assert.equal(r.headers.get('cache-control'), 'no-store');
-    got = { ok: false, permanent: true, reason: 'blocked' };
+    Object.assign(got, { permanent: true, reason: 'blocked' });
     r = await fetch(`${base}/logo/${TOKEN}`);
     assert.equal(r.status, 404);
     assert.equal(r.headers.get('cache-control'), 'public, max-age=86400');
@@ -119,4 +120,22 @@ test('a token that is not pons is refused with its TpError JSON before any fetch
     assert.deepEqual(await r.json(), { error: 'that is not a pons launch', code: 'not_pons' });
   });
   assert.equal(asked, 0);
+});
+
+test('an unverified (dag-pb) logo is served cached for a day, never immutable', async (t) => {
+  const got = { ok: true, bytes: PNG, type: 'image/png', verified: false };
+  stubChain(t, { got });
+  await withServer(async (base) => {
+    let r = await fetch(`${base}/logo/${TOKEN}`);
+    assert.equal(r.status, 200);
+    assert.equal(r.headers.get('content-type'), 'image/png');
+    assert.equal(r.headers.get('cache-control'), 'public, max-age=86400');
+    assert.equal(r.headers.get('x-content-type-options'), 'nosniff');
+    assert.ok(Buffer.from(await r.arrayBuffer()).equals(PNG));
+    delete got.verified;
+    r = await fetch(`${base}/logo/${TOKEN}`);
+    assert.equal(r.status, 200);
+    assert.equal(r.headers.get('cache-control'), 'public, max-age=86400', 'no verdict is not a verified one');
+    await r.arrayBuffer();
+  });
 });
