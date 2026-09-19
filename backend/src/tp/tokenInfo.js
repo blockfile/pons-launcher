@@ -30,7 +30,7 @@
 // Every string is attacker-chosen. Control and bidi-override characters are stripped
 // by code point (no escape sequences in this source — memory: write-tool-escapes),
 // lengths are capped, socials are kept only when they become an https URL on the
-// platform's own host (website: any https host), and the logo text is reduced to an
+// platform's hosts (SOCIAL_HOSTS; website: a DNS host), and the logo text is reduced to an
 // IPFS CID (cid.js) or, failing that, to an https URL on a named host on port 443
 // (safeFetch.vetUrl), which GET /api/tp/logo/:ca serves (logo.js). The URL rides on the
 // info object as a NON-enumerable property, so JSON (GET /token) never carries it: the
@@ -60,7 +60,6 @@ const V1_LAST_LAUNCH_TS = 1786563753;
 const MAX_CACHE = 5000;
 const MAX_DESCRIPTION = 1000;
 const MAX_SOCIAL = 200;
-const MAX_LINK = 300;
 const POOL_TTL_MS = 15_000;
 const LF = 10;
 const LOGO_PATH = '/api/tp/logo/';
@@ -100,10 +99,44 @@ function cleanDescription(value) {
   return cleanString(value, MAX_DESCRIPTION, true);
 }
 
-const X_HOSTS = new Set(['x.com', 'www.x.com', 'mobile.x.com', 'twitter.com', 'www.twitter.com', 'mobile.twitter.com']);
-const TELEGRAM_HOSTS = new Set(['t.me', 'www.t.me', 'telegram.me', 'www.telegram.me']);
-const DISCORD_HOSTS = new Set(['discord.gg', 'www.discord.gg', 'discord.com', 'www.discord.com', 'discordapp.com', 'www.discordapp.com']);
-const FARCASTER_HOSTS = new Set(['warpcast.com', 'www.warpcast.com', 'farcaster.xyz', 'www.farcaster.xyz']);
+// THE social host table: each platform's accepted hosts -> the host its links are sent
+// on. frontend/src/dapp/ui/tokenFacts.js holds the same literal (tab isolation: each
+// side owns its copy) and both tests pin it, so change both files together. The page
+// checks a link against the same table, so it drops nothing sent from here.
+// discordapp.com is Discord's legacy domain: its links are sent as discord.com.
+const SOCIAL_HOSTS = Object.freeze({
+  x: Object.freeze({
+    'x.com': 'x.com',
+    'www.x.com': 'x.com',
+    'mobile.x.com': 'x.com',
+    'twitter.com': 'x.com',
+    'www.twitter.com': 'x.com',
+    'mobile.twitter.com': 'x.com',
+  }),
+  telegram: Object.freeze({
+    't.me': 't.me',
+    'www.t.me': 't.me',
+    'telegram.me': 't.me',
+    'www.telegram.me': 't.me',
+  }),
+  discord: Object.freeze({
+    'discord.gg': 'discord.gg',
+    'www.discord.gg': 'discord.gg',
+    'discord.com': 'discord.com',
+    'www.discord.com': 'discord.com',
+    'discordapp.com': 'discord.com',
+    'www.discordapp.com': 'discord.com',
+  }),
+  farcaster: Object.freeze({
+    'warpcast.com': 'warpcast.com',
+    'www.warpcast.com': 'warpcast.com',
+    'farcaster.xyz': 'farcaster.xyz',
+    'www.farcaster.xyz': 'farcaster.xyz',
+  }),
+});
+// A website's host: a DNS name with a letter (or IDN) TLD, never an IP literal. The
+// page's safeSocial applies the same rule, so every website link sent here renders.
+const DNS_NAME = /^(?=.{1,253}$)(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?[.])+(?:[a-z]{2,63}|xn--[a-z0-9-]{1,59})$/;
 // A profile / post / invite path: '/name', '/name/status/123', '/+invite', '/i/status/1'.
 const SAFE_PATH = /^[/][A-Za-z0-9_.+/-]{1,150}$/;
 const X_HANDLE = /^@?([A-Za-z0-9_]{1,15})$/;
@@ -132,29 +165,38 @@ function httpsUrl(value) {
   return url;
 }
 
-/** A link on one platform: its own host, a safe path, no query; www. dropped. */
-function platformLink(value, hosts, canonicalHost) {
+/** The host a platform's link is sent on, or null when the host is not the platform's. */
+function canonicalHost(kind, hostname) {
+  const hosts = SOCIAL_HOSTS[kind];
+  // Own keys only: 'https://constructor/x' must not find Object.prototype's.
+  return hosts && Object.prototype.hasOwnProperty.call(hosts, hostname) ? hosts[hostname] : null;
+}
+
+/** A link on one platform: one of its hosts, a safe path, no query; sent on its canonical host. */
+function platformLink(value, kind) {
   const url = httpsUrl(value);
-  if (!url || !hosts.has(url.hostname) || !SAFE_PATH.test(url.pathname)) return null;
-  return 'https://' + (canonicalHost || url.hostname.replace(/^www[.]/, '')) + url.pathname;
+  const host = url ? canonicalHost(kind, url.hostname) : null;
+  if (!host || !SAFE_PATH.test(url.pathname)) return null;
+  return 'https://' + host + url.pathname;
 }
 
 function xLink(value) {
   const handle = X_HANDLE.exec(socialText(value));
   if (handle) return 'https://x.com/' + handle[1];
-  return platformLink(value, X_HOSTS, 'x.com');
+  return platformLink(value, 'x');
 }
 
 function telegramLink(value) {
   const handle = TELEGRAM_HANDLE.exec(socialText(value));
   if (handle) return 'https://t.me/' + handle[1];
-  return platformLink(value, TELEGRAM_HOSTS, 't.me');
+  return platformLink(value, 'telegram');
 }
 
+/** A website: an https link on any DNS-named host (no IP literal), at most 200 characters. */
 function websiteLink(value) {
   const url = httpsUrl(value);
-  if (!url || !url.hostname.includes('.') || url.hostname.endsWith('.')) return null;
-  return url.href.length <= MAX_LINK ? url.href : null;
+  if (!url || !DNS_NAME.test(url.hostname)) return null;
+  return url.href.length <= MAX_SOCIAL ? url.href : null;
 }
 
 /**
@@ -166,9 +208,9 @@ function normaliseSocials(socials) {
   return Object.freeze({
     x: xLink(s.twitter),
     telegram: telegramLink(s.telegram),
-    discord: platformLink(s.discord, DISCORD_HOSTS, null),
+    discord: platformLink(s.discord, 'discord'),
     website: websiteLink(s.website),
-    farcaster: platformLink(s.farcaster, FARCASTER_HOSTS, null),
+    farcaster: platformLink(s.farcaster, 'farcaster'),
   });
 }
 
@@ -406,6 +448,7 @@ module.exports = {
   streamStats,
   normaliseSocials,
   cleanDescription,
+  SOCIAL_HOSTS,
   V1_LAST_LAUNCH_TS,
   POOL_TTL_MS,
   _clearCache,

@@ -380,3 +380,93 @@ test('streamStats: null without indexer stats; else the ring stats, the launch r
   assert.equal(second.figures.progress, 0.5);
   assert.equal(chain.count('aggregate3'), 1, 'the stats path itself never reads');
 });
+
+
+// ── the one social host table (Task 19a: the page renders every link sent) ────────
+
+// frontend/src/dapp/ui/tokenFacts.test.js pins the same literal against the page's
+// copy (tab isolation: each side owns its table). Change both tables and both tests.
+const SOCIAL_HOSTS_LITERAL = {
+  x: {
+    'x.com': 'x.com',
+    'www.x.com': 'x.com',
+    'mobile.x.com': 'x.com',
+    'twitter.com': 'x.com',
+    'www.twitter.com': 'x.com',
+    'mobile.twitter.com': 'x.com',
+  },
+  telegram: {
+    't.me': 't.me',
+    'www.t.me': 't.me',
+    'telegram.me': 't.me',
+    'www.telegram.me': 't.me',
+  },
+  discord: {
+    'discord.gg': 'discord.gg',
+    'www.discord.gg': 'discord.gg',
+    'discord.com': 'discord.com',
+    'www.discord.com': 'discord.com',
+    'discordapp.com': 'discord.com',
+    'www.discordapp.com': 'discord.com',
+  },
+  farcaster: {
+    'warpcast.com': 'warpcast.com',
+    'www.warpcast.com': 'warpcast.com',
+    'farcaster.xyz': 'farcaster.xyz',
+    'www.farcaster.xyz': 'farcaster.xyz',
+  },
+};
+
+test("SOCIAL_HOSTS is the one host table: frozen, and the same literal as the page's", () => {
+  assert.deepEqual(T.SOCIAL_HOSTS, SOCIAL_HOSTS_LITERAL);
+  assert.ok(Object.isFrozen(T.SOCIAL_HOSTS));
+  for (const [kind, hosts] of Object.entries(T.SOCIAL_HOSTS)) {
+    assert.ok(Object.isFrozen(hosts), kind);
+    // A link sent on its canonical host is sent unchanged when it is read again.
+    for (const canonical of Object.values(hosts)) assert.equal(hosts[canonical], canonical, `${kind}: ${canonical}`);
+  }
+});
+
+test('normaliseSocials: each link is sent on its canonical host; discordapp.com becomes discord.com', () => {
+  const cases = [
+    // [field, input, expected]
+    ['discord', 'https://discordapp.com/invite/abc123', 'https://discord.com/invite/abc123'],
+    ['discord', 'https://www.discordapp.com/invite/abc123', 'https://discord.com/invite/abc123'],
+    ['discord', 'http://DiscordApp.com/invite/abc123', 'https://discord.com/invite/abc123'],
+    ['discord', 'discordapp.com/invite/abc123', 'https://discord.com/invite/abc123'],
+    ['discord', 'https://www.discord.gg/abc123', 'https://discord.gg/abc123'],
+    ['discord', 'https://mobile.discord.com/invite/abc123', null],
+    ['discord', 'https://discordapp.com.evil.example/invite/abc123', null],
+    ['discord', 'https://discordapp.com/', null],
+    ['twitter', 'https://mobile.twitter.com/pons', 'https://x.com/pons'],
+    ['farcaster', 'https://www.farcaster.xyz/dwr', 'https://farcaster.xyz/dwr'],
+    // Hosts that are Object.prototype keys: own keys only, never 'https://[object Object]/...'.
+    ['twitter', 'https://constructor/pons', null],
+    ['telegram', 'https://__proto__/ponsfamily', null],
+    ['discord', 'https://constructor/invite/abc123', null],
+    ['farcaster', 'https://__proto__/dwr', null],
+  ];
+  const key = { twitter: 'x', telegram: 'telegram', discord: 'discord', farcaster: 'farcaster' };
+  for (const [field, input, want] of cases) {
+    assert.equal(T.normaliseSocials({ [field]: input })[key[field]], want, `${field}: ${input}`);
+  }
+});
+
+test('normaliseSocials: a website is sent only when the page renders it (a DNS host, at most 200 characters)', () => {
+  const at = (n) => 'example.com/' + 'a'.repeat(n); // sent as 'https://' + 12 + n characters
+  const cases = [
+    ['https://1.2.3.4/', null],
+    ['http://46.225.60.163/', null],
+    ['https://[::1]/', null],
+    ['https://a_b.example.com/', null],
+    ['https://46-225-60-163.sslip.io/', 'https://46-225-60-163.sslip.io/'],
+    ['https://mobile.io/', 'https://mobile.io/'],
+    ['https://' + String.fromCharCode(0xfc) + '.example/', 'https://xn--tda.example/'],
+    [at(180), 'https://' + at(180)],
+    [at(181), null],
+  ];
+  for (const [input, want] of cases) {
+    assert.equal(T.normaliseSocials({ website: input }).website, want, input.slice(0, 40));
+  }
+  assert.equal(('https://' + at(180)).length, 200);
+});
