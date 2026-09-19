@@ -18,12 +18,43 @@ import { id } from 'ethers';
 
 export const SOCIAL_KINDS = Object.freeze(['x', 'telegram', 'discord', 'website', 'farcaster']);
 
-const HOSTS = Object.freeze({
-  x: ['x.com', 'twitter.com'],
-  telegram: ['t.me', 'telegram.me'],
-  discord: ['discord.gg', 'discord.com'],
-  farcaster: ['warpcast.com', 'farcaster.xyz'],
+// THE social host table: each network's accepted hosts -> the host its links are
+// shown on. The server's copy (backend/src/tp/tokenInfo.js SOCIAL_HOSTS) is the same
+// literal (tab isolation: each side owns its copy) and both tests pin it, so change
+// both files together. The server sends every link on its canonical host already;
+// checking with the same table, the page drops nothing the server sends.
+export const SOCIAL_HOSTS = Object.freeze({
+  x: Object.freeze({
+    'x.com': 'x.com',
+    'www.x.com': 'x.com',
+    'mobile.x.com': 'x.com',
+    'twitter.com': 'x.com',
+    'www.twitter.com': 'x.com',
+    'mobile.twitter.com': 'x.com',
+  }),
+  telegram: Object.freeze({
+    't.me': 't.me',
+    'www.t.me': 't.me',
+    'telegram.me': 't.me',
+    'www.telegram.me': 't.me',
+  }),
+  discord: Object.freeze({
+    'discord.gg': 'discord.gg',
+    'www.discord.gg': 'discord.gg',
+    'discord.com': 'discord.com',
+    'www.discord.com': 'discord.com',
+    'discordapp.com': 'discord.com',
+    'www.discordapp.com': 'discord.com',
+  }),
+  farcaster: Object.freeze({
+    'warpcast.com': 'warpcast.com',
+    'www.warpcast.com': 'warpcast.com',
+    'farcaster.xyz': 'farcaster.xyz',
+    'www.farcaster.xyz': 'farcaster.xyz',
+  }),
 });
+// A profile / post / invite path, the server's rule: '/name', '/name/status/123', '/+invite'.
+const SAFE_PATH = /^[/][A-Za-z0-9_.+/-]{1,150}$/;
 const WINDOWS = Object.freeze(['m5', 'h1', 'h24']);
 const MAX_SOCIAL = 200;
 const MAX_DESCRIPTION = 1000;
@@ -80,8 +111,11 @@ export function cleanText(v, max) {
 
 /**
  * A social value as a link the page may render, or null: an https URL with no
- * credentials and no port, on that network's own hosts (a website: any DNS
- * host). A bare X or Telegram handle becomes its x.com / t.me link.
+ * credentials and no port. A network's link needs a host in SOCIAL_HOSTS and a
+ * profile / post / invite path, and comes back on the table's canonical host
+ * with no query, as the server sends it; a website needs a DNS host (checked
+ * whole) and at most 200 characters. A bare X or Telegram handle becomes its
+ * x.com / t.me link. Every link the server sends comes back unchanged.
  */
 export function safeSocial(kind, value) {
   if (!SOCIAL_KINDS.includes(kind) || typeof value !== 'string') return null;
@@ -96,10 +130,11 @@ export function safeSocial(kind, value) {
     return null;
   }
   if (u.protocol !== 'https:' || u.username || u.password || u.port) return null;
-  const host = u.hostname.toLowerCase().replace(/^(www|mobile)\./, '');
-  if (!DNS.test(host)) return null;
-  if (kind !== 'website' && !HOSTS[kind].includes(host)) return null;
-  return u.href.length > MAX_SOCIAL ? null : u.href;
+  if (kind === 'website') return DNS.test(u.hostname) && u.href.length <= MAX_SOCIAL ? u.href : null;
+  const hosts = SOCIAL_HOSTS[kind];
+  // Own keys only: 'https://constructor/x' must not find Object.prototype's.
+  if (!Object.prototype.hasOwnProperty.call(hosts, u.hostname) || !SAFE_PATH.test(u.pathname)) return null;
+  return `https://${hosts[u.hostname]}${u.pathname}`;
 }
 
 /**

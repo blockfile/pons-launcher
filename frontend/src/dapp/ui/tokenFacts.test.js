@@ -12,6 +12,7 @@ import {
   changeDir,
   identicon,
   SOCIAL_KINDS,
+  SOCIAL_HOSTS,
 } from './tokenFacts.js';
 
 // No escape sequences in this file on purpose (memory: write-tool-escapes).
@@ -24,7 +25,7 @@ const Q96 = 1n << 96n;
 test("socials: https links on each network's own hosts only; bare handles become x.com / t.me links", () => {
   assert.deepEqual([...SOCIAL_KINDS], ['x', 'telegram', 'discord', 'website', 'farcaster']);
   assert.equal(safeSocial('x', 'https://x.com/pons'), 'https://x.com/pons');
-  assert.equal(safeSocial('x', 'https://twitter.com/pons/status/1'), 'https://twitter.com/pons/status/1');
+  assert.equal(safeSocial('x', 'https://twitter.com/pons/status/1'), 'https://x.com/pons/status/1', 'on the canonical host, as the server sends it');
   assert.equal(safeSocial('x', '@VortaMarkets'), 'https://x.com/VortaMarkets');
   assert.equal(safeSocial('telegram', 'ponsfamily'), 'https://t.me/ponsfamily');
   assert.equal(safeSocial('telegram', 'https://t.me/ponsfamily'), 'https://t.me/ponsfamily');
@@ -187,4 +188,84 @@ test('identicon: 5 x 5, mirrored, the same for the same address in any case, dif
   assert.ok(a.some(Boolean));
   assert.deepEqual(identicon(TOKEN.toUpperCase().replace('0X', '0x')), a);
   assert.notDeepEqual(identicon(PAIR), a);
+});
+
+
+// The server's table (backend/src/tp/tokenInfo.js SOCIAL_HOSTS), which its own test
+// pins with the same literal. Tab isolation: each side owns its copy; change both.
+test("SOCIAL_HOSTS is the server's host table, literally", () => {
+  assert.deepEqual(SOCIAL_HOSTS, {
+    x: {
+      'x.com': 'x.com',
+      'www.x.com': 'x.com',
+      'mobile.x.com': 'x.com',
+      'twitter.com': 'x.com',
+      'www.twitter.com': 'x.com',
+      'mobile.twitter.com': 'x.com',
+    },
+    telegram: {
+      't.me': 't.me',
+      'www.t.me': 't.me',
+      'telegram.me': 't.me',
+      'www.telegram.me': 't.me',
+    },
+    discord: {
+      'discord.gg': 'discord.gg',
+      'www.discord.gg': 'discord.gg',
+      'discord.com': 'discord.com',
+      'www.discord.com': 'discord.com',
+      'discordapp.com': 'discord.com',
+      'www.discordapp.com': 'discord.com',
+    },
+    farcaster: {
+      'warpcast.com': 'warpcast.com',
+      'www.warpcast.com': 'warpcast.com',
+      'farcaster.xyz': 'farcaster.xyz',
+      'www.farcaster.xyz': 'farcaster.xyz',
+    },
+  });
+  assert.ok(Object.isFrozen(SOCIAL_HOSTS) && Object.values(SOCIAL_HOSTS).every((h) => Object.isFrozen(h)));
+});
+
+test('safeSocial renders every link the server sends, unchanged', () => {
+  // The links Part 02's normaliseSocials tests (Tasks 21 and 25) pin as its output.
+  const SENT = [
+    ['x', 'https://x.com/arnzxbt/status/2101288151469916245'],
+    ['x', 'https://x.com/playfomowar'],
+    ['x', 'https://x.com/useumbraa'],
+    ['x', 'https://x.com/VortaMarkets'],
+    ['telegram', 'https://t.me/+RQ8q4ioXsYxmNWE5'],
+    ['telegram', 'https://t.me/Temperuss/519'],
+    ['telegram', 'https://t.me/hoodetta'],
+    ['discord', 'https://discord.gg/abc123'],
+    ['discord', 'https://discord.com/invite/abc123'],
+    ['website', 'https://gmgnpad.com/'],
+    ['website', 'https://www.idleai.xyz/'],
+    ['website', 'https://thedrivingfly.com/#live-auction'],
+    ['website', 'https://linktr.ee/ArcadiaGame'],
+    ['website', 'https://46-225-60-163.sslip.io/'],
+    ['website', 'https://mobile.io/'],
+    ['website', 'https://xn--tda.example/'],
+    ['website', 'https://example.com/' + 'a'.repeat(180)],
+    ['farcaster', 'https://warpcast.com/dwr'],
+    ['farcaster', 'https://farcaster.xyz/dwr'],
+  ];
+  for (const [kind, url] of SENT) assert.equal(safeSocial(kind, url), url, `${kind}: ${url}`);
+  assert.deepEqual(normalizeInfo({ socials: { discord: 'https://discord.com/invite/abc123' } }).socials, [
+    { kind: 'discord', url: 'https://discord.com/invite/abc123' },
+  ]);
+});
+
+test('safeSocial checks and canonicalises with the same table: discordapp.com is shown as discord.com', () => {
+  assert.equal(safeSocial('discord', 'https://discordapp.com/invite/abc123'), 'https://discord.com/invite/abc123');
+  assert.equal(safeSocial('discord', 'https://www.discordapp.com/invite/abc123'), 'https://discord.com/invite/abc123');
+  assert.equal(safeSocial('x', 'https://mobile.twitter.com/pons'), 'https://x.com/pons');
+  assert.equal(safeSocial('x', 'https://x.com/pons?s=21'), 'https://x.com/pons', 'the query goes, as on the server');
+  assert.equal(safeSocial('farcaster', 'https://www.farcaster.xyz/dwr'), 'https://farcaster.xyz/dwr');
+  assert.equal(safeSocial('discord', 'https://mobile.discord.com/invite/abc123'), null, 'not a host in the table');
+  assert.equal(safeSocial('x', 'https://x.com/'), null, 'no profile path');
+  assert.equal(safeSocial('x', 'https://constructor/pons'), null, 'an Object.prototype key is not a host');
+  assert.equal(safeSocial('telegram', 'https://__proto__/ponsfamily'), null);
+  assert.equal(safeSocial('website', 'https://a_b.example.com/'), null, 'not a DNS name');
+  assert.equal(safeSocial('website', 'https://example.com/' + 'a'.repeat(181)), null, 'over 200 characters');
 });
