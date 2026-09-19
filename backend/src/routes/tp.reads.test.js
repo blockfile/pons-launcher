@@ -13,8 +13,13 @@ const { getAddress, hexlify, randomBytes } = require('ethers');
 
 const venue = require('../tp/venue');
 const state = require('../tp/state');
+const tokenInfo = require('../tp/tokenInfo');
 const { TpError } = require('../tp/errors');
 const router = require('./tp');
+
+// GET /token/:ca also reads the token's info. Offline by default in this file: a test
+// that wants an info stubs readTokenInfo itself (stub() restores this default after it).
+tokenInfo.readTokenInfo = async () => null;
 
 const TOKEN = '0xd8865aa9052a5e2f59641bb613ca84ec9377b101';
 const CURVE = '0x03ef670d7ec0e1c93e1a6cfa3bc24883c3492d81';
@@ -146,6 +151,52 @@ test('an unexpected failure is 502 unavailable (errors.js sendError) and leaks n
     assert.equal(status, 502);
     assert.equal(body.code, 'unavailable');
     assert.equal(JSON.stringify(body).includes('secret-internal-host'), false);
+  });
+});
+
+test('GET /token/:ca also answers {info, figures}: the token info, and the figures from the mark', async (t) => {
+  const INFO = {
+    token: TOKEN,
+    version: 'v2',
+    description: 'A token.',
+    phantomQuote: (168n * 10n ** 16n).toString(),
+    graduationThreshold: (42n * 10n ** 17n).toString(),
+  };
+  stub(t, venue, 'resolveVenue', async () => VENUE);
+  stub(t, state, 'readMark', async () => ({
+    block: 7,
+    price: 2e-9,
+    quoteReserve: (168n * 10n ** 16n + 21n * 10n ** 17n).toString(),
+    tokenReserve: '1',
+    feeBps: 100,
+  }));
+  stub(t, tokenInfo, 'readTokenInfo', async (v) => {
+    assert.equal(v, VENUE);
+    return INFO;
+  });
+  await withServer(async (base) => {
+    const { status, body } = await getJson(`${base}/token/${TOKEN}`);
+    assert.equal(status, 200);
+    assert.deepEqual(body.venue, VENUE, 'the venue is unchanged');
+    assert.equal(body.mark.block, 7, 'the mark is unchanged');
+    assert.deepEqual(body.info, INFO);
+    assert.deepEqual(body.figures, { progress: 0.5, raised: (21n * 10n ** 17n).toString(), liquidity: null });
+  });
+});
+
+test('GET /token/:ca: an info that will not read is info: null; the venue and the mark still answer', async (t) => {
+  t.mock.method(console, 'warn', () => {});
+  stub(t, venue, 'resolveVenue', async () => VENUE);
+  stub(t, state, 'readMark', async () => ({ block: 7, price: 1e-9, quoteReserve: '1', tokenReserve: '2', feeBps: 100 }));
+  stub(t, tokenInfo, 'readTokenInfo', async () => {
+    throw new Error('rpc timeout');
+  });
+  await withServer(async (base) => {
+    const { status, body } = await getJson(`${base}/token/${TOKEN}`);
+    assert.equal(status, 200);
+    assert.equal(body.info, null);
+    assert.deepEqual(body.figures, { progress: null, raised: null, liquidity: null });
+    assert.equal(body.mark.block, 7);
   });
 });
 

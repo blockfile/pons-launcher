@@ -23,6 +23,7 @@ const quote = require('../tp/quote');
 const broadcast = require('../tp/broadcast');
 const { broadcastCost } = require('../tp/limits'); // own line: later tasks' edits anchor on the line above
 const { handleStream, parseSid } = require('../tp/stream');
+const tokenInfo = require('../tp/tokenInfo'); // module object: routes/tp.reads.test.js stubs it
 const { createAccountRouter } = require('../tp/account');
 
 const router = express.Router();
@@ -45,20 +46,26 @@ const broadcastLimit = rateLimit({
 const wrap = (fn) => (req, res, next) => Promise.resolve().then(() => fn(req, res, next)).catch(next);
 
 // ── routes ───────────────────────────────────────────────────────────────────
-// {venue, mark}. The mark is best effort: a venue whose price will not read
-// answers mark: null — nothing, rather than a wrong number.
+// {venue, mark, info, figures}. Everything but the venue is best effort, read side by
+// side: a venue whose price will not read answers mark: null, a token whose info will
+// not read info: null — nothing, rather than a wrong number. info is the token header's
+// static half (tokenInfo.readTokenInfo, cached forever); figures its live half from
+// this mark (curve progress, pool liquidity), which the stream's 'stats' then updates.
 router.get(
   '/token/:ca',
   readLimit,
   wrap(async (req, res) => {
     const v = await venue.resolveVenue(req.params.ca);
-    let mark = null;
-    try {
-      mark = await state.readMark(v);
-    } catch (err) {
-      console.warn(`[tp] mark unavailable for ${v.token}: ${err.message}`);
-    }
-    res.json({ venue: v, mark });
+    const quiet = (what) => (err) => {
+      console.warn(`[tp] ${what} unavailable for ${v.token}: ${err && err.message}`);
+      return null;
+    };
+    const [mark, info, pool] = await Promise.all([
+      Promise.resolve().then(() => state.readMark(v)).catch(quiet('mark')),
+      Promise.resolve().then(() => tokenInfo.readTokenInfo(v)).catch(quiet('info')),
+      Promise.resolve().then(() => tokenInfo.poolBalances(v)).catch(quiet('pool balances')),
+    ]);
+    res.json({ venue: v, mark, info, figures: tokenInfo.figures(v, mark, info, pool) });
   })
 );
 // {token, addresses} -> {venue, wallets}. The addresses (<= 100, each

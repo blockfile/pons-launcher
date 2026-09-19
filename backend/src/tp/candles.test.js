@@ -153,3 +153,77 @@ test('a full day at one trade per second folds fast enough to serve a snapshot',
   assert.equal(hours.length, 24);
   assert.ok(ms < 250, `folding took ${ms} ms`);
 });
+
+// ── stats: the token header's 5 m / 1 h / 24 h ───────────────────────────────
+
+const near = (a, b) => Math.abs(a - b) < 1e-9;
+
+test('stats: change against the newest trade before each window, volume inside it', () => {
+  const r = new CandleRing();
+  const now = T0 + 100_000;
+  r.add(trade(now - 86_405, 1, 1)); // before the 24 h window (the ring still holds it)
+  r.add(trade(now - 7_200, 2, 2)); // inside 24 h, before 1 h
+  r.add(trade(now - 600, 4, 3)); // inside 1 h, before 5 m
+  r.add(trade(now - 60, 5, 0.5)); // inside 5 m
+  r.add(trade(now - 10, 8, 0.5));
+  const s = r.stats(now, { since: now - 86_400 });
+  assert.equal(s.at, now);
+  assert.equal(s.since, now - 86_400);
+  assert.equal(s.price, 8);
+  assert.ok(near(s.change.m5, 8 / 4 - 1));
+  assert.ok(near(s.change.h1, 8 / 2 - 1));
+  assert.ok(near(s.change.h24, 8 / 1 - 1));
+  assert.ok(near(s.volume.m5, 1));
+  assert.ok(near(s.volume.h1, 4));
+  assert.ok(near(s.volume.h24, 6));
+  assert.deepEqual(s.complete, { m5: true, h1: true, h24: true });
+});
+
+test('stats: no trade inside a window is exactly 0 %, not unknown', () => {
+  const r = new CandleRing();
+  const now = T0 + 100_000;
+  r.add(trade(now - 7_200, 3, 1));
+  const s = r.stats(now, { since: now - 86_400 });
+  assert.equal(s.price, 3);
+  assert.deepEqual(s.change, { m5: 0, h1: 0, h24: 0 });
+  assert.deepEqual(s.volume, { m5: 0, h1: 0, h24: 1 });
+});
+
+test('stats: with no trade before a window, the open of its oldest trade — or the launch price when it launched inside', () => {
+  const r = new CandleRing();
+  const now = T0 + 100_000;
+  r.add(trade(now - 1_000, 2, 1));
+  r.add(trade(now - 100, 3, 1));
+  let s = r.stats(now, { since: now - 3_600 });
+  assert.ok(near(s.change.m5, 3 / 2 - 1), '5 m: the trade before it');
+  assert.ok(near(s.change.h1, 3 / 2 - 1), '1 h: the oldest trade inside it');
+  assert.ok(near(s.change.h24, 3 / 2 - 1));
+  assert.deepEqual(s.complete, { m5: true, h1: true, h24: false }, 'the history reaches back 1 h only');
+
+  s = r.stats(now, { since: now - 3_600, launchTs: now - 2_000, launchPrice: 1 });
+  assert.ok(near(s.change.m5, 3 / 2 - 1), 'the launch is not inside 5 m');
+  assert.ok(near(s.change.h1, 3 / 1 - 1), 'launched inside the hour: against the launch price');
+  assert.ok(near(s.change.h24, 3 / 1 - 1));
+  assert.deepEqual(s.complete, { m5: true, h1: true, h24: true }, 'the history reaches the launch');
+});
+
+test('stats: an empty ring knows no price; history not read yet is incomplete', () => {
+  const s = new CandleRing().stats(T0);
+  assert.deepEqual(s, {
+    at: T0,
+    since: null,
+    price: null,
+    change: { m5: null, h1: null, h24: null },
+    volume: { m5: 0, h1: 0, h24: 0 },
+    complete: { m5: false, h1: false, h24: false },
+  });
+});
+
+test('stats: a second newer than nowSec is not counted; volume is in pair units', () => {
+  const r = new CandleRing({ quoteDecimals: 6 });
+  r.add({ ...trade(T0 - 5, 3), quoteAmt: '2500000' });
+  r.add({ ...trade(T0 + 5, 9), quoteAmt: '1000000' });
+  const s = r.stats(T0);
+  assert.equal(s.price, 3);
+  assert.ok(near(s.volume.m5, 2.5));
+});

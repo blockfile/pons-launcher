@@ -772,3 +772,58 @@ test('TP_MAX_TOKENS comes from the environment, default 30', () => {
     else process.env.TP_MAX_TOKENS = saved;
   }
 });
+
+// ── stats(): the token header's change and volume ────────────────────────────
+
+/** A curve trade with chosen amounts (curveLog's are fixed): price = quoteWei / tokenWei. */
+function curveTrade(block, quoteWei, tokenWei) {
+  txSeq += 1;
+  return {
+    address: CURVE,
+    topics: [TOPICS.CURVE_BUY, pad(ROUTER), pad(ALICE)],
+    data: abi.encode(['uint256', 'uint256', 'uint256', 'uint256'], [quoteWei, tokenWei, 0n, 0n]),
+    blockNumber: block,
+    index: 0,
+    transactionHash: '0x' + txSeq.toString(16).padStart(64, '0'),
+  };
+}
+
+test('stats(): change and volume over the history indexed so far, and how far back it reaches', async () => {
+  const s = setup({ head: 40_000 });
+  s.chain.logs.push(curveTrade(10_000, 10n ** 15n, 10n ** 23n), curveTrade(39_990, 2n * 10n ** 15n, 10n ** 23n));
+  const ix = s.reg.acquire(curveVenue);
+  await s.clock.advance(0); // the first hour: blocks 4,001..40,000
+  const now = T0 + 3_999; // block 39,990's second — the fake wall clock is far behind the chart
+  let st = ix.stats();
+  assert.equal(st.at, now);
+  assert.equal(st.since, now - 3_600, '36,000 blocks read = 1 h at 10 blocks a second');
+  assert.ok(Math.abs(st.price - 2e-8) < 1e-20);
+  assert.ok(Math.abs(st.change.m5 - 1) < 1e-9, '5 m: against the trade before it');
+  assert.ok(Math.abs(st.change.h1 - 1) < 1e-9, '1 h: against its oldest trade');
+  assert.ok(Math.abs(st.volume.h1 - 0.003) < 1e-12);
+  assert.deepEqual(st.complete, { m5: true, h1: true, h24: false });
+
+  await s.clock.advance(2_000); // the rest of the day (blocks 0..4,000)
+  st = ix.stats();
+  assert.equal(st.since, now - 86_400);
+  assert.equal(st.complete.h24, true);
+  const launched = ix.stats({ ts: T0 + 500, price: 5e-9 });
+  assert.ok(Math.abs(launched.change.h1 - 3) < 1e-9, 'a launch inside the hour is its reference');
+  s.reg.stopAll();
+});
+
+test('stats() is one ring scan per second and per ingest, shared by every caller', async () => {
+  const s = setup({ head: 40_000 });
+  s.chain.logs.push(curveTrade(40_000, 10n ** 15n, 10n ** 23n));
+  const ix = s.reg.acquire(curveVenue);
+  await s.clock.advance(0);
+  const a = ix.stats();
+  assert.equal(ix.stats(), a, 'nothing new: the same object');
+  s.chain.head = 40_010;
+  s.chain.logs.push(curveTrade(40_005, 3n * 10n ** 15n, 10n ** 23n)); // the same second
+  await s.clock.advance(400); // one live poll
+  const b = ix.stats();
+  assert.notEqual(b, a);
+  assert.ok(Math.abs(b.price - 3e-8) < 1e-20);
+  s.reg.stopAll();
+});
