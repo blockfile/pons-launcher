@@ -1,26 +1,32 @@
 'use strict';
 
-// Token logos for the dApp's header (spec Addendum v2 D): fetched BY THE SERVER from
-// IPFS gateways and served by GET /api/tp/logo/:ca from the page's own origin, so the
-// page's CSP stays img-src 'self' data:.
+// Token logos for the dApp's header (spec Addendum v2 D): fetched BY THE SERVER and
+// served by GET /api/tp/logo/:ca from the page's own origin, so the page's CSP stays
+// img-src 'self' data:. Two sources:
 //
-// SSRF. The only URLs this module ever fetches are <gateway prefix><cid>: the prefixes
-// are a fixed https list (TP_LOGO_GATEWAYS, default below) and the CID has passed
-// cid.parseCid, whose character set has no '/', '?', '#', '@', ':' or '.'. The token's
-// own logo text contributes nothing but that CID; the host it names is never
-// contacted. Redirects are not followed (redirect: 'manual' — any 3xx is a failed
-// gateway), so a gateway cannot bounce the fetch anywhere else either.
+//   - an IPFS logo (ipfs://<cid>, a gateway URL, a bare CID: ~78% of pons logos):
+//     getLogo(cid) fetches <gateway prefix><cid> from a fixed https list
+//     (TP_LOGO_GATEWAYS, default below). The CID has passed cid.parseCid, whose
+//     character set has no '/', '?', '#', '@', ':' or '.', so the token's own logo
+//     text contributes nothing but that CID and the host it names is never contacted.
+//     Redirects are not followed (redirect: 'manual': any 3xx is a failed gateway);
+//   - a logo on an ordinary https host (~21%; spec section E decision 19):
+//     getHttpsLogo(url) fetches it through safeFetch.js, the SSRF-safe GET (https on
+//     443 only, no userinfo, every DNS answer public, the connection pinned to the
+//     vetted address, at most 2 redirects each vetted again, 5 s in all).
 //
-// What is served: at most TP_LOGO_MAX_BYTES (default 1 MiB, the spec's cap; ~15% of
-// sampled pons logos are 1-3 MB and become identicons), and only PNG, JPEG, GIF or WebP
-// by their MAGIC BYTES — never SVG, and never whatever Content-Type a gateway claimed.
+// What is served: at most TP_LOGO_MAX_BYTES (default 3 MiB, at most 5 MiB: the largest
+// sampled pons logos are 3 MB), and only PNG, JPEG, GIF or WebP by their MAGIC BYTES —
+// never SVG, and never whatever Content-Type a gateway or host claimed.
 // A raw-codec CIDv1 (bafkrei..., ~half of all pons logos) IS the sha2-256 of the file,
 // so those bytes are verified and a lying gateway cannot swap the image. dag-pb CIDs
 // (Qm..., bafybei...) wrap the file in a UnixFS node and are not verified: their bytes
 // are only a gateway's word, so they are trusted for UNVERIFIED_TTL_MS (a day) and no
 // longer. The server then drops them and asks the gateways again, and GET /logo tells
 // browsers max-age=86400 (CACHE_HIT_UNVERIFIED). Only verified bytes stay held until
-// evicted and are served immutable (CACHE_HIT).
+// evicted and are served immutable (CACHE_HIT). A logo from an https host can never be
+// verified (its host may change it at any time): it is held and served like dag-pb
+// bytes, for a day.
 //
 // Gateways (server-side, measured 2026-09-19): ponsfamily's own worker — where
 // ponsfamily uploads logos (config.ipfsUploadUrl) — answers in 0.3-1.5 s, Filebase in
@@ -41,6 +47,7 @@
 
 const crypto = require('node:crypto');
 const { parseCid } = require('./cid');
+const safeFetch = require('./safeFetch'); // module object: tests stand in for safeGet
 
 const DEFAULT_GATEWAYS = Object.freeze([
   'https://pons-vercel-data-gateway.ozzy-6de.workers.dev/public/ipfs/|4000',
@@ -49,7 +56,7 @@ const DEFAULT_GATEWAYS = Object.freeze([
 ]);
 const MIB = 1024 * 1024;
 // Each overridable by its TP_LOGO_* variable (backend/.env.example).
-const DEFAULTS = Object.freeze({ maxBytes: MIB, cacheBytes: 64 * MIB, retryMs: 10 * 60_000, concurrency: 3 });
+const DEFAULTS = Object.freeze({ maxBytes: 3 * MIB, cacheBytes: 64 * MIB, retryMs: 10 * 60_000, concurrency: 3 });
 const MAX_BYTES_CEILING = 5 * MIB; // pons' own uploader cap: no reason to ever allow more
 const MAX_MISSES = 10_000;
 const DEFAULT_TIMEOUT_MS = 4000;
@@ -164,6 +171,7 @@ function createLogoStore(overrides = {}) {
     setTimeout: (fn, ms) => setTimeout(fn, ms),
     clearTimeout: (h) => clearTimeout(h),
     gateways: null,
+    safeGet: (url, options) => safeFetch.safeGet(url, options),
     maxBytes: Math.min(posInt(env.TP_LOGO_MAX_BYTES, DEFAULTS.maxBytes), MAX_BYTES_CEILING),
     cacheBytes: posInt(env.TP_LOGO_CACHE_BYTES, DEFAULTS.cacheBytes),
     retryMs: posInt(env.TP_LOGO_RETRY_MS, DEFAULTS.retryMs),
@@ -174,10 +182,11 @@ function createLogoStore(overrides = {}) {
   const gateways = deps.gateways || (fromEnv.length ? fromEnv : parseGateways(DEFAULT_GATEWAYS.join(',')));
   const limit = createLimiter(deps.concurrency);
 
-  const hits = new Map(); // cid -> {bytes, type, verified, expires}, oldest first
+  // Keyed by the CID, or by 'https:' + the URL for a logo on an https host.
+  const hits = new Map(); // key -> {bytes, type, verified, expires}, oldest first
   let held = 0;
-  const misses = new Map(); // cid -> {until, permanent, reason}
-  const inflight = new Map(); // cid -> Promise
+  const misses = new Map(); // key -> {until, permanent, reason}
+  const inflight = new Map(); // key -> Promise
 
   function remember(cid, entry) {
     if (entry.bytes.length > deps.cacheBytes) return;
@@ -247,14 +256,11 @@ function createLogoStore(overrides = {}) {
   }
 
   /**
-   * A CID's image: {ok: true, bytes: Buffer, type, verified} or {ok: false, permanent, reason}.
-   * `verified`: the bytes hash to the CID (a raw CID), so they may be cached for good.
-   * `permanent`: there will never be an image for this CID (a bad CID, a 451).
+   * `key`'s image from the caches, or from `load()` once (single-flight), remembered:
+   * a verified answer for good, an unverified one for UNVERIFIED_TTL_MS, a failure for
+   * retryMs (a permanent one for good).
    */
-  function getLogo(cidText) {
-    const parsed = parseCid(cidText);
-    if (!parsed) return Promise.resolve({ ok: false, permanent: true, reason: 'bad_cid' });
-    const key = parsed.cid;
+  function cached(key, load) {
     const hit = hits.get(key);
     if (hit) {
       hits.delete(key);
@@ -269,7 +275,7 @@ function createLogoStore(overrides = {}) {
       return Promise.resolve({ ok: false, permanent: miss.permanent, reason: miss.reason });
     }
     if (inflight.has(key)) return inflight.get(key);
-    const pending = fetchCid(parsed)
+    const pending = load()
       .then((r) => {
         if (r.ok) {
           misses.delete(key);
@@ -285,7 +291,38 @@ function createLogoStore(overrides = {}) {
     return pending;
   }
 
-  return { getLogo, gateways, heldBytes: () => held };
+  /**
+   * A CID's image: {ok: true, bytes: Buffer, type, verified} or {ok: false, permanent, reason}.
+   * `verified`: the bytes hash to the CID (a raw CID), so they may be cached for good.
+   * `permanent`: there will never be an image for this CID (a bad CID, a 451).
+   */
+  function getLogo(cidText) {
+    const parsed = parseCid(cidText);
+    if (!parsed) return Promise.resolve({ ok: false, permanent: true, reason: 'bad_cid' });
+    return cached(parsed.cid, () => fetchCid(parsed));
+  }
+
+  /** One attempt at an https host's logo through safeFetch: {ok, bytes, type, verified: false} or {reason}. */
+  async function fromHttpsHost(url) {
+    const r = await deps.safeGet(url, { maxBytes: deps.maxBytes });
+    if (!r.ok) return { ok: false, permanent: r.reason === 'bad_url', reason: r.reason };
+    const type = sniffImage(r.bytes);
+    if (!type) return { ok: false, permanent: false, reason: 'not_image' };
+    return { ok: true, bytes: r.bytes, type, verified: false };
+  }
+
+  /**
+   * The image a logo URL on an ordinary https host names, fetched SSRF-safe
+   * (safeFetch.js): {ok: true, bytes, type, verified: false} or {ok: false, permanent, reason}.
+   * Never verified: held for UNVERIFIED_TTL_MS and served for a day, like dag-pb bytes.
+   */
+  function getHttpsLogo(url) {
+    const vetted = safeFetch.vetUrl(url);
+    if (!vetted) return Promise.resolve({ ok: false, permanent: true, reason: 'bad_url' });
+    return cached(`https:${vetted.href}`, () => limit(() => fromHttpsHost(vetted.href)));
+  }
+
+  return { getLogo, getHttpsLogo, gateways, heldBytes: () => held };
 }
 
 let store = null; // built on first use, so requiring this module reads nothing
@@ -295,8 +332,14 @@ function getLogo(cid) {
   return store.getLogo(cid);
 }
 
+function getHttpsLogo(url) {
+  if (!store) store = createLogoStore();
+  return store.getHttpsLogo(url);
+}
+
 module.exports = {
   getLogo,
+  getHttpsLogo,
   createLogoStore,
   parseGateways,
   sniffImage,

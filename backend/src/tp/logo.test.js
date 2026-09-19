@@ -131,7 +131,7 @@ test('backend/.env.example documents every TP_LOGO_* setting, with the defaults 
   ]) {
     assert.ok(lines.includes(line), line);
   }
-  assert.equal(DEFAULTS.maxBytes, 1024 * 1024, "the spec's 1 MB cap");
+  assert.equal(DEFAULTS.maxBytes, 3 * 1024 * 1024, 'section E decision 18: 3 MiB (at most 5 MiB)');
 });
 
 // ── fetching ─────────────────────────────────────────────────────────────────
@@ -312,6 +312,61 @@ test('Cache-Control: immutable only for bytes that hash to their CID; unverified
   assert.equal(CACHE_HIT, 'public, max-age=31536000, immutable');
   assert.equal(CACHE_HIT_UNVERIFIED, 'public, max-age=86400');
   assert.equal(UNVERIFIED_TTL_MS, 86_400_000, 'the server trusts unverified bytes exactly as long as a browser may');
+});
+
+// ── logos on ordinary https hosts (section E decision 19) ────────────────────
+
+/** A safeGet stand-in: `answers` maps a URL to {ok, bytes} | {ok: false, reason}; calls are logged. */
+function fakeSafeGet(answers) {
+  const calls = [];
+  const fn = async (url, options) => {
+    calls.push({ url, options });
+    return answers[url] || { ok: false, reason: 'http_404' };
+  };
+  fn.calls = calls;
+  return fn;
+}
+
+test('an https-host logo goes through safeFetch with the byte cap; it is an image by magic bytes, never verified', async () => {
+  const bytes = png();
+  const safeGet = fakeSafeGet({ 'https://pbs.twimg.com/media/x.png': { ok: true, bytes } });
+  const s = store({ safeGet, maxBytes: 4096 });
+  const got = await s.getHttpsLogo('https://pbs.twimg.com/media/x.png#frag');
+  assert.deepEqual(got, { ok: true, bytes, type: 'image/png', verified: false });
+  assert.deepEqual(safeGet.calls, [{ url: 'https://pbs.twimg.com/media/x.png', options: { maxBytes: 4096 } }]);
+  const svg = store({ safeGet: fakeSafeGet({ 'https://evil.example.com/a.svg': { ok: true, bytes: SVG } }) });
+  assert.deepEqual(await svg.getHttpsLogo('https://evil.example.com/a.svg'), { ok: false, permanent: false, reason: 'not_image' });
+});
+
+test('an https-host logo URL that fails the SSRF vetting is permanent and fetches nothing', async () => {
+  const safeGet = fakeSafeGet({});
+  const s = store({ safeGet });
+  for (const bad of ['http://pbs.twimg.com/x.png', 'https://127.0.0.1/x.png', 'https://pbs.twimg.com:8443/x.png', 'https://u:p@pbs.twimg.com/x.png', 'not a url']) {
+    assert.deepEqual(await s.getHttpsLogo(bad), { ok: false, permanent: true, reason: 'bad_url' }, bad);
+  }
+  assert.equal(safeGet.calls.length, 0);
+});
+
+test('an https-host logo is held a day and fetched again after; a failure waits retryMs', async () => {
+  const clock = { t: 1_000_000 };
+  const bytes = png();
+  const answers = { 'https://logo.example.com/a.png': { ok: true, bytes } };
+  const safeGet = fakeSafeGet(answers);
+  const s = store({ safeGet, now: () => clock.t });
+  await s.getHttpsLogo('https://logo.example.com/a.png');
+  await Promise.all([s.getHttpsLogo('https://logo.example.com/a.png'), s.getHttpsLogo('https://logo.example.com/a.png')]);
+  assert.equal(safeGet.calls.length, 1, 'held: nothing fetched again within the day');
+  clock.t += UNVERIFIED_TTL_MS;
+  assert.equal((await s.getHttpsLogo('https://logo.example.com/a.png')).ok, true);
+  assert.equal(safeGet.calls.length, 2, 'a day on, the host is asked again');
+
+  answers['https://logo.example.com/b.png'] = { ok: false, reason: 'forbidden_address' };
+  assert.deepEqual(await s.getHttpsLogo('https://logo.example.com/b.png'), { ok: false, permanent: false, reason: 'forbidden_address' });
+  await s.getHttpsLogo('https://logo.example.com/b.png');
+  assert.equal(safeGet.calls.length, 3, 'a failure is not retried at once');
+  clock.t += 60_000;
+  await s.getHttpsLogo('https://logo.example.com/b.png');
+  assert.equal(safeGet.calls.length, 4, 'then it is');
 });
 
 test('unverified (dag-pb) bytes are held a day, then fetched again; verified (raw) bytes stay held', async () => {

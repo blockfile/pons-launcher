@@ -31,8 +31,10 @@
 // by code point (no escape sequences in this source — memory: write-tool-escapes),
 // lengths are capped, socials are kept only when they become an https URL on the
 // platform's own host (website: any https host), and the logo text is reduced to an
-// IPFS CID (cid.js) that GET /api/tp/logo/:ca serves (logo.js). The raw logo text never
-// reaches the browser.
+// IPFS CID (cid.js) or, failing that, to an https URL on a named host on port 443
+// (safeFetch.vetUrl), which GET /api/tp/logo/:ca serves (logo.js). The URL rides on the
+// info object as a NON-enumerable property, so JSON (GET /token) never carries it: the
+// raw logo text never reaches the browser.
 //
 // figures(): curve progress is ponsfamily's own formula (ponsV2GraduationProgress in
 // their bundle): real quote / graduationThreshold, real = quoteReserve - phantomQuote
@@ -48,8 +50,9 @@ const { TpError } = require('./errors');
 const providers = require('./providers');
 const { aggregate3, decodeSlot, one } = require('./multicall');
 const { cidFromLogoUri } = require('./cid');
+const { vetUrl } = require('./safeFetch');
 
-const lc = (a) => String(a).toLowerCase();
+const lc =(a) => String(a).toLowerCase();
 const ZERO = lc(C.NATIVE);
 
 const V1_LAST_LAUNCH_TS = 1786563753;
@@ -169,10 +172,18 @@ function normaliseSocials(socials) {
   });
 }
 
-/** The logo text -> {cid, path} (path: this token's GET /api/tp/logo/:ca), or null. */
+/**
+ * The logo text -> {cid, path} for an IPFS logo, {path} with a non-enumerable `url` for
+ * one on an ordinary https host, or null (path: this token's GET /api/tp/logo/:ca).
+ */
 function logoOf(token, text) {
   const cid = cidFromLogoUri(text);
-  return cid ? Object.freeze({ cid, path: LOGO_PATH + token }) : null;
+  if (cid) return Object.freeze({ cid, path: LOGO_PATH + token });
+  const url = vetUrl(text);
+  if (!url) return null;
+  const logo = { path: LOGO_PATH + token };
+  Object.defineProperty(logo, 'url', { value: url.href, enumerable: false });
+  return Object.freeze(logo);
 }
 
 const addressOrNull = (a) => (a == null || lc(a) === ZERO ? null : getAddress(lc(a)));

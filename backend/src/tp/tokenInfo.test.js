@@ -143,10 +143,37 @@ test('v1: the registry deployer, no curve reads, and launchedBefore the last v1 
   assert.equal(info.launchedAt, null);
   assert.equal(info.launchedBefore, T.V1_LAST_LAUNCH_TS);
   assert.equal(info.launchedBefore, 1786563753);
-  assert.equal(info.logo, null, 'a logo outside IPFS is no logo');
+  // A logo on an ordinary https host (section E decision 19): served by GET /logo through
+  // the SSRF-safe fetch. The URL is for the server only: it never goes out as JSON.
+  assert.deepEqual({ ...info.logo }, { path: '/api/tp/logo/' + TOKEN });
+  assert.equal(info.logo.url, 'https://pbs.twimg.com/media/x.png');
+  assert.ok(!JSON.stringify(info).includes('twimg'), 'the logo URL is not in the JSON the page gets');
   assert.equal(info.graduationThreshold, null);
   assert.equal(info.phantomQuote, null);
   assert.equal(chain.log.filter((l) => l.to === CURVE).length, 0);
+});
+
+test('a logo text that is neither IPFS nor a vetted https URL is no logo', async () => {
+  for (const text of [
+    'http://pbs.twimg.com/media/x.png',
+    'https://127.0.0.1/x.png',
+    'https://10.0.0.1/x.png',
+    'https://pbs.twimg.com:8443/x.png',
+    'https://user:pw@pbs.twimg.com/x.png',
+    'https://localhost/x.png',
+    'data:image/png;base64,AAAA',
+    'javascript:alert(1)',
+    'just some words',
+  ]) {
+    T._clearCache();
+    const chain = fakeChain();
+    chain.on(TOKEN, TOKEN_INFO, () => [DEPLOYER, text, '', ['', '', '', '', '']]);
+    chain.on(C.PONS_V1_FACTORY, V1_RECORD, () => [
+      [TOKEN, DEPLOYER, C.WETH, ZERO, 673450n, 0n, 0n, 25741081n, 10n ** 27n, false, 10000, true, 46n * 10n ** 15n],
+    ]);
+    const info = await T.readTokenInfo(v1Venue, { provider: chain.provider });
+    assert.equal(info.logo, null, text);
+  }
 });
 
 test('a token whose getTokenInfo reverts still answers the registry fields — no logo, no socials', async () => {

@@ -20,7 +20,9 @@
 //                             never contacted; a query or fragment is ignored, a path
 //                             AFTER the CID (a file inside a directory) is refused
 //   <cid>                     a bare CID (one sample)
-// Everything else (21% of samples are other https hosts) is no logo.
+// Everything else is not a CID. The 21% of samples on other https hosts are fetched
+// instead through the SSRF-safe GET (tokenInfo.js -> safeFetch.js; spec section E
+// decision 19); any other text is no logo.
 //
 // No escape sequences in this source (memory: write-tool-escapes).
 

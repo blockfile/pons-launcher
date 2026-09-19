@@ -122,6 +122,28 @@ test('a token that is not pons is refused with its TpError JSON before any fetch
   assert.equal(asked, 0);
 });
 
+test('a logo on an https host is fetched through getHttpsLogo with the URL from the info, and served for a day', async (t) => {
+  const URL_TEXT = 'https://pbs.twimg.com/media/x.png';
+  const source = { path: '/api/tp/logo/' + TOKEN };
+  Object.defineProperty(source, 'url', { value: URL_TEXT, enumerable: false });
+  const asked = stubChain(t, { info: { token: TOKEN, logo: source } });
+  const httpsAsked = [];
+  stub(t, logo, 'getHttpsLogo', async (url) => {
+    httpsAsked.push(url);
+    return { ok: true, bytes: PNG, type: 'image/png', verified: false };
+  });
+  await withServer(async (base) => {
+    const r = await fetch(`${base}/logo/${TOKEN}`);
+    assert.equal(r.status, 200);
+    assert.equal(r.headers.get('content-type'), 'image/png');
+    assert.equal(r.headers.get('cache-control'), 'public, max-age=86400', 'an https host may change its logo: never immutable');
+    assert.equal(r.headers.get('x-content-type-options'), 'nosniff');
+    assert.ok(Buffer.from(await r.arrayBuffer()).equals(PNG));
+  });
+  assert.deepEqual(httpsAsked, [URL_TEXT]);
+  assert.deepEqual(asked, [], 'no IPFS gateway is asked for an https logo');
+});
+
 test('an unverified (dag-pb) logo is served cached for a day, never immutable', async (t) => {
   const got = { ok: true, bytes: PNG, type: 'image/png', verified: false };
   stubChain(t, { got });
