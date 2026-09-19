@@ -55,6 +55,7 @@ const { AbiCoder, FetchRequest, Interface, JsonRpcProvider, Transaction } = requ
 const C = require('./constants');
 const { TpError } = require('./errors');
 const providers = require('./providers');
+const config = require('../config');
 
 const coder = AbiCoder.defaultAbiCoder();
 
@@ -530,11 +531,18 @@ async function sendOne(rpc, seqRpc, raw, timeoutMs) {
  *
  * @param {object} venue a Venue from venue.js
  * @param {string[]} raws signed raw transactions (hex)
- * @param {{provider?: object, sequencer?: object|null, sequencerTimeoutMs?: number}} [deps]
+ * @param {{provider?: object, sequencer?: object|null, sequencerTimeoutMs?: number, dryRun?: boolean}} [deps]
  *   tests only. Injecting `provider` also turns the env's sequencer OFF unless
  *   `sequencer` is passed too, so a test can never reach a real endpoint.
  * @returns {Promise<Array<{hash, from, nonce, ok, error}>>} in the order of `raws`
  */
+// Tests inject a fake provider; that is offline by construction, so it is not dry run
+// unless the test says so. With no injection the server's own flag decides.
+function isDryRun(deps) {
+  if (typeof deps.dryRun === 'boolean') return deps.dryRun;
+  return deps.provider ? false : Boolean(config.dryRun);
+}
+
 async function broadcast(venue, raws, deps = {}) {
   if (!Array.isArray(raws) || raws.length === 0) {
     throw new TpError('bad_request', 'txs must be a non-empty list of signed transactions');
@@ -562,7 +570,14 @@ async function broadcast(venue, raws, deps = {}) {
     slots.add(slot);
   });
 
-  // 2. Send.
+  // 2. A DRY_RUN server sends nothing — the same promise the console's tabs keep, and
+  // the one server.js prints at boot. Checked AFTER validation, so a bad batch is still
+  // refused as bad_tx and a dry-run deployment exercises the whole allowlist.
+  if (isDryRun(deps)) {
+    throw new TpError('unavailable', 'this server runs with DRY_RUN — nothing is broadcast', 503);
+  }
+
+  // 3. Send.
   const rpc = deps.provider || providers.tpSendProvider();
   const seqRpc = deps.provider ? deps.sequencer || null : sequencerProvider();
   const seqTimeoutMs = deps.sequencerTimeoutMs ?? SEQUENCER_TIMEOUT_MS;
@@ -691,5 +706,6 @@ module.exports = {
     sendError,
     sequencerProvider,
     resetSequencer,
+    isDryRun,
   },
 };

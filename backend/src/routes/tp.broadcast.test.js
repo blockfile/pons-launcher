@@ -10,6 +10,9 @@
 // blank it BEFORE anything loads config.js (dotenv never overrides a set variable),
 // so a developer's .env can never send these test transactions anywhere.
 process.env.TP_SEQUENCER_URL = '';
+// The send provider below is a fake, so this process runs 'live': a DRY_RUN server
+// refuses every broadcast (tp/broadcast.js), which is not what these tests are about.
+process.env.DRY_RUN = 'false';
 
 const test = require('node:test');
 const assert = require('node:assert/strict');

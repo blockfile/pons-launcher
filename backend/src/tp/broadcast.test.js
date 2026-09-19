@@ -598,3 +598,28 @@ test('refused — a v1 sell at a fee tier other than the launch pool the venue n
     await refused(pinned, { to: C.SWAP_ROUTER02, data: (me) => v1Sell({ recipient: me, fee }) }, /fee tier/);
   }
 });
+
+test('broadcast: a DRY_RUN server validates the batch but sends nothing', async () => {
+  const w = Wallet.createRandom();
+  const rpc = fakeSender();
+  const good = await sellTx(w, 0);
+  await assert.rejects(
+    broadcast(curveNative, [good], { provider: rpc, dryRun: true }),
+    (e) => e instanceof TpError && e.code === 'unavailable' && e.status === 503 && /DRY_RUN/.test(e.message)
+  );
+  assert.equal(rpc.sent.length, 0);
+  // Validation still runs first: a bad batch is refused as bad_tx, not as dry run.
+  const evil = await sign(w, { to: TOKEN, nonce: 1, data: erc20.encodeFunctionData('transfer', [ATTACKER, 1n]) });
+  await assert.rejects(
+    broadcast(curveNative, [evil], { provider: rpc, dryRun: true }),
+    (e) => e instanceof TpError && e.code === 'bad_tx'
+  );
+  assert.equal(rpc.sent.length, 0);
+});
+
+test('broadcast: with no injected provider the dry-run flag comes from config', () => {
+  const { _private } = require('./broadcast');
+  assert.equal(_private.isDryRun({}), require('../config').dryRun);
+  assert.equal(_private.isDryRun({ provider: {} }), false);
+  assert.equal(_private.isDryRun({ provider: {}, dryRun: true }), true);
+});

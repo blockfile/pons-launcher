@@ -13,6 +13,9 @@
 // stream of the same token hears neither.
 
 process.env.TP_SEQUENCER_URL = ''; // never send a test transaction anywhere (see tp.broadcast.test.js)
+// The send provider below is a fake, so this process runs 'live': a DRY_RUN server
+// refuses every broadcast (tp/broadcast.js), which is not what these tests are about.
+process.env.DRY_RUN = 'false';
 
 const test = require('node:test');
 const assert = require('node:assert/strict');
