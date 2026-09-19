@@ -23,6 +23,7 @@ const {
   firstLoadFiles,
   isUpstreamHiccup,
   withRetry,
+  pollReceipt,
 } = require('./tpSmoke');
 
 const LF = String.fromCharCode(10);
@@ -172,7 +173,15 @@ test('isUpstreamHiccup: a fork read the upstream throttled or pruned, not a real
   );
   assert.equal(isUpstreamHiccup(throttled), true);
   assert.equal(isUpstreamHiccup(forkCallError('Internal error: failed to get account for 0x64F8: Max retries exceeded')), true);
-  assert.equal(isUpstreamHiccup(forkCallError('historical state 0xabc is not available')), true);
+  // Pruned history is NOT a hiccup: once the public RPC stops serving the fork
+  // block's state it never serves it again, so a retry only burns the backoff
+  // (measured: a --pair setup stalled ~10 min retrying it). It fails at once.
+  assert.equal(
+    isUpstreamHiccup(
+      forkCallError('Internal error: failed to get storage for 0x7868 at 2296: server returned an error response: error code -32000: historical state adf836 is not available')
+    ),
+    false
+  );
   assert.equal(isUpstreamHiccup(new Error('server response 429 Too Many Requests')), true);
   assert.equal(isUpstreamHiccup(Object.assign(new Error('fetch failed'), { cause: { code: 'ECONNRESET' } })), true);
   // A contract that really reverted is not retried: the same generic message, no upstream words.
@@ -240,4 +249,41 @@ test('withRetry retries only what `retryable` accepts, backing off 1x, 2x, 4x th
     { attempts: 2, baseMs: 1, sleep }
   );
   assert.equal(value, 2);
+});
+
+// ethers v6 waitForTransaction reads the head (N), then the receipt; a tx mined in
+// N+1 between the two has "0 confirmations" and the wait sleeps until a NEXT block.
+// An automining fork that goes idle after the last tx never mines one (measured: a
+// pair leg's 6 txs all mined within 1 s, the wait timed out after 60 s). The smoke
+// run polls the receipt itself.
+test('pollReceipt returns the receipt as soon as the node has one, with no block event needed', async () => {
+  let t = 0;
+  const clock = { now: () => t, sleep: async (ms) => { t += ms; } };
+  let calls = 0;
+  const getReceipt = async (hash) => {
+    calls++;
+    return calls >= 3 ? { hash, status: 1, blockNumber: 7 } : null;
+  };
+  const r = await pollReceipt(getReceipt, '0xab', { timeoutMs: 5_000, pollMs: 100, ...clock });
+  assert.deepEqual(r, { hash: '0xab', status: 1, blockNumber: 7 });
+  assert.equal(calls, 3);
+  assert.equal(t, 200, 'two waits of pollMs between three reads');
+
+  // A read that throws is retried like a missing receipt (the fork answers late).
+  t = 0;
+  let n = 0;
+  const flaky = async () => {
+    n++;
+    if (n === 1) throw new Error('socket hang up');
+    return { status: 0 };
+  };
+  assert.deepEqual(await pollReceipt(flaky, '0xcd', { timeoutMs: 5_000, pollMs: 50, ...clock }), { status: 0 }, 'a reverted receipt is returned too');
+
+  // Never mined: a timeout error naming the hash, after timeoutMs.
+  t = 0;
+  await assert.rejects(
+    pollReceipt(async () => null, '0xef', { timeoutMs: 1_000, pollMs: 250, ...clock }),
+    (err) => err.message.includes('0xef') && err.message.includes('1 s')
+  );
+  assert.ok(t >= 1_000 && t < 1_300);
 });

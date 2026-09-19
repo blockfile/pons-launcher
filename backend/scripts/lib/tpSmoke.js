@@ -230,11 +230,14 @@ function firstLoadFiles(html, read) {
   return { js, css, lazy: [...lazy].filter((f) => !js.includes(f)) };
 }
 
-// What a fork says when it could not serve a read from its upstream: the public RPC
-// throttled it (anvil: "failed to get storage ... HTTP error 429"), pruned the fork
-// block's state, or dropped the connection. Never a contract's own revert.
+// What a fork says when it could not serve a read from its upstream for a while: the
+// public RPC throttled it (anvil: "failed to get storage ... HTTP error 429") or
+// dropped the connection. Never a contract's own revert.
 const UPSTREAM_HICCUP =
-  /\b429\b|too many requests|failed to get (storage|account|block|code)|historical state|rate.?limit|timed? ?out|econnreset|econnrefused|socket hang up|fetch failed/i;
+  /\b429\b|too many requests|failed to get (storage|account|block|code)|rate.?limit|timed? ?out|econnreset|econnrefused|socket hang up|fetch failed/i;
+// ... except pruned history: once the public RPC stops serving the fork block's state
+// it never serves it again, so retrying only burns the backoff. That fails at once.
+const UPSTREAM_GONE = /historical state .* is not available|missing trie node|state (is )?not available/i;
 
 /**
  * Did this read fail because the fork's upstream could not serve it, rather than
@@ -249,7 +252,8 @@ function isUpstreamHiccup(err) {
   if (err.info && err.info.error) parts.push(err.info.error.message, err.info.error.code);
   if (err.error) parts.push(err.error.message, err.error.code);
   if (err.cause) parts.push(err.cause.message, err.cause.code);
-  return UPSTREAM_HICCUP.test(parts.filter((p) => p !== undefined && p !== null).join(' | '));
+  const text = parts.filter((p) => p !== undefined && p !== null).join(' | ');
+  return !UPSTREAM_GONE.test(text) && UPSTREAM_HICCUP.test(text);
 }
 
 const pause = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
@@ -270,9 +274,34 @@ async function withRetry(fn, { attempts = 6, baseMs = 2000, sleep = pause, retry
   }
 }
 
+/**
+ * Wait for a transaction's receipt by reading it every `pollMs` until the node has
+ * one (landed or reverted), or `timeoutMs` passes. NOT ethers' waitForTransaction:
+ * that reads the head N, then the receipt, and a tx mined in N+1 between the two
+ * has "0 confirmations" and sleeps until a NEXT block — which an automining fork
+ * that goes idle after its last tx never mines. A failed read counts as "not yet".
+ */
+async function pollReceipt(getReceipt, hash, { timeoutMs = 60_000, pollMs = 200, sleep = pause, now = Date.now } = {}) {
+  const t0 = now();
+  for (;;) {
+    let receipt = null;
+    try {
+      receipt = await getReceipt(hash);
+    } catch (_err) {
+      receipt = null;
+    }
+    if (receipt) return receipt;
+    if (now() - t0 >= timeoutMs) {
+      throw new Error(`no receipt for ${hash} within ${Math.round(timeoutMs / 1000)} s`);
+    }
+    await sleep(pollMs);
+  }
+}
+
 module.exports = {
   isUpstreamHiccup,
   withRetry,
+  pollReceipt,
   pctAmount,
   clickAmounts,
   receivedWei,

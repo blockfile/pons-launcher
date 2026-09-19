@@ -122,6 +122,7 @@ const {
   firstLoadFiles,
   isUpstreamHiccup,
   withRetry,
+  pollReceipt,
 } = require('./lib/tpSmoke');
 
 const ARGS = new Set(process.argv.slice(2));
@@ -490,8 +491,13 @@ async function balances(token, addresses, pairToken = null) {
   return out;
 }
 
+// Receipts by polling (lib/tpSmoke.js pollReceipt), never ethers' wait: it reads the
+// head, then the receipt, and a tx mined between the two waits for a NEXT block that an
+// idle automining fork never mines (measured: a pair leg mined in 1 s, the wait hit 60 s).
+const receiptOf = (hash) => pollReceipt((h) => provider.getTransactionReceipt(h), hash, { timeoutMs: 60_000, pollMs: 200 });
+
 async function landed(hashes, what) {
-  const receipts = await Promise.all(hashes.map((h) => provider.waitForTransaction(h, 1, 60_000)));
+  const receipts = await Promise.all(hashes.map((h) => receiptOf(h)));
   check(
     receipts.every((r) => r && r.status === 1),
     `${what}: all ${hashes.length} tx landed (status 1)`
@@ -547,7 +553,7 @@ async function buyCurve(ctx, curveAddress, what) {
     const c = new Contract(curveAddress, CURVE_V2_ABI, w);
     const sim = await upstream(() => c.buy.staticCall(BUY_WEI, 0n, w.address, { value: BUY_WEI }));
     const tx = await upstream(() => c.buy(BUY_WEI, (sim * 90n) / 100n, w.address, { value: BUY_WEI }));
-    const r = await tx.wait(1, 60_000);
+    const r = await receiptOf(tx.hash);
     check(r.status === 1, `${what} ${label(w.address)}: bought the curve token with ${formatEther(BUY_WEI)} ETH`);
     last = Math.max(last, r.blockNumber);
   }
@@ -641,7 +647,7 @@ async function buyGraduated(ctx, token, what) {
       `${what} ${label(w.address)}: V4 buy built against the verified ETH-quoted pool`
     );
     const tx = await w.sendTransaction({ to: built.to, data: built.data, value: built.value, gasLimit: 500_000n });
-    const r = await tx.wait(1, 60_000);
+    const r = await receiptOf(tx.hash);
     check(r.status === 1, `${what} ${label(w.address)}: bought the graduated token with ${formatEther(BUY_WEI)} ETH`);
     last = Math.max(last, r.blockNumber);
   }
@@ -717,14 +723,14 @@ async function buyPairCurve(ctx, pc, what) {
     const swap = await router
       .connect(w)
       .exactInput([pc.route.path, w.address, BUY_WEI, (quoted * 90n) / 100n], { value: BUY_WEI, gasLimit: 600_000n });
-    check((await swap.wait(1, 60_000)).status === 1, `${what} ${label(w.address)}: swapped ${formatEther(BUY_WEI)} ETH into ${pc.pairSymbol}`);
+    check((await receiptOf(swap.hash)).status === 1, `${what} ${label(w.address)}: swapped ${formatEther(BUY_WEI)} ETH into ${pc.pairSymbol}`);
     const held = await pairToken.balanceOf(w.address);
     const approve = await pairToken.connect(w).approve(pc.curve, held);
-    await approve.wait(1, 60_000);
+    await receiptOf(approve.hash);
     const c = new Contract(pc.curve, CURVE_V2_ABI, w);
     const sim = await c.buy.staticCall(held, 0n, w.address);
     const tx = await c.buy(held, (sim * 90n) / 100n, w.address, { gasLimit: 600_000n });
-    const r = await tx.wait(1, 60_000);
+    const r = await receiptOf(tx.hash);
     check(
       r.status === 1 && (await pairToken.balanceOf(w.address)) === 0n,
       `${what} ${label(w.address)}: bought the token-quoted curve with all its ${formatUnits(held, pc.pairDecimals)} ${pc.pairSymbol}`
