@@ -335,6 +335,16 @@ one click. Design: `docs/superpowers/specs/2026-09-19-tp-dapp-design.md`.
   is the console page's bundle (`/assets`). nginx enforces that
   (`deploy/nginx-rhbond.conf`) and so does the server itself, by Host
   (`DAPP_HOST`), so a mis-edit of either one alone does not expose the console.
+- **Token logos are fetched by the server.** `/api/tp/logo/<CA>` takes the logo a
+  token names on chain. An IPFS logo (most of them) comes from fixed IPFS gateways,
+  never from a host the token names: `TP_LOGO_GATEWAYS` sets them, and the default
+  is ponsfamily's own gateway, then Filebase, then Pinata (a 451 from any of them is
+  final). A logo on another https host is fetched through an SSRF-safe GET
+  (`backend/src/tp/safeFetch.js`): port 443 only, every DNS answer must be a public
+  address and the connection is pinned to it, at most 2 redirects, 5 s in all. The
+  server checks the bytes (PNG, JPEG, GIF or WebP by their magic bytes, at most
+  `TP_LOGO_MAX_BYTES`, 3 MiB) and serves them from the dApp's own origin, so the
+  page's CSP keeps images to its own origin. Anything else shows as an identicon.
 - `backend/.env` needs nothing new. `DAPP_HOST`, `TP_MAX_TOKENS` and
   `TP_SEQUENCER_URL` are optional; see `backend/.env.example`.
 - **The account** (connect a wallet, sign in, saved wallets synced ENCRYPTED; spec
@@ -345,8 +355,13 @@ one click. Design: `docs/superpowers/specs/2026-09-19-tp-dapp-design.md`.
   that directory up with the droplet**, e.g.
   `tar czf ~/tp-accounts.$(date +%F).tgz -C backend/data tp-accounts`: losing
   `vaults/` loses every visitor's synced list (their own key exports stay the real
-  backup). Optional settings, all in `backend/.env.example`: `TP_ACCOUNTS_DIR`,
-  `TP_SIWE_ORIGIN`, `TP_VAULT_*`, `TP_ACCOUNT_*`, and the logo proxy's `TP_LOGO_*`.
+  backup). Restoring a backup without `revoked.json` makes the sessions a Delete
+  ended valid again for up to 24 h. Optional settings, all in
+  `backend/.env.example`: `TP_ACCOUNTS_DIR`, `TP_SIWE_ORIGIN` (it must equal the
+  dApp's origin exactly), `TP_VAULT_*` (with `TP_VAULT_KEEP_DELETED_DAYS`),
+  `TP_ACCOUNT_*`, and the logo proxy's `TP_LOGO_*`. The console hosts keep their
+  nginx password exactly as it is: the account is a wallet sign-in on the dApp host
+  only, and it replaces nothing there.
 
 **First deploy** (DNS already points `dapp` at the droplet). On the droplet, in
 the repo checkout, not during a live launch:
@@ -387,23 +402,34 @@ done
 curl -s https://dapp.rhbond.xyz/api/tp/fees                                     # JSON fee params
 echo "console $(curl -s -o /dev/null -w '%{http_code}' https://rhbond.xyz/)"   # 401: the console still asks for its password
 curl -sN --max-time 5 'https://dapp.rhbond.xyz/api/tp/stream?token=<a pons CA>&interval=1' | head -c 200   # a snapshot event at once
+curl -s https://dapp.rhbond.xyz/api/tp/token/<a pons CA> | head -c 600; echo            # ..."info":{...},"figures":{...}}
+curl -s -o /dev/null -w '%{http_code} %{content_type}' https://dapp.rhbond.xyz/api/tp/logo/<a pons CA>; echo   # 200 image/... or 404 application/json
 ```
 
 **Later updates:** `git pull && npm ci && npm run build && pm2 restart pons-launcher`.
 nginx needs touching again only if `deploy/nginx-rhbond.conf` changed.
 
-**The v2 update (the account) changed it**: a new `location ^~ /api/tp/account/` with a
-tighter burst and a 400k body cap. After the usual update, copy the site file once more
-exactly as in step 3, then check that the account API answers:
+**The v2 update** (the account, wallet choice, live %-left bars, the token header:
+the spec's "Addendum v2"). It changes `deploy/nginx-rhbond.conf`: a new
+`location ^~ /api/tp/account/` with a tighter burst and a 400k body cap. On the
+droplet, in the repo checkout, not during a live launch:
 
 ```bash
+git pull
+npm ci
+npm run build
+pm2 restart pons-launcher      # loads /api/tp/account, /api/tp/logo and the header's stats
 SITE=$(grep -l 'server_name rhbond.xyz' /etc/nginx/sites-enabled/*)
 sudo cp "$SITE" ~/nginx-rhbond.$(date +%F).bak
 sudo diff "$SITE" deploy/nginx-rhbond.conf     # only the account location and its comments
 sudo cp deploy/nginx-rhbond.conf "$SITE"
 sudo nginx -t && sudo systemctl reload nginx
 curl -s https://dapp.rhbond.xyz/api/tp/account/me    # {"error":...,"code":"no_session"}
+curl -s -o /dev/null -w '%{http_code}\n' -X POST -H 'content-type: application/json' -d '{}' https://dapp.rhbond.xyz/api/tp/account/login   # 403: no Origin, the CSRF guard
 ```
+
+Then add `backend/data/tp-accounts/` to the droplet's backups (the account bullet
+above says what is in it). `backend/.env` needs nothing new.
 
 **Restoring a visitor's saved list** (they ask you; nothing else can). A deleted
 list is kept for `TP_VAULT_KEEP_DELETED_DAYS` (30) days under

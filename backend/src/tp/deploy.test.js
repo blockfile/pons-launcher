@@ -308,6 +308,44 @@ test('README covers the dApp account: the nginx re-copy, the backups, the settin
   }
 });
 
+test('README carries the v2 update: code, nginx re-copy and checks in order, backups, settings, where logos come from', () => {
+  const text = fs.readFileSync(README, 'utf8');
+  const at = text.indexOf('**The v2 update**');
+  assert.ok(at > 0, 'README has "The v2 update"');
+  const v2 = text.slice(at, text.indexOf('**Restoring a visitor', at));
+  const order = [
+    'git pull',
+    'npm ci',
+    'npm run build',
+    'pm2 restart pons-launcher',
+    'sudo diff "$SITE" deploy/nginx-rhbond.conf',
+    'sudo cp deploy/nginx-rhbond.conf "$SITE"',
+    'sudo nginx -t && sudo systemctl reload nginx',
+    'curl -s https://dapp.rhbond.xyz/api/tp/account/me',
+    '# 403: no Origin, the CSRF guard',
+  ];
+  let from = 0;
+  for (const step of order) {
+    const i = v2.indexOf(step, from);
+    assert.ok(i >= 0, `The v2 update is missing, or has out of order: ${step}`);
+    from = i + step.length;
+  }
+  assert.ok(v2.includes('backend/data/tp-accounts/'), 'the v2 update names the backup');
+  for (const s of [
+    '**Token logos are fetched by the server.**',
+    '`TP_LOGO_GATEWAYS`',
+    '`backend/src/tp/safeFetch.js`',
+    '`TP_LOGO_MAX_BYTES`, 3 MiB',
+    'https://dapp.rhbond.xyz/api/tp/token/<a pons CA>',
+    'https://dapp.rhbond.xyz/api/tp/logo/<a pons CA>',
+    '`revoked.json`',
+    '`TP_VAULT_KEEP_DELETED_DAYS`',
+    'nginx password exactly as it is: the account is a wallet sign-in on the dApp host',
+  ]) {
+    assert.ok(text.includes(s), `README is missing: ${s}`);
+  }
+});
+
 test('README: a deleted or overwritten saved list can be restored by hand', () => {
   const text = fs.readFileSync(README, 'utf8');
   for (const s of [
