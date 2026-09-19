@@ -23,6 +23,7 @@ const quote = require('../tp/quote');
 const broadcast = require('../tp/broadcast');
 const { broadcastCost } = require('../tp/limits'); // own line: later tasks' edits anchor on the line above
 const { handleStream, parseSid } = require('../tp/stream');
+const { createAccountRouter } = require('../tp/account');
 
 const router = express.Router();
 
@@ -177,6 +178,10 @@ router.post(
 // GET /api/tp/stream?token=&interval=&sid= -> Server-Sent Events (tp/stream.js). No
 // readLimit: open streams are capped per visitor by streamSlots inside handleStream.
 router.get('/stream', wrap(handleStream));
+// /api/tp/account/*: SIWE login, the session cookie and (tp/vaultStore.js) the
+// encrypted wallet list. Its own limits, CSRF guard, 404 and error handler
+// (tp/account.js); it holds ciphertext only and never a key.
+router.use('/account', createAccountRouter());
 
 // ── the end of the line for every /api/tp request ────────────────────────────
 router.use((req, res) => res.status(404).json({ error: 'not found' }));

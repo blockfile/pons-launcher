@@ -81,6 +81,15 @@ test('a route whose module has not landed answers 501 {error, code: unavailable}
   }
 });
 
+test('/api/tp/account is mounted before the catch-all: GET /me without a cookie → 401 no_session', async () => {
+  const r = await call('GET', '/api/tp/account/me');
+  assert.equal(r.status, 401);
+  assert.equal(r.json.code, 'no_session');
+  const unknown = await call('GET', '/api/tp/account/nope');
+  assert.equal(unknown.status, 404);
+  assert.deepEqual(unknown.json, { error: 'not found' });
+});
+
 test('an unknown /api/tp path is answered 404 by the tp router itself — never the console', async () => {
   for (const p of ['/api/tp/nope', '/api/tp', '/api/tp/token', '/api/tp/../v4/wallets/backup']) {
     const r = await call('GET', p);

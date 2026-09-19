@@ -26,13 +26,22 @@ test('CODES is exactly the contract list', () => {
     [
       'bad_address',
       'bad_request',
+      'bad_signature',
       'bad_tx',
+      'challenge_expired',
+      'conflict',
+      'forbidden',
+      'key_mismatch',
       'migrating',
+      'no_session',
       'not_contract',
       'not_pons',
       'rate_limited',
+      'store_full',
+      'too_large',
       'too_many',
       'unavailable',
+      'unknown_nonce',
     ]
   );
   assert.ok(Object.isFrozen(CODES));
@@ -61,6 +70,26 @@ test('sendError answers a TpError with its own status and {error, code}', () => 
   sendError(res, new TpError('too_many', 'at most 100 addresses', 413));
   assert.equal(res.statusCode, 413);
   assert.deepEqual(res.body, { error: 'at most 100 addresses', code: 'too_many' });
+});
+
+test('a TpError may carry numeric extra fields, which the answer spreads beside {error, code}', () => {
+  const e = new TpError('conflict', 'changed elsewhere', 409, { rev: 7 });
+  assert.deepEqual(e.extra, { rev: 7 });
+  assert.ok(Object.isFrozen(e.extra));
+  const res = fakeRes();
+  sendError(res, e);
+  assert.equal(res.statusCode, 409);
+  assert.deepEqual(res.body, { rev: 7, error: 'changed elsewhere', code: 'conflict' });
+  assert.equal(new TpError('bad_tx', 'x').extra, undefined);
+});
+
+test('extra is numbers only and can never replace error or code', () => {
+  assert.throws(() => new TpError('conflict', 'x', 409, { rev: '7' }), /extra/);
+  assert.throws(() => new TpError('conflict', 'x', 409, { rev: Number.NaN }), /extra/);
+  assert.throws(() => new TpError('conflict', 'x', 409, { code: 1 }), /extra/);
+  assert.throws(() => new TpError('conflict', 'x', 409, { error: 1 }), /extra/);
+  assert.throws(() => new TpError('conflict', 'x', 409, [1]), /extra/);
+  assert.throws(() => new TpError('conflict', 'x', 409, null), /extra/);
 });
 
 test('sendError hides the text of a non-TpError behind 502 unavailable', () => {
