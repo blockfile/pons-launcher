@@ -388,11 +388,24 @@ export default function App() {
     ({ added, removed, unreadable }) => {
       const list = syncOwnAddrs();
       const s = sessionRef.current;
-      if (s && removed) s.reset(); // rows of removed wallets go; the reload below lists the rest
-      loadInto(s, list);
+      // Only the rows of the wallets that left go (session.removeRows); a row with
+      // a sell, an approval or a pair leg in flight goes once that settles. Never
+      // the session's reset here: this runs whenever another device's change
+      // arrives, and a reset forgets every OTHER wallet's sells in flight, the
+      // curve walk and the owed pair legs — the reload would then offer tokens
+      // that are still being sold, and the next click would sell them twice.
+      let finishing = 0;
+      if (s && removed) {
+        const held = new Set(list.map((a) => a.toLowerCase()));
+        finishing = s.removeRows(s.view().rows.map((r) => r.address).filter((a) => !held.has(a.toLowerCase()))).deferred;
+      }
+      if (added) loadInto(s, list); // lists the wallets another device imported
       const n = (k) => `${k} wallet${k === 1 ? '' : 's'}`;
       if (added) toast(`${n(added)} from your account`, 'ok');
-      if (removed) toast(`${n(removed)} removed on another device`, 'info');
+      if (removed) {
+        const still = finishing ? ` — ${finishing} had a sell in flight, which still settles on chain` : '';
+        toast(`${n(removed)} removed on another device${still}`, 'info');
+      }
       if (unreadable) toast(`${n(unreadable)} in your account could not be read and were skipped`, 'error');
     },
     [loadInto, syncOwnAddrs, toast]
@@ -447,7 +460,11 @@ export default function App() {
         // name these wallets too: they go with them. The account copy keeps its own.
         if (realDeps.positions) realDeps.positions.clear();
         syncOwnAddrs();
-        if (sessionRef.current) sessionRef.current.reset();
+        // Every row goes — through removeRows, not the session's reset: a sell
+        // still in flight keeps counting until it settles, so unlocking again at
+        // once never offers those tokens a second time.
+        const session = sessionRef.current;
+        if (session) session.removeRows(session.view().rows.map((r) => r.address));
       }
       return true;
     },

@@ -113,6 +113,11 @@ export function createSession({
   const seen = new Set();
   const walk = []; // curve sells not yet reflected in the streamed mark
   const pairs = new Map(); // lower address -> pair-leg state
+  // Rows removeRows set aside while something of theirs was in flight: out of
+  // `order` (never listed, chosen, quoted, armed or re-read) but still in W, so
+  // their receipts land, their sells still count as `ahead` in a pool quote, and
+  // a wallet loaded again meanwhile keeps them. tick() drops a row once settled.
+  const leaving = new Set();
   let cache = null;
   let cacheGen = 0;
   let quoting = false;
@@ -518,6 +523,9 @@ export function createSession({
         applyState(w, ws, { exact: true });
         if (legs && carried > 0n) persistPair(key); // re-dated, at this read's nonce
       } else {
+        // Loaded again before its sells settled (removeRows): listed again, with
+        // those sells still in flight — never its chain balance as sellable.
+        if (leaving.delete(key)) order.push(key);
         // A read a block behind must not hand back tokens a sell that just landed took.
         applyState(w, ws, { exact: now() - w.landedAt > LANDED_SETTLE_MS });
       }
@@ -1067,7 +1075,10 @@ export function createSession({
    *   now     no backoff wait (a leg rebuilt after 'nonce too low')
    */
   function queuePair(key, { manual = false, now: soon = false } = {}) {
-    if (disposed || !isPairLeg() || !W.has(key)) return;
+    // A wallet that left the tab (removeRows) has no key here to sign a leg
+    // with: the pair ledger keeps what it is owed, and an import lists it with
+    // Convert. Loaded again before its row went, the tick's retry queues it.
+    if (disposed || !isPairLeg() || !W.has(key) || leaving.has(key)) return;
     const p = pair(key);
     if (manual) p.manual = true;
     if (manual || soon) {
@@ -1135,7 +1146,7 @@ export function createSession({
     const t = now();
     const due = [...pairQueue].filter((k) => {
       const p = pair(k);
-      return W.has(k) && !p.running && t >= p.retryAt;
+      return W.has(k) && !leaving.has(k) && !p.running && t >= p.retryAt;
     });
     pairQueue.clear();
     if (!due.length) return;
@@ -1298,7 +1309,7 @@ export function createSession({
     let n = 0;
     for (const k of keys) {
       const p = pairs.get(k);
-      if (!p || !W.has(k) || convertibleOf(p) <= 0n) continue;
+      if (!p || !W.has(k) || leaving.has(k) || convertibleOf(p) <= 0n) continue;
       queuePair(k, { manual: true });
       n += 1;
     }
@@ -1620,6 +1631,7 @@ export function createSession({
     }
     const t = now();
     for (const [h, e] of early) if (t - e.at > EARLY_KEEP_MS) early.delete(h);
+    dropSettled();
   }
 
   function setTicked(address, on) {
@@ -1667,14 +1679,82 @@ export function createSession({
     slippageBps = bps;
   }
 
+  /**
+   * Forget every row, the curve walk and every pair leg. Only for the visitor's
+   * own Clear: sells still in flight stop counting, so a wallet loaded again
+   * before they are mined would offer their tokens a second time. A wallet that
+   * leaves on its own (another device, Lock) goes through removeRows instead.
+   */
   function reset() {
     W.clear();
     order = [];
     pairs.clear();
+    leaving.clear();
     cache = null;
     cacheGen += 1;
     walk.length = 0;
     emit();
+  }
+
+  /** Nothing of the row is in flight: no sell, approval or pair leg unanswered, no pair leg being read or signed. */
+  function settled(w) {
+    const p = pairs.get(w.key);
+    return w.ops === 0 && w.inflight === 0n && !(p && p.running);
+  }
+
+  function drop(key) {
+    W.delete(key);
+    leaving.delete(key);
+    pairs.delete(key);
+    pairQueue.delete(key);
+    armQueue.delete(key);
+    settleKeys.delete(key);
+    resyncKeys.delete(key);
+  }
+
+  /**
+   * The rows of wallets that left this tab: another device removed them from
+   * the account (the sync already took their keys), or Lock / Disconnect took
+   * the account's wallets away. Nothing else changes — every other row keeps
+   * its sells in flight and its optimistic balance, the curve walk keeps every
+   * sell not yet in the mark, and the other wallets' pair legs keep running.
+   *
+   * A row with nothing in flight goes now. A row with a sell, an approval or a
+   * pair leg in flight leaves the table now (out of `order`: never listed,
+   * chosen, quoted, armed or re-read again) but stays in W until it settles:
+   * its receipts still land, its sells still ride `ahead` of a pool click, and
+   * a wallet loaded again before then keeps them in flight (loadWallets), so
+   * the next click sells 50 % of what is left — never of its chain balance.
+   * tick() drops the row once it has settled.
+   * @param {string[]} addresses
+   * @returns {{removed: number, deferred: number}} rows gone now / gone once settled
+   */
+  function removeRows(addresses) {
+    let removed = 0;
+    let deferred = 0;
+    for (const a of Array.isArray(addresses) ? addresses : []) {
+      const key = lower(a);
+      const w = W.get(key);
+      if (!w || leaving.has(key)) continue;
+      order = order.filter((k) => k !== key);
+      if (settled(w)) {
+        drop(key);
+        removed += 1;
+      } else {
+        leaving.add(key);
+        deferred += 1;
+      }
+    }
+    if (removed || deferred) emit();
+    return { removed, deferred };
+  }
+
+  /** tick(): a row removeRows set aside goes once nothing of it is in flight. */
+  function dropSettled() {
+    for (const key of [...leaving]) {
+      const w = W.get(key);
+      if (!w || settled(w)) drop(key);
+    }
   }
 
   function start() {
@@ -1699,6 +1779,7 @@ export function createSession({
     loadWallets,
     reload: () => loadWallets(deps.store.addresses()),
     reset,
+    removeRows,
     setTicked,
     setAllTicked,
     arm,

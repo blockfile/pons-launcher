@@ -1434,3 +1434,137 @@ test('a pair batch refused for price impact is split: what passes converts now, 
   assert.equal(big.pairPending, '5000');
   assert.match(big.detail, /price impact/);
 });
+
+// ── rows leaving the tab (Task 30): a synced removal or a Lock never resets the session ──
+test('a wallet removed on another device while sells are in flight: the next 50 % sells 25 %, not 50 %', async () => {
+  const calls = [];
+  const h = harness({
+    venue: CURVE,
+    planSellCalls: calls,
+    states: [
+      wallet(A, { tokenBalance: '1000', allowance: '1000', nonce: 0 }),
+      wallet(B, { tokenBalance: '1000', allowance: '1000', nonce: 0 }),
+    ],
+  });
+  await h.s.loadWallets([A, B]);
+  assert.equal((await h.s.sell(50)).sent, 2);
+  // Another device removed B, and the same sync brought a wallet in: the page
+  // reloads what the tab holds. The chain does not show A's sell yet.
+  assert.deepEqual(h.s.removeRows([B]), { removed: 0, deferred: 1 });
+  await h.s.loadWallets([A]);
+  assert.deepEqual(
+    h.s.view().rows.map((r) => [r.address, r.tokens]),
+    [[A, '500']]
+  );
+  const out = await h.s.sell(50);
+  assert.equal(out.sent, 1);
+  assert.deepEqual(h.log.broadcast.at(-1), [`raw|${A}|1|sell:250`], '25 % of the position, never 50 % of it again');
+  // the curve floor is still priced past BOTH sells in flight, the removed wallet's included
+  assert.equal(calls[1].mark.tokenReserve, String(1_000_000_000 + 500 + 500));
+});
+
+test('a removed wallet with a sell in flight leaves the table at once, is never sold again, and goes once settled', async () => {
+  const h = harness({ venue: CURVE, states: [wallet(A, { tokenBalance: '1000', allowance: '1000', nonce: 0 })] });
+  await h.s.loadWallets([A]);
+  await h.s.sell(50);
+  assert.deepEqual(h.s.removeRows([A]), { removed: 0, deferred: 1 });
+  assert.deepEqual(h.s.view().rows, []);
+  const out = await h.s.sell(100);
+  assert.equal(out.sent, 0);
+  assert.equal(h.s.preview(50).count, 0);
+  h.s.setAllTicked(true);
+  await flush();
+  assert.equal(h.log.broadcast.length, 1, 'nothing is signed for a wallet that left');
+  h.s.tick();
+  h.s.onReceipt({ hash: hashOfSell(A, 0, 500), status: 'landed', block: 11, gasUsed: '1' });
+  h.s.tick(); // settled: the row goes
+  // Imported again later: a new row read from the chain (the wallet sent elsewhere meanwhile: nonce 7).
+  Object.assign(h.byAddr.get(A), { tokenBalance: '500', nonce: 7 });
+  await h.s.loadWallets([A]);
+  assert.deepEqual(
+    h.s.view().rows.map((r) => r.tokens),
+    ['500']
+  );
+  await h.s.sell(100);
+  assert.deepEqual(h.log.broadcast.at(-1), [`raw|${A}|7|sell:500`], 'a fresh row, its nonce seeded from the chain');
+});
+
+test('a wallet removed and loaded again before its sell settles keeps that sell counted', async () => {
+  const h = harness({ venue: CURVE, states: [wallet(A, { tokenBalance: '1000', allowance: '1000', nonce: 0 })] });
+  await h.s.loadWallets([A]);
+  await h.s.sell(50);
+  h.s.removeRows([A]); // e.g. Lock ...
+  h.s.tick(); // ... still in flight: kept
+  await h.s.loadWallets([A]); // ... and unlocked again at once; the chain still says 1000
+  assert.deepEqual(
+    h.s.view().rows.map((r) => [r.address, r.tokens, r.status]),
+    [[A, '500', 'sent']]
+  );
+  await h.s.sell(50);
+  assert.deepEqual(h.log.broadcast.at(-1), [`raw|${A}|1|sell:250`]);
+  h.s.onReceipt({ hash: hashOfSell(A, 0, 500), status: 'landed', block: 11, gasUsed: '1' });
+  h.s.tick();
+  assert.equal(h.s.view().rows.length, 1, 'listed again: a settled sell does not drop it');
+});
+
+test("a removed wallet's pool sells in flight still ride ahead of the next click", async () => {
+  const h = harness({
+    venue: POOL,
+    states: [
+      wallet(A, { tokenBalance: '1000', allowance: '1000', nonce: 0 }),
+      wallet(B, { tokenBalance: '1000', allowance: '1000', nonce: 0 }),
+    ],
+  });
+  await h.s.loadWallets([A, B]);
+  assert.equal((await h.s.sell(50)).sent, 2);
+  h.s.removeRows([B]);
+  const out = await h.s.sell(50);
+  assert.equal(out.sent, 1);
+  assert.deepEqual(h.log.quote.at(-1), [{ address: A, amount: '250' }]);
+  assert.equal(h.log.ahead.at(-1), '1000', "A's 500 and B's 500 are still unmined");
+});
+
+test("a remote removal keeps the other wallets' owed pair legs; the removed wallet's proceeds stay on the ledger", async () => {
+  const ledger = memoryLedger();
+  const h = harness({
+    venue: AMZN_CURVE,
+    pairLedger: ledger,
+    states: [
+      wallet(A, { tokenBalance: '1000000', allowance: '1000000', nonce: 0, pairBalance: '0' }),
+      wallet(B, { tokenBalance: '1000000', allowance: '1000000', nonce: 0, pairBalance: '0' }),
+    ],
+  });
+  let impact = 1400;
+  h.api.postPairQuote = async (pairToken, amount) => {
+    h.log.pair.push(amount);
+    return { amountOut: String(BigInt(amount) * 2n), path: 'route', fees: [], impactBps: impact, ok: impact <= 1000, reason: impact > 1000 ? 'too deep' : null };
+  };
+  await h.s.loadWallets([A, B]);
+  await h.s.sell(100); // each: expected 1000 AMZN, minOut 850
+  Object.assign(h.byAddr.get(A), { nonce: 1, tokenBalance: '0', pairBalance: '1000' });
+  h.s.onReceipt({ hash: hashOfSell(A, 0, 1000000), status: 'landed', block: 30, gasUsed: '1' });
+  await h.runTimers();
+  assert.deepEqual(h.log.pair, ['1000'], "A's leg was refused for price impact: owed, retried after a backoff");
+
+  h.s.removeRows([B]); // another device removed B while its sell is in flight
+  Object.assign(h.byAddr.get(B), { nonce: 1, tokenBalance: '0', pairBalance: '1000' });
+  h.s.onReceipt({ hash: hashOfSell(B, 0, 1000000), status: 'landed', block: 30, gasUsed: '1' });
+  await h.runTimers();
+  assert.equal(owedIn(ledger, B), 850n, "B's proceeds are remembered: an import lists them with Convert");
+
+  impact = 50;
+  h.advance(16_000);
+  for (let i = 0; i < 5; i += 1) h.s.tick();
+  await h.runTimers();
+  assert.deepEqual(h.log.pair, ['1000', '1000'], "A's owed leg retried on its own");
+  assert.equal(h.log.broadcast.at(-1)[0], `raw|${A}|1|approve:${PAIR}:${ROUTER}:1000`);
+  assert.deepEqual(
+    h.log.broadcast.flat().filter((raw) => raw.includes(`|${B}|`)),
+    [`raw|${B}|0|sell:1000000`],
+    'nothing but its own sell was ever signed for B'
+  );
+  assert.deepEqual(
+    h.s.view().rows.map((r) => r.address),
+    [A]
+  );
+});
