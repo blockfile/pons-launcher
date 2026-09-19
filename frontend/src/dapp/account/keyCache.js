@@ -11,9 +11,16 @@
  * cached — which is why it expires after 12 hours (a browser cannot report
  * "closed"), and Lock and Disconnect delete it.
  *
- * An expired or malformed record is deleted when it is read. When IndexedDB is
- * missing or throws (some private windows) the cache keeps the key in this tab's
- * memory only: unlocking then lasts until the tab closes, as the passphrase
+ * An expired or malformed record is deleted WHEN IT IS READ and, so that the 12 hours
+ * hold for a record nothing ever reads again, by a sweep over the whole store on every
+ * page load. The reader alone was not enough: a visitor who unlocks and closes the tab
+ * loses their session cookie 24 h later, so resume() gets a 401 and never asks the
+ * cache for that address again — the CryptoKey then sat in IndexedDB for weeks, usable
+ * by an XSS or a malicious extension that opens the database itself. Making the cache
+ * opens the database, which is what makes the sweep run at all.
+ *
+ * When IndexedDB is missing or throws (some private windows) the cache keeps the key in
+ * this tab's memory only: unlocking then lasts until the tab closes, as the passphrase
  * vault always did. No failure here ever throws to the caller.
  */
 export const KEY_TTL_MS = 12 * 60 * 60 * 1000;
@@ -42,6 +49,31 @@ export function createKeyCache({ indexedDB = globalThis.indexedDB, now = () => D
   const memory = new Map();
   let opening = null;
 
+  const stale = (r) => !r || !Number.isFinite(r.expiresAt) || r.expiresAt <= now();
+
+  /**
+   * Every expired or malformed record, gone. ONE readwrite cursor, so a record another
+   * tab has just refreshed cannot be deleted between reading it and deleting it.
+   * Best effort throughout: it must never delay or break the get/put beside it.
+   */
+  function sweepExpired(db) {
+    for (const [a, r] of memory) if (stale(r)) memory.delete(a);
+    if (!db || !db.objectStoreNames.contains(STORE)) return;
+    const tx = db.transaction(STORE, 'readwrite');
+    const store = tx.objectStore(STORE);
+    if (typeof store.openCursor !== 'function') return; // no cursors: the reader still deletes
+    const req = store.openCursor();
+    req.onsuccess = () => {
+      const cur = req.result;
+      if (!cur) return;
+      if (stale(cur.value)) cur.delete();
+      cur.continue();
+    };
+    req.onerror = () => {};
+    tx.onerror = () => {};
+    tx.onabort = () => {};
+  }
+
   function openDb() {
     if (!opening) {
       opening = new Promise((resolve) => {
@@ -64,7 +96,15 @@ export function createKeyCache({ indexedDB = globalThis.indexedDB, now = () => D
             // the open below fails and the cache falls back to memory
           }
         };
-        req.onsuccess = () => resolve(req.result);
+        req.onsuccess = () => {
+          const db = req.result;
+          try {
+            sweepExpired(db);
+          } catch {
+            // a sweep is never worth failing the open for
+          }
+          resolve(db);
+        };
         req.onerror = () => resolve(null);
         req.onblocked = () => resolve(null);
       });
@@ -140,6 +180,12 @@ export function createKeyCache({ indexedDB = globalThis.indexedDB, now = () => D
       memory.set(a, rec); // no IndexedDB (or it refused the key): this tab only
     }
   }
+
+  // Open eagerly, so the sweep above runs on EVERY page load. openDb() is lazy
+  // otherwise, and the visitor this matters for is exactly the one whose session has
+  // expired: their page never calls get(), put() or remove(), so nothing would open
+  // the database and the stale record would live on. openDb() never rejects.
+  void openDb();
 
   return { get, put, remove };
 }

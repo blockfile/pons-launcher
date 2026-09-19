@@ -307,7 +307,10 @@ info and logo. Decisions below are the operator's.
 - **Staying unlocked**: after unlock the derived key is kept as a **non-extractable**
   WebCrypto key in IndexedDB with a 12 h expiry, so refreshes and new tabs do not ask
   again; a **Lock** button and Disconnect wipe it. (Browsers cannot report "browser
-  closed", hence the fixed expiry.)
+  closed", hence the fixed expiry.) The expiry is enforced by a sweep of the whole
+  store on every page load, not only when the record is read: the session cookie
+  lasts 24 h, so a visitor who unlocks and closes the tab would otherwise never read
+  that record again and the key would outlive the 12 h the risk below is bounded by.
 - Imports, removals and position records save to the account automatically. A visitor
   who does not connect keeps today's behaviour (memory only), with a banner offering to
   connect. A v1 passphrase vault found on the device is offered for moving into the

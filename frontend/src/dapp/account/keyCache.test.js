@@ -28,7 +28,9 @@ function fakeIndexedDB({ refusePut = false } = {}) {
   }
   return {
     dbs,
+    opens: 0,
     open(name) {
+      this.opens += 1;
       const req = { result: null, onsuccess: null, onerror: null, onupgradeneeded: null, onblocked: null };
       later(() => {
         let db = dbs.get(name);
@@ -69,6 +71,34 @@ function fakeIndexedDB({ refusePut = false } = {}) {
                 delete: (k) => wrap(() => {
                   st.rows.delete(k);
                 }),
+                // A cursor over a snapshot of the keys, as a real readwrite cursor is.
+                openCursor: () => {
+                  const keys = [...st.rows.keys()];
+                  let i = -1;
+                  const req = { result: null, onsuccess: null, onerror: null };
+                  pending += 1;
+                  let settled = false;
+                  const step = () =>
+                    later(() => {
+                      i += 1;
+                      const k = keys[i];
+                      req.result =
+                        k === undefined
+                          ? null
+                          : {
+                              value: st.rows.get(k),
+                              delete: () => st.rows.delete(k),
+                              continue: step,
+                            };
+                      if (req.onsuccess) req.onsuccess();
+                      if (req.result === null && !settled) {
+                        settled = true;
+                        settle();
+                      }
+                    });
+                  step();
+                  return req;
+                },
               });
               return tx;
             },
@@ -155,4 +185,96 @@ test('put ignores a malformed address or keyId instead of storing it', async () 
   const addr = Wallet.createRandom().address;
   await cache.put(addr, { key: await aesKey(), keyId: '0x1234' });
   assert.equal(await cache.get(addr), null);
+});
+
+test('every page load sweeps: a record nothing ever reads again does not outlive its 12 hours', async () => {
+  const idb = fakeIndexedDB();
+  let t = 0;
+  const a = Wallet.createRandom().address.toLowerCase();
+  await createKeyCache({ indexedDB: idb, now: () => t }).put(a, { key: await aesKey(), keyId: KEY_ID });
+  const rows = idb.dbs.get('tp-account').stores.get('keys').rows;
+  assert.equal(rows.size, 1);
+
+  // The session cookie died 24 h in, so resume() never calls get() for this address
+  // again. Page loads at +2 d, +5 d, +33 d must still clear it.
+  t = KEY_TTL_MS + 1;
+  const opensBefore = idb.opens;
+  createKeyCache({ indexedDB: idb, now: () => t });
+  assert.equal(idb.opens, opensBefore + 1, 'making the cache opens the database, so the sweep can run');
+  for (let i = 0; i < 20 && rows.size; i++) await new Promise((r) => setImmediate(r));
+  assert.equal(rows.size, 0, 'swept without anything reading it');
+});
+
+test('the sweep clears another address, and leaves a live record alone', async () => {
+  const idb = fakeIndexedDB();
+  let t = 0;
+  const cache = createKeyCache({ indexedDB: idb, now: () => t });
+  const a = Wallet.createRandom().address.toLowerCase();
+  await cache.put(a, { key: await aesKey(), keyId: KEY_ID });
+  t = KEY_TTL_MS;
+  const b = Wallet.createRandom().address.toLowerCase();
+  await cache.put(b, { key: await aesKey(), keyId: KEY_ID });
+  const rows = idb.dbs.get('tp-account').stores.get('keys').rows;
+  assert.deepEqual([...rows.keys()].sort(), [a, b].sort());
+
+  // A later page load only ever signs in as B: A must still go.
+  t = KEY_TTL_MS + 1;
+  const next = createKeyCache({ indexedDB: idb, now: () => t });
+  for (let i = 0; i < 20 && rows.has(a); i++) await new Promise((r) => setImmediate(r));
+  assert.equal(rows.has(a), false, 'the address that stopped being used was swept');
+  assert.ok(await next.get(b), 'and the live one is untouched');
+});
+
+test('a malformed record is swept too, and an IndexedDB without cursors still works', async () => {
+  const idb = fakeIndexedDB();
+  const cache = createKeyCache({ indexedDB: idb, now: () => 0 });
+  const a = Wallet.createRandom().address.toLowerCase();
+  await cache.put(a, { key: await aesKey(), keyId: KEY_ID });
+  const rows = idb.dbs.get('tp-account').stores.get('keys').rows;
+  delete rows.get(a).expiresAt;
+  createKeyCache({ indexedDB: idb, now: () => 0 });
+  for (let i = 0; i < 20 && rows.size; i++) await new Promise((r) => setImmediate(r));
+  assert.equal(rows.size, 0);
+
+  // An old or partial implementation with no openCursor falls back to today's
+  // delete-when-read, and nothing throws.
+  const plain = fakeIndexedDB();
+  const realTx = plain.open;
+  const noCursor = {
+    open: (name) => {
+      const req = realTx.call(plain, name);
+      const patch = () => {
+        const db = req.result;
+        if (!db) return;
+        const tx = db.transaction;
+        db.transaction = (n) => {
+          const t = tx.call(db, n);
+          const store = t.objectStore;
+          t.objectStore = () => {
+            const s2 = store();
+            delete s2.openCursor;
+            return s2;
+          };
+          return t;
+        };
+      };
+      Object.defineProperty(req, 'onsuccess', {
+        configurable: true,
+        set(f) {
+          Object.defineProperty(req, 'onsuccess', {
+            configurable: true,
+            value: () => {
+              patch();
+              f();
+            },
+          });
+        },
+      });
+      return req;
+    },
+  };
+  const c2 = createKeyCache({ indexedDB: noCursor, now: () => 0 });
+  const b = Wallet.createRandom().address;
+  await c2.put(b, { key: await aesKey(), keyId: KEY_ID });
+  assert.ok(await c2.get(b));
 });

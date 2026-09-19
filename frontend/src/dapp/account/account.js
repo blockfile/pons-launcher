@@ -26,8 +26,9 @@
  * unlock of an account (the server holds no copy yet) asks for the unlock
  * signature TWICE and refuses a wallet whose two signatures differ; every later
  * unlock compares the derived keyId with the server's and changes nothing on a
- * mismatch. A key cached on this device (keyCache, 12 h) makes a refresh need
- * no wallet at all.
+ * mismatch. A key cached on this device (keyCache, 12 h — swept on every page
+ * load, so the 12 h holds even for an account nothing reads again) makes a
+ * refresh need no wallet at all.
  */
 import { checkChallenge, unlockMessage } from './messages.js';
 import { deriveVaultKey } from './unlockKey.js';
