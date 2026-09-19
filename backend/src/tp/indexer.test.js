@@ -388,6 +388,77 @@ test('RPC errors: catching_up with backoff, then live again without losing the t
   s.reg.stopAll();
 });
 
+// The chain's public RPC (measured 2026-09-19): its newest ~10,000 blocks come from a
+// "main backend" that searches at most 2,000 of them per eth_getLogs; older blocks come
+// from a log store that takes 10,000. A range with more than 2,000 of the newest blocks
+// is refused — with that message when it lies wholly among them, and as a bare
+// "internal server errror" when it straddles the line. A fixed 10k window over the
+// newest blocks is refused on every retry, so the first hour never loads and the chart
+// never goes live.
+function publicRpcLimits(chain, { recent = 10_000, recentMax = 2_000 } = {}) {
+  const inner = chain.getLogs.bind(chain);
+  chain.refused = 0;
+  chain.getLogs = async (f) => {
+    const boundary = chain.head - recent;
+    const recentPart = f.toBlock - Math.max(f.fromBlock, boundary + 1) + 1;
+    if (recentPart > recentMax) {
+      chain.refused += 1;
+      if (f.fromBlock <= boundary) {
+        throw new Error('could not coalesce error (error={ "code": -32000, "message": "internal server errror" })');
+      }
+      throw new Error(`requested logs from ${recentPart - 1} blocks from main backend but only allowed to search ${recentMax} blocks from main backend per request`);
+    }
+    return inner(f);
+  };
+  return chain;
+}
+
+test('an RPC that refuses a wide window over its newest blocks: the window is split, the hour loads and live follows', async () => {
+  const s = setup({ head: 1_000_000 });
+  publicRpcLimits(s.chain);
+  s.chain.logs.push(curveLog('buy', 999_990), curveLog('sell', 992_000), curveLog('buy', 990_400), curveLog('sell', 975_000));
+  const ix = s.reg.acquire(curveVenue);
+  const seen = watch(ix);
+  await s.clock.advance(0);
+
+  assert.ok(s.chain.refused > 0, 'the node did refuse the full window');
+  const hour = seen.status.find((x) => x.historySeconds === 3600);
+  assert.ok(hour, 'the first hour loaded');
+  assert.equal(hour.state, 'live');
+  assert.deepEqual(ix.recentTrades(10).map((t) => t.block), [975_000, 990_400, 992_000, 999_990], 'nothing lost across the splits');
+  for (const c of s.chain.calls('getLogs')) assert.ok(c.toBlock - c.fromBlock + 1 <= 10_000);
+
+  // and live trades flow
+  s.chain.logs.push(curveLog('buy', 1_000_004));
+  s.chain.head = 1_000_005;
+  await s.clock.advance(400);
+  assert.deepEqual(seen.trades.flat().map((t) => t.block), [1_000_004]);
+  s.reg.stopAll();
+});
+
+test('a rate limit or a timeout is not split: it backs off as before', async () => {
+  const s = setup();
+  const ix = s.reg.acquire(curveVenue);
+  const seen = watch(ix);
+  await s.clock.advance(0);
+  const before = s.chain.calls('getLogs').length;
+  s.chain.head = 40_005;
+  const inner = s.chain.getLogs.bind(s.chain);
+  let refuse = 1;
+  s.chain.getLogs = async (f) => {
+    if (refuse > 0) {
+      refuse -= 1;
+      s.chain.timeline.push({ m: 'getLogs', ...f });
+      throw new Error('server response 429 Too Many Requests');
+    }
+    return inner(f);
+  };
+  await s.clock.advance(400);
+  assert.equal(s.chain.calls('getLogs').length - before, 1, 'one call, no split');
+  assert.equal(seen.status.at(-1).state, 'catching_up');
+  s.reg.stopAll();
+});
+
 // ── graduation ───────────────────────────────────────────────────────────────────
 
 test('a curve that graduates switches to the pool filter with no gap', async () => {

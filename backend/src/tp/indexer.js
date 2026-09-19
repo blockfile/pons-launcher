@@ -55,6 +55,10 @@ const RECENT_MAX = 500;
 const DEDUP_MAX = 20_000;
 const TS_CACHE_MAX = 4096;
 const PHASE_RESCAN_MARGIN = 50;
+// The narrowest getLogs range a refused window is split down to (see _logs).
+const MIN_SPLIT_BLOCKS = 125;
+// Refusals that splitting cannot help: the node is busy or slow, not the range too wide.
+const NOT_A_RANGE_ERROR = /429|too many|rate limit|timeout|timed out|ETIMEDOUT|ECONNRESET|ECONNREFUSED|socket hang up/i;
 
 const lc = (s) => String(s || '').toLowerCase();
 const byChainOrder = (a, b) => a.block - b.block || a.logIndex - b.logIndex;
@@ -328,15 +332,35 @@ class Indexer extends EventEmitter {
     if (trades.length) this._ingest(trades, false);
   }
 
-  async _scan(fromBlock, toBlock, filters) {
+  /**
+   * getLogs over [fromBlock, toBlock], split in halves while the node refuses the range.
+   * QuickNode answers 10,000 blocks per call; the chain's public RPC answers only 2,000
+   * of its newest ~9,500 blocks per call and fails a range that straddles that line
+   * ("internal server errror"; measured 2026-09-19). With a fixed 10k window the first
+   * hour's newest window is refused on every retry and the chart never goes live, so a
+   * refused range is halved (down to MIN_SPLIT_BLOCKS) and read piece by piece, in
+   * order. A rate limit or a timeout is not split — more calls would not help — and
+   * propagates to the tick's backoff as before.
+   */
+  async _logs(f, fromBlock, toBlock) {
     const { limit } = this._ctx;
     const provider = this._ctx.provider();
+    try {
+      return (await limit(() => provider.getLogs({ address: f.address, topics: f.topics, fromBlock, toBlock }))) || [];
+    } catch (err) {
+      if (this._stopped || toBlock - fromBlock + 1 <= MIN_SPLIT_BLOCKS || NOT_A_RANGE_ERROR.test(errText(err))) throw err;
+      const mid = fromBlock + Math.floor((toBlock - fromBlock) / 2);
+      const low = await this._logs(f, fromBlock, mid);
+      const high = await this._logs(f, mid + 1, toBlock);
+      return low.concat(high);
+    }
+  }
+
+  async _scan(fromBlock, toBlock, filters) {
     const found = new Map();
     for (const f of filters) {
-      const logs = await limit(() =>
-        provider.getLogs({ address: f.address, topics: f.topics, fromBlock, toBlock })
-      );
-      for (const log of logs || []) {
+      const logs = await this._logs(f, fromBlock, toBlock);
+      for (const log of logs) {
         const t = decodeLog(log, this.venue);
         if (!t) continue;
         const key = t.tx + ':' + t.logIndex;
