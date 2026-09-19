@@ -147,6 +147,19 @@ test('POST /quote re-reads the phase once when the curve has graduated, then quo
   assert.equal(r.body.quotes[0].amountOut, '1000');
 });
 
+test('POST /quote prices a full 100-wallet body behind `ahead`, the tokens still in flight (not a row)', async () => {
+  venueMod.cachedVenue = async () => gradVenue;
+  const sells = Array.from({ length: 100 }, (_, i) => ({ address: '0x' + (i + 1).toString(16).padStart(40, '0'), amount: '1000000' }));
+  const r = await post('/quote', { token: TOKEN, sells, ahead: '5000000' });
+  assert.equal(r.status, 200);
+  assert.equal(r.body.quotes.length, 100);
+  assert.equal(r.body.quotes[0].address, sells[0].address);
+  assert.equal(r.body.quotes[0].amountOut, '1000', 'Q(ahead + a) - Q(ahead) on the 1-per-1000 fake');
+  const bad = await post('/quote', { token: TOKEN, sells: sells.slice(0, 1), ahead: '-5' });
+  assert.equal(bad.status, 400);
+  assert.equal(bad.body.code, 'bad_request');
+});
+
 test('POST /quote refuses a bad token and a bad sells list with {error, code}', async () => {
   venueMod.cachedVenue = async () => gradVenue;
   let r = await post('/quote', { token: 'nope', sells: [] });

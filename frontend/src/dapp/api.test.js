@@ -129,6 +129,20 @@ test('buildBody sends exactly the allowlisted fields for each kind', async () =>
   assert.equal(buildBody('broadcast', { token: TOKEN, txs: [raw] }), JSON.stringify({ token: TOKEN, txs: [raw] }));
 });
 
+test('a quote may carry `ahead` — the tokens still in flight, a whole amount — and leaves it out when absent', async () => {
+  const a = Wallet.createRandom().address;
+  const sells = [{ address: a, amount: '7' }];
+  const want = [{ address: a.toLowerCase(), amount: '7' }];
+  assert.equal(buildBody('quote', { token: TOKEN, sells, ahead: 500n }), JSON.stringify({ token: TOKEN, sells: want, ahead: '500' }));
+  assert.equal(buildBody('quote', { token: TOKEN, sells, ahead: undefined }), JSON.stringify({ token: TOKEN, sells: want }));
+  for (const bad of ['-1', '0', '1.5', 7, 'x']) assert.throws(() => buildBody('quote', { token: TOKEN, sells, ahead: bad }), /ahead/, String(bad));
+  const fetch = fakeFetch([jsonAnswer(200, { quotes: [] }), jsonAnswer(200, { quotes: [] })]);
+  await postQuote(TOKEN, sells, { fetch, ahead: '500' });
+  await postQuote(TOKEN, sells, { fetch });
+  assert.equal(fetch.calls[0].init.body, JSON.stringify({ token: TOKEN, sells: want, ahead: '500' }));
+  assert.equal(fetch.calls[1].init.body, JSON.stringify({ token: TOKEN, sells: want }));
+});
+
 test('buildBody refuses an unknown kind and any field outside the allowlist, without echoing it', () => {
   const secretName = Wallet.createRandom().privateKey;
   assert.throws(() => buildBody('export', { token: TOKEN }), /unknown request kind/);

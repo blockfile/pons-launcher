@@ -46,7 +46,8 @@ const max = (a, b) => (a > b ? a : b);
 const ADDRESS = /^0x[0-9a-f]{40}$/;
 const READ_CHUNK = 100;
 const BROADCAST_MAX = 100;
-// The backend quotes at most this many sells per /quote (api.js, quote.js).
+// The backend quotes at most this many sells per /quote (api.js, quote.js). The
+// tab's own sells still in flight ride along as `ahead`, never as a row.
 const MAX_QUOTE_ROWS = 100;
 const MISSED_AFTER_MS = 20_000;
 const DROP_AFTER_MS = 60_000;
@@ -83,9 +84,6 @@ const MARK_LAG_MS = 1_500;
 // its last landed sell (a read served a block behind would hand the sold
 // tokens back).
 const LANDED_SETTLE_MS = 10_000;
-// Labels the tab's own pool sells still in flight in a click's /quote body, so
-// the click is priced behind them. Never a wallet: planSell matches by address.
-const INFLIGHT_LABEL = '0x0000000000000000000000000000000000000001';
 // planArm's per-wallet reasons (chain/plan.js SKIP.NO_GAS / SKIP.UNREAD, Task 10).
 const ARM_NO_GAS = SKIP.NO_GAS;
 const ARM_UNREAD = SKIP.UNREAD;
@@ -1340,11 +1338,11 @@ export function createSession({
     }
   }
 
-  /** The tab's own pool sells still in flight, as one leading /quote row: this click lands behind them. */
-  function inflightRow() {
+  /** The tokens the tab's own sells still have in flight: this click lands behind them (/quote `ahead`). */
+  function inflightTotal() {
     let total = 0n;
     for (const w of W.values()) total += w.inflight;
-    return total > 0n ? { address: INFLIGHT_LABEL, amount: total.toString() } : null;
+    return total;
   }
 
   /**
@@ -1355,7 +1353,8 @@ export function createSession({
    * Pool floors come from chain/plan.js attachQuotes (worstOut: priced as if
    * the wallet lands after every other sell of the click — Task 10 contract
    * note 4) of an exact /quote of this click's sellRequests body: only the
-   * wallets that can sell, behind the tab's own pool sells still in flight.
+   * wallets that can sell, behind the tab's own pool sells still in flight
+   * (`ahead`, which is not a row: a full 100-wallet body still fits).
    * Never from the preview cache: scaled from a quote of every wallet's FULL
    * balance, that floor is sized for a 100 % exit and on a thin pool sits far
    * below what the visitor's slippage setting promises. planSell uses a quote
@@ -1386,23 +1385,21 @@ export function createSession({
     let inBody = new Set();
     if (isPool()) {
       let body;
-      let ahead;
       try {
         body = poolBody(sellable(chosen, pct), pct);
-        ahead = inflightRow();
       } catch (e) {
         return refused(errText(e));
       }
-      if (body.length + (ahead ? 1 : 0) > MAX_QUOTE_ROWS) {
-        return refused(`a pool click sells from at most ${MAX_QUOTE_ROWS - (ahead ? 1 : 0)} wallets — untick some and click again`);
+      if (body.length > MAX_QUOTE_ROWS) {
+        return refused(`a pool click sells from at most ${MAX_QUOTE_ROWS} wallets — untick some and click again`);
       }
       inBody = new Set(body.map((s) => lower(s.address)));
       if (!body.length) exact = []; // nothing to quote: planSell skips each wallet with its own reason
       else {
-        const full = ahead ? [ahead, ...body] : body;
+        const ahead = inflightTotal();
         try {
-          const res = await deps.api.postQuote(venue.token, full);
-          exact = attached(full, res).filter((r) => lower(r.address) !== INFLIGHT_LABEL);
+          const res = await deps.api.postQuote(venue.token, body, ahead > 0n ? { ahead: ahead.toString() } : undefined);
+          exact = attached(body, res);
           qc = buildQuoteCache(body, exact, now());
         } catch (e) {
           return refused(`quote failed: ${errText(e)}`);

@@ -77,8 +77,9 @@ router.post(
   })
 );
 router.get('/fees', readLimit, wrap(async (req, res) => res.json(await state.feeParams())));
-// {token, sells: [{address, amount}]} -> {quotes}: cumulative, in the order the
-// click sends (tp/quote.js). The send path: venue.cachedVenue costs no chain read
+// {token, sells: [{address, amount}], ahead?} -> {quotes}: cumulative, in the order
+// the click sends (tp/quote.js), behind `ahead` — the tokens the visitor's earlier
+// sells still have in flight (not a row). The send path: venue.cachedVenue costs no chain read
 // on a hit. A curve that graduated since the venue was cached answers every row
 // reason 'graduated'; re-read the phase ONCE and quote the pool instead (spec:
 // "Graduation mid-session").
@@ -93,13 +94,14 @@ router.post(
     if (typeof body.token !== 'string' || !/^0x[0-9a-fA-F]{40}$/.test(body.token)) {
       throw new TpError('bad_address', 'token is not an address');
     }
+    const opts = { ahead: body.ahead };
     let v = await venue.cachedVenue(body.token.toLowerCase());
-    let quotes = await quote.quoteSells(v, body.sells);
+    let quotes = await quote.quoteSells(v, body.sells, {}, opts);
     if (v.kind === 'curve' && quotes.some((q) => q.reason === 'graduated')) {
       const fresh = await venue.refreshPhase(v);
       if (fresh && fresh !== v) {
         v = fresh;
-        quotes = await quote.quoteSells(v, body.sells);
+        quotes = await quote.quoteSells(v, body.sells, {}, opts);
       }
     }
     res.json({ quotes });

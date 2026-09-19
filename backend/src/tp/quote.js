@@ -38,7 +38,9 @@ const providers = require('./providers');
 const BPS = 10_000n;
 const ZERO = '0x0000000000000000000000000000000000000000';
 
-// At most this many sells per request (the plan's ≤ 100 wallets).
+// At most this many sells per request (the plan's ≤ 100 wallets). The tokens a
+// visitor's earlier sells still have in flight ride along as `ahead`, never as a
+// row, so a full 100-wallet click can still be priced behind them.
 const MAX_SELLS = 100;
 // Quotes per Multicall3 eth_call. A V4 quote through the pons hook costs a few
 // hundred thousand gas; 25 keeps one eth_call far under the node's call gas cap.
@@ -365,16 +367,24 @@ async function quotePool(venue, list, rpc) {
  * @param {object} venue a Venue from venue.js
  * @param {Array<{address: string, amount: string}>} sells amounts in token base units
  * @param {{provider?: object}} [deps] tests inject a fake provider
+ * @param {{ahead?: string}} [opts] ahead: tokens the visitor's earlier sells still
+ *   have in flight (decimal base units). Every row is priced behind them, as if
+ *   they were a leading row — but they are not one: no quote is returned for them
+ *   and they do not count toward the 100 rows.
  * @returns {Promise<Array<{address, amountOut, impactBps, ok, reason}>>}
  *   amountOut: decimal string, in the PAIR token's base units (wei for ETH/WETH).
  */
-async function quoteSells(venue, sells, deps = {}) {
+async function quoteSells(venue, sells, deps = {}, opts = {}) {
   if (!venue || !venue.kind) throw new TpError('bad_request', 'no venue to quote');
   const list = parseSells(sells);
+  const ahead = opts.ahead === undefined || opts.ahead === null ? 0n : parseAmount(opts.ahead, 'ahead');
+  const rows = ahead > 0n ? [{ address: ZERO, amount: ahead }, ...list] : list;
   const rpc = deps.provider || providers.tpReadProvider();
-  if (venue.kind === 'curve') return quoteCurve(venue, list, rpc);
-  if (venue.kind === 'graduated' || venue.kind === 'v1') return quotePool(venue, list, rpc);
-  throw new TpError('not_pons', `venue kind ${venue.kind} cannot be quoted`);
+  let out;
+  if (venue.kind === 'curve') out = await quoteCurve(venue, rows, rpc);
+  else if (venue.kind === 'graduated' || venue.kind === 'v1') out = await quotePool(venue, rows, rpc);
+  else throw new TpError('not_pons', `venue kind ${venue.kind} cannot be quoted`);
+  return ahead > 0n ? out.slice(1) : out;
 }
 
 /**

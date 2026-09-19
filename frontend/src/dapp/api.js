@@ -100,6 +100,11 @@ function amount(value, name) {
   return n.toString();
 }
 
+/** Optional amount: absent is left out of the body. */
+function optionalAmount(value, name) {
+  return value === undefined || value === null ? undefined : amount(value, name);
+}
+
 function addressList(value, name) {
   return list(value, name).map((a, i) => address(a, `${name}[${i}]`));
 }
@@ -136,7 +141,7 @@ function rawTxList(value, name) {
 
 const SCHEMAS = {
   wallets: { token: address, addresses: addressList },
-  quote: { token: address, sells: sellList },
+  quote: { token: address, sells: sellList, ahead: optionalAmount },
   pairQuote: { pairToken: address, amount },
   broadcast: { token: address, txs: rawTxList, sid },
 };
@@ -162,7 +167,7 @@ function assertNoKey(value, path) {
 /**
  * The JSON body for a request kind, from its allowlist only.
  *   wallets:   {token, addresses}
- *   quote:     {token, sells: [{address, amount}]}
+ *   quote:     {token, sells: [{address, amount}], ahead?}
  *   pairQuote: {pairToken, amount}
  *   broadcast: {token, txs, sid?}
  * Throws on an unknown kind, any other field, a bad value, or a key-shaped value.
@@ -233,9 +238,14 @@ export async function getFees(opts) {
   return request('GET', '/fees', undefined, opts);
 }
 
-/** POST /quote {token, sells} -> {quotes} */
+/**
+ * POST /quote {token, sells, ahead?} -> {quotes}. opts.ahead: the tokens this
+ * tab's earlier sells still have in flight — the click is priced behind them,
+ * and they are not a row (a full 100-wallet body still fits).
+ */
 export async function postQuote(token, sells, opts) {
-  return request('POST', '/quote', buildBody('quote', { token, sells }), opts);
+  const ahead = opts && opts.ahead !== undefined ? opts.ahead : undefined;
+  return request('POST', '/quote', buildBody('quote', { token, sells, ahead }), opts);
 }
 
 /** POST /quote/pair {pairToken, amount} -> {amountOut, path, fees, impactBps, ok, reason} */

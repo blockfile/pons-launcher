@@ -60,7 +60,7 @@ const owedIn = (ledger, addr) => (ledger.get(PAIR, addr) || { owed: 0n }).owed;
 
 function harness({ venue, states, planSellCalls = [], real = false, live = true, pairLedger = null, fees: feesOver = {}, onVenue }) {
   const byAddr = new Map(states.map((s) => [s.address.toLowerCase(), s]));
-  const log = { wallets: [], broadcast: [], quote: [], pair: [], token: 0 };
+  const log = { wallets: [], broadcast: [], quote: [], ahead: [], pair: [], token: 0 };
   const toasts = [];
   const api = {
     onBroadcast: null,
@@ -73,8 +73,9 @@ function harness({ venue, states, planSellCalls = [], real = false, live = true,
       if (api.onBroadcast) return { results: api.onBroadcast(txs, log.broadcast.length) };
       return { results: txs.map((raw) => ({ hash: `h:${raw}`, from: raw.split('|')[1], nonce: 0, ok: true, error: null })) };
     },
-    async postQuote(token, sells) {
+    async postQuote(token, sells, opts) {
       log.quote.push(sells);
+      log.ahead.push(opts && opts.ahead !== undefined ? String(opts.ahead) : null);
       return { quotes: sells.map((s) => ({ address: s.address, amountOut: (BigInt(s.amount) / 2n).toString(), impactBps: 10, ok: true, reason: null })) };
     },
     async postPairQuote(pairToken, amount) {
@@ -385,15 +386,10 @@ test('pool venue: every click quotes its OWN amounts exactly; the warm cache onl
   assert.deepEqual(h.log.quote[1], [{ address: A, amount: '500000' }]);
   assert.ok(calls.length > planned);
   assert.equal(calls.at(-1).quotes[0].amountOut, '250000');
+  assert.equal(h.log.ahead[1], null, 'nothing in flight yet');
   await h.s.sell(50);
-  assert.deepEqual(
-    h.log.quote[2],
-    [
-      { address: INFLIGHT, amount: '500000' },
-      { address: A, amount: '250000' },
-    ],
-    "a click is quoted BEHIND the tab's own sells still in flight"
-  );
+  assert.deepEqual(h.log.quote[2], [{ address: A, amount: '250000' }]);
+  assert.equal(h.log.ahead[2], '500000', "a click is quoted BEHIND the tab's own sells still in flight");
 });
 
 test('a receipt missed during a reconnect is inferred from the nonce and the balance', async () => {
@@ -506,12 +502,13 @@ const sellOf = (raw) => {
   return { amountIn, minOut };
 };
 
-/** A concave fake pool, Q(x) = x * K / (x + K), answered cumulatively in body order as Task 4 does. */
+/** A concave fake pool, Q(x) = x * K / (x + K), answered cumulatively in body order — behind `ahead` — as Task 4 does. */
 function concavePool(h, K, capAt = null) {
   const Q = (x) => (x * K) / (x + K);
-  h.api.postQuote = async (token, sells) => {
+  h.api.postQuote = async (token, sells, opts) => {
     h.log.quote.push(sells);
-    let S = 0n;
+    h.log.ahead.push(opts && opts.ahead !== undefined ? String(opts.ahead) : null);
+    let S = opts && opts.ahead !== undefined ? BigInt(opts.ahead) : 0n;
     return {
       quotes: sells.map((s) => {
         const before = Q(S);
@@ -673,10 +670,10 @@ test('graduated, REAL planSell, two wallets on a concave pool: floors are priced
   const o2 = await h.s.sell(50);
   assert.equal(o2.sent, 2);
   assert.deepEqual(h.log.quote[1], [
-    { address: INFLIGHT, amount: '2000000' },
     { address: A, amount: '750000' },
     { address: B, amount: '250000' },
   ]);
+  assert.equal(h.log.ahead[1], '2000000');
   const [rawA2, rawB2] = h.log.broadcast[1];
   // A lands after the first click AND B at worst: Q(3,000,000) - Q(2,250,000) = 274,285 >= 253,968.
   assert.deepEqual(sellOf(rawA2), { amountIn: 750000n, minOut: 215872n });
@@ -748,6 +745,19 @@ test('a pool click refuses more than 100 wallets up front, with a reason', async
   assert.equal(out.sent, 0);
   assert.match(out.reason, /at most 100 wallets/);
   assert.equal(h.log.quote.length, 0);
+});
+
+test('a second pool click while 100 sells are in flight still quotes all 100 wallets, behind them', async () => {
+  const states = Array.from({ length: 100 }, (_, i) => wallet(nth(i), { tokenBalance: '1000', allowance: '1000', nonce: 0 }));
+  const h = harness({ venue: POOL, states });
+  await h.s.loadWallets(states.map((s) => s.address));
+  const o1 = await h.s.sell(25);
+  assert.equal(o1.sent, 100);
+  const o2 = await h.s.sell(25);
+  assert.equal(o2.sent, 100, o2.reason || '');
+  assert.equal(h.log.quote.at(-1).length, 100);
+  assert.ok(!h.log.quote.at(-1).some((s) => s.address === INFLIGHT), 'what is in flight is not a row');
+  assert.equal(h.log.ahead.at(-1), '25000', 'but the click is priced behind it');
 });
 
 // ── the pair -> ETH leg (review: pair-leg-owed-double-count, pair-proceeds-stranded-no-retry) ──

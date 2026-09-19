@@ -308,6 +308,43 @@ test('input: sells are checked before any chain read', async () => {
   assert.equal(await code(quoteSells({ ...gradVenue, kind: 'flap' }, [{ address: A1, amount: '1' }], { provider: rpc })), 'not_pons');
 });
 
+// ── ahead: the visitor's own sells still in flight (review round 3: F5) ──────
+test('ahead: every row is quoted behind the tokens still in flight, which are neither a row nor counted in the 100', async () => {
+  const h = v4Handler({ poolKey: nativePoolKey, zeroForOne: false });
+  const rpc = fakeProvider(h);
+  const a = 10n ** 24n;
+  const ahead = 3n * 10n ** 24n;
+  const rows = await quoteSells(gradVenue, [{ address: A1, amount: a.toString() }], { provider: rpc }, { ahead: ahead.toString() });
+  assert.equal(rows.length, 1);
+  assert.equal(rows[0].address, A1);
+  assert.equal(rows[0].amountOut, (cpOut(ahead + a, R_TOKEN, R_QUOTE) - cpOut(ahead, R_TOKEN, R_QUOTE)).toString());
+  assert.ok(BigInt(rows[0].amountOut) < cpOut(a, R_TOKEN, R_QUOTE), 'priced behind the sells in flight');
+
+  const full = Array.from({ length: 100 }, (_, i) => ({ address: '0x' + (i + 1).toString(16).padStart(40, '0'), amount: (10n ** 21n).toString() }));
+  const all = await quoteSells(gradVenue, full, { provider: rpc }, { ahead: ahead.toString() });
+  assert.equal(all.length, 100, 'a full 100-wallet body plus what is in flight');
+  assert.equal(all[0].address, full[0].address);
+
+  const none = await quoteSells(gradVenue, [{ address: A1, amount: a.toString() }], { provider: rpc }, { ahead: '0' });
+  assert.equal(none[0].amountOut, cpOut(a, R_TOKEN, R_QUOTE).toString(), '0 ahead: nothing in flight');
+});
+
+test('ahead: a curve walks the reserves past the tokens in flight first', async () => {
+  const rpc = fakeProvider(curveHandler({ ...LIVE.before, feeBps: LIVE.feeBps, creatorTaxBps: LIVE.creatorTaxBps }));
+  const second = 10n ** 24n;
+  const [r] = await quoteSells(curveVenue, [{ address: A2, amount: second.toString() }], { provider: rpc }, { ahead: LIVE.tokensIn.toString() });
+  const gross = (LIVE.after.q * second) / (LIVE.after.t + second);
+  assert.equal(r.amountOut, (gross - (gross * 100n) / 10000n - (gross * 100n) / 10000n).toString());
+});
+
+test('ahead: a bad amount is refused before any chain read', async () => {
+  const rpc = { async call() { throw new Error('must not be called'); } };
+  const code = (p) => p.then(() => null, (e) => e.code);
+  for (const bad of ['-1', '1.5', 5, 'x', (1n << 128n).toString()]) {
+    assert.equal(await code(quoteSells(gradVenue, [{ address: A1, amount: '1' }], { provider: rpc }, { ahead: bad })), 'bad_request', String(bad));
+  }
+});
+
 // ── pair -> ETH ──────────────────────────────────────────────────────────────
 function pairHandler(pools) {
   return (target, data) => {
