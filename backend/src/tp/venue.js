@@ -87,11 +87,21 @@ function providerOf(deps) {
 // text. The page renders them as React text only; here they are also stripped
 // of control characters and capped, so the payload stays small and plain.
 // Filtered by code point on purpose: no escape sequences in this source.
+//
+// The same code points tokenInfo.keepCode strips, because name, symbol and pairSymbol
+// are spliced into RUNNING TEXT the visitor acts on — "Convert <symbol> -> ETH" on the
+// convert button, "<amount> <symbol> -> ETH" on each row, "Swap the <pairSymbol> into
+// ETH now" in its tooltip. One unterminated RLO (U+202E) in a symbol reverses
+// everything after it inside that box, so the button can be made to read as if it
+// converted the other way round. C1 controls (128-159) and the bidi isolates
+// (U+2066-2069) go for the same reason.
 function cleanText(value, fallback) {
   if (value == null) return fallback;
   const kept = Array.from(String(value)).filter((ch) => {
     const c = ch.codePointAt(0);
-    return c >= 32 && c !== 127;
+    if (c < 32 || c === 127 || (c >= 128 && c <= 159)) return false;
+    if ((c >= 0x202a && c <= 0x202e) || (c >= 0x2066 && c <= 0x2069)) return false;
+    return true;
   });
   const s = kept.slice(0, 64).join('').trim();
   return s || fallback;

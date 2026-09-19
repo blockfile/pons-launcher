@@ -180,21 +180,32 @@ function recoverSigner(message, sig) {
 }
 
 /**
- * Outstanding login challenges, in memory: 5-minute life, single use, at most
- * `perIp` per client (the oldest goes) and `max` in total (the oldest goes).
+ * Outstanding login challenges, in memory: 5-minute life, single use, at most `perIp`
+ * per CLIENT AND ADDRESS (the oldest goes) and `max` in total (the oldest goes).
+ *
+ * Per IP alone would not do: clientIp() keys a shared IPv4 exactly, so every visitor
+ * behind one carrier NAT or office egress shares one bucket, and each holds its slot
+ * for the full 5 minutes while its owner is in their wallet's approval dialog. The
+ * sixth neighbour to tap Connect silently evicted the first, whose signature then
+ * answered 401 unknown_nonce. Keying by (ip, address) separates them; `perIp` is over
+ * the 5 min x TP_ACCOUNT_NONCES_PER_MIN an IP could issue anyway, so a visitor's own
+ * retries never evict their own, and `max` stays the memory bound.
  */
-function createChallenges({ now = Date.now, perIp = 5, max = 10_000 } = {}) {
+function createChallenges({ now = Date.now, perIp = 20, max = 10_000 } = {}) {
   const byNonce = new Map(); // nonce -> {address, message, expiresAt, ip}; insertion = issue order
-  const byIp = new Map(); // ip -> Set(nonce), oldest first
+  const byClient = new Map(); // 'ip|address' -> Set(nonce), oldest first
+
+  const clientKey = (record) => `${record.ip}|${String(record.address).toLowerCase()}`;
 
   function drop(nonce) {
     const c = byNonce.get(nonce);
     if (!c) return null;
     byNonce.delete(nonce);
-    const mine = byIp.get(c.ip);
+    const k = clientKey(c);
+    const mine = byClient.get(k);
     if (mine) {
       mine.delete(nonce);
-      if (mine.size === 0) byIp.delete(c.ip);
+      if (mine.size === 0) byClient.delete(k);
     }
     return c;
   }
@@ -206,14 +217,15 @@ function createChallenges({ now = Date.now, perIp = 5, max = 10_000 } = {}) {
       if (c.expiresAt > t) break;
       drop(n);
     }
-    for (let mine = byIp.get(record.ip); mine && mine.size >= perIp; mine = byIp.get(record.ip)) {
+    const k = clientKey(record);
+    for (let mine = byClient.get(k); mine && mine.size >= perIp; mine = byClient.get(k)) {
       drop(mine.values().next().value);
     }
     while (byNonce.size >= max) drop(byNonce.keys().next().value);
     byNonce.set(nonce, record);
-    const mine = byIp.get(record.ip) || new Set();
+    const mine = byClient.get(k) || new Set();
     mine.add(nonce);
-    byIp.set(record.ip, mine);
+    byClient.set(k, mine);
   }
 
   /** The challenge for `nonce`, removed — single use, whatever the login's outcome. */

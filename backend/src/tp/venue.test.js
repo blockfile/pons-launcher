@@ -286,6 +286,25 @@ test('hostile metadata is cleaned: control characters dropped, capped at 64 char
   assert.equal(v.symbol, '0xaaaa...aaaa'); // unreadable symbol falls back to a short address
 });
 
+test('a symbol cannot reorder the words of a money action: bidi and C1 controls go too', async () => {
+  const fc = v2Chain();
+  const rlo = String.fromCodePoint(0x202e); // right-to-left override, unterminated
+  const isolate = String.fromCodePoint(0x2066);
+  const c1 = String.fromCodePoint(0x9b);
+  fc.on(TOKEN, 'function symbol() view returns (string)', () => [`AMZN${rlo}`]);
+  fc.on(TOKEN, 'function name() view returns (string)', () => [`A${isolate}M${c1}Z`]);
+  const v = await venue.resolveVenue(TOKEN, { provider: fc.provider });
+  // These are spliced into running text: "Convert <symbol> -> ETH", "<amount> <symbol>
+  // -> ETH", "Swap the <pairSymbol> into ETH now". One unterminated override reverses
+  // everything after it in that box.
+  assert.equal(v.symbol, 'AMZN');
+  assert.equal(v.name, 'AMZ');
+  for (const ch of [rlo, isolate, c1]) {
+    assert.equal(v.symbol.includes(ch), false);
+    assert.equal(v.name.includes(ch), false);
+  }
+});
+
 // ── pons v2 graduated ───────────────────────────────────────────────────────
 
 test('poolKeyFor reproduces the on-chain-verified reference poolId (poolswap.js:23-32)', () => {

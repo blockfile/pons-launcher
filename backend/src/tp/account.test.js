@@ -24,6 +24,7 @@ const {
   parseOrigin,
   canonicalSignature,
   recoverSigner,
+  ACCOUNT_LIMITS,
   createChallenges,
   createSessions,
   readSessionCookie,
@@ -192,12 +193,42 @@ test('canonicalSignature refuses 64 bytes, a long wrapper, a bad v, r or s out o
 });
 
 // ── challenges, sessions, cookie, secret ─────────────────────────────────────
-test('challenges: single use, 5 outstanding per IP (oldest goes), a global cap, expired ones pruned', () => {
+test('challenges: an outstanding one is per IP AND ADDRESS, so neighbours behind one NAT never evict each other', () => {
+  const clock = { t: T0 };
+  const c = createChallenges({ now: () => clock.t, perIp: 2, max: 100 });
+  const rec = (ip, address) => ({ address, message: 'm', expiresAt: clock.t + 300_000, ip });
+  // Six visitors on one carrier NAT address tap Connect within the 5-minute life of a
+  // challenge; each is in their wallet's approval dialog.
+  const nonces = [];
+  for (let i = 0; i < 6; i++) {
+    const n = `n${i}`;
+    c.add(n, rec('1.1.1.1', `0xvisitor${i}`));
+    nonces.push(n);
+  }
+  for (const n of nonces) assert.ok(c.take(n), `${n} survived its neighbours`);
+
+  // One address still cannot hoard: its own oldest goes.
+  for (let i = 0; i < 3; i++) c.add(`m${i}`, rec('1.1.1.1', '0xsame'));
+  assert.equal(c.take('m0'), null, 'the third challenge of one account evicts its oldest');
+  assert.ok(c.take('m1'));
+});
+
+test('the shipped per-IP-and-address allowance is well over the rate at which nonces can be issued', () => {
+  assert.ok(ACCOUNT_LIMITS.noncesPerMin <= 10);
+  const c = createChallenges({ now: () => T0 });
+  const rec = { address: '0xa', message: 'm', expiresAt: T0 + 300_000, ip: '1.1.1.1' };
+  // The default perIp must not evict inside the 5-minute life at the issue rate the
+  // nonce limiter already permits, or a visitor's own retry could evict their own.
+  for (let i = 0; i < 20; i++) c.add(`k${i}`, rec);
+  assert.ok(c.take('k0'), 'twenty of one account are still outstanding');
+});
+
+test('challenges: single use, a bounded number outstanding per IP and address (oldest goes), a global cap, expired ones pruned', () => {
   const clock = { t: T0 };
   const c = createChallenges({ now: () => clock.t, perIp: 5, max: 8 });
   const rec = (ip, ttl = 300_000) => ({ address: '0x', message: 'm', expiresAt: clock.t + ttl, ip });
   for (let i = 0; i < 6; i++) c.add(`a${i}`, rec('1.1.1.1'));
-  assert.equal(c.take('a0'), null, 'the 6th challenge of one IP evicts its oldest');
+  assert.equal(c.take('a0'), null, 'the 6th challenge of one IP and address evicts its oldest');
   assert.ok(c.take('a1'));
   assert.equal(c.take('a1'), null, 'single use');
   for (let i = 0; i < 6; i++) c.add(`b${i}`, rec(`2.2.2.${i}`));

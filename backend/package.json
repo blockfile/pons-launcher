@@ -8,7 +8,7 @@
   "scripts": {
     "start": "node server.js",
     "dev": "node --watch server.js",
-    "test": "node --test \"src/**/*.test.js\" \"../shared/*.test.js\"",
+    "test": "node --test \"src/**/*.test.js\" \"scripts/lib/*.test.js\" \"scripts/lib/*.test.mjs\" \"../shared/*.test.js\"",
     "user:add": "node scripts/user.js add",
     "user:list": "node scripts/user.js list",
     "user:remove": "node scripts/user.js remove",
@@ -32,6 +32,7 @@
   },
   "dependencies": {
     "dotenv": "^16.4.7",
+    "@noble/curves": "1.2.0",
     "ethers": "^6.13.5",
     "express": "^4.21.2",
     "solc": "^0.8.36"

@@ -84,7 +84,10 @@ const slash = (p) => p.split(path.sep).join('/');
 process.chdir(SCRATCH);
 
 const { Wallet, getBytes, hashMessage, toUtf8String } = require('ethers');
-// ethers 6.17 pins @noble/curves 1.2.0; the hedged owner needs its extraEntropy.
+// backend/package.json declares @noble/curves at the version ethers pins: the hedged
+// owner needs its extraEntropy, and ethers' own SigningKey.sign is deterministic
+// RFC6979, so it cannot stand in. Without the declaration a lockfile refresh onto
+// curves 2.x would kill this script at require time with npm test still green.
 const { secp256k1 } = require('@noble/curves/secp256k1');
 const {
   isAccount,
