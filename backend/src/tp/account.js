@@ -34,6 +34,14 @@
 // non-GET must be application/json (no HTML form can send that) from Origin ==
 // TP_SIWE_ORIGIN. That also covers login CSRF.
 //
+// THE VAULT (tp/vaultStore.js): GET/PUT/DELETE /vault read and write the signed-in
+// address's ciphertext blob, never another's — the address comes from the session,
+// never from the body. Writes pay a per-IP and a per-ADDRESS bucket; a write that
+// CREATES a vault also pays TP_ACCOUNT_CREATES_PER_HOUR per IP (identities are free
+// to make, disk is not). A DELETE revokes every session of the address, this one
+// included. The store never touches the disk synchronously (this process also
+// answers /api/tp/broadcast), so the vault routes and requireSession are async.
+//
 // NOTHING AT REQUIRE TIME TOUCHES THE DISK OR THROWS. This router is mounted by
 // routes/tp.js inside the console's own process: a bad TP_SIWE_ORIGIN or an
 // unwritable TP_ACCOUNTS_DIR turns into 503 'unavailable' on the account routes
@@ -45,9 +53,14 @@ const path = require('node:path');
 const express = require('express');
 const { getAddress, hashMessage, recoverAddress } = require('ethers');
 const { TpError, sendError } = require('./errors');
-const { rateLimit, clientIp } = require('./limits');
+const { rateLimit, clientIp, tokenBuckets } = require('./limits');
 const { CHAIN_ID } = require('./constants');
 const { DEFAULT_DAPP_HOST } = require('./hostGate');
+const { createVaultStore, validatePut } = require('./vaultStore');
+
+// Express 4 does not catch a rejected promise from an async handler (routes/tp.js has
+// the same one-liner): route every rejection to this router's error handler.
+const wrap = (fn) => (req, res, next) => Promise.resolve().then(() => fn(req, res, next)).catch(next);
 
 const LF = String.fromCharCode(10);
 const STATEMENT =
@@ -332,6 +345,7 @@ function createAccountRouter({
   origin = process.env.TP_SIWE_ORIGIN || `https://${process.env.DAPP_HOST || DEFAULT_DAPP_HOST}`,
   now = Date.now,
   limits = {},
+  vaultLimits = {},
 } = {}) {
   const lim = { ...ACCOUNT_LIMITS, ...limits };
   const router = express.Router();
@@ -356,7 +370,10 @@ function createAccountRouter({
     if (ctx) return ctx;
     const { dir: root } = config();
     try {
-      ctx = { sessions: createSessions({ secret: loadSessionSecret(root), now }) };
+      ctx = {
+        sessions: createSessions({ secret: loadSessionSecret(root), now }),
+        store: createVaultStore({ dir: root, limits: vaultLimits, now }),
+      };
       return ctx;
     } catch (err) {
       console.error(`[tp] account store unavailable: ${err.message}`);
@@ -369,18 +386,31 @@ function createAccountRouter({
   const loginLimit = rateLimit({ windowMs: 60_000, max: lim.loginsPerMin, now });
   const readLimit = rateLimit({ windowMs: 60_000, max: lim.readsPerMin, now });
   const writeIpLimit = rateLimit({ windowMs: 60_000, max: lim.writesPerMinPerIp, now });
+  // After requireSession: keyed by the signed-in address, whatever IP it writes from.
+  const writeAccountLimit = rateLimit({
+    windowMs: 60_000,
+    max: lim.writesPerMinPerAccount,
+    now,
+    key: (req) => `account:${req.tpSession.address}`,
+  });
+  // New vaults per IP per hour: charged only when a PUT actually creates one.
+  const creates = tokenBuckets({ windowMs: 3600_000, max: lim.createsPerHour, now });
 
-  function requireSession(req, res, next) {
+  // Async: the revocations live in the vault store, which reads the disk only
+  // asynchronously (it opens on first use).
+  const requireSession = wrap(async (req, res, next) => {
     const token = readSessionCookie(req);
     if (!token) return next(noSession());
-    const session = context().sessions.verify(token);
-    if (!session) {
+    const { sessions, store } = context();
+    const session = sessions.verify(token);
+    // A vault DELETE revokes every session of its address issued up to that moment.
+    if (!session || session.issuedAt <= (await store.notBefore(session.address))) {
       res.clearCookie(COOKIE_NAME, COOKIE_OPTIONS);
       return next(noSession());
     }
     req.tpSession = session;
     return next();
-  }
+  });
 
   router.use((req, res, next) => {
     res.set('Cache-Control', 'no-store');
@@ -425,16 +455,77 @@ function createAccountRouter({
     res.status(204).end();
   });
 
-  // -> {address, expiresAt}
-  router.get('/me', readLimit, requireSession, (req, res) => {
-    res.json({ address: getAddress(req.tpSession.address), expiresAt: req.tpSession.expiresAt });
-  });
+  // -> {address, expiresAt, vault: {rev, updatedAt, keyId, bytes} | null}
+  router.get(
+    '/me',
+    readLimit,
+    requireSession,
+    wrap(async (req, res) => {
+      const vault = await context().store.meta(req.tpSession.address);
+      res.json({ address: getAddress(req.tpSession.address), expiresAt: req.tpSession.expiresAt, vault });
+    })
+  );
+
+  // -> {vault: null | {v, kv, keyId, iv, ct, rev, updatedAt}}
+  router.get(
+    '/vault',
+    readLimit,
+    requireSession,
+    wrap(async (req, res) => {
+      res.json({ vault: await context().store.get(req.tpSession.address) });
+    })
+  );
+
+  // {baseRev, kv, keyId, iv, ct, rekey?} -> {rev, updatedAt}
+  router.put(
+    '/vault',
+    writeIpLimit,
+    requireSession,
+    writeAccountLimit,
+    wrap(async (req, res) => {
+      const { store } = context();
+      const input = validatePut(req.body, { maxBytes: store.limits.maxBytes });
+      const ip = clientIp(req);
+      const out = await store.put(req.tpSession.address, input, {
+        // Called inside the store's write lane, only when this write is about to
+        // CREATE a vault (every other check passed): an update, or a baseRev 0 that
+        // meets an existing vault (409 conflict), pays nothing. The slot is taken
+        // here, so two racing creates from one IP cannot both slip under the cap; a
+        // create that then fails on the disk (503) has still spent its slot.
+        beforeCreate: () => {
+          const slot = creates.take(ip);
+          if (!slot.ok) {
+            res.set('Retry-After', String(Math.max(1, Math.ceil(slot.retryAfterMs / 1000))));
+            throw new TpError('rate_limited', 'too many new saved-wallet lists from this address — try again later', 429);
+          }
+        },
+      });
+      res.json({ rev: out.rev, updatedAt: out.updatedAt });
+    })
+  );
+
+  // {baseRev} -> {deleted}. Ends every session of this address, this one included.
+  router.delete(
+    '/vault',
+    writeIpLimit,
+    requireSession,
+    writeAccountLimit,
+    wrap(async (req, res) => {
+      const body = objectBody(req.body, ['baseRev']);
+      if (!Number.isSafeInteger(body.baseRev) || body.baseRev < 0) {
+        throw new TpError('bad_request', 'baseRev must be the rev you read');
+      }
+      const out = await context().store.remove(req.tpSession.address, body.baseRev);
+      res.clearCookie(COOKIE_NAME, COOKIE_OPTIONS);
+      res.json(out);
+    })
+  );
 
   router.use((req, res) => res.status(404).json({ error: 'not found' }));
   // eslint-disable-next-line no-unused-vars
   router.use((err, req, res, next) => sendError(res, err));
 
-  router.limiters = { nonceLimit, loginLimit, readLimit, writeIpLimit };
+  router.limiters = { nonceLimit, loginLimit, readLimit, writeIpLimit, writeAccountLimit };
   return router;
 }
 

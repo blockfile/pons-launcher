@@ -22,6 +22,7 @@ process.env.HISTORY_PATH = path.join(tmp, 'launches.json');
 process.env.USERS_PATH = path.join(tmp, 'users.json');
 process.env.V4_STORE_PATH = path.join(tmp, 'v4.json');
 process.env.DAPP_HOST = 'dapp.mount.test';
+process.env.TP_ACCOUNTS_DIR = path.join(tmp, 'tp-accounts');
 fs.writeFileSync(
   process.env.USERS_PATH,
   JSON.stringify({
@@ -99,6 +100,16 @@ test('dApp host: console routes answer 404 before identify or any router runs', 
     assert.equal(r.status, 404, p);
     assert.deepEqual(JSON.parse(r.body), { error: 'not found' }, p);
   }
+});
+
+test('the account API: 401 no_session on the dApp host, 404 on the console host (host gate)', async () => {
+  const onDapp = await get('/api/tp/account/me', DAPP);
+  assert.equal(onDapp.status, 401);
+  assert.equal(JSON.parse(onDapp.body).code, 'no_session');
+  const onConsole = await get('/api/tp/account/me', '127.0.0.1');
+  assert.equal(onConsole.status, 404);
+  assert.deepEqual(JSON.parse(onConsole.body), { error: 'not found' });
+  assert.ok(!fs.existsSync(path.join(tmp, 'tp-accounts')), 'a request without a cookie never touches the disk');
 });
 
 test('console host: /dapp and /dapp/* answer 404 — the key-holding page never runs on the console origin', async () => {

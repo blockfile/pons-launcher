@@ -337,6 +337,15 @@ one click. Design: `docs/superpowers/specs/2026-09-19-tp-dapp-design.md`.
   (`DAPP_HOST`), so a mis-edit of either one alone does not expose the console.
 - `backend/.env` needs nothing new. `DAPP_HOST`, `TP_MAX_TOKENS` and
   `TP_SEQUENCER_URL` are optional; see `backend/.env.example`.
+- **The account** (connect a wallet, sign in, saved wallets synced ENCRYPTED; spec
+  Addendum v2 A) keeps its state in `backend/data/tp-accounts/`: `vaults/` (one
+  ciphertext file per signed-in address, which this server cannot decrypt),
+  `session.key` (signs the session cookies; deleting it signs everyone out) and
+  `revoked.json`. **Back that directory up with the droplet**, e.g.
+  `tar czf ~/tp-accounts.$(date +%F).tgz -C backend/data tp-accounts`: losing
+  `vaults/` loses every visitor's synced list (their own key exports stay the real
+  backup). Optional settings, all in `backend/.env.example`: `TP_ACCOUNTS_DIR`,
+  `TP_SIWE_ORIGIN`, `TP_VAULT_*`, `TP_ACCOUNT_*`, and the logo proxy's `TP_LOGO_*`.
 
 **First deploy** (DNS already points `dapp` at the droplet). On the droplet, in
 the repo checkout, not during a live launch:
@@ -381,6 +390,19 @@ curl -sN --max-time 5 'https://dapp.rhbond.xyz/api/tp/stream?token=<a pons CA>&i
 
 **Later updates:** `git pull && npm ci && npm run build && pm2 restart pons-launcher`.
 nginx needs touching again only if `deploy/nginx-rhbond.conf` changed.
+
+**The v2 update (the account) changed it**: a new `location ^~ /api/tp/account/` with a
+tighter burst and a 400k body cap. After the usual update, copy the site file once more
+exactly as in step 3, then check that the account API answers:
+
+```bash
+SITE=$(grep -l 'server_name rhbond.xyz' /etc/nginx/sites-enabled/*)
+sudo cp "$SITE" ~/nginx-rhbond.$(date +%F).bak
+sudo diff "$SITE" deploy/nginx-rhbond.conf     # only the account location and its comments
+sudo cp deploy/nginx-rhbond.conf "$SITE"
+sudo nginx -t && sudo systemctl reload nginx
+curl -s https://dapp.rhbond.xyz/api/tp/account/me    # {"error":...,"code":"no_session"}
+```
 
 **Local end-to-end check** (an Anvil fork of chain 4663, throwaway wallets, nothing
 touches the real chain): `cd frontend && npm run build`, then

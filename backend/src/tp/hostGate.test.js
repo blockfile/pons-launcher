@@ -8,7 +8,7 @@ const path = require('path');
 const http = require('http');
 const express = require('express');
 
-const { dappHostGate, normaliseHost, isDappPath, DEFAULT_DAPP_HOST } = require('./hostGate');
+const { dappHostGate, normaliseHost, isDappPath, isAccountPath, DEFAULT_DAPP_HOST } = require('./hostGate');
 
 const DAPP = 'dapp.test.invalid';
 const CONSOLE = 'console.test.invalid';
@@ -36,6 +36,7 @@ function makeApp(dist) {
   app.use(dappHostGate({ host: DAPP, dist }));
   app.use(express.static(dist));
   app.get('/api/tp/x', (req, res) => res.json({ tp: true }));
+  app.get('/api/tp/account/me', (req, res) => res.json({ account: true }));
   app.get('/api/v4/wallets/backup', (req, res) => res.json({ keys: 'CONSOLE-SECRET' }));
   app.get('/api/health', (req, res) => res.json({ ok: true }));
   app.use((req, res) => {
@@ -251,6 +252,28 @@ test('dApp host with no dApp build → 404 JSON naming the build step', async ()
   } finally {
     s.close();
     fs.rmSync(bare, { recursive: true, force: true });
+  }
+});
+
+test('the account API answers on the dApp host only: every console-host spelling of it → 404', async () => {
+  const onDapp = await request(server, { path: '/api/tp/account/me', host: DAPP });
+  assert.equal(onDapp.status, 200);
+  assert.deepEqual(JSON.parse(onDapp.body), { account: true });
+  for (const p of ['/api/tp/account/me', '/API/TP/ACCOUNT/me', '/api/tp/%61ccount/me', '/api/tp/account', '/api//tp/account/me']) {
+    const r = await request(server, { path: p, host: CONSOLE });
+    assert.equal(r.status, 404, p);
+    assert.deepEqual(JSON.parse(r.body), { error: 'not found' }, p);
+  }
+  const other = await request(server, { path: '/api/tp/x', host: CONSOLE });
+  assert.equal(other.status, 200, 'the rest of /api/tp is unchanged on the console host');
+});
+
+test('isAccountPath: what reaches /api/tp/account, and what does not', () => {
+  for (const p of ['/api/tp/account', '/api/tp/account/', '/api/tp/account/vault', '/API/Tp/Account/me', '/api/tp/%61ccount', '/api/./tp/account', ['/api', 'tp', 'account'].join(String.fromCharCode(92)), '/api/tp/account.']) {
+    assert.equal(isAccountPath(p), true, p);
+  }
+  for (const p of ['/api/tp/accounts', '/api/tp/x', '/api/account', '/tp/account', '/', '', '/api/tp']) {
+    assert.equal(isAccountPath(p), false, p);
   }
 });
 

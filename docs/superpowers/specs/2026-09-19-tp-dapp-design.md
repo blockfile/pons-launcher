@@ -304,6 +304,36 @@ info and logo. Decisions below are the operator's.
   connect. A v1 passphrase vault found on the device is offered for moving into the
   account.
 
+### A: risks the operator accepts, and where the build departs from the text above
+
+Signed off by the operator with the v2 plan, before the first real save.
+
+- **A phished pair of signatures opens the saved keys.** The unlock message is fixed,
+  so any site can ask a wallet to sign it. A phishing copy of dapp.rhbond.xyz that gets
+  a visitor to sign it AND one login challenge (which the phisher fetches live from this
+  server) can download that visitor's ciphertext and decrypt every saved bundle key.
+  MetaMask warns when a sign-in message names another domain, but it does not block the
+  signature, and other wallets may not warn at all. An nginx password in front of the
+  dApp would not remove this risk (the phishing page asks for the same signatures), and
+  it cannot keep wallets across refreshes unless the server holds the keys, which is the
+  dropped private mode. The console keeps its nginx basic auth unchanged.
+- **The unlock message is frozen once anyone saves.** Its text, the HKDF salt and info
+  and the AES-GCM additional data are golden-tested: one changed byte (a new domain, a
+  CRLF, the em dash above) silently changes every user's key. Its form (shaped like a
+  sign-in message, so MetaMask warns on another domain, or plain text) is final after
+  the first save.
+- **Lockout.** A wallet that stops signing deterministically (an MPC or smart-contract
+  wallet, a wallet update) or is lost takes the saved list with it; the server cannot
+  help. The saved list is a convenience copy: the console's key exports stay the backup.
+- Already accepted under decision 1: an XSS, a malicious extension or a compromised
+  dependency can USE the cached key while it is cached (12 h), and the server remains
+  the root of trust for the page's code.
+- **The build departs from the text above in four places:** the cookie is
+  `__Host-tp_session` with `Path=/` (the `__Host-` prefix requires it, and it is what
+  stops the sibling hosts from tossing a cookie); concurrency is on an integer `rev`, not
+  `updatedAt`; a public `keyId` (HKDF of the same signature) replaces the AES "check"
+  value; and the unlock message is ASCII, without the em dash.
+
 ## B. Choosing wallets
 
 Clear per-row checkboxes with All / None / Invert; the top % chips sell from the ticked

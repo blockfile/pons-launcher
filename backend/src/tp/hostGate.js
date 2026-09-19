@@ -17,13 +17,18 @@
 // dApp host serves the dApp's files and nothing of the console: the console's code sits
 // behind basic auth on its own host, and this host has no password.
 //
-// EVERY OTHER HOST (the console) is unchanged except for one path: /dapp and /dapp/*
-// answer 404 JSON, whatever the method. Without that, express.static would serve the
+// EVERY OTHER HOST (the console) is unchanged except for two paths, which answer 404
+// JSON whatever the method: /dapp and /dapp/*, and the account API /api/tp/account and
+// /api/tp/account/*. Without that, express.static would serve the
 // key-holding dApp page at https://rhbond.xyz/dapp/ — on the CONSOLE's origin, with no
 // CSP, where the browser attaches the console's cached basic-auth credentials (and an
 // nginx-injected x-api-key, if that map is on) to every /api request. An XSS in the
 // dApp there could call the console's key-export routes. The page may only ever run on
-// DAPP_HOST, where every console route is a 404.
+// DAPP_HOST, where every console route is a 404. The account API (tp/account.js) sets
+// and reads the dApp's session cookie and holds its visitors' encrypted wallet lists:
+// it answers on the dApp's origin only, where the CSP and the __Host- cookie apply.
+// (Local dev through the Vite proxy therefore runs the backend with DAPP_HOST set to
+// the proxy's target host, e.g. 127.0.0.1 — backend/.env.example.)
 //
 // nginx enforces the same allowlist; this is the copy that survives a mis-edited nginx
 // file.
@@ -77,6 +82,24 @@ function isDappPath(reqPath) {
   return first.replace(/[^a-z0-9_-].*$/, '') === 'dapp';
 }
 
+/**
+ * True when a request path would reach the account API: /api/tp/account or anything
+ * under it, judged as isDappPath judges /dapp (decoded, backslashes as slashes, dot
+ * segments and doubled slashes collapsed, case-folded, the segment cut at its first
+ * character outside [a-z0-9_-]). "/api/tp/accounts" is not the account API.
+ */
+function isAccountPath(reqPath) {
+  let p = String(reqPath || '');
+  try {
+    p = decodeURIComponent(p);
+  } catch (_err) {
+    // undecodable: judged raw
+  }
+  p = path.posix.normalize(p.split(String.fromCharCode(92)).join('/')).toLowerCase();
+  const seg = p.split('/').filter(Boolean);
+  return seg[0] === 'api' && seg[1] === 'tp' && (seg[2] || '').replace(/[^a-z0-9_-].*$/, '') === 'account';
+}
+
 function normaliseHost(value) {
   let h = String(value || '').trim().toLowerCase();
   if (h.startsWith('[')) {
@@ -106,8 +129,10 @@ function dappHostGate({ host = process.env.DAPP_HOST || DEFAULT_DAPP_HOST, dist 
 
   return function dappGate(req, res, next) {
     if (hostOf(req) !== want) {
-      // The console host: untouched, except that the dApp page never runs on its origin.
+      // The console host: untouched, except that the dApp page never runs on its origin
+      // and the dApp's account API never answers there.
       if (isDappPath(req.path)) return notFound(res);
+      if (isAccountPath(req.path)) return notFound(res);
       return next();
     }
 
@@ -133,4 +158,13 @@ function dappHostGate({ host = process.env.DAPP_HOST || DEFAULT_DAPP_HOST, dist 
   };
 }
 
-module.exports = { dappHostGate, hostOf, normaliseHost, isDappPath, DEFAULT_DAPP_HOST, DAPP_CSP, DAPP_ASSETS };
+module.exports = {
+  dappHostGate,
+  hostOf,
+  normaliseHost,
+  isDappPath,
+  isAccountPath,
+  DEFAULT_DAPP_HOST,
+  DAPP_CSP,
+  DAPP_ASSETS,
+};
