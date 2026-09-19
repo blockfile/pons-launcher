@@ -159,6 +159,7 @@ const {
   tokenInfoProblems,
   figuresProblems,
   statsProblems,
+  NonceFloor,
 } = require('./lib/tpSmoke');
 
 const ARGS = new Set(process.argv.slice(2));
@@ -813,16 +814,19 @@ async function freshMark(token, minBlock) {
   }
 }
 
-// Balances read through the API after a landing must show the landing (a /wallets
-// read taken within ethers' 250 ms cache of an identical earlier read could not).
-async function statesAfter(ctx, token, minNonces) {
-  const t0 = Date.now();
-  for (;;) {
-    const states = await walletStates(ctx, token);
-    if (states.every((s) => Number(s.nonce) >= (minNonces.get(lc(s.address)) || 0))) return states;
-    if (Date.now() - t0 > 15_000) throw new Error('/wallets kept answering nonces from before the last landing for 15 s');
-    await sleep(300);
-  }
+// Every /wallets read a step signs on goes through the run's NonceFloor: a read
+// taken before this run's last landing (a fork still answering `pending` from a
+// moment ago, or ethers' 250 ms cache of an identical earlier read) would seed the
+// step's fresh NonceBook at a nonce the chain has already used, and the node would
+// refuse every transaction of the step with "nonce has already been used".
+async function statesAfter(ctx, token, floor) {
+  return floor.waitFor(() => walletStates(ctx, token));
+}
+
+// Tell the floor where each wallet's nonce now stands on-chain. Called before the
+// first read of a venue and after every landing, so no read is ever unjudged.
+async function recordLanded(ctx, floor) {
+  for (const a of ctx.addresses) floor.record(a, await provider.getTransactionCount(a, 'latest'));
 }
 
 async function signAll(ctx, entries) {
@@ -843,7 +847,7 @@ async function broadcast(token, raws, what, sid) {
   return raws.map((raw) => lc(Transaction.from(raw).hash));
 }
 
-async function arm(ctx, venue, stream) {
+async function arm(ctx, venue, stream, floor) {
   const what = `${venue.label} arm`;
   if (venue.kind === 'curve') {
     check(lc(venue.spenders.approve) === lc(venue.curve), `${what}: the spender to approve is the curve`);
@@ -853,7 +857,7 @@ async function arm(ctx, venue, stream) {
       `${what}: token -> Permit2, Permit2 -> the UniversalRouter`
     );
   }
-  const states = await walletStates(ctx, venue.token);
+  const states = await statesAfter(ctx, venue.token, floor);
   const fees = await apiOk('GET', '/api/tp/fees');
   const nonces = new ctx.dapp.NonceBook();
   for (const s of states) nonces.seed(s.address, Number(s.nonce));
@@ -868,8 +872,10 @@ async function arm(ctx, venue, stream) {
   const hashes = await broadcast(venue.token, raws, what, stream.sid);
   await landed(hashes, what);
   await stream.waitFor(receiptsIn(hashes), 10_000, `${what}: the stream pushed a landed receipt for every approval`);
+  // The first sell's /wallets read must include these approvals.
+  await recordLanded(ctx, floor);
 
-  const armed = await walletStates(ctx, venue.token);
+  const armed = await statesAfter(ctx, venue.token, floor);
   const token = new Contract(venue.token, ERC20_ABI, provider);
   const permit2 = new Contract(PERMIT2, PERMIT2_ABI, provider);
   for (const s of armed) {
@@ -893,9 +899,9 @@ async function arm(ctx, venue, stream) {
 // A token-quoted sell paid the pair token: turn exactly that into ETH, the way the
 // page's pair leg does (POST /quote/pair, planPairLeg, one /broadcast of approve +
 // swap at consecutive nonces).
-async function pairLeg(ctx, venue, stream, got, what) {
+async function pairLeg(ctx, venue, stream, got, what, floor) {
   const fees = await apiOk('GET', '/api/tp/fees');
-  const states = await walletStates(ctx, venue.token);
+  const states = await statesAfter(ctx, venue.token, floor);
   const nonces = new ctx.dapp.NonceBook();
   for (const s of states) nonces.seed(s.address, Number(s.nonce));
   const legs = [];
@@ -931,10 +937,10 @@ async function pairLeg(ctx, venue, stream, got, what) {
   }
 }
 
-async function sellStep(ctx, venue, stream, pct, afterBlock, minNonces) {
+async function sellStep(ctx, venue, stream, pct, afterBlock, floor) {
   const what = `${venue.label} ${pct}%`;
   const mark = await freshMark(venue.token, afterBlock);
-  const states = await statesAfter(ctx, venue.token, minNonces);
+  const states = await statesAfter(ctx, venue.token, floor);
   const fees = await apiOk('GET', '/api/tp/fees');
   const want = new Map(states.map((s) => [lc(s.address), pctAmount(s.tokenBalance, pct)]));
 
@@ -1036,11 +1042,13 @@ async function sellStep(ctx, venue, stream, pct, afterBlock, minNonces) {
   // or flaky. Generous, and the timeout names the indexer's status.
   await stream.waitFor(tradesIn(hashes), 180_000, `${what}: the indexer reported every sell as a trade on the stream`);
 
+  // The pair leg signs on its own /wallets read: the sells it follows land first.
+  await recordLanded(ctx, floor);
   if (!venue.nativeQuote) {
-    await pairLeg(ctx, venue, stream, new Map(sells.map((p, i) => [p.address, got[i]])), `${what} pair leg`);
+    await pairLeg(ctx, venue, stream, new Map(sells.map((p, i) => [p.address, got[i]])), `${what} pair leg`, floor);
   }
   // The next click's /wallets read must include everything this one sent.
-  for (const a of ctx.addresses) minNonces.set(lc(a), await provider.getTransactionCount(a, 'latest'));
+  await recordLanded(ctx, floor);
   return Math.max(...receipts.map((r) => r.blockNumber));
 }
 
@@ -1081,16 +1089,20 @@ async function runVenue(ctx, token, kind, extra) {
     const strangerSid = stranger.events.find((e) => e.event === 'snapshot').data.sid;
     check(/^[0-9a-f]{32}$/.test(strangerSid) && strangerSid !== sid, `${tag}: the second viewer got a sid of its own`);
 
-    const states = await walletStates(ctx, token);
+    // The setup buys landed before this venue's first read: the floor starts at
+    // where the chain has each wallet now, and every landing below raises it.
+    const floor = new NonceFloor();
+    await recordLanded(ctx, floor);
+
+    const states = await statesAfter(ctx, token, floor);
     const t = new Contract(token, ERC20_ABI, provider);
     for (const s of states) {
       check(s.tokenBalance === (await t.balanceOf(s.address)).toString(), `${tag} ${label(s.address)}: /wallets tokenBalance equals balanceOf on-chain`);
     }
 
-    await arm(ctx, venue, stream);
+    await arm(ctx, venue, stream, floor);
     let lastTrade = extra.lastTradeBlock;
-    const minNonces = new Map();
-    for (const pct of [25, 50, 100]) lastTrade = await sellStep(ctx, venue, stream, pct, lastTrade, minNonces);
+    for (const pct of [25, 50, 100]) lastTrade = await sellStep(ctx, venue, stream, pct, lastTrade, floor);
 
     const left = await balances(token, ctx.addresses, extra.pair || null);
     check([...left.values()].every((b) => b.token === 0n), `${tag}: after 100% every wallet holds 0 tokens`);

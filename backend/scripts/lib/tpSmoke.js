@@ -493,8 +493,90 @@ function statsProblems(stats) {
   return out;
 }
 
+/**
+ * The nonce each wallet's next `/wallets` read has to reach before that read may
+ * be built on.
+ *
+ * The page keeps ONE NonceBook for a session, and `seed()` never moves a counter
+ * backwards, so a stale wallet read cannot hand the page a nonce it has already
+ * spent. The smoke seeds a FRESH NonceBook for every step from the read it just
+ * took, so it has no such protection: a `/wallets` answer taken before the step
+ * before it landed (a fork still answering `pending` from a moment ago, or
+ * ethers' 250 ms cache of an identical earlier read) makes the whole step sign at
+ * nonces the chain has already used, and every transaction is refused with
+ * "nonce has already been used".
+ *
+ * So every landing this run causes — an arm's approvals as much as a click's
+ * sells — raises its wallet's floor, and a read is taken through `waitFor`.
+ * A wallet the floor was never told about is refused outright rather than
+ * trusted: that silence is what let the hole exist (the floor used to start empty
+ * at each venue's first sell, and an empty floor clears anything).
+ *
+ * Counts only, never an address: this file's output is quoted in the smoke's log.
+ */
+class NonceFloor {
+  constructor() {
+    this.floor_ = new Map();
+  }
+
+  /** Raise `address`'s floor. Never lowers it. */
+  record(address, nonce) {
+    const k = String(address).toLowerCase();
+    const v = Number(nonce);
+    if (!Number.isSafeInteger(v) || v < 0) throw new RangeError('nonce must be a non-negative integer');
+    const cur = this.floor_.get(k);
+    if (cur === undefined || v > cur) this.floor_.set(k, v);
+  }
+
+  /** The floor known for a wallet, or undefined. */
+  get(address) {
+    return this.floor_.get(String(address).toLowerCase());
+  }
+
+  /** How a `/wallets` read measures up: how many wallets are unknown, how many behind. */
+  measure(states) {
+    const list = Array.isArray(states) ? states : [];
+    let unknown = 0;
+    let behind = 0;
+    for (const s of list) {
+      const floor = this.get(s && s.address);
+      if (floor === undefined) unknown += 1;
+      else if (Number(s.nonce) < floor) behind += 1;
+    }
+    return { unknown, behind, total: list.length };
+  }
+
+  /**
+   * Read until every wallet's nonce shows what this run landed, then answer that
+   * read. An unknown wallet throws at once: the caller did not record what it
+   * landed, so no read of that wallet can be judged.
+   */
+  async waitFor(read, { timeoutMs = 15_000, pauseMs = 300, sleep = pause } = {}) {
+    const t0 = Date.now();
+    for (;;) {
+      const states = await read();
+      const { unknown, behind, total } = this.measure(states);
+      if (unknown > 0) {
+        throw new Error(
+          `no landing recorded for ${unknown} of ${total} wallet(s) — record the chain's nonce before reading`
+        );
+      }
+      if (behind === 0) return states;
+      if (Date.now() - t0 >= timeoutMs) {
+        throw new Error(
+          `/wallets kept answering nonces from before this run's last landing for ${Math.round(
+            timeoutMs / 1000
+          )} s (${behind} of ${total} wallets)`
+        );
+      }
+      await sleep(pauseMs);
+    }
+  }
+}
+
 module.exports = {
   isUpstreamHiccup,
+  NonceFloor,
   withRetry,
   pollReceipt,
   pctAmount,

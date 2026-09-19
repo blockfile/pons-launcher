@@ -31,6 +31,7 @@ const {
   tokenInfoProblems,
   figuresProblems,
   statsProblems,
+  NonceFloor,
 } = require('./tpSmoke');
 
 const LF = String.fromCharCode(10);
@@ -436,4 +437,70 @@ test("statsProblems holds the stream's stats to Part 02's shape", () => {
     'stats.figures is missing',
   ]);
   assert.deepEqual(statsProblems(null), ['stats are missing']);
+});
+
+// ── the nonce floor: a /wallets read must show what this run already landed ──
+
+test('an empty floor refuses a read rather than trusting it', async () => {
+  const floor = new NonceFloor();
+  const states = [{ address: '0xAa', nonce: 7 }];
+  assert.deepEqual(floor.measure(states), { unknown: 1, behind: 0, total: 1 });
+  await assert.rejects(
+    () => floor.waitFor(async () => states, { timeoutMs: 0 }),
+    /no landing recorded for 1 of 1 wallet/
+  );
+});
+
+test('record keeps the highest nonce per wallet, whatever the address case', () => {
+  const floor = new NonceFloor();
+  floor.record('0xAaBb', 4);
+  floor.record('0xaabb', 2);
+  assert.equal(floor.get('0xAABB'), 4);
+  floor.record('0xAABB', 9);
+  assert.equal(floor.get('0xaabb'), 9);
+});
+
+test('a floor raised by a landing refuses states from before it', () => {
+  const floor = new NonceFloor();
+  floor.record('0xa1', 5);
+  floor.record('0xa2', 5);
+  assert.deepEqual(
+    floor.measure([
+      { address: '0xA1', nonce: 4 },
+      { address: '0xA2', nonce: 5 },
+    ]),
+    { unknown: 0, behind: 1, total: 2 }
+  );
+});
+
+test('waitFor reads again until every wallet has caught up, then returns that read', async () => {
+  const floor = new NonceFloor();
+  floor.record('0xa1', 5);
+  const reads = [
+    [{ address: '0xa1', nonce: 4 }],
+    [{ address: '0xa1', nonce: 4 }],
+    [{ address: '0xa1', nonce: 6 }],
+  ];
+  let n = 0;
+  const got = await floor.waitFor(async () => reads[n++], { timeoutMs: 5_000, pauseMs: 0 });
+  assert.equal(n, 3);
+  assert.deepEqual(got, [{ address: '0xa1', nonce: 6 }]);
+});
+
+test('waitFor gives up with the count still behind, never an address', async () => {
+  const floor = new NonceFloor();
+  floor.record('0xa1', 5);
+  floor.record('0xa2', 5);
+  const stale = [
+    { address: '0xa1', nonce: 4 },
+    { address: '0xa2', nonce: 4 },
+  ];
+  await assert.rejects(
+    () => floor.waitFor(async () => stale, { timeoutMs: 20, pauseMs: 1 }),
+    (err) => {
+      assert.match(err.message, /2 of 2 wallets/);
+      assert.equal(/0xa1/.test(err.message), false, 'the message names no wallet address');
+      return true;
+    }
+  );
 });
