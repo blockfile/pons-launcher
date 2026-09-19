@@ -36,11 +36,13 @@ function WalletTable({ view, venue, getMark, walletCount, onTick, onTickAll, onR
   const allTicked = view.rows.length > 0 && view.rows.every((r) => r.ticked);
   const pairSym = venue.pairSymbol || 'pair';
   const convertible = view.totals.convertible || 0;
+  // Rows stay listed after a 100 % sell (their receipts, unconverted proceeds): count the holders only.
+  const holding = view.rows.filter((r) => r.tokens !== '0').length;
   return (
     <div className="wallets" data-testid="wallet-table">
       <div className="wallets-head">
         <span className="wallets-count">
-          {view.rows.length} holding · {view.totals.ticked} ticked · {walletCount} imported
+          {holding} holding · {view.totals.ticked} ticked · {walletCount} imported
         </span>
         <div className="wallets-actions">
           {view.totals.failedArm > 0 && (
