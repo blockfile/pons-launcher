@@ -9,9 +9,9 @@
 //   - the name is resolved HERE and EVERY address it resolves to must be public:
 //     loopback, private (RFC 1918), link-local (with the 169.254.169.254 metadata
 //     service), CGNAT (with 100.100.100.200), multicast, unspecified, reserved,
-//     documentation and benchmark ranges, IPv4-mapped / IPv4-compatible / NAT64 /
-//     6to4 / Teredo IPv6 (each can smuggle an IPv4 address) and ULA (with the AWS
-//     fd00:ec2::254 metadata address) are all refused;
+//     documentation and benchmark ranges, IPv4-mapped / IPv4-translated / IPv4-
+//     compatible / NAT64 / 6to4 / Teredo IPv6 (each can smuggle an IPv4 address),
+//     SRv6 SIDs and ULA (with the AWS fd00:ec2::254 metadata address) are all refused;
 //   - the connection goes to the VETTED address: the request's lookup is pinned to it,
 //     so there is no second DNS lookup a rebinding name could answer differently. The
 //     TLS SNI, the certificate check and the Host header still use the name;
@@ -59,12 +59,16 @@ const FORBIDDEN_V4 = Object.freeze([
 const FORBIDDEN_V6 = Object.freeze([
   ['::', 96], // unspecified, loopback and the deprecated IPv4-compatible ::a.b.c.d
   ['::ffff:0:0', 96], // IPv4-mapped
+  ['::ffff:0:0:0', 96], // IPv4-translated (SIIT, RFC 7915)
   ['64:ff9b::', 96], // NAT64
   ['64:ff9b:1::', 48], // local-use NAT64
   ['100::', 64], // discard-only
   ['2001::', 32], // Teredo
+  ['2001:2::', 48], // benchmarking (RFC 5180)
   ['2001:db8::', 32], // documentation
   ['2002::', 16], // 6to4
+  ['3fff::', 20], // documentation (RFC 9637)
+  ['5f00::', 16], // SRv6 SIDs (RFC 9602)
   ['fc00::', 7], // unique local (AWS metadata fd00:ec2::254)
   ['fe80::', 10], // link-local
   ['fec0::', 10], // site-local (deprecated)
@@ -168,15 +172,14 @@ function fetchOnce(url, pinned, { request, maxBytes, remainingMs, setTimer, clea
         },
         (res) => {
           const status = res.statusCode;
+          // Refused answers are DESTROYED, never drained: finishing clears this hop's
+          // deadline, so a drained body would keep trickling from an attacker-chosen
+          // host with no cap and no clock (agent: false — no connection worth reusing).
           if (REDIRECT_STATUSES.has(status)) {
             const location = res.headers.location;
-            res.resume();
-            return finish(typeof location === 'string' && location ? { redirect: location } : { ok: false, reason: `http_${status}` });
+            return stop(typeof location === 'string' && location ? { redirect: location } : { ok: false, reason: `http_${status}` });
           }
-          if (status !== 200) {
-            res.resume();
-            return finish({ ok: false, reason: `http_${status}` });
-          }
+          if (status !== 200) return stop({ ok: false, reason: `http_${status}` });
           const declared = Number(res.headers['content-length']);
           if (Number.isFinite(declared) && declared > maxBytes) return stop({ ok: false, reason: 'too_large' });
           const chunks = [];

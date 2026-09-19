@@ -52,7 +52,7 @@ const { aggregate3, decodeSlot, one } = require('./multicall');
 const { cidFromLogoUri } = require('./cid');
 const { vetUrl } = require('./safeFetch');
 
-const lc =(a) => String(a).toLowerCase();
+const lc = (a) => String(a).toLowerCase();
 const ZERO = lc(C.NATIVE);
 
 const V1_LAST_LAUNCH_TS = 1786563753;

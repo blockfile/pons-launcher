@@ -369,9 +369,10 @@ market cap, 5 m / 1 h / 24 h change, 24 h volume, curve progress to graduation (
 liquidity (pools), age, creator, description (collapsible) and social links (X,
 Telegram, Discord, website, Farcaster) — https links only, `rel="noopener noreferrer"`,
 rendered as text/icons, never HTML. The **logo is fetched by the server**
-(`GET /api/tp/logo/:ca`) from IPFS gateways only (no arbitrary hosts — SSRF), capped at
-1 MB, PNG/JPEG/GIF/WebP by magic bytes (never SVG), cached, and served from the page's
-own origin so the CSP stays `img-src 'self' data:`. No logo → a generated identicon.
+(`GET /api/tp/logo/:ca`) from IPFS gateways (no arbitrary hosts — SSRF) or, for a logo
+on an ordinary https host, through the SSRF-safe GET (see E.19), capped at 3 MiB,
+PNG/JPEG/GIF/WebP by magic bytes (never SVG), cached, and served from the page's own
+origin so the CSP stays `img-src 'self' data:`. No logo → a generated identicon.
 
 ## E. What the v2 build decided, and what it accepts (approved by Ivan 2026-09-19)
 

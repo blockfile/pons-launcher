@@ -24,12 +24,14 @@ function fakeLookup(table, asked = []) {
 
 /**
  * An https.request stand-in answering `steps` in order: {status, headers, chunks} or
- * {hang: true} (never answers) or {error: true}. Every options object is logged.
+ * {hang: true} (never answers) or {error: true}. Every options object is logged in
+ * `seen`, and every request in `reqs`, so a test can see that it was destroyed.
  */
-function fakeRequest(steps, seen = []) {
+function fakeRequest(steps, seen = [], reqs = []) {
   return (options, onResponse) => {
     seen.push(options);
     const req = new EventEmitter();
+    reqs.push(req);
     req.destroyed = false;
     req.destroy = () => {
       req.destroyed = true;
@@ -61,6 +63,7 @@ test('isForbiddenAddress: every private, local, reserved or IPv4-carrying range 
     '::', '::1', '::ffff:127.0.0.1', '::ffff:8.8.8.8', '::127.0.0.1', '64:ff9b::808:808',
     '64:ff9b:1::1', '100::1', '2001::1', '2001:db8::1', '2002:7f00:1::', 'fc00::1',
     'fd00:ec2::254', 'fe80::1', 'fec0::1', 'ff02::1', 'not-an-ip', '', 'localhost',
+    '::ffff:0:7f00:1', '::ffff:0:808:808', '2001:2::1', '3fff::1', '5f00::1',
   ];
   for (const a of forbidden) assert.equal(isForbiddenAddress(a), true, a);
   const allowed = ['8.8.8.8', '1.1.1.1', '46.225.60.163', '93.184.216.34', '172.32.0.1', '100.128.0.1', '11.0.0.1', '2606:4700:4700::1111', '2a00:1450:4001:80b::200e'];
@@ -173,12 +176,32 @@ test('size: a declared or streamed body over maxBytes is refused and the downloa
   assert.equal(exact.ok, true);
 });
 
-test('a non-200 answer or a broken connection is a failure, never a partial body', async () => {
+test('a non-200 answer or a broken connection is a failure, never a partial body, and never a live socket', async () => {
   const lookup = fakeLookup(PUBLIC);
-  assert.deepEqual(await safeGet('https://logo.example.com/a.png', { lookup, request: fakeRequest([{ status: 404, chunks: [PNG] }]) }), { ok: false, reason: 'http_404' });
-  assert.deepEqual(await safeGet('https://logo.example.com/a.png', { lookup, request: fakeRequest([{ status: 206, chunks: [PNG] }]) }), { ok: false, reason: 'http_206' });
+  const ends = [];
+  assert.deepEqual(await safeGet('https://logo.example.com/a.png', { lookup, request: fakeRequest([{ status: 404, chunks: [PNG] }], [], ends) }), { ok: false, reason: 'http_404' });
+  assert.deepEqual(await safeGet('https://logo.example.com/a.png', { lookup, request: fakeRequest([{ status: 206, chunks: [PNG] }], [], ends) }), { ok: false, reason: 'http_206' });
   assert.deepEqual(await safeGet('https://logo.example.com/a.png', { lookup, request: fakeRequest([{ error: true }]) }), { ok: false, reason: 'fetch_failed' });
-  assert.deepEqual(await safeGet('https://logo.example.com/a.png', { lookup, request: fakeRequest([{ status: 302 }]) }), { ok: false, reason: 'http_302' });
+  assert.deepEqual(await safeGet('https://logo.example.com/a.png', { lookup, request: fakeRequest([{ status: 302 }], [], ends) }), { ok: false, reason: 'http_302' });
+  // The hop's deadline is gone once safeGet has answered, so a body left draining would
+  // trickle from an attacker-chosen host with no cap and no clock: destroy the request.
+  assert.deepEqual(ends.map((r) => r.destroyed), [true, true, true], 'a refused answer leaves no socket reading');
+
+  const hops = [];
+  const chain = await safeGet('https://logo.example.com/a.png', {
+    lookup,
+    request: fakeRequest(
+      [
+        { status: 302, headers: { location: '/1.png' } },
+        { status: 302, headers: { location: '/2.png' } },
+        { status: 302, headers: { location: '/3.png' } },
+      ],
+      [],
+      hops
+    ),
+  });
+  assert.deepEqual(chain, { ok: false, reason: 'too_many_redirects' });
+  assert.deepEqual(hops.map((r) => r.destroyed), [true, true, true], 'every redirect hop is destroyed, not drained');
 });
 
 test(`redirects: at most ${MAX_REDIRECTS}, each hop vetted again from the top (scheme, port, name, DNS)`, async () => {
