@@ -85,7 +85,7 @@ export default function AccountBar({ acct, sync, wallets, legacy, leaving = null
           {view.actions.map((a) => {
             const Icon = ICONS[a.id];
             return (
-              <button key={a.id} type="button" className={CLASS[a.kind]} onClick={() => press(a)} data-testid={`account-${a.id}`}>
+              <button key={a.id} type="button" className={CLASS[a.kind]} title={a.title || undefined} onClick={() => press(a)} data-testid={`account-${a.id}`}>
                 {Icon && <Icon aria-hidden="true" />} {a.label}
               </button>
             );

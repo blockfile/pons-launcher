@@ -92,7 +92,19 @@ export function accountView({ acct, sync = null, wallets = [], legacy = 'none', 
   if (acct.step) {
     return { ...view, busy: true, text: STEP_TEXT[acct.step] || 'Waiting for your wallet…', error: '' };
   }
-  const disconnect = { id: 'disconnect', label: 'Disconnect', kind: 'quiet', needsWallet: false };
+  // What Disconnect really does, said where the visitor presses it. The session token
+  // is stateless and POST /logout only clears the cookie, so a token captured before
+  // the press (a compromised extension, a copied browser profile) stays good for the
+  // rest of its 24 h. The one thing that ends every session of an account is Delete
+  // saved copy, which the server answers by revoking them — so the button must not
+  // imply more than it does.
+  const disconnect = {
+    id: 'disconnect',
+    label: 'Disconnect',
+    kind: 'quiet',
+    needsWallet: false,
+    title: 'Signs this browser out. Your sign-in on other devices is untouched, and a copy of this sign-in taken from this browser stays valid until it expires — use Delete saved copy to end every session of this account.',
+  };
   const signedIn = acct.status === 'locked' || acct.status === 'unlocked';
   if (signedIn && acct.walletAddress && acct.address && acct.walletAddress !== acct.address) {
     view.switched = `Your wallet switched to ${short(acct.walletAddress)}. This page is still signed in as ${short(acct.address)}.`;

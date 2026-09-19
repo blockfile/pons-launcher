@@ -268,7 +268,14 @@ export function createAccount({ api, discovery, keyCache, origin = globalThis.lo
     set({ status: session ? 'locked' : 'out', error: '', keyEpoch: epoch });
   }
 
-  /** Sign out: forget the key, end the session, let go of the wallet. */
+  /**
+   * Sign out THIS BROWSER: forget the key, drop the cookie, let go of the wallet.
+   * The session token is stateless (an HMAC the server checks, not a row it holds),
+   * and POST /logout only clears the cookie — so a copy of it taken from this browser
+   * before now stays good until it expires, and other devices are untouched. The only
+   * thing that ends every session of an account is DELETE /vault (deleteSaved), which
+   * the server answers by revoking them. accountView says so on the button.
+   */
   async function disconnect() {
     const a = state.address;
     const epoch = drop();

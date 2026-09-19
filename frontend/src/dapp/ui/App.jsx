@@ -223,17 +223,31 @@ export default function App() {
   }, [feed, token, tf]);
 
   // Gas price (and the backend's ETH/USD) stay warm: the click path never fetches them.
+  // It backs off on a refusal instead of spending the same per-IP read bucket the
+  // holdings read has already given up on — /wallets, /token, /fees, /logo and
+  // /quote/pair share one — and honours a 429's Retry-After when the server sends one.
   useEffect(() => {
     if (!token) return undefined;
     let dead = false;
+    let skip = 0; // polls to sit out
+    let misses = 0;
     const id = setInterval(async () => {
+      if (skip > 0) {
+        skip -= 1;
+        return;
+      }
       try {
         const f = await api.getFees();
         if (dead) return;
+        misses = 0;
         setFees(f);
         if (sessionRef.current) sessionRef.current.setFees(f);
-      } catch {
-        // keep the last fees
+      } catch (e) {
+        // keep the last fees, and stand back: 2, 4, 8 then 16 polls, or as long as a
+        // 429's Retry-After asked for.
+        misses += 1;
+        const said = e && e.cause && Number.isFinite(e.cause.retryAfterMs) ? e.cause.retryAfterMs : 0;
+        skip = Math.min(20, Math.max(2 ** Math.min(misses, 4), Math.ceil(said / FEES_EVERY_MS)));
       }
     }, FEES_EVERY_MS);
     return () => {

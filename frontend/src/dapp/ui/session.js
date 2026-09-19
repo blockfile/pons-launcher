@@ -88,7 +88,11 @@ const LANDED_SETTLE_MS = 10_000;
 // rows are re-read this often — ONE /wallets per 100 rows, which the server
 // charges 1 read token per 20 addresses (limits.readCost): 100 rows = 5 of the
 // 120 a minute, 15 a minute at 20 s. A refused read (a 429, the network) doubles
-// the wait, up to BALANCE_BACKOFF_MAX_MS; a read that succeeds resets it.
+// the wait, up to BALANCE_BACKOFF_MAX_MS; a read that succeeds resets it. When the
+// server SAYS when to come back (a 429's Retry-After, which api.js parses onto
+// cause.retryAfterMs), that is used instead of the blind doubling: the bucket refills
+// in under a minute, so doubling to five minutes left the live holdings — the whole
+// point of the feature — stale for far longer than the server ever asked for.
 const BALANCE_EVERY_MS = 20_000;
 const BALANCE_BACKOFF_MAX_MS = 300_000;
 // ...and once a minute that same read also carries the IMPORTED wallets that are
@@ -166,6 +170,8 @@ export function createSession({
   // the periodic balance read (refreshBalances)
   let balanceAt = deps.now();
   let balanceWaitMs = BALANCE_EVERY_MS;
+  // Said once per spell of refusals, not once per refused read.
+  let rateLimitSaid = false;
   let balancing = false;
   // ...and its once-a-minute look at the imported wallets not listed
   let discoverAt = deps.now();
@@ -1822,6 +1828,7 @@ export function createSession({
         if (w.ops === 0 && (w.status === 'idle' || w.status === 'ready' || w.status === 'skipped')) rest(w);
       }
       balanceWaitMs = BALANCE_EVERY_MS;
+      rateLimitSaid = false;
       if (found) {
         const what = venue.symbol || 'this token';
         say(`${found} imported wallet${found === 1 ? ' now holds' : 's now hold'} ${what}: listed and ticked`);
@@ -1831,7 +1838,16 @@ export function createSession({
       return true;
     } catch (e) {
       // A graduation found by this read reloads the wallets itself (applyVenue).
-      if (!(e && e.cause && e.cause.code === 'venue_changed')) balanceWaitMs = Math.min(balanceWaitMs * 2, BALANCE_BACKOFF_MAX_MS);
+      const cause = e && e.cause ? e.cause : null;
+      if (cause && cause.code === 'venue_changed') return false;
+      const said = cause && Number.isFinite(cause.retryAfterMs) && cause.retryAfterMs > 0 ? cause.retryAfterMs : null;
+      balanceWaitMs = said === null ? Math.min(balanceWaitMs * 2, BALANCE_BACKOFF_MAX_MS) : Math.min(Math.max(said, BALANCE_EVERY_MS), BALANCE_BACKOFF_MAX_MS);
+      // A 429 is the one refusal the visitor can act on (close a tab), and it never
+      // reached the page: the table simply stopped moving.
+      if (cause && cause.code === 'rate_limited' && !rateLimitSaid) {
+        rateLimitSaid = true;
+        say('too many reads from this connection: the holdings update more slowly for a moment');
+      }
       return false;
     } finally {
       balancing = false;

@@ -123,3 +123,13 @@ test('accountSaving: only an unlocked account whose sync is healthy counts as sa
   for (const code of ['key_mismatch', 'undecryptable', 'unreadable'])
     assert.equal(accountSaving(unlocked, { state: 'blocked', code, error: 'x' }), false, code);
 });
+
+test('Disconnect says what it really does: this browser only, and not a revocation', () => {
+  const v = accountView({ acct: { ...base, status: 'unlocked', address: A }, wallets: WALLETS });
+  const d = v.actions.find((a) => a.id === 'disconnect');
+  assert.ok(d, 'the button is there');
+  assert.match(d.title, /this browser/i);
+  assert.match(d.title, /Delete saved copy/, 'it names the one action that ends every session');
+  // Every other button says nothing it cannot keep.
+  for (const a of v.actions) if (a.id !== 'disconnect') assert.equal(a.title, undefined);
+});

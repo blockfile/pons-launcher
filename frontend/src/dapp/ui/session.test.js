@@ -975,6 +975,63 @@ test('100 pair legs: one read, two pair quotes, one broadcast request per 50 wal
   assert.ok(legs[0][1].includes('|swap:1000:1700:'), legs[0][1]);
 });
 
+test('a 429 on the holdings read waits as long as the server asked, and says so once', async () => {
+  const h = harness({ venue: CURVE, states: [wallet(A, { tokenBalance: '1000', allowance: '1000', nonce: 0 })] });
+  await h.s.loadWallets([A]);
+  const real = h.api.postWallets;
+  let reads = 0;
+  const refuse = (retryAfterMs) => {
+    h.api.postWallets = async () => {
+      reads += 1;
+      const err = new Error('too many requests');
+      err.cause = { code: 'rate_limited', retryAfterMs };
+      throw err;
+    };
+  };
+  refuse(25_000);
+  h.advance(20_000);
+  h.s.tick();
+  await h.runTimers();
+  assert.equal(reads, 1);
+  assert.equal(h.toasts.filter((t) => /more slowly/.test(t.message || '')).length, 1, 'the visitor is told once');
+
+  // Blind doubling would have waited 40 s; the server asked for 25.
+  h.advance(24_000);
+  h.s.tick();
+  await h.runTimers();
+  assert.equal(reads, 1, 'not before the server said');
+  h.advance(1_500);
+  h.s.tick();
+  await h.runTimers();
+  assert.equal(reads, 2, 'and then it asks again');
+  assert.equal(h.toasts.filter((t) => /more slowly/.test(t.message || '')).length, 1, 'and not once per refused read');
+
+  // With no Retry-After the blind doubling stands.
+  refuse(undefined);
+  h.advance(30_000);
+  h.s.tick();
+  await h.runTimers();
+  const after = reads;
+  h.advance(25_000);
+  h.s.tick();
+  await h.runTimers();
+  assert.equal(reads, after, 'with nothing said, the wait doubled instead');
+  h.advance(30_000);
+  h.s.tick();
+  await h.runTimers();
+  assert.equal(reads, after + 1);
+
+  // One read that lands puts it back to the ordinary 20 s, and lets it speak again.
+  h.api.postWallets = real;
+  h.advance(60_000);
+  h.s.tick();
+  await h.runTimers();
+  h.advance(20_500);
+  h.s.tick();
+  await h.runTimers();
+  assert.equal(reads, after + 1, 'the refusing stub is gone');
+});
+
 test("a re-read that fails never turns into a failed approval; Retry re-reads before it signs again", async () => {
   const h = harness({ venue: CURVE, states: [wallet(A, { tokenBalance: '1000', nonce: 0 })] });
   await h.s.loadWallets([A]);
