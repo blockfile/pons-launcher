@@ -6,6 +6,7 @@
 import { id, keccak256 } from 'ethers';
 import * as api from '../api.js';
 import { signTx, addresses } from '../keys/walletStore.js';
+import { hasVault } from '../keys/vault.js';
 import { planArm, planSell } from '../chain/plan.js';
 import { approveTx, pairToEthTx } from '../chain/build.js';
 import { NonceBook } from '../chain/nonces.js';
@@ -37,6 +38,8 @@ export const realDeps = {
   clearTimeout: (id) => clearTimeout(id),
   sleep: (ms) => new Promise((resolve) => setTimeout(resolve, ms)),
   isHidden: () => typeof document !== 'undefined' && document.hidden === true,
-  // Unconverted pair proceeds across reloads: hashed ids and amounts only.
-  pairLedger: createPairLedger({ storage: localStore(), hash: id }),
+  // Unconverted pair proceeds across a token switch — and across a reload only for
+  // a visitor who chose to remember wallets on this device (its entries can be
+  // linked to the wallets: see pairLedger.js). App wipes it on Clear and Forget.
+  pairLedger: createPairLedger({ storage: localStore(), hash: id, persist: hasVault }),
 };

@@ -387,6 +387,7 @@ export default function App() {
   const onClear = useCallback(() => {
     if (!window.confirm('Remove every wallet from this tab? You will need the keys again to sell.')) return;
     clearWallets();
+    realDeps.pairLedger.clear(); // what the page remembered about these wallets goes with them
     syncOwnAddrs();
     if (sessionRef.current) sessionRef.current.reset();
     if (!safeHasVault()) return;
@@ -442,6 +443,7 @@ export default function App() {
   const onForget = useCallback(() => {
     if (!window.confirm('Delete the encrypted wallets saved on this device? Keys not kept elsewhere are lost.')) return;
     wipeVault();
+    realDeps.pairLedger.clear(); // its entries can be linked to the wallets: they go too
     setVault('none');
     toast('Saved wallets deleted from this device', 'ok');
   }, [toast]);

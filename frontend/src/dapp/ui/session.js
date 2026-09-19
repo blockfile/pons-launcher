@@ -20,8 +20,9 @@
  *           pool (AMZN, SPCX...) -> ONE batched read of the pair balances ->
  *           at most two /quote/pair -> approve + swap per wallet at
  *           consecutive nonces -> ONE broadcast. Proceeds that stay in the
- *           pair token (a refusal, a reload) keep a lasting retry and a
- *           Convert action
+ *           pair token (a refusal) keep a lasting retry and a Convert action;
+ *           an earlier visit's (pairLedger) are listed and converted only on
+ *           a click
  *   nonces  'known' = already sent (never re-signed); 'low'/'high' -> resync
  *           from /wallets and re-sign ONCE; a 'low' sell whose balance already
  *           dropped is recorded as landed instead (re-signing would sell twice);
@@ -58,6 +59,12 @@ const BATCH_MS = 250;
 // A refused pair leg is retried after this long, doubling, capped.
 const PAIR_BACKOFF_MS = 15_000;
 const PAIR_BACKOFF_MAX_MS = 600_000;
+// A pair balance below what the landed sells guarantee is a node behind them
+// (the nonce and the balances are separate requests, maybe separate nodes): the
+// leg waits for a read that holds them. Only a shortfall that holds across reads
+// for this long is believed (the proceeds left another way, or a leg of ours
+// landed unseen) — never one read.
+const SHORT_TRUST_MS = 60_000;
 // The preview's quote cache (pools): refreshed this often while visible, and
 // trusted this long. It never sizes a floor.
 const PREVIEW_REFRESH_MS = 5_000;
@@ -184,11 +191,15 @@ export function createSession({
     let p = pairs.get(key);
     if (!p) {
       p = {
-        baseline: null, // the pair balance that is the visitor's own; null = not read yet
-        owedMin: 0n, // landed sells' minimum-outs not yet swapped
+        baseline: null, // the pair balance the automatic leg leaves alone (the visitor's own + carried); null = not read yet
+        owedMin: 0n, // a lower bound of this session's proceeds still in the wallet: landed minimum-outs less what landed legs covered
+        credit: 0n, // landed legs' amounts beyond the owedMin they covered: proceeds of sells whose receipts are still to come
         measured: 0n, // the last fresh read's balance above the baseline
+        shortSince: 0, // when reads first came back below owedMin (0: they do not)
         minNonce: 0, // a read below this nonce predates a landed op of ours
         touched: false, // a sell of this wallet was sent: the baseline can no longer be read
+        carried: 0n, // an earlier visit's unconverted proceeds (pairLedger): converted only on a click
+        manual: false, // the queued leg is the visitor's Convert click: carried proceeds go too
         running: false,
         again: false,
         retryAt: 0,
@@ -199,8 +210,10 @@ export function createSession({
     return p;
   }
 
-  /** Pair-token proceeds this page knows are still to be turned into ETH. */
+  /** This session's pair-token proceeds still to be turned into ETH (the automatic leg's amount). */
   const pendingOf = (p) => max(p.measured, p.owedMin);
+  /** Everything a row offers to convert: this session's proceeds and an earlier visit's. */
+  const convertibleOf = (p) => pendingOf(p) + p.carried;
 
   /** What React sees: addresses, balances and statuses. Nothing else. */
   function view() {
@@ -210,7 +223,7 @@ export function createSession({
       .filter(Boolean)
       .map((w) => {
         const p = legs ? pairs.get(w.key) : null;
-        const owed = p ? pendingOf(p) : 0n;
+        const owed = p ? convertibleOf(p) : 0n;
         return {
           address: w.address,
           ticked: w.ticked,
@@ -413,10 +426,34 @@ export function createSession({
         nonces.resync(w.address, Number(ws.nonce) || 0);
         applyState(w, ws, { exact: false });
       }
+      noteNonces(keys);
       emit();
     } catch {
       // The next send's own nonce error resyncs it.
     }
+  }
+
+  /**
+   * The proceeds an earlier visit left in the pair token (pairLedger), as far as
+   * this fresh read can vouch for them:
+   *   - dropped when the wallet has sent a transaction since that this page did
+   *     not (its nonce moved past the one recorded): the visitor may have moved
+   *     them out and bought pair tokens to hold;
+   *   - clamped to what the wallet holds above its own pair tokens (the recorded
+   *     balance less the recorded proceeds);
+   *   - not listed when the read lacks a nonce or a pair balance (the entry stays).
+   * The session never converts them on its own: only a Convert click does.
+   */
+  function carriedFrom(ws) {
+    const L = deps.pairLedger;
+    const e = L ? L.get(venue.pairToken, ws.address) : null;
+    if (!e || e.owed <= 0n) return 0n;
+    const n = ws.nonce === null || ws.nonce === undefined ? NaN : Number(ws.nonce);
+    if (ws.pairBalance === undefined || ws.pairBalance === null || !Number.isSafeInteger(n)) return 0n;
+    let keep = 0n;
+    if (e.nonce !== null && e.bal !== null && n <= e.nonce) keep = min(e.owed, sub(BigInt(ws.pairBalance), sub(e.bal, e.owed)));
+    if (keep !== e.owed) L.set(venue.pairToken, ws.address, keep, { nonce: e.nonce ?? undefined, bal: e.bal === null ? undefined : sub(e.bal, e.owed - keep) });
+    return keep;
   }
 
   async function loadWallets(addresses) {
@@ -444,8 +481,8 @@ export function createSession({
         } catch {
           bal = 0n;
         }
-        // Proceeds an earlier visit left in the pair token (pairLedger: public amounts only).
-        const carried = legs && deps.pairLedger ? deps.pairLedger.get(venue.pairToken, ws.address) : 0n;
+        // Proceeds an earlier visit left in the pair token, checked against this read.
+        const carried = legs ? carriedFrom(ws) : 0n;
         if (bal <= 0n && carried <= 0n) continue; // the table lists holders (and unconverted proceeds) only
         w = {
           key,
@@ -470,15 +507,13 @@ export function createSession({
         nonces.seed(ws.address, Number(ws.nonce) || 0);
         if (legs) {
           const p = pair(key);
-          p.owedMin = carried;
-          if (ws.pairBalance !== undefined && ws.pairBalance !== null) {
-            // What the wallet holds minus what this page still owes it: a pair position
-            // the visitor already had is left alone, carried proceeds are not.
-            p.baseline = sub(BigInt(ws.pairBalance), carried);
-            p.measured = min(carried, BigInt(ws.pairBalance));
-          }
+          // The automatic leg leaves the whole balance alone — the visitor's own pair
+          // tokens AND the carried proceeds, which only a Convert click swaps.
+          p.carried = carried;
+          if (ws.pairBalance !== undefined && ws.pairBalance !== null) p.baseline = BigInt(ws.pairBalance);
         }
         applyState(w, ws, { exact: true });
+        if (legs && carried > 0n) persistPair(key); // re-dated, at this read's nonce
       } else {
         // A read a block behind must not hand back tokens a sell that just landed took.
         applyState(w, ws, { exact: now() - w.landedAt > LANDED_SETTLE_MS });
@@ -603,7 +638,9 @@ export function createSession({
     if (m.kind === 'pairSwap') {
       const p = pair(m.key);
       p.running = false;
+      p.manual = false; // a refused click needs a new click for the carried proceeds
       backoff(p);
+      persistPair(m.key); // what the ledger took as swapped is owed again
       setRow(w, 'failed', `${pairSym()} → ETH not sent: ${why} — retrying`, m.hash || null);
     } else {
       setRow(w, 'failed', why, m.hash || null);
@@ -658,7 +695,24 @@ export function createSession({
     }
     if (newOwn.length && hub) hub.emit('own', newOwn);
     if (retry.length) await retryNonce(retry);
+    noteNonces(metas.map((m) => m.key));
     emit();
+  }
+
+  /**
+   * The ledger's entries of these wallets (any pair token) now expect the nonce
+   * this page signs with next: its own sends — on any token — never make an
+   * earlier visit's proceeds look moved by someone else.
+   */
+  function noteNonces(keys) {
+    if (!deps.pairLedger || !deps.pairLedger.touch) return;
+    const list = [];
+    for (const key of new Set(keys)) {
+      const w = W.get(key);
+      const n = w ? nonces.peek(w.address) : undefined;
+      if (Number.isSafeInteger(n)) list.push({ address: w.address, nonce: n });
+    }
+    if (list.length) deps.pairLedger.touch(list);
   }
 
   async function retryNonce(list) {
@@ -672,7 +726,7 @@ export function createSession({
     }
     const byKey = new Map(states.map((s) => [lower(s.address), s]));
     const redo = [];
-    const rebuild = new Set();
+    const rebuild = new Map(); // key -> the leg was the visitor's Convert click
     for (const { m, kind } of list) {
       const ws = byKey.get(m.key);
       if (!ws) {
@@ -699,20 +753,20 @@ export function createSession({
         const w = W.get(m.key);
         if (w) w.ops = Math.max(0, w.ops - 1);
         if (m.kind === 'pairSwap') pair(m.key).running = false;
-        rebuild.add(m.key);
+        rebuild.set(m.key, rebuild.get(m.key) || !!m.manual);
         continue;
       }
       redo.push({ m, ws });
     }
     if (rebuild.size) {
       await withLock(async () => {
-        for (const key of rebuild) {
+        for (const key of rebuild.keys()) {
           const w = W.get(key);
           const ws = byKey.get(key);
           if (w && ws) nonces.resync(w.address, Number(ws.nonce) || 0);
         }
       });
-      for (const key of rebuild) queuePair(key, true);
+      for (const [key, manual] of rebuild) queuePair(key, { now: true, manual });
     }
     if (!redo.length) return;
     const raws = [];
@@ -920,10 +974,18 @@ export function createSession({
       const p = pair(m.key);
       p.running = false;
       if (ok) {
-        // Lowered by what was actually swapped: a leg that also swapped a later
-        // sell's proceeds leaves nothing owed for them.
-        p.owedMin = sub(p.owedMin, m.amount);
-        p.measured = sub(p.measured, m.amount);
+        // An earlier visit's proceeds it swapped leave the baseline with them.
+        const c = min(m.carriedPart || 0n, p.carried);
+        p.carried -= c;
+        if (p.baseline !== null) p.baseline = sub(p.baseline, c);
+        // This session's part covers what was owed; the rest — proceeds of sells
+        // whose receipts have not arrived yet — is a credit their receipts use up,
+        // so a late receipt never asks for a second leg of proceeds already swapped.
+        const auto = sub(m.amount, c);
+        const covered = min(p.owedMin, auto);
+        p.owedMin -= covered;
+        p.credit += auto - covered;
+        p.measured = sub(p.measured, auto);
         p.minNonce = Math.max(p.minNonce, Number(m.tx.nonce) + 1);
         p.backoffMs = 0;
         p.retryAt = 0;
@@ -931,6 +993,7 @@ export function createSession({
         setRow(w, 'landed', `${pairSym()} → ETH done · ${where}`, hash);
       } else {
         backoff(p);
+        persistPair(m.key); // owed again
         setRow(w, 'reverted', `${pairSym()} → ETH swap reverted — ${pairSym()} kept in the wallet; retrying`, hash);
       }
       if (p.again) {
@@ -945,16 +1008,31 @@ export function createSession({
   // ── the pair -> ETH leg ────────────────────────────────────────────────────
   function sellLanded(m) {
     const p = pair(m.key);
-    p.owedMin += m.minOut;
+    // A leg that already swapped this sell's proceeds (its receipt came late) left a credit.
+    const used = min(p.credit, m.minOut);
+    p.credit -= used;
+    p.owedMin += m.minOut - used;
+    p.shortSince = 0; // a shortfall seen before these proceeds says nothing about them
     p.minNonce = Math.max(p.minNonce, Number(m.tx.nonce) + 1);
     persistPair(m.key);
     queuePair(m.key);
   }
 
-  function persistPair(key) {
+  /**
+   * Remember what this wallet is owed across a token switch or a reload
+   * (pairLedger): the proceeds, the balance the page expects (its own pair
+   * tokens + the proceeds) and the nonce it signs with next. `less`: a leg about
+   * to be sent — written as if it will land, so a page closed before its receipt
+   * never counts those proceeds twice; a revert or a refusal writes them back.
+   */
+  function persistPair(key, less = { auto: 0n, carried: 0n }) {
     const w = W.get(key);
     if (!w || !deps.pairLedger || !isPairLeg()) return;
-    deps.pairLedger.set(venue.pairToken, w.address, pendingOf(pair(key)));
+    const p = pair(key);
+    const owed = sub(pendingOf(p), less.auto) + sub(p.carried, less.carried);
+    const own = p.baseline === null ? 0n : sub(p.baseline, p.carried);
+    const n = nonces.peek(w.address);
+    deps.pairLedger.set(venue.pairToken, w.address, owed, { nonce: Number.isSafeInteger(n) ? n : Number(w.state.nonce) || 0, bal: own + owed });
   }
 
   function backoff(p) {
@@ -965,16 +1043,23 @@ export function createSession({
   function refusePair(key, why) {
     const p = pair(key);
     p.running = false;
+    p.manual = false; // a refused click needs a new click for the carried proceeds
     backoff(p);
+    persistPair(key); // anything written as if a leg would land is owed again
     const w = W.get(key);
     if (w && w.ops === 0) setRow(w, 'failed', why);
   }
 
-  /** Queue a wallet's pair leg for the next batch. `manual`: the visitor pressed Convert — no backoff wait. */
-  function queuePair(key, manual = false) {
+  /**
+   * Queue a wallet's pair leg for the next batch.
+   *   manual  the visitor pressed Convert: no backoff wait, and an earlier visit's proceeds go too
+   *   now     no backoff wait (a leg rebuilt after 'nonce too low')
+   */
+  function queuePair(key, { manual = false, now: soon = false } = {}) {
     if (disposed || !isPairLeg() || !W.has(key)) return;
     const p = pair(key);
-    if (manual) {
+    if (manual) p.manual = true;
+    if (manual || soon) {
       p.retryAt = 0;
       p.backoffMs = 0;
     }
@@ -991,10 +1076,16 @@ export function createSession({
   }
 
   /**
-   * How much of the pair token to swap for a wallet, from a read that is known
-   * to include every landed op of ours (ws.nonce >= p.minNonce):
+   * How much of the pair token the automatic leg swaps for a wallet, from a read
+   * whose nonce includes every landed op of ours (ws.nonce >= p.minNonce) — or
+   * null when the read cannot be trusted yet:
    *   known baseline   the balance above it — never more (a swap of more would
-   *                    take the visitor's own pair tokens)
+   *                    take the visitor's own pair tokens). A balance below what
+   *                    the landed sells guarantee (owedMin) is a node behind
+   *                    them — the nonce and the balances are separate requests —
+   *                    so it is re-read and never lowers owedMin on its own:
+   *                    only a shortfall that holds across reads for
+   *                    SHORT_TRUST_MS is believed
    *   baseline unread  at most the landed sells' minimum-outs (<= the proceeds)
    *   balance unread   the landed sells' minimum-outs
    */
@@ -1003,8 +1094,14 @@ export function createSession({
     const bal = BigInt(ws.pairBalance);
     if (p.baseline === null) return min(p.owedMin, bal);
     const delta = sub(bal, p.baseline);
+    if (delta < p.owedMin) {
+      const t = now();
+      if (!p.shortSince) p.shortSince = t;
+      if (t - p.shortSince < SHORT_TRUST_MS) return null;
+      p.owedMin = delta; // it held for a minute of reads: the proceeds left another way
+    }
+    p.shortSince = 0;
     p.measured = delta;
-    if (p.owedMin > delta) p.owedMin = delta;
     return delta;
   }
 
@@ -1061,9 +1158,22 @@ export function createSession({
           stale.push(k); // a node behind our own landed ops: its balance cannot be trusted
           continue;
         }
-        const amount = measure(p, ws);
+        const auto = measure(p, ws);
+        if (auto === null) {
+          stale.push(k); // below what our landed sells guarantee: a node behind them
+          continue;
+        }
+        // A Convert click also swaps an earlier visit's proceeds — what the wallet
+        // holds above the visitor's own pair tokens, never more.
+        let carriedPart = 0n;
+        if (p.manual && p.carried > 0n && read && p.baseline !== null) {
+          carriedPart = min(p.carried, sub(sub(BigInt(ws.pairBalance), sub(p.baseline, p.carried)), auto));
+        }
+        const manual = p.manual;
+        p.manual = false;
         persistPair(k);
-        if (amount > 0n) legs.push({ key: k, amount, pairBefore: read ? BigInt(ws.pairBalance) : null });
+        const amount = auto + carriedPart;
+        if (amount > 0n) legs.push({ key: k, amount, carriedPart, manual, pairBefore: read ? BigInt(ws.pairBalance) : null });
         else p.running = false; // nothing (left) to convert
       }
       waitFor = stale;
@@ -1131,12 +1241,15 @@ export function createSession({
           const rawS = await deps.store.signTx(w.address, s);
           raws.push(rawA, rawS);
           w.ops += 2;
-          metas.push({ id: ++opSeq, kind: 'pairApprove', key: l.key, tx: a }, { id: ++opSeq, kind: 'pairSwap', key: l.key, tx: s, amount: l.amount, pairBefore: l.pairBefore });
+          metas.push(
+            { id: ++opSeq, kind: 'pairApprove', key: l.key, tx: a, manual: l.manual },
+            { id: ++opSeq, kind: 'pairSwap', key: l.key, tx: s, amount: l.amount, carriedPart: l.carriedPart, manual: l.manual, pairBefore: l.pairBefore }
+          );
           // Saved as if the swap will land: should the page close before its receipt,
           // the next visit leaves at worst these proceeds unconverted — never counts
           // them twice and swaps the visitor's own pair tokens. A revert or a refusal
-          // writes them back.
-          if (deps.pairLedger) deps.pairLedger.set(venue.pairToken, w.address, sub(pendingOf(pair(l.key)), l.amount));
+          // writes them back (onReceipt, failed, refusePair).
+          persistPair(l.key, { auto: l.amount - l.carriedPart, carried: l.carriedPart });
           setRow(w, 'sent', `swapping ${fmtUnits(l.amount, qDec(), 4)} ${pairSym()} → ETH`);
         } catch (e) {
           refusePair(l.key, `${pairSym()} → ETH not signed: ${errText(e)}`);
@@ -1155,8 +1268,8 @@ export function createSession({
     let n = 0;
     for (const k of keys) {
       const p = pairs.get(k);
-      if (!p || !W.has(k) || pendingOf(p) <= 0n) continue;
-      queuePair(k, true);
+      if (!p || !W.has(k) || convertibleOf(p) <= 0n) continue;
+      queuePair(k, { manual: true });
       n += 1;
     }
     return n;
@@ -1468,8 +1581,9 @@ export function createSession({
     if (isPool() && !deps.isHidden() && (!cache || now() - cache.at >= PREVIEW_REFRESH_MS)) refreshQuotes();
     if (ticks % 5 === 0) {
       sweep();
-      // The pair leg's lasting trigger: proceeds still in the pair token (a refused
-      // leg, a reverted swap, a reload) are retried once their backoff has passed.
+      // The pair leg's lasting trigger: this session's proceeds still in the pair
+      // token (a refused leg, a reverted swap) are retried once their backoff has
+      // passed. An earlier visit's (carried) never are: only a click converts them.
       if (isPairLeg()) {
         const t = now();
         for (const [k, p] of pairs) if (!p.running && pendingOf(p) > 0n && t >= p.retryAt) queuePair(k);

@@ -1,8 +1,9 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { AbiCoder, Interface } from 'ethers';
+import { AbiCoder, Interface, id } from 'ethers';
 import { createSession } from './session.js';
 import { createHub } from './hub.js';
+import { createPairLedger } from './pairLedger.js';
 import { planArm as realPlanArm, planSell as realPlanSell } from '../chain/plan.js';
 import { NonceBook as RealNonceBook } from '../chain/nonces.js';
 import { NATIVE, PERMIT2, UNIVERSAL_ROUTER } from '../chain/constants.js';
@@ -41,22 +42,21 @@ class FakeNonces {
     this.resyncs.push([a.toLowerCase(), n]);
     this.m.set(a.toLowerCase(), n);
   }
+  peek(a) {
+    return this.m.get(a.toLowerCase());
+  }
 }
 
 function wallet(address, over = {}) {
   return { address, tokenBalance: '0', ethBalance: '1000000000000000000', nonce: 0, allowance: '0', permit2: null, ...over };
 }
 
-/** An in-memory stand-in for ui/pairLedger.js (localStorage in the page). */
+/** ui/pairLedger.js itself, in memory (no storage: the page without Remember). */
 function memoryLedger() {
-  const m = new Map();
-  const k = (p, a) => `${p.toLowerCase()}:${a.toLowerCase()}`;
-  return {
-    m,
-    get: (p, a) => m.get(k(p, a)) || 0n,
-    set: (p, a, v) => (v > 0n ? m.set(k(p, a), v) : m.delete(k(p, a))),
-  };
+  return createPairLedger({ storage: null, hash: id });
 }
+/** What the ledger says a wallet is owed (0 when nothing). */
+const owedIn = (ledger, addr) => (ledger.get(PAIR, addr) || { owed: 0n }).owed;
 
 function harness({ venue, states, planSellCalls = [], real = false, live = true, pairLedger = null, fees: feesOver = {}, onVenue }) {
   const byAddr = new Map(states.map((s) => [s.address.toLowerCase(), s]));
@@ -793,6 +793,9 @@ for (const own of ['1000', '0']) {
     await h.runTimers();
     h.s.onReceipt({ hash: hashOfSell(A, 1, 187500), status: 'landed', block: 30, gasUsed: '1' }); // late
     await h.runTimers();
+    const row = h.s.view().rows[0];
+    assert.equal(row.pairPending, '0', 'the leg already swapped the late sell’s proceeds: nothing owed');
+    assert.doesNotMatch(row.detail, /waiting/, 'and no wait for a read that could never show them');
     for (let i = 0; i < 10; i += 1) h.s.tick();
     await h.runTimers();
     assert.deepEqual(h.log.pair, ['437']);
@@ -815,6 +818,15 @@ test("a 'nonce too low' pair leg is rebuilt from a fresh read, never re-signed b
   await h.runTimers();
   assert.deepEqual(h.log.pair, ['500']);
   assert.equal(h.log.broadcast.length, 2, 'the refused leg was not re-signed');
+  // The fresh read shows the proceeds gone — below what the landed sell guarantees.
+  // One read never lowers what is owed; the shortfall is believed once it holds.
+  for (let s = 0; s < 150; s += 5) {
+    h.advance(5_000);
+    for (let i = 0; i < 5; i += 1) h.s.tick();
+    await h.runTimers();
+  }
+  assert.deepEqual(h.log.pair, ['500'], 'never a second leg');
+  assert.equal(h.log.broadcast.length, 2);
   assert.equal(h.s.view().rows[0].pairPending, '0');
 });
 
@@ -1104,4 +1116,271 @@ test('an approval confirmed across a graduation is re-armed for the pool, never 
   assert.notEqual(row.status, 'failed', row.detail);
   assert.equal(h.log.broadcast.length, 2, 'Permit2 approvals for the pool');
   assert.ok(h.log.broadcast[1][0].startsWith(`raw|${A}|4|0x095ea7b3`));
+});
+
+// ── the pair leg trusts no single read (review round 3: F2, F3, F9) ──────────
+/** Serve the next `n` /wallets answers from a node behind the chain: `over` replaces each wallet's fields. */
+function staleReads(h, n, over) {
+  const real = h.api.postWallets;
+  let left = n;
+  h.api.postWallets = async (token, addrs) => {
+    const res = await real(token, addrs);
+    if (left <= 0) return res;
+    left -= 1;
+    return { ...res, wallets: res.wallets.map((w) => ({ ...w, ...over })) };
+  };
+  return () => left;
+}
+
+test('a pair read that lags its nonce never lowers what is owed: the leg waits and then swaps the real proceeds', async () => {
+  const ledger = memoryLedger();
+  const h = harness({ venue: AMZN_CURVE, pairLedger: ledger, states: [wallet(A, { tokenBalance: '1000000', allowance: '1000000', nonce: 0, pairBalance: '100' })] });
+  await h.s.loadWallets([A]);
+  await h.s.sell(50); // expected 500, minOut 425
+  // getTransactionCount reached a fresh node, the balance multicall one a block behind.
+  Object.assign(h.byAddr.get(A), { nonce: 1, tokenBalance: '500000', pairBalance: '100' });
+  h.s.onReceipt({ hash: hashOfSell(A, 0, 500000), status: 'landed', block: 30, gasUsed: '1' });
+  await h.runTimers();
+  assert.deepEqual(h.log.pair, [], 'no leg from a read that cannot hold the landed proceeds');
+  const row = h.s.view().rows[0];
+  assert.equal(row.pairPending, '425', 'the landed minimum-out is still owed');
+  assert.match(row.detail, /waiting for a fresh balance read/);
+  assert.equal(owedIn(ledger, A), 425n, 'and remembered');
+
+  h.byAddr.get(A).pairBalance = '1000'; // the node catches up: 100 of the visitor's own + 900 proceeds
+  h.advance(16_000);
+  for (let i = 0; i < 5; i += 1) h.s.tick();
+  await h.runTimers();
+  assert.deepEqual(h.log.pair, ['900'], "the whole proceeds, never the visitor's 100");
+});
+
+test('a shortfall that holds across reads for a minute is believed: the leg stops waiting and swaps nothing', async () => {
+  const h = harness({ venue: AMZN_CURVE, states: [wallet(A, { tokenBalance: '1000000', allowance: '1000000', nonce: 0, pairBalance: '100' })] });
+  await h.s.loadWallets([A]);
+  await h.s.sell(50);
+  // The proceeds left the wallet some other way: every read shows the 100 alone.
+  Object.assign(h.byAddr.get(A), { nonce: 1, tokenBalance: '500000', pairBalance: '100' });
+  h.s.onReceipt({ hash: hashOfSell(A, 0, 500000), status: 'landed', block: 30, gasUsed: '1' });
+  await h.runTimers();
+  for (let s = 0; s < 200; s += 5) {
+    h.advance(5_000);
+    for (let i = 0; i < 5; i += 1) h.s.tick();
+    await h.runTimers();
+  }
+  assert.deepEqual(h.log.pair, [], 'never a swap of more than the balance above the baseline');
+  assert.equal(h.s.view().rows[0].pairPending, '0');
+  const reads = h.log.wallets.length;
+  for (let s = 0; s < 120; s += 5) {
+    h.advance(5_000);
+    for (let i = 0; i < 5; i += 1) h.s.tick();
+    await h.runTimers();
+  }
+  assert.ok(h.log.wallets.length - reads <= 1, 'and stops re-reading');
+});
+
+test("a read served behind the wallet's own landed leg is re-read, never measured: the visitor's pair tokens stay", async () => {
+  const h = harness({ venue: AMZN_CURVE, states: [wallet(A, { tokenBalance: '1000000', allowance: '1000000', nonce: 0, pairBalance: '1000' })] });
+  await h.s.loadWallets([A]);
+  await h.s.sell(50); // nonce 0: 500,000 -> minOut 425
+  Object.assign(h.byAddr.get(A), { nonce: 1, tokenBalance: '500000', pairBalance: '1500' });
+  h.s.onReceipt({ hash: hashOfSell(A, 0, 500000), status: 'landed', block: 30, gasUsed: '1' });
+  await h.runTimers();
+  assert.deepEqual(h.log.pair, ['500']);
+  const leg = h.log.broadcast.at(-1);
+  Object.assign(h.byAddr.get(A), { nonce: 3, pairBalance: '1000' });
+  h.s.onReceipt({ hash: `h:${leg[0]}`, status: 'landed', block: 31, gasUsed: '1' });
+  h.s.onReceipt({ hash: `h:${leg[1]}`, status: 'landed', block: 31, gasUsed: '1' });
+  await h.runTimers();
+
+  await h.s.sell(50); // nonce 3: 250,000 -> minOut 212
+  Object.assign(h.byAddr.get(A), { nonce: 4, tokenBalance: '250000', pairBalance: '1250' });
+  // The next reads reach a node from before the leg landed: nonce 1, 1,500 AMZN.
+  const left = staleReads(h, 3, { nonce: 1, tokenBalance: '500000', pairBalance: '1500' });
+  h.s.onReceipt({ hash: hashOfSell(A, 3, 250000), status: 'landed', block: 40, gasUsed: '1' });
+  await h.runTimers();
+  h.advance(16_000);
+  for (let i = 0; i < 5; i += 1) h.s.tick();
+  await h.runTimers();
+  assert.equal(left(), 0, 'the stale reads were served');
+  assert.deepEqual(h.log.pair, ['500', '250'], 'the 250 proceeds, never 500 again');
+});
+
+test('a reverted or refused pair swap writes its proceeds back to the ledger at once', async () => {
+  for (const how of ['reverted', 'refused']) {
+    const ledger = memoryLedger();
+    const h = harness({ venue: AMZN_CURVE, pairLedger: ledger, states: [wallet(A, { tokenBalance: '1000000', allowance: '1000000', nonce: 0, pairBalance: '0' })] });
+    await h.s.loadWallets([A]);
+    await h.s.sell(100);
+    Object.assign(h.byAddr.get(A), { nonce: 1, tokenBalance: '0', pairBalance: '1000' });
+    if (how === 'refused') {
+      h.api.onBroadcast = (txs, n) => txs.map((raw) => (n === 2 ? { ok: false, error: 'insufficient funds for gas * price + value' } : { hash: `h:${raw}`, ok: true }));
+    }
+    h.s.onReceipt({ hash: hashOfSell(A, 0, 1000000), status: 'landed', block: 30, gasUsed: '1' });
+    await h.runTimers();
+    assert.deepEqual(h.log.pair, ['1000'], how);
+    if (how === 'reverted') {
+      const leg = h.log.broadcast.at(-1);
+      assert.equal(owedIn(ledger, A), 0n, 'written as if the swap will land while it is in flight');
+      Object.assign(h.byAddr.get(A), { nonce: 3 });
+      h.s.onReceipt({ hash: `h:${leg[0]}`, status: 'landed', block: 31, gasUsed: '1' });
+      h.s.onReceipt({ hash: `h:${leg[1]}`, status: 'reverted', block: 31, gasUsed: '1' });
+      await flush();
+    }
+    assert.equal(owedIn(ledger, A), 1000n, `${how}: the proceeds are owed again`);
+    assert.equal(h.s.view().rows[0].pairPending, '1000', how);
+  }
+});
+
+test('a page closed while its pair swap is in flight lists nothing and sends nothing once that swap landed', async () => {
+  const ledger = memoryLedger();
+  const st = wallet(A, { tokenBalance: '1000000', allowance: '1000000', nonce: 0, pairBalance: '300' });
+  const h1 = harness({ venue: AMZN_CURVE, pairLedger: ledger, states: [st] });
+  await h1.s.loadWallets([A]);
+  await h1.s.sell(100);
+  Object.assign(st, { nonce: 1, tokenBalance: '0', pairBalance: '1300' });
+  h1.s.onReceipt({ hash: hashOfSell(A, 0, 1000000), status: 'landed', block: 30, gasUsed: '1' });
+  await h1.runTimers();
+  assert.deepEqual(h1.log.pair, ['1000']);
+  h1.s.dispose(); // closed before the leg's receipts
+
+  Object.assign(st, { nonce: 3, pairBalance: '300' }); // the swap landed after the page closed
+  const h2 = harness({ venue: AMZN_CURVE, pairLedger: ledger, states: [{ ...st }] });
+  await h2.s.loadWallets([A]);
+  assert.equal(h2.s.view().rows.length, 0, 'no token and nothing owed: not listed');
+  for (let i = 0; i < 30; i += 1) h2.s.tick();
+  await h2.runTimers();
+  assert.deepEqual(h2.log.pair, []);
+  assert.equal(h2.log.broadcast.length, 0);
+});
+
+// ── an earlier visit's proceeds are the visitor's to convert (review round 3: F1) ──
+/** Visit 1: a 100 % sell whose leg is refused for impact, leaving 1000 AMZN of proceeds on top of `own`. */
+async function leaveProceeds(ledger, own = 1000n) {
+  const st = wallet(A, { tokenBalance: '1000000', allowance: '1000000', nonce: 0, pairBalance: String(own) });
+  const h1 = harness({ venue: AMZN_CURVE, states: [st], pairLedger: ledger });
+  h1.api.postPairQuote = async (pairToken, amount) => {
+    h1.log.pair.push(amount);
+    return { amountOut: String(BigInt(amount) * 2n), path: 'route', fees: [], impactBps: 1400, ok: false, reason: 'too deep' };
+  };
+  await h1.s.loadWallets([A]);
+  await h1.s.sell(100);
+  Object.assign(st, { nonce: 1, tokenBalance: '0', pairBalance: String(own + 1000n) });
+  h1.s.onReceipt({ hash: hashOfSell(A, 0, 1000000), status: 'landed', block: 30, gasUsed: '1' });
+  await h1.runTimers();
+  assert.deepEqual(h1.log.pair, ['1000']);
+  h1.s.dispose();
+  return st;
+}
+
+test("an earlier visit's proceeds are listed with Convert but never swapped without a click", async () => {
+  const ledger = memoryLedger();
+  const st = await leaveProceeds(ledger);
+  const h2 = harness({ venue: AMZN_CURVE, states: [{ ...st }], pairLedger: ledger });
+  await h2.s.loadWallets([A]);
+  const row = h2.s.view().rows[0];
+  assert.equal(row.pairPending, '1000');
+  assert.equal(row.canConvert, true);
+  for (let s = 0; s < 120; s += 5) {
+    h2.advance(5_000);
+    for (let i = 0; i < 5; i += 1) h2.s.tick();
+    await h2.runTimers();
+  }
+  assert.deepEqual(h2.log.pair, [], 'two minutes of ticks: nothing converted on its own');
+  assert.equal(h2.log.broadcast.length, 0);
+  assert.equal(h2.s.convertPair(A), 1);
+  await h2.runTimers();
+  assert.deepEqual(h2.log.pair, ['1000'], 'the click converts the proceeds, not the 1000 of its own');
+  assert.equal(h2.log.broadcast.at(-1)[0], `raw|${A}|1|approve:${PAIR}:${ROUTER}:1000`);
+});
+
+test('an entry is dropped when the wallet has sent a transaction the page did not (the visitor moved or re-bought)', async () => {
+  const ledger = memoryLedger();
+  const st = await leaveProceeds(ledger);
+  // Between the visits: the 1000 AMZN are moved out and 1000 AMZN bought back to hold.
+  Object.assign(st, { nonce: 3 });
+  const h2 = harness({ venue: AMZN_CURVE, states: [{ ...st }], pairLedger: ledger });
+  await h2.s.loadWallets([A]);
+  assert.equal(h2.s.view().rows.length, 0, 'nothing listed');
+  assert.equal(owedIn(ledger, A), 0n, 'and forgotten');
+  assert.equal(h2.s.convertPair(A), 0);
+  for (let i = 0; i < 30; i += 1) h2.s.tick();
+  await h2.runTimers();
+  assert.deepEqual(h2.log.pair, []);
+});
+
+test("an entry is clamped when the wallet holds less than the page recorded; the visitor's own pair tokens stay out", async () => {
+  const ledger = memoryLedger();
+  ledger.set(PAIR, A, 1000n, { nonce: 5, bal: 2000n }); // 1000 of its own + 1000 owed, next nonce 5
+  const h = harness({ venue: AMZN_CURVE, pairLedger: ledger, states: [wallet(A, { tokenBalance: '0', nonce: 5, pairBalance: '1400' })] });
+  await h.s.loadWallets([A]);
+  assert.equal(h.s.view().rows[0].pairPending, '400');
+  assert.equal(owedIn(ledger, A), 400n);
+  h.s.convertPair(A);
+  await h.runTimers();
+  assert.deepEqual(h.log.pair, ['400']);
+});
+
+test('a legacy entry without a nonce is not trusted', async () => {
+  const ledger = memoryLedger();
+  ledger.set(PAIR, A, 1000n, { bal: 5000n });
+  const h = harness({ venue: AMZN_CURVE, pairLedger: ledger, states: [wallet(A, { tokenBalance: '0', nonce: 5, pairBalance: '5000' })] });
+  await h.s.loadWallets([A]);
+  assert.equal(h.s.view().rows.length, 0);
+});
+
+test("a sell of this session never takes an earlier visit's proceeds along: they wait for the click", async () => {
+  const ledger = memoryLedger();
+  ledger.set(PAIR, A, 1000n, { nonce: 0, bal: 2000n }); // 1000 of its own + 1000 carried
+  const h = harness({ venue: AMZN_CURVE, pairLedger: ledger, states: [wallet(A, { tokenBalance: '1000000', allowance: '1000000', nonce: 0, pairBalance: '2000' })] });
+  await h.s.loadWallets([A]);
+  assert.equal(h.s.view().rows[0].pairPending, '1000');
+  await h.s.sell(50); // minOut 425
+  Object.assign(h.byAddr.get(A), { nonce: 1, tokenBalance: '500000', pairBalance: '2500' });
+  h.s.onReceipt({ hash: hashOfSell(A, 0, 500000), status: 'landed', block: 30, gasUsed: '1' });
+  await h.runTimers();
+  assert.deepEqual(h.log.pair, ['500'], 'this sell’s 500 only');
+  const leg = h.log.broadcast.at(-1);
+  Object.assign(h.byAddr.get(A), { nonce: 3, pairBalance: '2000' });
+  h.s.onReceipt({ hash: `h:${leg[0]}`, status: 'landed', block: 31, gasUsed: '1' });
+  h.s.onReceipt({ hash: `h:${leg[1]}`, status: 'landed', block: 31, gasUsed: '1' });
+  await h.runTimers();
+  assert.equal(h.s.view().rows[0].pairPending, '1000', 'the carried proceeds are still offered');
+  assert.equal(owedIn(ledger, A), 1000n);
+  h.s.convertPair(A);
+  await h.runTimers();
+  assert.deepEqual(h.log.pair, ['500', '1000']);
+  const conv = h.log.broadcast.at(-1);
+  Object.assign(h.byAddr.get(A), { nonce: 5, pairBalance: '1000' });
+  h.s.onReceipt({ hash: `h:${conv[0]}`, status: 'landed', block: 32, gasUsed: '1' });
+  h.s.onReceipt({ hash: `h:${conv[1]}`, status: 'landed', block: 32, gasUsed: '1' });
+  await h.runTimers();
+  assert.equal(h.s.view().rows[0].pairPending, '0');
+  assert.equal(owedIn(ledger, A), 0n);
+});
+
+test("a Refresh read between a sell's landing and its receipt never becomes the baseline", async () => {
+  const h = harness({ venue: AMZN_CURVE, states: [wallet(A, { tokenBalance: '1000000', allowance: '1000000', nonce: 0, pairBalance: null })] });
+  await h.s.loadWallets([A]);
+  await h.s.sell(25); // minOut 212
+  // The sell is on chain (50,000 of the visitor's own + 250 proceeds) before its receipt reaches the page.
+  Object.assign(h.byAddr.get(A), { nonce: 1, tokenBalance: '750000', pairBalance: '50250' });
+  await h.s.reload();
+  h.s.onReceipt({ hash: hashOfSell(A, 0, 250000), status: 'landed', block: 30, gasUsed: '1' });
+  await h.runTimers();
+  assert.deepEqual(h.log.pair, ['212'], 'the landed minimum-out, never swallowed into a baseline');
+});
+
+test("the page's own sends on another token keep an earlier entry valid", async () => {
+  const ledger = memoryLedger();
+  const st = await leaveProceeds(ledger);
+  // The visitor opens an ETH-quoted token and sells it from the same wallet (nonce 1 -> 2).
+  const eth = harness({ venue: CURVE, pairLedger: ledger, states: [{ ...st, tokenBalance: '1000', allowance: '1000' }] });
+  await eth.s.loadWallets([A]);
+  await eth.s.sell(100);
+  assert.equal(eth.log.broadcast.length, 1);
+  eth.s.dispose();
+  Object.assign(st, { nonce: 2 });
+  const h2 = harness({ venue: AMZN_CURVE, states: [{ ...st }], pairLedger: ledger });
+  await h2.s.loadWallets([A]);
+  assert.equal(h2.s.view().rows[0].pairPending, '1000');
 });
