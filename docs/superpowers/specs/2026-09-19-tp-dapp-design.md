@@ -265,3 +265,67 @@ DNS is in place (`dapp` A record → the droplet). Then: add the nginx block,
 `sudo certbot --nginx --cert-name rhbond.xyz -d rhbond.xyz -d www.rhbond.xyz -d api.rhbond.xyz -d dapp.rhbond.xyz`,
 enable HTTP/2 on the new 443 listen; `git pull`, `npm ci` (new frontend deps),
 `npm run build`, `pm2 restart` (new backend routes).
+
+---
+
+# Addendum v2 (2026-09-19, after the operator used v1)
+
+Operator feedback on the first build: wallets vanish on refresh; choosing which wallets
+sell is not obvious; holdings should be live with a %-left bar; the token needs its
+info and logo. Decisions below are the operator's.
+
+## A. Account: connect a wallet, bundles synced encrypted
+
+- **Connect wallet** with any injected browser wallet (EIP-6963 discovery, fallback
+  `window.ethereum`): MetaMask, Rabby, OKX, Coinbase extension. No WalletConnect (it
+  needs third-party connections the CSP forbids).
+- **Login**: a Sign-In-With-Ethereum (EIP-4361) message — domain = the page's host,
+  chain id 4663, a single-use server nonce (5 min), expiry 24 h. The server verifies it
+  (`ethers.verifyMessage`, domain must equal `DAPP_HOST`, nonce unused) and sets an
+  httpOnly, Secure, SameSite=Strict session cookie scoped to `/api/tp/account`.
+- **Encryption key**: a SECOND, fixed message ("rhbond take-profit — unlock my saved
+  wallets", naming the domain, the account and a version) signed with `personal_sign`.
+  The signature → HKDF-SHA256 → AES-GCM-256 key, derived **in the browser**. That
+  signature is **never sent to the server**. A stored key-check (AES-GCM of a constant)
+  detects a wallet whose signatures are not deterministic (smart-contract / passkey
+  wallets): such a wallet is told it cannot be used for saving, and the old
+  passphrase vault remains as the fallback.
+- **Sync**: the ciphertext blob `{v:2, address, check, wallets, positions}` is stored on
+  the server under the connected address (`GET/PUT/DELETE /api/tp/account/vault`,
+  optimistic concurrency on `updatedAt`, ≤ 256 KB). **The server stores only ciphertext
+  it cannot decrypt**; decision 1's rule "the server never receives a private key"
+  still holds — plaintext keys never leave the browser.
+- **Staying unlocked**: after unlock the derived key is kept as a **non-extractable**
+  WebCrypto key in IndexedDB with a 12 h expiry, so refreshes and new tabs do not ask
+  again; a **Lock** button and Disconnect wipe it. (Browsers cannot report "browser
+  closed", hence the fixed expiry.)
+- Imports, removals and position records save to the account automatically. A visitor
+  who does not connect keeps today's behaviour (memory only), with a banner offering to
+  connect. A v1 passphrase vault found on the device is offered for moving into the
+  account.
+
+## B. Choosing wallets
+
+Clear per-row checkboxes with All / None / Invert; the top % chips sell from the ticked
+wallets only. Every row also gets its own **25 / 50 / 100** buttons that sell that one
+wallet (same one-click rules, same slippage, same planning).
+
+## C. Live holdings with a %-left bar
+
+Each row shows live: tokens held, value (ETH and USD), % of supply, and a **bar of the
+position left**: 100 % when the wallet is first seen holding this token, falling as it
+sells (25 % then 50 % → 37.5 %). The starting size is a high-water mark (a later buy
+raises it) and is saved in the account's encrypted `positions`. In-flight sells show as
+a striped segment until they land. Balances refresh from receipts at once and by a
+periodic read while the token is open; values move with the live price.
+
+## D. Token info
+
+A token header: logo, name, symbol, CA with copy, venue badge, price (ETH and USD),
+market cap, 5 m / 1 h / 24 h change, 24 h volume, curve progress to graduation (curves) or
+liquidity (pools), age, creator, description (collapsible) and social links (X,
+Telegram, Discord, website, Farcaster) — https links only, `rel="noopener noreferrer"`,
+rendered as text/icons, never HTML. The **logo is fetched by the server**
+(`GET /api/tp/logo/:ca`) from IPFS gateways only (no arbitrary hosts — SSRF), capped at
+1 MB, PNG/JPEG/GIF/WebP by magic bytes (never SVG), cached, and served from the page's
+own origin so the CSP stays `img-src 'self' data:`. No logo → a generated identicon.
