@@ -114,6 +114,9 @@ export function createFeed({ api, hub, getSession, setMark = () => {}, followVen
         case 'status':
           hub.emit('status', data);
           break;
+        case 'stats':
+          hub.emit('stats', data); // the token header's changes, volume and figures (Task 35)
+          break;
         default:
           break;
       }

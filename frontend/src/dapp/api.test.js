@@ -13,6 +13,7 @@ import {
   postPairQuote,
   broadcast,
   sidFor,
+  logoPath,
 } from './api.js';
 
 // No escape sequences in this file on purpose (memory: write-tool-escapes).
@@ -516,4 +517,14 @@ test("a 409 'migrating' (a graduation in progress) is retried, never final", asy
   timers.runNext();
   await until(() => fetch.calls.length === 2);
   close();
+});
+
+// ── Task 35: the token header's logo route ────────────────────────────────────
+
+test("logoPath is this origin's logo route for an address, and null for anything else", () => {
+  assert.equal(logoPath(TOKEN.toUpperCase().replace('0X', '0x')), `/api/tp/logo/${TOKEN}`);
+  assert.equal(logoPath('javascript:alert(1)'), null);
+  assert.equal(logoPath(`${TOKEN}/../../wallets`), null);
+  assert.equal(logoPath(Wallet.createRandom().privateKey), null);
+  assert.equal(logoPath(null), null);
 });

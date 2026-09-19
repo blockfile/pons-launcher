@@ -333,6 +333,16 @@ export async function getToken(ca, opts) {
   return request('GET', `/token/${a}`, undefined, opts);
 }
 
+/**
+ * The token's logo as THIS origin serves it (GET /api/tp/logo/:ca: the server
+ * fetches it from IPFS, sniffs and caches it), for an <img src>; null for
+ * anything but an address. Built from the CA, never taken from a response: the
+ * page loads no logo from anywhere else (its CSP is img-src 'self' data:).
+ */
+export function logoPath(ca) {
+  return typeof ca === 'string' && ADDRESS_RE.test(ca) ? `${BASE}/logo/${ca.toLowerCase()}` : null;
+}
+
 /** POST /wallets {token, addresses} -> {wallets} */
 export async function postWallets(token, addresses, opts) {
   return request('POST', '/wallets', buildBody('wallets', { token, addresses }), opts);

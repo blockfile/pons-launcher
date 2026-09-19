@@ -51,7 +51,7 @@ function harness() {
   };
   const hub = createHub();
   const heard = [];
-  for (const name of ['snapshot', 'mark', 'bar', 'trades', 'phase', 'status']) hub.on(name, (d) => heard.push([name, d]));
+  for (const name of ['snapshot', 'mark', 'bar', 'trades', 'phase', 'status', 'stats']) hub.on(name, (d) => heard.push([name, d]));
   let session = null;
   const marks = [];
   const venues = [];
@@ -223,4 +223,21 @@ test("a live stream's retry marks the page offline; its reconnect snapshot settl
   assert.equal(s.reconnects, 1, 'the missed-receipt sweep runs');
   assert.deepEqual(s.live, [true, false, true]);
   assert.deepEqual(h.venues.at(-1), { token: X, kind: 'curve' }, 'a snapshot names the venue: followed');
+});
+
+test("the stream's stats reach the page for the open token only, once it is live", async () => {
+  const h = harness();
+  h.use(fakeSession(X));
+  h.feed.open(X);
+  h.feed.setTimeframe(1);
+  h.streams[0].emit('stats', { change5m: 1 }); // before the snapshot: the stream is not live yet
+  h.streams[0].emit('snapshot', snap(X));
+  h.streams[0].emit('stats', { change5m: 2.5, fromTs: 1 });
+  assert.deepEqual(
+    h.heard.filter(([n]) => n === 'stats'),
+    [['stats', { change5m: 2.5, fromTs: 1 }]]
+  );
+  h.use(fakeSession(Y)); // openToken(Y) ran; X's stream is not closed yet
+  h.streams[0].emit('stats', { change5m: 9 });
+  assert.equal(h.heard.filter(([n]) => n === 'stats').length, 1, "X's stats never reach Y's header");
 });

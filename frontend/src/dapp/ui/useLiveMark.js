@@ -41,3 +41,35 @@ export function usePrefersReducedMotion() {
   }, []);
   return reduced;
 }
+
+/**
+ * The stream's latest 'stats' (the token header's 5 m / 1 h / 24 h change and
+ * 24 h volume, Task 35) — from a 'stats' event or a snapshot carrying `stats` —
+ * re-rendering the caller at most once per `everyMs`. Raw: the caller cleans it
+ * (tokenFacts.normalizeStats). null until the stream has sent any.
+ */
+export function useLiveStats(hub, everyMs = 1000) {
+  const [stats, setStats] = useState(null);
+  useEffect(() => {
+    let latest = null;
+    let last = 0;
+    let timer = 0;
+    const update = () => {
+      timer = 0;
+      last = Date.now();
+      setStats(latest);
+    };
+    const take = (s) => {
+      if (!s || typeof s !== 'object') return;
+      latest = s;
+      if (timer) return;
+      timer = setTimeout(update, Math.max(0, everyMs - (Date.now() - last)));
+    };
+    const offs = [hub.on('stats', take), hub.on('snapshot', (d) => take(d && d.stats))];
+    return () => {
+      offs.forEach((off) => off());
+      if (timer) clearTimeout(timer);
+    };
+  }, [hub, everyMs]);
+  return stats;
+}

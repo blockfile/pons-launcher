@@ -97,6 +97,8 @@ export default function App() {
   const [view, setView] = useState(EMPTY_VIEW);
   const [fees, setFees] = useState(null);
   const [quoteUsd, setQuoteUsd] = useState({ usd: null, reason: 'loading' });
+  // The open token's header facts from GET /token/:ca: {info, figures} (TokenHeader).
+  const [tokenFacts, setTokenFacts] = useState(null);
   const [presets, setPresets] = useState(() => loadPresets());
   const [slippage, setSlippage] = useState(() => loadSlippage());
   const [importOpen, setImportOpen] = useState(false);
@@ -153,7 +155,7 @@ export default function App() {
       setOpening(true);
       setTokenError('');
       try {
-        const [{ venue: v, mark }, f] = await Promise.all([api.getToken(ca), api.getFees()]);
+        const [{ venue: v, mark, info, figures }, f] = await Promise.all([api.getToken(ca), api.getFees()]);
         closeSession();
         markRef.current = mark;
         own.current.txs = new Set();
@@ -172,6 +174,7 @@ export default function App() {
         s.setLive(feed.isLive(v.token)); // the same token re-opened keeps its live stream; another token never does
         s.start();
         setFees(f);
+        setTokenFacts({ info: info || null, figures: figures || null });
         setVenue(v);
         setTab('wallets');
         loadInto(s, syncOwnAddrs());
@@ -660,6 +663,8 @@ export default function App() {
             hub={hub}
             getMark={getMark}
             quoteUsd={quoteUsd}
+            ethUsd={ethUsd}
+            tokenFacts={tokenFacts}
             walletCount={walletCount}
             onImport={openImport}
           />
