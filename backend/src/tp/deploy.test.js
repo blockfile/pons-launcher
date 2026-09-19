@@ -314,6 +314,9 @@ test('README: a deleted or overwritten saved list can be restored by hand', () =
     '`deleted/`',
     'TP_VAULT_KEEP_DELETED_DAYS',
     'cp deleted/<address>.<ms>/<address>.json vaults/',
+    'cp deleted/<address>.<ms>/<address>.json.prev vaults/<address>.json',
+    'the first deletion (never replaced',
+    'the latest (each new deletion replaces it',
     'cp vaults/<address>.json.prev vaults/<address>.json',
     'chmod 600 vaults/<address>.json',
   ]) {

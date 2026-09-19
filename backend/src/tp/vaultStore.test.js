@@ -362,7 +362,7 @@ test('delete: rev-checked; the vault and its .prev move whole into deleted/<addr
   assert.equal(await store.get(a), null);
   assert.deepEqual(fs.readdirSync(path.join(dir, 'vaults')), []);
   const kept = path.join(dir, 'deleted', `${a}.${T0 + 5000}`);
-  assert.deepEqual(await store.deletedCopy(a), { deletedAt: T0 + 5000, dir: kept });
+  assert.deepEqual(await store.deletedCopies(a), [{ deletedAt: T0 + 5000, dir: kept }]);
   assert.ok(fs.readFileSync(path.join(kept, `${a}.json`)).equals(cur), 'the list, byte for byte');
   assert.ok(fs.readFileSync(path.join(kept, `${a}.json.prev`)).equals(prev), 'its .prev, byte for byte');
   assert.deepEqual(await store.stats(), { accounts: 0, totalBytes: cur.length + prev.length, deleted: 1 });
@@ -387,41 +387,148 @@ test('a hand restore is a copy back: the deleted list reads back after a restart
   const input = validatePut(body());
   await store.put(a, input, BY_S1);
   await store.remove(a, 1);
-  const { dir: kept } = await store.deletedCopy(a);
+  const [{ dir: kept }] = await store.deletedCopies(a);
   fs.copyFileSync(path.join(kept, `${a}.json`), path.join(dir, 'vaults', `${a}.json`));
   const restarted = open(dir, { clock }).store;
   assert.deepEqual(await restarted.get(a), { v: 2, kv: 1, keyId: KEY_A, iv: input.iv, ct: input.ct, rev: 1, updatedAt: T0 });
   assert.equal((await restarted.stats()).accounts, 1);
 });
 
-test('only the first deletion in the keep window is kept: deleting again cannot flush it; it is erased once the window passes', async () => {
+/** Bytes of every file under `d`, recursively. */
+const treeBytes = (d) =>
+  fs.readdirSync(d, { withFileTypes: true }).reduce((n, e) => n + (e.isDirectory() ? treeBytes(path.join(d, e.name)) : fs.statSync(path.join(d, e.name)).size), 0);
+
+test('a list made after a deletion is kept by its own deletion: another session deleting it loses neither list', async () => {
   const dir = tmpDir();
   const { store, clock } = open(dir);
   const a = addr();
-  const owner = validatePut(body());
-  await store.put(a, owner, BY_S1);
+  const file = path.join(dir, 'vaults', `${a}.json`);
+  // The owner saves L1, then deletes it to start over under a new key.
+  await store.put(a, validatePut(body()), BY_S1);
+  const l1 = fs.readFileSync(file);
+  clock.t += 1000;
   await store.remove(a, 1);
-  const first = await store.deletedCopy(a);
-  // A stolen session makes a new list and deletes it too — twice.
-  for (let i = 0; i < 2; i++) {
-    clock.t += 1000;
-    await store.put(a, validatePut(body({ keyId: KEY_B })), BY_S2);
-    assert.deepEqual(await store.remove(a, 1), { deleted: true });
-  }
-  assert.deepEqual(await store.deletedCopy(a), first, 'still the first deletion');
-  assert.equal(readJson(path.join(first.dir, `${a}.json`)).ct, owner.ct);
-  assert.equal((await store.stats()).deleted, 1);
-  assert.deepEqual(fs.readdirSync(path.join(dir, 'vaults')), []);
+  // A new sign-in, a new list L2 (saved twice, so it has a .prev of its own).
+  const owner2 = { writer: T0 + 2000 };
+  clock.t += 1000;
+  await store.put(a, validatePut(body({ keyId: KEY_B })), owner2);
+  await store.put(a, validatePut(body({ baseRev: 1, keyId: KEY_B })), owner2);
+  const l2 = fs.readFileSync(file);
+  const l2prev = fs.readFileSync(`${file}.prev`);
+  // ONE phished sign-in deletes L2.
+  clock.t += 1000;
+  assert.deepEqual(await store.remove(a, 2), { deleted: true });
 
-  // 30 days on, the next read erases it; the next delete is kept again.
+  const kept = await store.deletedCopies(a);
+  assert.deepEqual(kept, [
+    { deletedAt: T0 + 1000, dir: path.join(dir, 'deleted', `${a}.${T0 + 1000}`) },
+    { deletedAt: T0 + 3000, dir: path.join(dir, 'deleted', `${a}.${T0 + 3000}`) },
+  ]);
+  assert.ok(fs.readFileSync(path.join(kept[0].dir, `${a}.json`)).equals(l1), 'L1, byte for byte');
+  assert.ok(fs.readFileSync(path.join(kept[1].dir, `${a}.json`)).equals(l2), 'L2, byte for byte');
+  assert.ok(fs.readFileSync(path.join(kept[1].dir, `${a}.json.prev`)).equals(l2prev), "L2's .prev, byte for byte");
+  assert.deepEqual(fs.readdirSync(path.join(dir, 'vaults')), []);
+  assert.deepEqual(await store.stats(), { accounts: 0, totalBytes: l1.length + l2.length + l2prev.length, deleted: 2 });
+});
+
+test('the first deletion in the keep window is never replaced: a later one takes only the latest slot; each is erased when its own window passes', async () => {
+  const dir = tmpDir();
+  const { store, clock } = open(dir);
+  const a = addr();
+  const lists = [];
+  const deleteOne = async () => {
+    clock.t += 1000;
+    const input = validatePut(body({ keyId: lists.length % 2 ? KEY_B : KEY_A }));
+    await store.put(a, input, BY_S2);
+    lists.push({ ct: input.ct, deletedAt: clock.t });
+    assert.deepEqual(await store.remove(a, 1), { deleted: true });
+  };
+  const keptCts = async () => (await store.deletedCopies(a)).map((d) => readJson(path.join(d.dir, `${a}.json`)).ct);
+
+  await deleteOne();
+  await deleteOne();
+  const [first, second] = await store.deletedCopies(a);
+  // A third and a fourth deletion (a stolen session, again and again): each replaces
+  // the latest slot only, so the first stays and at most two are kept.
+  await deleteOne();
+  assert.deepEqual(await keptCts(), [lists[0].ct, lists[2].ct]);
+  assert.ok(!fs.existsSync(second.dir), 'the replaced latest copy is erased from disk');
+  await deleteOne();
+  assert.deepEqual(await keptCts(), [lists[0].ct, lists[3].ct]);
+  assert.deepEqual((await store.deletedCopies(a))[0], first, 'still the first deletion');
+  assert.equal(fs.readdirSync(path.join(dir, 'deleted')).length, 2);
+  assert.deepEqual(fs.readdirSync(path.join(dir, 'vaults')), []);
+  assert.deepEqual(await store.stats(), { accounts: 0, totalBytes: treeBytes(path.join(dir, 'deleted')), deleted: 2 });
+
+  // 30 days after the first deletion, the next read erases it; the latest stays and
+  // is now the first: the next deletion is kept beside it.
   clock.t = first.deletedAt + 30 * DAY;
   assert.equal(await store.get(a), null);
-  assert.equal(await store.deletedCopy(a), null);
   assert.ok(!fs.existsSync(first.dir), 'erased from disk');
+  assert.deepEqual(await keptCts(), [lists[3].ct]);
+  await deleteOne();
+  assert.deepEqual(await keptCts(), [lists[3].ct, lists[4].ct]);
+
+  // Once every window has passed, nothing is kept.
+  clock.t = lists[4].deletedAt + 30 * DAY;
+  assert.deepEqual(await store.deletedCopies(a), []);
   assert.deepEqual(await store.stats(), { accounts: 0, totalBytes: 0, deleted: 0 });
-  await store.put(a, validatePut(body()), BY_S1);
-  await store.remove(a, 1);
-  assert.equal((await store.deletedCopy(a)).deletedAt, clock.t);
+  assert.deepEqual(fs.readdirSync(path.join(dir, 'deleted')), []);
+});
+
+test('deletions of one address inside one millisecond never collide on a name', async () => {
+  const dir = tmpDir();
+  const { store } = open(dir);
+  const a = addr();
+  const cts = [];
+  for (let i = 0; i < 3; i++) {
+    const input = validatePut(body());
+    await store.put(a, input, BY_S1);
+    cts.push(input.ct);
+    assert.deepEqual(await store.remove(a, 1), { deleted: true });
+  }
+  const kept = await store.deletedCopies(a);
+  assert.deepEqual(kept.map((d) => d.deletedAt), [T0, T0 + 2]);
+  assert.deepEqual(kept.map((d) => readJson(path.join(d.dir, `${a}.json`)).ct), [cts[0], cts[2]]);
+  assert.deepEqual(fs.readdirSync(path.join(dir, 'deleted')).sort(), [`${a}.${T0}`, `${a}.${T0 + 2}`]);
+});
+
+test('a delete that fails while replacing the latest slot loses nothing, and the next one trims back to two', async (t) => {
+  const dir = tmpDir();
+  const { store, clock } = open(dir);
+  const a = addr();
+  for (let i = 0; i < 2; i++) {
+    clock.t += 1000;
+    await store.put(a, validatePut(body()), BY_S1);
+    await store.remove(a, 1);
+  }
+  const [first] = await store.deletedCopies(a);
+  clock.t += 1000;
+  const input = validatePut(body());
+  await store.put(a, input, BY_S1);
+  t.mock.method(fs.promises, 'rm', async () => {
+    const err = new Error('EIO: i/o error, rm');
+    err.code = 'EIO';
+    throw err;
+  });
+  const original = console.error;
+  console.error = () => {};
+  try {
+    await rejection(store.remove(a, 1), 'unavailable', 503);
+  } finally {
+    console.error = original;
+  }
+  t.mock.restoreAll();
+  assert.equal((await store.get(a)).ct, input.ct, 'the list is still there');
+  assert.equal((await store.deletedCopies(a)).length, 3, 'and so is every copy');
+
+  clock.t += 1000;
+  assert.deepEqual(await store.remove(a, 1), { deleted: true });
+  const kept = await store.deletedCopies(a);
+  assert.deepEqual(kept.map((d) => d.deletedAt), [first.deletedAt, clock.t]);
+  assert.equal(readJson(path.join(kept[1].dir, `${a}.json`)).ct, input.ct);
+  assert.equal(fs.readdirSync(path.join(dir, 'deleted')).length, 2);
+  assert.deepEqual(await store.stats(), { accounts: 0, totalBytes: treeBytes(path.join(dir, 'deleted')), deleted: 2 });
 });
 
 test('keepDeletedMs 0 erases at once, and a reopen at 0 erases what an earlier setting kept', async () => {
@@ -502,7 +609,7 @@ test('paths are built from a validated address only', async () => {
     await assert.rejects(store.put(bad, validatePut(body()), BY_S1), /not an address/);
     await assert.rejects(store.remove(bad, 0), /not an address/);
     await assert.rejects(store.notBefore(bad), /not an address/);
-    await assert.rejects(store.deletedCopy(bad), /not an address/);
+    await assert.rejects(store.deletedCopies(bad), /not an address/);
   }
 });
 

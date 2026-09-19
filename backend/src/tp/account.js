@@ -42,8 +42,9 @@
 // starting over is a DELETE, which keeps the deleted copy for the operator
 // (TP_VAULT_KEEP_DELETED_DAYS) and revokes every session of the address, this one
 // included. Each write names its session (issuedAt) so the store's .prev keeps the
-// copy from before that session began writing. The store never touches the disk synchronously (this process also
-// answers /api/tp/broadcast), so the vault routes and requireSession are async.
+// copy from before that session began writing. The store never touches the disk
+// synchronously (this process also answers /api/tp/broadcast), so the vault routes
+// and requireSession are async.
 //
 // NOTHING AT REQUIRE TIME TOUCHES THE DISK OR THROWS. This router is mounted by
 // routes/tp.js inside the console's own process: a bad TP_SIWE_ORIGIN or an

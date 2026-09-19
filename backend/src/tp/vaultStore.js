@@ -21,17 +21,22 @@
 //     session wrote that version (or there is no .prev yet). One session, however
 //     many writes, cannot push the older copy out of .prev;
 //   - a DELETE moves the list and its .prev into deleted/ and keeps them there for
-//     TP_VAULT_KEEP_DELETED_DAYS (30; 0 = erase at once). Only the FIRST deletion of
-//     an address inside that window is kept, so deleting again cannot flush it, and
-//     a DELETE also revokes every session of the address (a new one needs a new
-//     login signature).
+//     TP_VAULT_KEEP_DELETED_DAYS (30; 0 = erase at once). At most two deletions of an
+//     address are kept inside that window: the FIRST, which nothing replaces, so
+//     deleting again cannot flush it, and the LATEST, which each new deletion
+//     replaces, so a list made after the first deletion is kept by its own. A DELETE
+//     also revokes every session of the address (a new one needs a new login
+//     signature), so losing a list takes two phished sign-ins, one after the other
+//     (delete it; then save and delete again), the same bar as pushing the owner's
+//     copy out of .prev.
 // Restoring is by hand, on the server (README "Take-profit dApp": cp + pm2 restart).
 //
 // ON DISK, under <TP_ACCOUNTS_DIR> (0700 directories, 0600 files):
 //   vaults/0x<40 lower hex>.json         the list
 //   vaults/0x<40 lower hex>.json.prev    the copy before the current session's writes
 //   deleted/0x<40 lower hex>.<ms>/       a deleted list: the same two files, as they
-//                                        were, copied in whole (<ms> = deletion time)
+//                                        were, copied in whole (<ms> = deletion time;
+//                                        at most two per address, first and latest)
 //   revoked.json                         per address, when its sessions were revoked
 // Paths are built only from a validated lower-case address. Every write is tmp +
 // fsync + rename (retried on Windows' transient EPERM/EBUSY) + a best-effort
@@ -248,10 +253,11 @@ async function guarded(what, fn) {
  *     beforeCreate() runs inside the lane, only for a write that is about to CREATE a
  *     vault, after every check has passed; it may throw (a TpError) to refuse it,
  *     and then nothing is written
- * remove(address, baseRev)      -> {deleted}: keeps a deleted copy, revokes every
- *                                  session of `address`
+ * remove(address, baseRev)      -> {deleted}: keeps a deleted copy (as the latest of at
+ *                                  most two), revokes every session of `address`
  * notBefore(address)            -> ms: sessions issued at or before it are revoked (0 = none)
- * deletedCopy(address)          -> {deletedAt, dir} of the kept deleted copy | null
+ * deletedCopies(address)        -> [{deletedAt, dir}] of the kept deleted copies, oldest
+ *                                  first (none: [])
  * stats()                       -> {accounts, totalBytes, deleted}
  * limits                        -> {maxBytes, maxAccounts, maxTotalBytes, keepDeletedMs} in force
  */
@@ -335,6 +341,14 @@ function createVaultStore({ dir, limits = {}, now = Date.now, maxPending = MAX_P
     return opening;
   }
 
+  /** Erase one kept deleted copy; the tally follows only once it is gone. */
+  async function eraseKept(name) {
+    const d = deleted.get(name);
+    await fsp.rm(path.join(deletedDir, name), { recursive: true, force: true });
+    deleted.delete(name);
+    totalBytes -= d.bytes;
+  }
+
   /** Erase every kept deleted copy older than keepDeletedMs (all of them at 0). */
   async function purgeExpired() {
     const cutoff = now() - lim.keepDeletedMs;
@@ -345,9 +359,7 @@ function createVaultStore({ dir, limits = {}, now = Date.now, maxPending = MAX_P
         nextPurgeAt = Math.min(nextPurgeAt, d.deletedAt + lim.keepDeletedMs);
         continue;
       }
-      await fsp.rm(path.join(deletedDir, name), { recursive: true, force: true });
-      deleted.delete(name);
-      totalBytes -= d.bytes;
+      await eraseKept(name);
       erased = true;
     }
     if (erased) await fsyncDir(deletedDir);
@@ -486,14 +498,20 @@ function createVaultStore({ dir, limits = {}, now = Date.now, maxPending = MAX_P
     await writeFileAtomic(revokedFile, JSON.stringify(Object.fromEntries(revoked)));
   }
 
+  /** The kept deleted copies of `a`, oldest first. */
   function keptFor(a) {
-    for (const [name, d] of deleted) if (d.address === a) return { name, ...d };
-    return null;
+    const out = [];
+    for (const [name, d] of deleted) if (d.address === a) out.push({ name, ...d });
+    return out.sort((x, y) => x.deletedAt - y.deletedAt);
   }
 
-  /** Copy the list and its .prev into deleted/<a>.<ms>/, in whole (built under a .tmp name). */
+  /**
+   * Copy the list and its .prev into deleted/<a>.<ms>/, in whole (built under a .tmp
+   * name). Two deletions of one address in one millisecond get <ms> and <ms + 1>.
+   */
   async function keepDeleted(a, curRaw, prevRaw) {
-    const deletedAt = now();
+    let deletedAt = now();
+    while (deleted.has(`${a}.${deletedAt}`)) deletedAt += 1;
     const name = `${a}.${deletedAt}`;
     const tmp = path.join(deletedDir, `${name}.${process.pid}.${crypto.randomBytes(6).toString('hex')}.tmp`);
     await fsp.mkdir(tmp, { mode: 0o700 });
@@ -525,9 +543,19 @@ function createVaultStore({ dir, limits = {}, now = Date.now, maxPending = MAX_P
       const prevFile = `${file}.prev`;
       const prevRaw = await readIfExists(prevFile);
       if (!old && !prevRaw) return { deleted: false };
-      // The first deletion inside the keep window is the one kept: deleting again
-      // (a stolen session, once more) cannot flush it.
-      if (lim.keepDeletedMs > 0 && !keptFor(a)) await keepDeleted(a, oldRaw, prevRaw);
+      // Two deleted copies of an address are kept inside the window: the FIRST and the
+      // LATEST. This one becomes the latest, and the one it replaces is erased only once
+      // this copy is safely down (and before the list itself goes, so a failure here
+      // loses nothing). So deleting again (a stolen session, once more) cannot flush the
+      // first, and a list made after the first deletion is kept by its own deletion:
+      // losing it takes one more sign-in, a new list and another delete.
+      if (lim.keepDeletedMs > 0) {
+        const kept = keptFor(a);
+        await keepDeleted(a, oldRaw, prevRaw);
+        // Every copy but the first: one, or more after a delete that failed right here.
+        for (const d of kept.slice(1)) await eraseKept(d.name);
+        if (kept.length > 1) await fsyncDir(deletedDir);
+      }
       if (prevRaw) {
         await fsp.unlink(prevFile);
         totalBytes -= prevRaw.length;
@@ -550,11 +578,10 @@ function createVaultStore({ dir, limits = {}, now = Date.now, maxPending = MAX_P
     return t < now() - REVOCATION_KEEP_MS ? 0 : t;
   }
 
-  async function deletedCopy(address) {
+  async function deletedCopies(address) {
     const a = lower(address);
     await maybePurge();
-    const d = keptFor(a);
-    return d ? { deletedAt: d.deletedAt, dir: path.join(deletedDir, d.name) } : null;
+    return keptFor(a).map((d) => ({ deletedAt: d.deletedAt, dir: path.join(deletedDir, d.name) }));
   }
 
   async function stats() {
@@ -562,7 +589,7 @@ function createVaultStore({ dir, limits = {}, now = Date.now, maxPending = MAX_P
     return { accounts, totalBytes, deleted: deleted.size };
   }
 
-  return { get, meta, put, remove, notBefore, deletedCopy, stats, limits: Object.freeze(lim) };
+  return { get, meta, put, remove, notBefore, deletedCopies, stats, limits: Object.freeze(lim) };
 }
 
 module.exports = {

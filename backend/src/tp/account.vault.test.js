@@ -232,6 +232,37 @@ test('DELETE: rev-checked; keeps a deleted copy, clears the cookie and revokes e
   }
 });
 
+test('a list saved after a Delete is kept by its own Delete: one phished sign-in deleting it loses neither list', async () => {
+  const app = await startApp();
+  try {
+    const w = Wallet.createRandom();
+    const a = w.address.toLowerCase();
+    const del = (cookie, baseRev) => call(app.server, 'DELETE', '/api/tp/account/vault', { body: { baseRev }, cookie });
+    // The owner deletes L1 to start over, signs in again and saves L2 under a new key.
+    const owner = await login(app.server, w);
+    const l1 = envelope(0);
+    await put(app.server, owner, l1);
+    app.clock.t += 1000;
+    assert.equal((await del(owner, 1)).status, 200);
+    app.clock.t += 1000;
+    const owner2 = await login(app.server, w);
+    const l2 = envelope(0, { keyId: KEY_B });
+    assert.equal((await put(app.server, owner2, l2)).status, 200);
+    // A thief with ONE phished sign-in deletes L2.
+    app.clock.t += 1000;
+    const thief = await login(app.server, w);
+    assert.deepEqual((await del(thief, 1)).json, { deleted: true });
+
+    const kept = fs.readdirSync(path.join(app.dir, 'deleted')).sort();
+    assert.deepEqual(kept, [`${a}.${T0 + 1000}`, `${a}.${T0 + 3000}`]);
+    const ctOf = (name) => JSON.parse(fs.readFileSync(path.join(app.dir, 'deleted', name, `${a}.json`), 'utf8')).ct;
+    assert.equal(ctOf(kept[0]), l1.ct, 'L1 is still kept');
+    assert.equal(ctOf(kept[1]), l2.ct, 'and so is L2');
+  } finally {
+    await app.close();
+  }
+});
+
 test('DELETE with nothing stored still signs the address out: 200 {deleted: false}, cookie cleared, every session revoked', async () => {
   const app = await startApp();
   try {

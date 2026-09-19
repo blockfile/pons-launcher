@@ -407,18 +407,23 @@ curl -s https://dapp.rhbond.xyz/api/tp/account/me    # {"error":...,"code":"no_s
 
 **Restoring a visitor's saved list** (they ask you; nothing else can). A deleted
 list is kept for `TP_VAULT_KEEP_DELETED_DAYS` (30) days under
-`backend/data/tp-accounts/deleted/<address>.<ms>/`: only the first deletion of an
-address in that window, so a stolen session deleting again cannot flush it. Every
-list also keeps, as `vaults/<address>.json.prev`, the copy from before its latest
-sign-in session started saving, so writes by a stolen session can be undone too.
-They are the same ciphertext files, so a restore is a copy (addresses in lower
-case); the visitor then signs in and unlocks with the same wallet as before:
+`backend/data/tp-accounts/deleted/<address>.<ms>/`, at most two per address in that
+window: the first deletion (never replaced, so a stolen session deleting again
+cannot flush it) and the latest (each new deletion replaces it, so a list made after
+the first deletion is kept by its own). Every list also keeps, as
+`vaults/<address>.json.prev`, the copy from before its latest sign-in session
+started saving, so writes by a stolen session can be undone too, and a deleted
+copy holds that `.prev` beside the list. They are the same ciphertext files, so a
+restore is a copy (addresses in lower case); the visitor then signs in and unlocks
+with the same wallet as before:
 
 ```bash
 cd backend/data/tp-accounts
 # EITHER a deleted list (if they started over since, move their new list aside first):
-ls deleted/ | grep <address>                          # -> <address>.<ms>
+ls deleted/ | grep <address>                          # -> <address>.<ms>: one or two, <ms> = when
 cp deleted/<address>.<ms>/<address>.json vaults/
+#   if that will not unlock (a stolen session overwrote the list, then deleted it):
+cp deleted/<address>.<ms>/<address>.json.prev vaults/<address>.json
 # OR a list a stolen session overwrote:
 cp vaults/<address>.json.prev vaults/<address>.json
 # then, either way:

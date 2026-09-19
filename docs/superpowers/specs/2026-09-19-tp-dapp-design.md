@@ -338,11 +338,14 @@ Signed off by the operator with the v2 plan, before the first real save.
   a save under another key is refused with no override, and starting over is Delete;
   the list's `.prev` keeps the copy from before the latest session began saving,
   however many times that session saves; a Delete keeps the deleted list, still
-  encrypted, for 30 days (`TP_VAULT_KEEP_DELETED_DAYS`; only the first deletion in that
-  window) so the operator can restore it by hand, and it signs the address out
-  everywhere. Do not tidy these away: they are the recovery path. Two phished sign-ins,
-  one after the other, can still push the owner's copy out of `.prev`; a Delete cannot
-  lose it.
+  encrypted, for 30 days (`TP_VAULT_KEEP_DELETED_DAYS`) so the operator can restore it
+  by hand, and it signs the address out everywhere. Two deletions of an address are
+  kept in that window: the first, which nothing replaces, and the latest, which each
+  new deletion replaces, so a list saved after the owner's own Delete is kept by its
+  own Delete. Do not tidy these away: they are the recovery path. Two phished sign-ins,
+  one after the other, can still push the owner's copy out of `.prev`, and can push a
+  list saved after a first deletion out of the latest slot (delete it, then save and
+  delete again); one phished sign-in cannot lose a list either way.
 
 ## B. Choosing wallets
 
@@ -419,10 +422,12 @@ warns about it on any site). After the first save, neither can change.
 **Other accepted risks.** While a key is cached (12 h, non-extractable), an XSS or an
 extension can USE it, not copy it. A stolen session can overwrite or delete the saved
 copy but not read it, and it cannot destroy it: the server keeps the copy from before
-that session began saving (`.prev`) and a deleted copy for 30 days, for a hand restore
-(Addendum A, as built). A wallet that changes how it signs, or is lost, locks its saved
-copy for good: the console's export files stay the real backup. The server is still
-the root of trust: it serves the page's code.
+that session began saving (`.prev`) and deleted copies for 30 days (the first deletion
+of an address and the latest), for a hand restore (Addendum A, as built). Pushing a
+copy out of either takes two phished sign-ins, one after the other. A wallet that
+changes how it signs, or is lost, locks its saved copy for good: the console's export
+files stay the real backup. The server is still the root of trust: it serves the
+page's code.
 
 **Decisions for sign-off.** Approved by Ivan on 2026-09-19 as listed, with 18 and 19
 changed by him. Each is one named constant or line to change back.
@@ -457,7 +462,7 @@ Token header (backend/src/tp/tokenInfo.js, logo.js, safeFetch.js, cid.js; fronte
 23. Where the page's own maths covers a figure (curve progress, a graduated pool's liquidity), the live mark wins over the server's figures.
 
 **Also built** (from the whole-plan review's fixes; each follows from the decisions above and is one clearly marked spot to change):
-- A save under another key is refused with no override (there is no `rekey`); starting over is Delete. A list's `.prev` keeps the copy from before the latest session began saving, however often that session saves. A Delete keeps the deleted list, still encrypted, for `TP_VAULT_KEEP_DELETED_DAYS` (30) days, the first deletion only, for a hand restore (README "Take-profit dApp").
+- A save under another key is refused with no override (there is no `rekey`); starting over is Delete. A list's `.prev` keeps the copy from before the latest session began saving, however often that session saves. A Delete keeps the deleted list, still encrypted, for `TP_VAULT_KEEP_DELETED_DAYS` (30) days, at most two per address (the first deletion, never replaced, and the latest), for a hand restore (README "Take-profit dApp").
 - Every vault disk call is async and writes go one at a time (the store's write lane): a save never stalls a sell on the one pm2 process.
 - The wallet list merges as an add-wins set with no clock in it: a removal on another device takes out only the imports it had seen, so a skewed clock can never drop a key from a live tab.
 - Saves are paced (a 5 s debounce, at most one scheduled save per 10 s, never later than 30 s) to stay well under the server's 30 writes a minute per account; a 429's Retry-After is honoured, and `rate_limited` / `unavailable` are retried.
