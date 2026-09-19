@@ -230,7 +230,49 @@ function firstLoadFiles(html, read) {
   return { js, css, lazy: [...lazy].filter((f) => !js.includes(f)) };
 }
 
+// What a fork says when it could not serve a read from its upstream: the public RPC
+// throttled it (anvil: "failed to get storage ... HTTP error 429"), pruned the fork
+// block's state, or dropped the connection. Never a contract's own revert.
+const UPSTREAM_HICCUP =
+  /\b429\b|too many requests|failed to get (storage|account|block|code)|historical state|rate.?limit|timed? ?out|econnreset|econnrefused|socket hang up|fetch failed/i;
+
+/**
+ * Did this read fail because the fork's upstream could not serve it, rather than
+ * because the contract reverted? ethers v6 turns anvil's internal error on an
+ * eth_call into a CALL_EXCEPTION whose message is the generic "missing revert
+ * data" — the same words as a genuine data-less revert — and keeps anvil's text in
+ * `info.error.message`, so every layer is read.
+ */
+function isUpstreamHiccup(err) {
+  if (!err) return false;
+  const parts = [err.message, err.shortMessage, err.code];
+  if (err.info && err.info.error) parts.push(err.info.error.message, err.info.error.code);
+  if (err.error) parts.push(err.error.message, err.error.code);
+  if (err.cause) parts.push(err.cause.message, err.cause.code);
+  return UPSTREAM_HICCUP.test(parts.filter((p) => p !== undefined && p !== null).join(' | '));
+}
+
+const pause = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+
+/**
+ * Run `fn(attempt)` until it resolves, retrying only errors `retryable` accepts
+ * (default: isUpstreamHiccup), waiting baseMs x 1, 2, 4, ... between attempts. The
+ * last error surfaces once `attempts` are spent; a non-retryable one at once.
+ */
+async function withRetry(fn, { attempts = 6, baseMs = 2000, sleep = pause, retryable = isUpstreamHiccup } = {}) {
+  for (let attempt = 1; ; attempt++) {
+    try {
+      return await fn(attempt);
+    } catch (err) {
+      if (attempt >= attempts || !retryable(err)) throw err;
+      await sleep(baseMs * 2 ** (attempt - 1));
+    }
+  }
+}
+
 module.exports = {
+  isUpstreamHiccup,
+  withRetry,
   pctAmount,
   clickAmounts,
   receivedWei,

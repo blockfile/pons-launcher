@@ -21,6 +21,8 @@ const {
   createSseParser,
   cspProblems,
   firstLoadFiles,
+  isUpstreamHiccup,
+  withRetry,
 } = require('./tpSmoke');
 
 const LF = String.fromCharCode(10);
@@ -151,4 +153,91 @@ test('firstLoadFiles follows static imports and preloads, keeps CSS apart and le
     css: ['/dapp/assets/dapp-c3.css'],
     lazy: ['/dapp/assets/EmptyScene-e5.js'],
   });
+});
+
+// What ethers v6 throws for an eth_call anvil could not serve because its fork
+// upstream answered 429 (measured on a fork of 4663): a CALL_EXCEPTION whose own
+// message is the generic "missing revert data", with anvil's words in info.error.
+function forkCallError(anvilMessage) {
+  const err = new Error('missing revert data (action="call", data=null, reason=null, code=CALL_EXCEPTION, version=6.17.0)');
+  err.code = 'CALL_EXCEPTION';
+  err.shortMessage = 'missing revert data';
+  err.info = { error: { code: -32603, message: anvilMessage }, payload: { method: 'eth_call' } };
+  return err;
+}
+
+test('isUpstreamHiccup: a fork read the upstream throttled or pruned, not a real revert', () => {
+  const throttled = forkCallError(
+    'Internal error: failed to get storage for 0x7eD5 at 5521: Max retries exceeded HTTP error 429 with body: {"code":429,"message":"Too Many Requests"}'
+  );
+  assert.equal(isUpstreamHiccup(throttled), true);
+  assert.equal(isUpstreamHiccup(forkCallError('Internal error: failed to get account for 0x64F8: Max retries exceeded')), true);
+  assert.equal(isUpstreamHiccup(forkCallError('historical state 0xabc is not available')), true);
+  assert.equal(isUpstreamHiccup(new Error('server response 429 Too Many Requests')), true);
+  assert.equal(isUpstreamHiccup(Object.assign(new Error('fetch failed'), { cause: { code: 'ECONNRESET' } })), true);
+  // A contract that really reverted is not retried: the same generic message, no upstream words.
+  const reverted = forkCallError('execution reverted');
+  assert.equal(isUpstreamHiccup(reverted), false);
+  assert.equal(isUpstreamHiccup(forkCallError('Execution error: execution reverted: SPL')), false);
+  assert.equal(isUpstreamHiccup(new Error('missing revert data')), false);
+  assert.equal(isUpstreamHiccup(null), false);
+});
+
+test('withRetry retries only what `retryable` accepts, backing off 1x, 2x, 4x the base', async () => {
+  const waits = [];
+  const sleep = async (ms) => {
+    waits.push(ms);
+  };
+  let calls = 0;
+  const flaky = async () => {
+    calls++;
+    if (calls < 3) throw new Error('429');
+    return 'value';
+  };
+  assert.equal(await withRetry(flaky, { attempts: 5, baseMs: 100, sleep, retryable: () => true }), 'value');
+  assert.equal(calls, 3);
+  assert.deepEqual(waits, [100, 200]);
+
+  // Out of attempts: the LAST error surfaces, after attempts - 1 waits.
+  waits.length = 0;
+  let n = 0;
+  await assert.rejects(
+    withRetry(
+      async () => {
+        n++;
+        throw new Error(`429 #${n}`);
+      },
+      { attempts: 3, baseMs: 10, sleep, retryable: () => true }
+    ),
+    (err) => err.message === '429 #3'
+  );
+  assert.deepEqual(waits, [10, 20]);
+
+  // Not retryable: thrown at once, no wait.
+  waits.length = 0;
+  let m = 0;
+  await assert.rejects(
+    withRetry(
+      async () => {
+        m++;
+        throw new Error('execution reverted');
+      },
+      { attempts: 5, baseMs: 10, sleep, retryable: (err) => err.message.includes('429') }
+    ),
+    (err) => err.message === 'execution reverted'
+  );
+  assert.equal(m, 1);
+  assert.deepEqual(waits, []);
+
+  // The default classifier is isUpstreamHiccup.
+  let k = 0;
+  const value = await withRetry(
+    async () => {
+      k++;
+      if (k === 1) throw forkCallError('Internal error: failed to get storage: HTTP error 429');
+      return k;
+    },
+    { attempts: 2, baseMs: 1, sleep }
+  );
+  assert.equal(value, 2);
 });

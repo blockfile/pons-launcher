@@ -120,6 +120,8 @@ const {
   createSseParser,
   cspProblems,
   firstLoadFiles,
+  isUpstreamHiccup,
+  withRetry,
 } = require('./lib/tpSmoke');
 
 const ARGS = new Set(process.argv.slice(2));
@@ -499,23 +501,52 @@ async function landed(hashes, what) {
 
 // A fork forwards getLogs over pre-fork blocks to the public RPC, which answers an
 // occasional 429 or "internal server error". The scans retry a window before giving up.
-async function getLogsRetry(filter) {
-  for (let attempt = 1; ; attempt++) {
-    try {
-      return await provider.getLogs(filter);
-    } catch (err) {
-      if (attempt >= 4) throw err;
-      await sleep(1000 * 2 ** (attempt - 1));
-    }
+function getLogsRetry(filter) {
+  return withRetry(() => provider.getLogs(filter), { attempts: 4, baseMs: 1000, retryable: () => true });
+}
+
+// Every state read the fork has not made yet goes to the public RPC, which throttles
+// bursts: anvil then fails the call ("failed to get storage ... HTTP error 429"), and
+// ethers reports it as a data-less revert. Setup reads retry THOSE, with backoff; a
+// contract's own revert is not retried (isUpstreamHiccup tells them apart).
+const upstream = (fn) => withRetry(fn);
+
+// The factory's TokenLaunched logs, newest first, scanned ONCE per run: the
+// token-quoted pick and the ETH-quoted pick read the same windows, and each 10k-block
+// window is a heavy getLogs on the throttled public RPC.
+let launchScan = null;
+function launchLogs() {
+  if (!launchScan) {
+    launchScan = (async () => {
+      const factory = new Contract(PONS_V2_FACTORY, FACTORY_V2_ABI, provider);
+      const topic = factory.interface.getEvent('TokenLaunched').topicHash;
+      const head = await provider.getBlockNumber();
+      const out = [];
+      for (const w of newestFirstWindows(head - MIN_AGE_BLOCKS, LOG_WINDOW, SCAN_WINDOWS)) {
+        const logs = await getLogsRetry({ address: PONS_V2_FACTORY, topics: [topic], fromBlock: w.from, toBlock: w.to });
+        for (const log of logs.reverse()) {
+          const ev = factory.interface.parseLog(log);
+          out.push({ token: getAddress(ev.args.token), pairToken: getAddress(ev.args.pairToken) });
+        }
+        const native = out.filter((l) => l.pairToken === ZeroAddress).length;
+        const stock = out.filter((l) => l.pairToken !== ZeroAddress && lc(l.pairToken) !== USDG).length;
+        if (native >= CANDIDATE_CAP && (!PAIR || stock >= CANDIDATE_CAP)) break;
+      }
+      return out;
+    })();
+    launchScan.catch(() => {
+      launchScan = null; // a failed scan is not cached
+    });
   }
+  return launchScan;
 }
 
 async function buyCurve(ctx, curveAddress, what) {
   let last = 0;
   for (const w of ctx.wallets) {
     const c = new Contract(curveAddress, CURVE_V2_ABI, w);
-    const sim = await c.buy.staticCall(BUY_WEI, 0n, w.address, { value: BUY_WEI });
-    const tx = await c.buy(BUY_WEI, (sim * 90n) / 100n, w.address, { value: BUY_WEI });
+    const sim = await upstream(() => c.buy.staticCall(BUY_WEI, 0n, w.address, { value: BUY_WEI }));
+    const tx = await upstream(() => c.buy(BUY_WEI, (sim * 90n) / 100n, w.address, { value: BUY_WEI }));
     const r = await tx.wait(1, 60_000);
     check(r.status === 1, `${what} ${label(w.address)}: bought the curve token with ${formatEther(BUY_WEI)} ETH`);
     last = Math.max(last, r.blockNumber);
@@ -529,37 +560,28 @@ async function pickCurveToken(ctx) {
   if (process.env.TP_SMOKE_CURVE_TOKEN) {
     candidates.push(getAddress(lc(process.env.TP_SMOKE_CURVE_TOKEN)));
   } else {
-    const topic = factory.interface.getEvent('TokenLaunched').topicHash;
-    const head = await provider.getBlockNumber();
-    for (const w of newestFirstWindows(head - MIN_AGE_BLOCKS, LOG_WINDOW, SCAN_WINDOWS)) {
-      const logs = await getLogsRetry({ address: PONS_V2_FACTORY, topics: [topic], fromBlock: w.from, toBlock: w.to });
-      for (const log of logs.reverse()) {
-        const ev = factory.interface.parseLog(log);
-        if (ev.args.pairToken === ZeroAddress) candidates.push(getAddress(ev.args.token));
-      }
-      if (candidates.length >= CANDIDATE_CAP) break;
-    }
+    for (const l of await launchLogs()) if (l.pairToken === ZeroAddress) candidates.push(l.token);
   }
   const probe = ctx.wallets[0];
   for (const token of candidates.slice(0, CANDIDATE_CAP)) {
-    const rec = await factory.getLaunchedToken(token);
+    const rec = await upstream(() => factory.getLaunchedToken(token));
     if (!rec.exists || Number(rec.phase) !== 0 || rec.pairToken !== ZeroAddress) continue;
     const curve = new Contract(rec.curve, CURVE_V2_ABI, provider);
-    const [native, ready, graduated, sellable] = await Promise.all([
-      curve.isNativeQuote(),
-      curve.readyToGraduate(),
-      curve.graduated(),
-      curve.sellableTokens(),
-    ]);
+    const [native, ready, graduated, sellable] = await upstream(() =>
+      Promise.all([curve.isNativeQuote(), curve.readyToGraduate(), curve.graduated(), curve.sellableTokens()])
+    );
     if (!native || ready || graduated || sellable === 0n) continue;
     // All the buys of the run (API run + UI run) together must stay far from
     // graduation, or the curve could bond mid-run and the test would be about
     // something else.
     let out = 0n;
     try {
-      out = await curve.buy.staticCall(BUY_WEI * 6n, 0n, probe.address, { value: BUY_WEI * 6n, from: probe.address });
-    } catch (_err) {
-      continue;
+      out = await upstream(() =>
+        curve.buy.staticCall(BUY_WEI * 6n, 0n, probe.address, { value: BUY_WEI * 6n, from: probe.address })
+      );
+    } catch (err) {
+      if (isUpstreamHiccup(err)) throw err;
+      continue; // the curve itself refuses the buys
     }
     if (out === 0n || out * 2n >= sellable) continue;
     return { token, curve: getAddress(rec.curve) };
@@ -575,7 +597,7 @@ async function pickGraduatedToken() {
   } else {
     // A graduation initialises a V4 pool whose hook is the pons meme hook and whose
     // currency0 is the native sentinel for an ETH-quoted launch.
-    const hook = lc(await factory.memeHook());
+    const hook = lc(await upstream(() => factory.memeHook()));
     const pm = new Interface(POOL_MANAGER_ABI);
     const topic = pm.getEvent('Initialize').topicHash;
     const nativeTopic = zeroPadValue(ZeroAddress, 32);
@@ -595,7 +617,7 @@ async function pickGraduatedToken() {
     }
   }
   for (const token of candidates.slice(0, 10)) {
-    const rec = await factory.getLaunchedToken(token);
+    const rec = await upstream(() => factory.getLaunchedToken(token));
     if (rec.exists && Number(rec.phase) === 2 && rec.pairToken === ZeroAddress) return token;
   }
   return null;
@@ -608,9 +630,11 @@ async function buyGraduated(ctx, token, what) {
   const poolswap = require('../src/evm/v3/poolswap');
   let last = 0;
   for (const w of ctx.wallets) {
-    const built = await poolswap.resolveAndBuildBuy(
-      { token, amountIn: BUY_WEI, slippageBps: 2000, recipient: w.address, deadline: nowSec() + 600, liquidate: true },
-      { provider }
+    const built = await upstream(() =>
+      poolswap.resolveAndBuildBuy(
+        { token, amountIn: BUY_WEI, slippageBps: 2000, recipient: w.address, deadline: nowSec() + 600, liquidate: true },
+        { provider }
+      )
     );
     check(
       built.pool.isNativeQuote && BigInt(built.value) === BUY_WEI,
@@ -639,9 +663,10 @@ async function pairRoute(pair, ethIn) {
   let best = null;
   for (const fee of fees) {
     try {
-      const out = BigInt((await quoter.quoteExactInput.staticCall(buyPath(pair, fee), ethIn))[0]);
+      const out = BigInt((await upstream(() => quoter.quoteExactInput.staticCall(buyPath(pair, fee), ethIn)))[0]);
       if (out > 0n && (!best || out > best.out)) best = { fee, out, path: buyPath(pair, fee) };
-    } catch (_err) {
+    } catch (err) {
+      if (isUpstreamHiccup(err)) throw err;
       // no pool at this tier
     }
   }
@@ -657,32 +682,22 @@ async function pickPairCurveToken() {
   if (process.env.TP_SMOKE_PAIR_CURVE_TOKEN) {
     candidates.push(getAddress(lc(process.env.TP_SMOKE_PAIR_CURVE_TOKEN)));
   } else {
-    const topic = factory.interface.getEvent('TokenLaunched').topicHash;
-    const head = await provider.getBlockNumber();
     const stock = [];
     const usdg = [];
-    for (const w of newestFirstWindows(head - MIN_AGE_BLOCKS, LOG_WINDOW, SCAN_WINDOWS)) {
-      const logs = await getLogsRetry({ address: PONS_V2_FACTORY, topics: [topic], fromBlock: w.from, toBlock: w.to });
-      for (const log of logs.reverse()) {
-        const ev = factory.interface.parseLog(log);
-        if (ev.args.pairToken === ZeroAddress) continue;
-        (lc(ev.args.pairToken) === USDG ? usdg : stock).push(getAddress(ev.args.token));
-      }
-      if (stock.length >= CANDIDATE_CAP) break;
+    for (const l of await launchLogs()) {
+      if (l.pairToken === ZeroAddress) continue;
+      (lc(l.pairToken) === USDG ? usdg : stock).push(l.token);
     }
     candidates.push(...stock.slice(0, CANDIDATE_CAP), ...usdg.slice(0, 10));
   }
   const routes = new Map();
   for (const token of candidates) {
-    const rec = await factory.getLaunchedToken(token);
+    const rec = await upstream(() => factory.getLaunchedToken(token));
     if (!rec.exists || Number(rec.phase) !== 0 || rec.pairToken === ZeroAddress) continue;
     const curve = new Contract(rec.curve, CURVE_V2_ABI, provider);
-    const [native, ready, graduated, sellable] = await Promise.all([
-      curve.isNativeQuote(),
-      curve.readyToGraduate(),
-      curve.graduated(),
-      curve.sellableTokens(),
-    ]);
+    const [native, ready, graduated, sellable] = await upstream(() =>
+      Promise.all([curve.isNativeQuote(), curve.readyToGraduate(), curve.graduated(), curve.sellableTokens()])
+    );
     if (native || ready || graduated || sellable === 0n) continue;
     const pair = getAddress(rec.pairToken);
     if (!routes.has(lc(pair))) routes.set(lc(pair), await pairRoute(pair, BUY_WEI));
