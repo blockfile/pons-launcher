@@ -29,6 +29,20 @@
 // the page signs on load can go out before any stream has connected: their
 // receipts wait in the server's per-sid replay (150 s) until the stream opens.
 // The sid lives in this module's memory only: never the URL bar, storage or a log.
+//
+// THE ACCOUNT (spec Addendum A) adds /account/*: a sign-in challenge and login,
+// the session, logout, and the account's encrypted copy (GET/PUT/DELETE vault).
+// Its bodies go through the same allowlist and key-shape scan, with ONE
+// exemption: a login's signature (65 bytes, 130 hex) is key-shaped by length,
+// so it is exempt from the scan — and postLogin sends it only after checking,
+// here, that it recovers to the signing address over the very challenge message
+// it answers. The unlock signature (the key material of the encrypted copy) is
+// over a different message, so it can never pass that check and ride the
+// exemption. The copy's ciphertext travels as canonical base64 and IS scanned:
+// a hex key pasted into it is refused, and random ciphertext does not contain 64
+// hex characters in a row (odds about 1 in 10^24 for the largest copy).
+import { getAddress } from 'ethers';
+import { canonicalSignature, signerOf } from './account/signature.js';
 
 const BASE = '/api/tp';
 export const INTERVALS = [1, 15, 60, 300, 3600];
@@ -45,6 +59,12 @@ const MAX_ITEMS = 100;
 // Token amounts fit uint128 (a V4 swap's amountIn is uint128). Capping here also
 // means a private key smuggled in as a decimal number (a 256-bit value) is refused.
 const MAX_AMOUNT = (1n << 128n) - 1n;
+const NONCE_RE = /^[0-9a-f]{32}$/;
+const LOGIN_SIG_RE = /^0x[0-9a-f]{130}$/;
+const KEY_ID_RE = /^0x[0-9a-f]{32}$/;
+const B64_RE = /^[A-Za-z0-9+/]*={0,2}$/;
+// The account copy's ciphertext: at most 256 KiB decoded (the server refuses more).
+export const MAX_VAULT_BYTES = 262144;
 
 const LF = String.fromCharCode(10);
 const CR = String.fromCharCode(13);
@@ -126,6 +146,64 @@ function sid(value, name) {
   return value;
 }
 
+function nonce(value, name) {
+  if (typeof value !== 'string' || !NONCE_RE.test(value)) throw apiError(`${name} is not a sign-in nonce`, 'bad_request');
+  return value;
+}
+
+// Only postLogin makes one: a signature it has checked against its own challenge.
+// A bare string is refused, so no caller can put a key-shaped value into the one
+// field the key-shape scan skips.
+class VerifiedLoginSignature {
+  constructor(hex) {
+    this.hex = hex;
+  }
+}
+
+function loginSignature(value, name) {
+  if (!(value instanceof VerifiedLoginSignature) || !LOGIN_SIG_RE.test(value.hex)) {
+    throw apiError(`${name} is not a sign-in signature verified by postLogin`, 'bad_request');
+  }
+  return value.hex;
+}
+
+function revision(value, name) {
+  if (!Number.isSafeInteger(value) || value < 0) throw apiError(`${name} must be a revision number`, 'bad_request');
+  return value;
+}
+
+function keyVersion(value, name) {
+  if (value !== 1) throw apiError(`${name} must be 1`, 'bad_request');
+  return value;
+}
+
+function keyId(value, name) {
+  if (typeof value !== 'string' || !KEY_ID_RE.test(value)) throw apiError(`${name} is not a key id`, 'bad_request');
+  return value;
+}
+
+/** Canonical base64 (padding included, no whitespace) whose decoded size is in [min, max]. */
+function isBase64(value, min, max) {
+  if (typeof value !== 'string' || value.length % 4 !== 0 || !B64_RE.test(value)) return false;
+  let bin;
+  try {
+    bin = atob(value);
+  } catch {
+    return false;
+  }
+  return btoa(bin) === value && bin.length >= min && bin.length <= max;
+}
+
+function iv(value, name) {
+  if (!isBase64(value, 12, 12)) throw apiError(`${name} is not a 12-byte base64 IV`, 'bad_request');
+  return value;
+}
+
+function ciphertext(value, name) {
+  if (!isBase64(value, 17, MAX_VAULT_BYTES)) throw apiError(`${name} is not base64 ciphertext of at most 256 KiB`, 'bad_request');
+  return value;
+}
+
 function rawTxList(value, name) {
   return list(value, name).map((raw, i) => {
     const ok =
@@ -144,7 +222,16 @@ const SCHEMAS = {
   quote: { token: address, sells: sellList, ahead: optionalAmount },
   pairQuote: { pairToken: address, amount },
   broadcast: { token: address, txs: rawTxList, sid },
+  challenge: { address },
+  login: { nonce, signature: loginSignature },
+  logout: {},
+  vaultPut: { baseRev: revision, kv: keyVersion, keyId, iv, ct: ciphertext },
+  vaultDelete: { baseRev: revision },
 };
+
+// A field the key-shape scan skips, because its validator above already pins it
+// to something that is not a bare key (signed type-2 txs; a verified login signature).
+const SCAN_EXEMPT = { broadcast: 'txs', login: 'signature' };
 
 /** Throw if any string (or object key) in `value` is shaped like a private key. */
 function assertNoKey(value, path) {
@@ -170,6 +257,11 @@ function assertNoKey(value, path) {
  *   quote:     {token, sells: [{address, amount}], ahead?}
  *   pairQuote: {pairToken, amount}
  *   broadcast: {token, txs, sid?}
+ *   challenge: {address}
+ *   login:     {nonce, signature}     (postLogin only: signature must be its verified wrapper)
+ *   logout:    {}
+ *   vaultPut:  {baseRev, kv, keyId, iv, ct}
+ *   vaultDelete: {baseRev}
  * Throws on an unknown kind, any other field, a bad value, or a key-shaped value.
  */
 export function buildBody(kind, fields) {
@@ -182,7 +274,7 @@ export function buildBody(kind, fields) {
   const body = {};
   for (const [k, check] of Object.entries(schema)) body[k] = check(fields[k], k);
   for (const [k, v] of Object.entries(body)) {
-    if (kind === 'broadcast' && k === 'txs') continue; // validated above as signed txs
+    if (SCAN_EXEMPT[kind] === k) continue; // validated above: see SCAN_EXEMPT
     assertNoKey(v, k);
   }
   return JSON.stringify(body);
@@ -191,6 +283,15 @@ export function buildBody(kind, fields) {
 // ── HTTP ─────────────────────────────────────────────────────────────────────
 function transport(opts) {
   return (opts && opts.fetch) || ((...args) => globalThis.fetch(...args));
+}
+
+// A refusal's Retry-After in ms, or null. The tp routes' limiter (limits.js) sends
+// whole seconds with every 429; an HTTP-date or anything else is ignored, and the
+// caller falls back to its own backoff.
+function retryAfterMs(res) {
+  const raw = res && res.headers && typeof res.headers.get === 'function' ? res.headers.get('retry-after') : null;
+  const text = typeof raw === 'string' ? raw.trim() : '';
+  return /^[0-9]{1,6}$/.test(text) ? Number(text) * 1000 : null;
 }
 
 async function request(method, path, body, opts) {
@@ -207,6 +308,7 @@ async function request(method, path, body, opts) {
   } catch {
     throw apiError('network error — the server did not answer', 'network');
   }
+  if (res.ok && res.status === 204) return {}; // logout answers with no body
   let json = null;
   try {
     json = await res.json();
@@ -216,7 +318,10 @@ async function request(method, path, body, opts) {
   if (!res.ok) {
     const message = json && typeof json.error === 'string' && json.error ? json.error : `request failed (${res.status})`;
     const code = json && typeof json.code === 'string' && json.code ? json.code : `http_${res.status}`;
-    throw apiError(message, code, res.status);
+    const err = apiError(message, code, res.status);
+    const wait = retryAfterMs(res);
+    if (wait !== null) err.cause.retryAfterMs = wait; // a 429 says when to come back
+    throw err;
   }
   if (!json || typeof json !== 'object') throw apiError('the server answered with something that is not JSON', 'bad_response', res.status);
   return json;
@@ -259,6 +364,123 @@ export async function broadcast(token, txs, opts) {
   if (opts && opts.sid !== undefined) s = opts.sid;
   else if (typeof token === 'string' && ADDRESS_RE.test(token)) s = sidFor(token);
   return request('POST', '/broadcast', buildBody('broadcast', { token, txs, sid: s }), opts);
+}
+
+// ── account (spec Addendum A) ─────────────────────────────────────────────────
+function badResponse(what) {
+  return apiError(`the server answered with a malformed ${what}`, 'bad_response');
+}
+
+function vaultMeta(v) {
+  if (v === null || v === undefined) return null;
+  if (!v || typeof v !== 'object' || !Number.isSafeInteger(v.rev) || v.rev < 1 || typeof v.keyId !== 'string' || !KEY_ID_RE.test(v.keyId)) {
+    throw badResponse('account copy');
+  }
+  return { rev: v.rev, keyId: v.keyId, updatedAt: Number(v.updatedAt) || 0, bytes: Number(v.bytes) || 0 };
+}
+
+/**
+ * POST /account/nonce {address} -> {nonce, message, issuedAt, expirationTime}: the
+ * sign-in challenge (the backend's route and field names: backend/src/tp/account.js,
+ * pinned for both sides by backend/src/tp/accountContract.json). account/messages.js
+ * checkChallenge checks it before anything is signed.
+ */
+export async function postChallenge(addr, opts) {
+  const j = await request('POST', '/account/nonce', buildBody('challenge', { address: addr }), opts);
+  if (typeof j.nonce !== 'string' || !NONCE_RE.test(j.nonce) || typeof j.message !== 'string' || j.message.length > 2000) {
+    throw badResponse('sign-in challenge');
+  }
+  return { nonce: j.nonce, message: j.message, issuedAt: j.issuedAt, expirationTime: j.expirationTime };
+}
+
+/**
+ * POST /account/login {nonce, signature} -> {address, expiresAt}.
+ * VERIFY BEFORE SEND: the signature must recover to `address` over `message`,
+ * and `message` must carry the line 'Nonce: <nonce>'. Otherwise nothing is
+ * sent. The signature goes out canonical (low s, v 27/28).
+ * @param {{nonce: string, signature: string, message: string, address: string}} login
+ */
+export async function postLogin({ nonce: n, signature, message, address: who } = {}, opts) {
+  nonce(n, 'nonce');
+  if (typeof message !== 'string' || !message.split(LF).includes(`Nonce: ${n}`)) {
+    throw apiError('the sign-in message does not carry this nonce', 'bad_request');
+  }
+  let sig;
+  try {
+    sig = canonicalSignature(signature);
+  } catch (e) {
+    throw apiError(e.message, (e.cause && e.cause.code) || 'bad_signature');
+  }
+  let signer = null;
+  let expected = null;
+  try {
+    signer = signerOf(message, sig);
+    expected = getAddress(String(who));
+  } catch {
+    signer = null;
+  }
+  sig.rs.fill(0);
+  if (!signer || signer !== expected) {
+    throw apiError('the signature is not from this address over this sign-in message, so it was not sent', 'bad_signature');
+  }
+  const body = buildBody('login', { nonce: n, signature: new VerifiedLoginSignature(sig.serialized) });
+  const j = await request('POST', '/account/login', body, opts);
+  if (typeof j.address !== 'string' || !ADDRESS_RE.test(j.address)) throw badResponse('login answer');
+  return { address: getAddress(j.address), expiresAt: j.expiresAt };
+}
+
+/**
+ * GET /account/me -> {address, expiresAt, vault: {rev, keyId, updatedAt, bytes}|null},
+ * or null when not signed in (401).
+ */
+export async function getAccountSession(opts) {
+  let j;
+  try {
+    j = await request('GET', '/account/me', undefined, opts);
+  } catch (e) {
+    if (e && e.cause && e.cause.status === 401) return null;
+    throw e;
+  }
+  if (typeof j.address !== 'string' || !ADDRESS_RE.test(j.address)) throw badResponse('session');
+  return { address: getAddress(j.address), expiresAt: j.expiresAt, vault: vaultMeta(j.vault) };
+}
+
+/** POST /account/logout -> {} (the server answers 204). */
+export async function postLogout(opts) {
+  await request('POST', '/account/logout', buildBody('logout', {}), opts);
+  return {};
+}
+
+/** GET /account/vault -> {v, kv, keyId, iv, ct, rev, updatedAt} | null */
+export async function getVault(opts) {
+  const j = await request('GET', '/account/vault', undefined, opts);
+  if (!('vault' in j)) throw badResponse('account copy');
+  if (j.vault === null) return null;
+  const v = j.vault;
+  const meta = vaultMeta(v);
+  if (v.kv !== 1 || !isBase64(v.iv, 12, 12) || !isBase64(v.ct, 17, MAX_VAULT_BYTES)) throw badResponse('account copy');
+  return { v: v.v, kv: 1, keyId: meta.keyId, iv: v.iv, ct: v.ct, rev: meta.rev, updatedAt: meta.updatedAt };
+}
+
+/**
+ * PUT /account/vault {baseRev, kv, keyId, iv, ct} -> {rev, updatedAt}. baseRev 0 creates.
+ * Refusals arrive as errors with cause.code 'conflict' (409: saved elsewhere
+ * first), 'key_mismatch' (409), 'too_large' (413), 'store_full' (507), or
+ * cause.status 401 (signed out).
+ */
+export async function putVault({ baseRev, kv, keyId: id, iv: ivText, ct }, opts) {
+  const j = await request('PUT', '/account/vault', buildBody('vaultPut', { baseRev, kv, keyId: id, iv: ivText, ct }), opts);
+  if (!Number.isSafeInteger(j.rev) || j.rev < 1) throw badResponse('save answer');
+  return { rev: j.rev, updatedAt: Number(j.updatedAt) || 0 };
+}
+
+/**
+ * DELETE /account/vault {baseRev} -> {deleted: true}. The server then ends EVERY
+ * session of the address, this one included (backend decision 6): signed out after.
+ */
+export async function deleteVault(baseRev, opts) {
+  const j = await request('DELETE', '/account/vault', buildBody('vaultDelete', { baseRev }), opts);
+  return { deleted: j.deleted === true };
 }
 
 // ── SSE ──────────────────────────────────────────────────────────────────────
