@@ -25,12 +25,12 @@ const CLASS = { go: 'go', quiet: '', danger: 'ghost danger' };
  * React text, the icon a data: URI drawn with <img> only. The passphrase field
  * is uncontrolled and cleared after use; it never enters React state.
  */
-export default function AccountBar({ acct, sync, wallets, legacy, onAction, onMigrate }) {
+export default function AccountBar({ acct, sync, wallets, legacy, leaving = null, onAction, onMigrate }) {
   const [picking, setPicking] = useState(null);
   const [moveError, setMoveError] = useState('');
   const [moving, setMoving] = useState(false);
   const passRef = useRef(null);
-  const view = accountView({ acct, sync, wallets, legacy });
+  const view = accountView({ acct, sync, wallets, legacy, leaving });
   if (view.hidden) return null;
 
   function press(action) {

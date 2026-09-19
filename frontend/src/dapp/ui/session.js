@@ -137,6 +137,11 @@ export function createSession({
   let disposed = false;
   let opSeq = 0;
   let venueMoving = false;
+  // Lock / Disconnect / Switch (App.leaveWhenQuiet, ui/leaveGate.js): sell
+  // clicks between their start and their broadcast, and — while the account's
+  // keys are about to leave the tab — the reason new clicks are refused.
+  let clicks = 0;
+  let sellHold = null;
   // mark freshness (curve floors are priced from it)
   let markAt = deps.now();
   let live = false;
@@ -1349,6 +1354,69 @@ export function createSession({
     }
   }
 
+  /**
+   * What this tab must still sign with its wallets' keys. Lock, Disconnect and
+   * Switch take the account's keys out of the tab and wait for this first
+   * (App.leaveWhenQuiet, ui/leaveGate.js):
+   *   clicks   sell clicks between their start and their broadcast: a pool
+   *            click awaits its /quote, a stale curve mark a fresh read, and
+   *            only then signs
+   *   sending  token-quoted venue: wallets with a transaction in flight — a
+   *            landed sell is followed by a pair -> ETH swap signed here
+   *   legs     token-quoted venue: wallets whose pair -> ETH leg is queued,
+   *            being read, quoted or signed, or sent and not yet mined
+   *   owed     token-quoted venue: wallets whose leg waits out a refusal (price
+   *            impact, no route, a read behind): `owedAmount` is their proceeds
+   *            still in the pair token (base units), `retryInMs` the time to the
+   *            first retry — which needs the key
+   * An ETH-quoted venue's sells in flight need nothing more from the keys: their
+   * receipts settle the rows whether the keys are here or not. Counts only —
+   * never an address.
+   * @returns {{clicks: number, sending: number, legs: number, owed: number,
+   *   owedAmount: string, retryInMs: number|null, symbol: string|null, decimals: number}}
+   */
+  function pendingWork() {
+    const out = { clicks, sending: 0, legs: 0, owed: 0, owedAmount: '0', retryInMs: null, symbol: null, decimals: qDec() };
+    if (!isPairLeg()) return out;
+    out.symbol = pairSym();
+    const t = now();
+    let owedAmount = 0n;
+    for (const [k, w] of W) {
+      const p = pairs.get(k);
+      if (p && (p.running || pairQueue.has(k))) out.legs += 1;
+      else if (w.ops > 0) out.sending += 1;
+      else if (p && pendingOf(p) > 0n) {
+        out.owed += 1;
+        owedAmount += pendingOf(p);
+        const wait = Math.max(0, p.retryAt - t);
+        if (out.retryInMs === null || wait < out.retryInMs) out.retryInMs = wait;
+      }
+    }
+    out.owedAmount = owedAmount.toString();
+    return out;
+  }
+
+  /**
+   * While the account's keys are about to leave this tab (App.leaveWhenQuiet),
+   * refuse new sell clicks with `reason`; null lets them through again. Receipts,
+   * pair legs, Convert and approvals carry on: they are what the leave waits for.
+   * @param {string|null} reason
+   */
+  function holdSells(reason) {
+    sellHold = typeof reason === 'string' && reason ? reason : null;
+  }
+
+  /** sell(), counted while it runs (pendingWork().clicks) and refused while held. */
+  async function countedSell(...args) {
+    if (sellHold) return refused(sellHold);
+    clicks += 1;
+    try {
+      return await sell(...args);
+    } finally {
+      clicks -= 1;
+    }
+  }
+
   /** The tokens the tab's own sells still have in flight: this click lands behind them (/quote `ahead`). */
   function inflightTotal() {
     let total = 0n;
@@ -1783,9 +1851,12 @@ export function createSession({
     setTicked,
     setAllTicked,
     arm,
-    sell,
+    // Counted while it runs (pendingWork().clicks) and refused while held (holdSells).
+    sell: countedSell,
     preview,
     convertPair,
+    pendingWork,
+    holdSells,
     onReceipt,
     onMark,
     onTrades,

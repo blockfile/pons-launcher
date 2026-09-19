@@ -1568,3 +1568,93 @@ test("a remote removal keeps the other wallets' owed pair legs; the removed wall
     [A]
   );
 });
+
+// ── leaving the account (Task 32): what the tab must still sign before Lock / Disconnect / Switch take the keys ──
+const NOTHING_LEFT = { clicks: 0, sending: 0, legs: 0, owed: 0, owedAmount: '0', retryInMs: null, symbol: 'AMZN', decimals: 18 };
+
+test('pendingWork follows a token-quoted sell: in flight, then its swap queued and sent, then nothing', async () => {
+  const h = harness({ venue: AMZN_CURVE, states: [wallet(A, { tokenBalance: '1000000', allowance: '1000000', nonce: 0, pairBalance: '0' })] });
+  await h.s.loadWallets([A]);
+  assert.deepEqual(h.s.pendingWork(), NOTHING_LEFT);
+  await h.s.sell(50);
+  assert.deepEqual(h.s.pendingWork(), { ...NOTHING_LEFT, sending: 1 }, 'its landing is followed by a swap this tab signs');
+  Object.assign(h.byAddr.get(A), { nonce: 1, tokenBalance: '500000', pairBalance: '500' });
+  h.s.onReceipt({ hash: hashOfSell(A, 0, 500000), status: 'landed', block: 30, gasUsed: '1' });
+  assert.deepEqual(h.s.pendingWork(), { ...NOTHING_LEFT, legs: 1 }, 'landed: its swap is queued, not signed yet');
+  await h.runTimers();
+  const leg = h.log.broadcast.at(-1);
+  assert.equal(leg[0], `raw|${A}|1|approve:${PAIR}:${ROUTER}:500`);
+  assert.deepEqual(h.s.pendingWork(), { ...NOTHING_LEFT, legs: 1 }, 'sent, not mined yet');
+  Object.assign(h.byAddr.get(A), { nonce: 3, pairBalance: '0' });
+  h.s.onReceipt({ hash: `h:${leg[0]}`, status: 'landed', block: 31, gasUsed: '1' });
+  h.s.onReceipt({ hash: `h:${leg[1]}`, status: 'landed', block: 31, gasUsed: '1' });
+  await h.runTimers();
+  assert.deepEqual(h.s.pendingWork(), NOTHING_LEFT);
+});
+
+test('pendingWork: a swap refused for price impact is owed (its proceeds, when it retries), not in flight', async () => {
+  const h = harness({ venue: AMZN_CURVE, states: [wallet(A, { tokenBalance: '1000000', allowance: '1000000', nonce: 0, pairBalance: '0' })] });
+  h.api.postPairQuote = async (pairToken, amount) => {
+    h.log.pair.push(amount);
+    return { amountOut: String(BigInt(amount) * 2n), path: 'route', fees: [], impactBps: 1400, ok: false, reason: 'too deep' };
+  };
+  await h.s.loadWallets([A]);
+  await h.s.sell(100);
+  Object.assign(h.byAddr.get(A), { nonce: 1, tokenBalance: '0', pairBalance: '1000' });
+  h.s.onReceipt({ hash: hashOfSell(A, 0, 1000000), status: 'landed', block: 30, gasUsed: '1' });
+  await h.runTimers();
+  assert.deepEqual(h.log.pair, ['1000']);
+  assert.deepEqual(h.s.pendingWork(), { ...NOTHING_LEFT, owed: 1, owedAmount: '1000', retryInMs: 15_000 });
+  h.advance(10_000);
+  assert.equal(h.s.pendingWork().retryInMs, 5_000);
+});
+
+test('pendingWork on an ETH-quoted venue: a sell in flight needs nothing more from the keys', async () => {
+  const h = harness({ venue: CURVE, states: [wallet(A, { tokenBalance: '1000', allowance: '1000', nonce: 0 })] });
+  await h.s.loadWallets([A]);
+  assert.equal((await h.s.sell(50)).sent, 1);
+  assert.equal(h.s.view().rows[0].status, 'sent');
+  assert.deepEqual(h.s.pendingWork(), { ...NOTHING_LEFT, symbol: null });
+});
+
+test('a click still waiting for its quote counts; holdSells refuses new clicks unsigned, and null lets them through', async () => {
+  const h = harness({ venue: POOL, states: [wallet(A, { tokenBalance: '1000', allowance: '1000', nonce: 0 })] });
+  await h.s.loadWallets([A]);
+  const realQuote = h.api.postQuote;
+  const waiting = [];
+  h.api.postQuote = (token, sells, opts) => new Promise((resolve) => waiting.push(() => resolve(realQuote(token, sells, opts))));
+  const click = h.s.sell(50);
+  await flush();
+  assert.equal(h.s.pendingWork().clicks, 1, 'between its start and its broadcast');
+  h.s.holdSells('sells are paused while your account locks');
+  let held = null;
+  h.s.sell(100).then((out) => {
+    held = out;
+  });
+  await flush();
+  assert.deepEqual(held, { sent: 0, failed: 0, skipped: [], reason: 'sells are paused while your account locks' }, 'answered at once');
+  assert.equal(waiting.length, 1, 'the held click asked for no quote');
+  waiting.shift()();
+  assert.equal((await click).sent, 1, 'a click that started before the hold still goes: the leave waits for it');
+  assert.equal(h.s.pendingWork().clicks, 0);
+  assert.equal(h.log.broadcast.length, 1);
+  h.s.holdSells(null);
+  h.api.postQuote = realQuote;
+  assert.equal((await h.s.sell(50)).sent, 1, 'released');
+  assert.equal(h.log.broadcast.length, 2);
+});
+
+test('holdSells stops new clicks only: a landed sell still gets its pair → ETH swap signed while the leave waits', async () => {
+  const h = harness({ venue: AMZN_CURVE, states: [wallet(A, { tokenBalance: '1000000', allowance: '1000000', nonce: 0, pairBalance: '0' })] });
+  await h.s.loadWallets([A]);
+  await h.s.sell(50);
+  h.s.holdSells('sells are paused while your account locks');
+  Object.assign(h.byAddr.get(A), { nonce: 1, tokenBalance: '500000', pairBalance: '500' });
+  h.s.onReceipt({ hash: hashOfSell(A, 0, 500000), status: 'landed', block: 30, gasUsed: '1' });
+  await h.runTimers();
+  const leg = h.log.broadcast.at(-1);
+  assert.equal(leg[0], `raw|${A}|1|approve:${PAIR}:${ROUTER}:500`);
+  assert.ok(leg[1].startsWith(`raw|${A}|2|swap:500:`), leg[1]);
+  assert.equal((await h.s.sell(50)).sent, 0);
+  assert.equal(h.log.broadcast.length, 2, 'no sell signed while held');
+});

@@ -24,6 +24,7 @@ import SellPanel from './SellPanel.jsx';
 import WalletTable from './WalletTable.jsx';
 import ImportDialog, { VaultBar } from './ImportDialog.jsx';
 import AccountBar from './AccountBar.jsx';
+import { leaveWarning, leavingText, pausedReason, waitForQuiet, waitingText } from './leaveGate.js';
 import { useStore } from './useStore.js';
 import { leaveAccountTab } from './leaveAccount.js';
 import Toasts from './Toasts.jsx';
@@ -83,6 +84,11 @@ export default function App() {
   const syncRef = useRef(null);
   const [sync, setSync] = useState(null);
   const [syncGen, setSyncGen] = useState(0); // +1 restarts the sync for the same key
+  // A Lock / Disconnect / Switch waiting for what the tab still has to sign
+  // (leaveWhenQuiet): {how, text, final} for the strip, and the ticket that
+  // Keep unlocked cancels.
+  const [leaving, setLeaving] = useState(null);
+  const leaveRef = useRef(null);
   const [venue, setVenue] = useState(null);
   const [opening, setOpening] = useState(false);
   const [tokenError, setTokenError] = useState('');
@@ -482,18 +488,80 @@ export default function App() {
     [account, syncOwnAddrs, toast]
   );
 
+  /**
+   * Lock, Disconnect and Switch. leaveAccount takes the account's wallets —
+   * their keys — out of this tab, and on a token-quoted venue every landed sell
+   * is followed by a pair -> ETH swap this tab signs with that wallet's key:
+   * taking the key first strands the proceeds in the pair token (and after a
+   * move into the account the pair ledger is memory-only, so a reload would not
+   * even list them for Convert). So, from the press (ui/leaveGate.js):
+   *   - new sell clicks are refused (session.holdSells), on every session open
+   *     while it waits;
+   *   - the strip says what the tab is still signing, with Keep unlocked, and
+   *     the leave waits for it: at most LEAVE_WAIT_MS;
+   *   - what is still in flight after that, or proceeds a refused swap left in
+   *     the pair token, go only on the visitor's OK.
+   * Then leaveAccount, unchanged. Sells come back when it is over, whatever the
+   * outcome. A signed-in but locked account takes no key away: straight through.
+   */
+  const leaveWhenQuiet = useCallback(
+    async (how) => {
+      const next = how === 'disconnect' ? 'disconnect' : 'lock';
+      if (account.get().status !== 'unlocked') return leaveAccount(next);
+      if (leaveRef.current) return false; // one leave at a time
+      const ticket = { cancelled: false };
+      leaveRef.current = ticket;
+      const held = new Set();
+      const read = () => {
+        const s = sessionRef.current;
+        if (!s) return null;
+        if (!held.has(s)) {
+          s.holdSells(pausedReason(how));
+          held.add(s);
+        }
+        return s.pendingWork();
+      };
+      try {
+        const outcome = await waitForQuiet({
+          read,
+          isCancelled: () => ticket.cancelled,
+          onWait: (work, msLeft) => {
+            const text = waitingText(how, work, msLeft);
+            setLeaving((prev) => (prev && !prev.final && prev.text === text ? prev : { how, text, final: false }));
+          },
+        });
+        if (outcome === 'cancelled') {
+          toast(how === 'disconnect' ? 'Still connected: sells are back on' : 'Still unlocked: sells are back on', 'info');
+          return false;
+        }
+        const warning = leaveWarning(how, read(), { persisted: safeHasVault() });
+        if (warning && !window.confirm(warning)) return false;
+        setLeaving({ how, text: leavingText(how), final: true });
+        return await leaveAccount(next);
+      } finally {
+        for (const s of held) s.holdSells(null);
+        leaveRef.current = null;
+        setLeaving(null);
+      }
+    },
+    [account, leaveAccount, toast]
+  );
+
   const onAccountAction = useCallback(
     async (id, walletId) => {
       if (id === 'connect') await connectFlow(walletId);
       else if (id === 'unlock') await account.unlock(walletId);
-      else if (id === 'lock') await leaveAccount('lock');
-      else if (id === 'disconnect') await leaveAccount('disconnect');
+      else if (id === 'lock') await leaveWhenQuiet('lock');
+      else if (id === 'disconnect') await leaveWhenQuiet('disconnect');
+      else if (id === 'leave-cancel') {
+        if (leaveRef.current) leaveRef.current.cancelled = true;
+      }
       else if (id === 'retry' && syncRef.current) await syncRef.current.retry();
       else if (id === 'signin-again') {
         if ((await account.signIn(walletId, { expect: account.get().address })) && syncRef.current) await syncRef.current.retry();
       } else if (id === 'switch') {
         const wid = account.get().walletId;
-        if (await leaveAccount('lock')) await connectFlow(wid);
+        if (await leaveWhenQuiet('switch')) await connectFlow(wid);
       } else if (id === 'delete') {
         const typed = window.prompt('This deletes the encrypted copy of your wallets from your account and signs it out here and on every other device. The server keeps the deleted copy, still encrypted, for 30 days in case you ask for it back. The wallets stay in this tab until you close it. Type DELETE to confirm.');
         if (typed !== 'DELETE') return;
@@ -508,7 +576,7 @@ export default function App() {
         else setSyncGen((g) => g + 1); // not deleted: still signed in, and an unlocked account keeps saving
       }
     },
-    [account, connectFlow, leaveAccount, toast]
+    [account, connectFlow, leaveWhenQuiet, toast]
   );
 
   // A passphrase vault on this device -> the account. The device copy is deleted
@@ -546,7 +614,7 @@ export default function App() {
           <p className="notice" role="note">
             <LuShieldAlert aria-hidden="true" /> Keys stay in this browser tab. Use trading wallets. A browser extension can read this page.
           </p>
-          <AccountBar acct={acct} sync={sync} wallets={discovered} legacy={vault} onAction={onAccountAction} onMigrate={onMigrate} />
+          <AccountBar acct={acct} sync={sync} wallets={discovered} legacy={vault} leaving={leaving} onAction={onAccountAction} onMigrate={onMigrate} />
           {vault === 'locked' && acct.status !== 'unlocked' && <VaultBar onUnlocked={onUnlocked} onForget={onForget} />}
           {vault === 'unlocked' && acct.status !== 'unlocked' && (
             <div className="vaultbar pane" role="status">

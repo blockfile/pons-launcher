@@ -39,7 +39,10 @@ function syncText(sync) {
 }
 
 /**
- * @param {{acct: object, sync: object|null, wallets: Array<{id, name, icon}>, legacy: 'none'|'locked'|'unlocked'}} input
+ * @param {{acct: object, sync: object|null, wallets: Array<{id, name, icon}>, legacy: 'none'|'locked'|'unlocked',
+ *   leaving?: null|{how: 'lock'|'disconnect'|'switch', text: string, final: boolean}}} input
+ *   leaving: a Lock / Disconnect / Switch waiting for the tab's own signing
+ *   (App.leaveWhenQuiet): its text, and the way back until `final`.
  * @returns {{
  *   hidden: boolean, banner: boolean, busy: boolean, text: string, hint: string, error: string,
  *   switched: string, sync: string, syncState: string,
@@ -47,7 +50,7 @@ function syncText(sync) {
  *   migrate: null|'passphrase'|'move',
  * }}
  */
-export function accountView({ acct, sync = null, wallets = [], legacy = 'none' }) {
+export function accountView({ acct, sync = null, wallets = [], legacy = 'none', leaving = null }) {
   const view = {
     hidden: false,
     banner: false,
@@ -62,6 +65,12 @@ export function accountView({ acct, sync = null, wallets = [], legacy = 'none' }
     migrate: null,
   };
   if (acct.status === 'starting') return { ...view, hidden: true, error: '' };
+  // A Lock / Disconnect / Switch waiting for what the tab still has to sign
+  // (ui/leaveGate.js): its text, and the way back while it still waits.
+  if (leaving) {
+    const stay = { id: 'leave-cancel', label: leaving.how === 'disconnect' ? 'Stay connected' : 'Keep unlocked', kind: 'quiet', needsWallet: false };
+    return { ...view, busy: true, text: String(leaving.text || ''), error: '', actions: leaving.final ? [] : [stay] };
+  }
   if (acct.step) {
     return { ...view, busy: true, text: STEP_TEXT[acct.step] || 'Waiting for your wallet…', error: '' };
   }

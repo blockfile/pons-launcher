@@ -83,3 +83,21 @@ test('no action is amber: the account strip moves no money', () => {
   ];
   for (const v of all) for (const a of v.actions) assert.ok(['go', 'quiet', 'danger'].includes(a.kind));
 });
+
+test("a leave waiting for the tab's own signing shows its text and only the way back; once final, nothing to press", () => {
+  const acct = { ...base, status: 'unlocked', address: A, walletAddress: A };
+  const text = 'Locking once this tab has signed what it still owes';
+  const v = accountView({ acct, sync: { state: 'saved' }, wallets: WALLETS, legacy: 'unlocked', leaving: { how: 'lock', text, final: false } });
+  assert.equal(v.busy, true);
+  assert.equal(v.text, text);
+  assert.deepEqual(v.actions, [{ id: 'leave-cancel', label: 'Keep unlocked', kind: 'quiet', needsWallet: false }]);
+  assert.equal(v.migrate, null, 'no move into the account while it locks');
+  assert.equal(accountView({ acct, sync: { state: 'saved' }, leaving: { how: 'disconnect', text, final: false } }).actions[0].label, 'Stay connected');
+  assert.deepEqual(accountView({ acct, sync: { state: 'saved' }, leaving: { how: 'switch', text, final: true } }).actions, []);
+});
+
+test('without a leave the strip is exactly as before', () => {
+  const acct = { ...base, status: 'unlocked', address: A, walletAddress: A };
+  assert.deepEqual(accountView({ acct, sync: { state: 'saved' }, leaving: null }), accountView({ acct, sync: { state: 'saved' } }));
+  assert.deepEqual(ids(accountView({ acct, sync: { state: 'saved' }, leaving: null })), ['lock', 'disconnect', 'delete']);
+});
