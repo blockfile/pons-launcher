@@ -196,8 +196,14 @@ export function createSession({
     });
   }
 
+  /** A row's own 25 / 50 / 100 buttons (sell(pct, {walletIds})): ticked or not, armed and paid for. */
+  function canSellOne(w) {
+    return w.optimistic > 0n && w.needsArm === false && !w.gasShort && !w.armError;
+  }
+
+  /** The chips: a ticked wallet that can sell. */
   function canSell(w) {
-    return w.ticked && w.optimistic > 0n && w.needsArm === false && !w.gasShort && !w.armError;
+    return w.ticked && canSellOne(w);
   }
 
   function pair(key) {
@@ -248,6 +254,7 @@ export function createSession({
           needsArm: w.needsArm === true,
           gasShort: w.gasShort,
           canSell: canSell(w),
+          canSellOne: canSellOne(w),
           pairPending: owed.toString(),
           canConvert: !!p && owed > 0n && !p.running,
         };
@@ -1439,11 +1446,16 @@ export function createSession({
    * below what the visitor's slippage setting promises. planSell uses a quote
    * only for exactly the amount it sells, so a wallet whose balance moved while
    * quoting is skipped 'no quote', never sold against someone else's floor.
+   *
+   * opts.walletIds: a row's own 25 / 50 / 100 buttons — sell exactly these
+   * wallets, ticked or not, through this same path (planning, slippage, nonces,
+   * broadcast, receipts). Without it: every ticked wallet.
    */
-  async function sell(pct) {
+  async function sell(pct, opts) {
     const t0 = now();
-    const chosen = order.map((k) => W.get(k)).filter((w) => w && w.ticked && w.optimistic > 0n);
-    if (!chosen.length) return refused('no ticked wallet holds tokens');
+    const only = opts && Array.isArray(opts.walletIds) ? new Set(opts.walletIds.map(lower)) : null;
+    const chosen = order.map((k) => W.get(k)).filter((w) => w && (only ? only.has(w.key) : w.ticked) && w.optimistic > 0n);
+    if (!chosen.length) return refused(only ? 'that wallet holds no tokens' : 'no ticked wallet holds tokens');
     if (markStale()) {
       // The stream is down or behind: one fresh read of the mark before a curve floor is priced from it.
       let res;
@@ -1720,6 +1732,18 @@ export function createSession({
     if (on) arm();
   }
 
+  /** Invert: every ticked row unticked and every unticked row ticked; a newly ticked wallet arms. */
+  function invertTicked() {
+    let ticked = false;
+    for (const w of W.values()) {
+      w.ticked = !w.ticked;
+      if (w.ticked) ticked = true;
+      if (w.ops === 0) rest(w);
+    }
+    emit();
+    if (ticked) arm();
+  }
+
   /** New gas figures. Their head-block time is the page's clock from now on. */
   function setFees(f) {
     if (!f) return;
@@ -1850,6 +1874,7 @@ export function createSession({
     removeRows,
     setTicked,
     setAllTicked,
+    invertTicked,
     arm,
     // Counted while it runs (pendingWork().clicks) and refused while held (holdSells).
     sell: countedSell,

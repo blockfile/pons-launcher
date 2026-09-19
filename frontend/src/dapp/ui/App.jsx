@@ -15,7 +15,7 @@ import { createFeed } from './feed.js';
 import { realDeps } from './deps.js';
 import { loadPresets, loadSlippage, savePresets, saveSlippage, slippageToBps } from './prefs.js';
 import { stageOf, summarizeSkips } from './sellMath.js';
-import { errText } from './format.js';
+import { errText, shortAddr } from './format.js';
 import { usePrefersReducedMotion } from './useLiveMark.js';
 import TokenBar from './TokenBar.jsx';
 import Chart from './Chart.jsx';
@@ -258,21 +258,26 @@ export default function App() {
     };
   }, [token, ethUsd, nativeQuote, pairToken, pairDecimals, pairSymbol]);
 
+  // opts.walletIds: a row's own 25 / 50 / 100 buttons — that wallet only, through
+  // the same session.sell path as the chips (planning, slippage, nonces, receipts).
   const onSell = useCallback(
-    async (pct) => {
+    async (pct, opts) => {
       const s = sessionRef.current;
       if (!s) return;
-      const out = await s.sell(pct);
+      const out = await s.sell(pct, opts);
+      const one = opts && Array.isArray(opts.walletIds) && opts.walletIds.length === 1 ? opts.walletIds[0] : null;
+      const what = one ? `${shortAddr(one)} ${pct}%` : `${pct}%`;
       const skipped = out.skipped.length ? ` · skipped: ${summarizeSkips(out.skipped)}` : '';
       if (out.sent > 0) {
         const failed = out.failed ? `, ${out.failed} failed` : '';
-        toast(`${pct}%: ${out.sent} sell${out.sent === 1 ? '' : 's'} sent${failed}${skipped}`, out.failed ? 'error' : 'ok');
+        toast(`${what}: ${out.sent} sell${out.sent === 1 ? '' : 's'} sent${failed}${skipped}`, out.failed ? 'error' : 'ok');
       } else {
-        toast(`${pct}%: nothing sent — ${out.reason || 'every send failed'}${skipped}`, 'error');
+        toast(`${what}: nothing sent — ${out.reason || 'every send failed'}${skipped}`, 'error');
       }
     },
     [toast]
   );
+  const onSellOne = useCallback((address, pct) => onSell(pct, { walletIds: [address] }), [onSell]);
 
   const preview = useCallback((pct) => (sessionRef.current ? sessionRef.current.preview(pct) : null), []);
 
@@ -293,6 +298,7 @@ export default function App() {
 
   const onTick = useCallback((address, on) => sessionRef.current && sessionRef.current.setTicked(address, on), []);
   const onTickAll = useCallback((on) => sessionRef.current && sessionRef.current.setAllTicked(on), []);
+  const onInvert = useCallback(() => sessionRef.current && sessionRef.current.invertTicked(), []);
   const onRetryArm = useCallback(() => sessionRef.current && sessionRef.current.arm({ retry: true }), []);
   // Pair-token proceeds (AMZN, SPCX...) -> ETH now: one wallet, or every wallet with some.
   const onConvert = useCallback((address) => sessionRef.current && sessionRef.current.convertPair(address), []);
@@ -671,6 +677,9 @@ export default function App() {
                       walletCount={walletCount}
                       onTick={onTick}
                       onTickAll={onTickAll}
+                      onInvert={onInvert}
+                      onSellOne={onSellOne}
+                      fees={fees}
                       onRefresh={onRefresh}
                       onRetryArm={onRetryArm}
                       onConvert={onConvert}

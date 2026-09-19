@@ -417,6 +417,7 @@ test('the view carries addresses, balances and statuses only', async () => {
     'address',
     'canConvert',
     'canSell',
+    'canSellOne',
     'detail',
     'ethBalance',
     'gasShort',
@@ -1657,4 +1658,118 @@ test('holdSells stops new clicks only: a landed sell still gets its pair → ETH
   assert.ok(leg[1].startsWith(`raw|${A}|2|swap:500:`), leg[1]);
   assert.equal((await h.s.sell(50)).sent, 0);
   assert.equal(h.log.broadcast.length, 2, 'no sell signed while held');
+});
+
+// ── Task 33: choosing wallets — a row's own sell, All / None / Invert ─────────
+
+test("a row's own sell (walletIds) sells that one wallet only, ticked or not, through the same plan and ONE broadcast", async () => {
+  const planSellCalls = [];
+  const h = harness({
+    venue: CURVE,
+    planSellCalls,
+    states: [wallet(A, { tokenBalance: '1000000', allowance: '1000000', nonce: 3 }), wallet(B, { tokenBalance: '2000000', allowance: '2000000', nonce: 7 })],
+  });
+  await h.s.loadWallets([A, B]);
+  h.s.setTicked(B, false);
+  const out = await h.s.sell(50, { walletIds: [B] });
+  assert.equal(out.sent, 1);
+  assert.deepEqual(
+    planSellCalls.at(-1).wallets.map((w) => w.address),
+    [B]
+  );
+  assert.equal(planSellCalls.at(-1).pct, 50);
+  assert.deepEqual(h.log.broadcast.at(-1), [`raw|${B}|7|sell:1000000`]);
+  const rows = h.s.view().rows;
+  assert.equal(rows.find((r) => r.address === B).tokens, '1000000');
+  assert.equal(rows.find((r) => r.address === B).ticked, false, 'a row sell does not tick the wallet');
+  assert.equal(rows.find((r) => r.address === A).tokens, '1000000', 'the other wallet is untouched');
+  // The chips still sell the ticked wallets only.
+  await h.s.sell(25);
+  assert.deepEqual(h.log.broadcast.at(-1), [`raw|${A}|3|sell:250000`]);
+});
+
+test('a row sell of a wallet that holds nothing, or is not listed, is refused and sends nothing', async () => {
+  const h = harness({ venue: CURVE, states: [wallet(A, { tokenBalance: '1000000', allowance: '1000000' })] });
+  await h.s.loadWallets([A]);
+  await h.s.sell(100, { walletIds: [A] });
+  const sent = h.log.broadcast.length;
+  const again = await h.s.sell(50, { walletIds: [A] });
+  assert.equal(again.sent, 0);
+  assert.match(again.reason, /holds no tokens/);
+  const stranger = await h.s.sell(50, { walletIds: [C] });
+  assert.equal(stranger.sent, 0);
+  const none = await h.s.sell(50, { walletIds: [] });
+  assert.equal(none.sent, 0);
+  assert.equal(h.log.broadcast.length, sent);
+});
+
+test("two fast clicks on one row's 50 % sell 75 % of it: the second uses the optimistic balance", async () => {
+  const h = harness({ venue: CURVE, states: [wallet(A, { tokenBalance: '1000000', allowance: '1000000', nonce: 0 })] });
+  await h.s.loadWallets([A]);
+  await Promise.all([h.s.sell(50, { walletIds: [A] }), h.s.sell(50, { walletIds: [A] })]);
+  assert.deepEqual(h.log.broadcast.flat(), [`raw|${A}|0|sell:500000`, `raw|${A}|1|sell:250000`]);
+  assert.equal(h.s.view().rows[0].tokens, '250000');
+});
+
+test("a row sell on a pool quotes that wallet alone, priced behind the tab's own sells still in flight", async () => {
+  const h = harness({
+    venue: POOL,
+    states: [wallet(A, { tokenBalance: '1000000', allowance: '1000000' }), wallet(B, { tokenBalance: '2000000', allowance: '2000000' })],
+  });
+  await h.s.loadWallets([A, B]);
+  await h.s.sell(50, { walletIds: [A] });
+  await h.s.sell(100, { walletIds: [B] });
+  assert.deepEqual(h.log.quote.at(-1), [{ address: B, amount: '2000000' }]);
+  assert.equal(h.log.ahead.at(-1), '500000');
+});
+
+test('canSellOne: a row can sell on its own whether or not it is ticked; not while it needs an approval or gas', async () => {
+  const h = harness({
+    venue: CURVE,
+    states: [
+      wallet(A, { tokenBalance: '1000000', allowance: '1000000' }),
+      wallet(B, { tokenBalance: '1000000', allowance: '0' }),
+      wallet(C, { tokenBalance: '1000000', allowance: '1000000', ethBalance: '0' }),
+    ],
+  });
+  await h.s.loadWallets([A, B, C]);
+  h.s.setAllTicked(false);
+  const byAddr = new Map(h.s.view().rows.map((r) => [r.address, r]));
+  assert.equal(byAddr.get(A).canSellOne, true);
+  assert.equal(byAddr.get(A).canSell, false, 'the chips need the tick');
+  assert.equal(byAddr.get(B).canSellOne, false, 'its approval is still in flight');
+  assert.equal(byAddr.get(C).canSellOne, false, 'no ETH for gas');
+});
+
+test('invertTicked flips every row, and a wallet it newly ticks arms', async () => {
+  const h = harness({
+    venue: CURVE,
+    states: [wallet(A, { tokenBalance: '1000000', allowance: '1000000' }), wallet(B, { tokenBalance: '1000000', allowance: '1000000', nonce: 4 })],
+  });
+  await h.s.loadWallets([A, B]);
+  h.s.setTicked(B, false);
+  // B bought more while unticked: its allowance is short now, and an unticked wallet is not armed.
+  h.byAddr.get(B).tokenBalance = '2000000';
+  await h.s.loadWallets([A, B]);
+  assert.equal(h.log.broadcast.length, 0);
+  h.s.invertTicked();
+  await flush();
+  assert.deepEqual(
+    h.s.view().rows.map((r) => [r.address, r.ticked]),
+    [
+      [A, false],
+      [B, true],
+    ]
+  );
+  assert.deepEqual(h.log.broadcast, [[`raw|${B}|4|approve`]], 'the newly ticked B arms');
+  h.s.invertTicked();
+  await flush();
+  assert.deepEqual(
+    h.s.view().rows.map((r) => [r.address, r.ticked]),
+    [
+      [A, true],
+      [B, false],
+    ]
+  );
+  assert.equal(h.log.broadcast.length, 1, 'A needs no approval');
 });

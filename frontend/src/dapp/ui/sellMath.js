@@ -232,3 +232,21 @@ export function blockedReason(view, fees) {
   if (view.totals.arming > 0) return 'Approvals are landing — selling unlocks per wallet.';
   return 'No ticked wallet can sell: check approvals and ETH for gas.';
 }
+
+/** A row's own sell buttons (spec addendum B): fixed, with the same one-click rules as the chips. */
+export const ROW_SELL_PCTS = Object.freeze([25, 50, 100]);
+
+/**
+ * Why a row's own 25 / 50 / 100 buttons are off, for their tooltip — '' when
+ * they are on. A row sells on its own whether or not it is ticked (session.js
+ * canSellOne); an unticked wallet that still needs its approval is not armed,
+ * so it must be ticked first.
+ */
+export function rowSellBlocked(row, fees) {
+  if (!fees) return 'gas price unavailable — retrying';
+  if (!row || row.tokens === '0') return 'this wallet holds none of the token';
+  if (row.gasShort) return row.gasShort;
+  if (row.needsArm) return row.ticked ? 'its approval is landing' : 'tick it to approve it first';
+  if (!row.canSellOne) return row.detail || 'not ready';
+  return '';
+}

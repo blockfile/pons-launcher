@@ -1258,3 +1258,74 @@ button.chip {
     grid-template-columns: 1fr;
   }
 }
+
+/* ── choosing wallets (addendum B, Task 33) ──────────────────────────────────
+   Bigger tick boxes whose whole cell is the hit area; All / None / Invert
+   move no money (quiet grey .seg). A row's own 25 / 50 / 100 keep the money
+   law in a dense cell: .spend stays the 2px vermilion frame, .live the
+   vermilion block with the white label — never quieter than .ghost. */
+.wallets-pick {
+  display: flex;
+  gap: 2px;
+}
+
+td.tick,
+th.tick {
+  width: 40px;
+  padding: 0;
+}
+
+.tick-hit {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 40px;
+  min-height: var(--row);
+  cursor: pointer;
+}
+
+.wallets input[type='checkbox'] {
+  width: 20px;
+  height: 20px;
+  cursor: pointer;
+}
+
+td.rowsell-cell {
+  width: 1%;
+}
+
+.rowsell {
+  display: inline-flex;
+  gap: 2px;
+}
+
+.rowsell button,
+.rowsell button.spend,
+.rowsell button.live,
+.rowsell button:disabled {
+  min-height: 22px;
+  min-width: 5ch;
+  padding: 0 6px;
+  font: var(--t-small) var(--mono);
+  font-weight: 700;
+}
+
+/* Touch screens: every target at least 36px tall, the tick cell 44px. */
+@media (pointer: coarse) {
+  .wallets td {
+    height: 44px;
+  }
+
+  .tick-hit {
+    width: 44px;
+    min-height: 44px;
+  }
+
+  .rowsell button,
+  .rowsell button.spend,
+  .rowsell button.live,
+  .rowsell button:disabled {
+    min-height: 36px;
+    min-width: 6ch;
+  }
+}

@@ -14,6 +14,8 @@ import {
   summarizeSkips,
   stageOf,
   blockedReason,
+  ROW_SELL_PCTS,
+  rowSellBlocked,
 } from './sellMath.js';
 
 const A = '0x' + 'a'.repeat(40);
@@ -169,4 +171,23 @@ test('blockedReason says why no chip can sell; a ticked set that holds nothing i
     blockedReason(view({ tokens: '7', ticked: 2 }), FEES),
     'No ticked wallet can sell: check approvals and ETH for gas.'
   );
+});
+
+test('ROW_SELL_PCTS: a row sells 25, 50 or 100 % of itself', () => {
+  assert.deepEqual([...ROW_SELL_PCTS], [25, 50, 100]);
+  assert.ok(Object.isFrozen(ROW_SELL_PCTS));
+});
+
+test("rowSellBlocked says why a row's own sell buttons are off, and '' when they are on", () => {
+  const FEES = { maxFeePerGas: '1' };
+  const row = (over) => ({ address: A, tokens: '5', ticked: true, needsArm: false, gasShort: null, canSellOne: true, detail: '', ...over });
+  assert.equal(rowSellBlocked(row(), FEES), '');
+  assert.equal(rowSellBlocked(row({ ticked: false }), FEES), '', 'an unticked row still sells on its own');
+  assert.equal(rowSellBlocked(row(), null), 'gas price unavailable — retrying');
+  assert.equal(rowSellBlocked(row({ tokens: '0', canSellOne: false }), FEES), 'this wallet holds none of the token');
+  assert.equal(rowSellBlocked(row({ gasShort: 'needs 0.001 ETH for gas', canSellOne: false }), FEES), 'needs 0.001 ETH for gas');
+  assert.equal(rowSellBlocked(row({ needsArm: true, canSellOne: false }), FEES), 'its approval is landing');
+  assert.equal(rowSellBlocked(row({ needsArm: true, ticked: false, canSellOne: false }), FEES), 'tick it to approve it first');
+  assert.equal(rowSellBlocked(row({ canSellOne: false, detail: 'wallet state unavailable — press Refresh' }), FEES), 'wallet state unavailable — press Refresh');
+  assert.equal(rowSellBlocked(row({ canSellOne: false }), FEES), 'not ready');
 });
