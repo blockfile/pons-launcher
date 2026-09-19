@@ -329,3 +329,106 @@ rendered as text/icons, never HTML. The **logo is fetched by the server**
 (`GET /api/tp/logo/:ca`) from IPFS gateways only (no arbitrary hosts — SSRF), capped at
 1 MB, PNG/JPEG/GIF/WebP by magic bytes (never SVG), cached, and served from the page's
 own origin so the CSP stays `img-src 'self' data:`. No logo → a generated identicon.
+
+## E. What the v2 build decided, and what it accepts (approved by Ivan 2026-09-19)
+
+**Encrypted account, or an nginx login?** The encrypted account, on the dApp only. An
+nginx password decides who may reach a server; it stores nothing, so it could fix
+"wallets vanish on refresh" only if the server kept the keys: the private mode that was
+dropped, and it would make the droplet a readable store of every visitor's keys. The
+account keeps ciphertext the server cannot decrypt, follows the visitor to another
+device, and keeps the dApp public. The console hosts (rhbond.xyz, api.rhbond.xyz) keep
+their nginx basic auth unchanged: that server holds keys that spend.
+
+**Accepted risk: a phished unlock signature opens the saved wallets.** The saved copy's
+key comes from the visitor's wallet signing ONE fixed message. Whoever gets a visitor to
+sign that message AND one sign-in message can sign in as that visitor, download the
+ciphertext and decrypt every saved bundle key. A phishing copy of dapp.rhbond.xyz can
+ask for both: it can fetch a real sign-in challenge from this server for any address.
+MetaMask warns when a sign-in message names another site than the one asking (the unlock
+message is SIWE-shaped for exactly that), but it does not block, and other wallets may
+not warn at all. Decision 1's accepted risks (an XSS, an extension, a compromised
+dependency) cover the keys while the page is open; this one covers the saved copy while
+the page is closed. It is accepted on the same footing: bundle wallets are trading
+wallets, the unlock message itself says "Only sign it on https://dapp.rhbond.xyz", and
+saving is optional: a visitor who never connects keeps v1's behaviour, and v1's
+passphrase vault on the device stays available. Ivan accepted this risk on 2026-09-19.
+
+**Frozen forever: the unlock message.** Once anyone has saved, one changed byte (a word,
+the domain, a CRLF from an editor) derives a different key for every visitor and locks
+them out of their saved wallets; the server cannot help. The message, for the EIP-55
+test address (frontend/src/dapp/account/messages.test.js pins the same SHA-256,
+2cd970a7...a10f, and backend/src/tp/spec.test.js checks this block against it):
+
+```text unlock-message
+dapp.rhbond.xyz wants you to sign in with your Ethereum account:
+0x5aAeb6053F3E94C9b9A09f33669435E7Ef1BeAed
+
+Unlock the wallets you saved on rhbond take-profit. This signature never leaves your browser: it is the key to your saved wallets. Only sign it on https://dapp.rhbond.xyz.
+
+URI: https://dapp.rhbond.xyz/vault
+Version: 1
+Chain ID: 4663
+Nonce: vaultkeyv1
+Issued At: 2026-09-19T00:00:00Z
+```
+
+The alternative, open only until the first real save: a plain-text message (no wallet
+warns about it on any site). After the first save, neither can change.
+
+**Other accepted risks.** While a key is cached (12 h, non-extractable), an XSS or an
+extension can USE it, not copy it. A stolen session can overwrite or delete the saved
+copy but not read it, and it cannot destroy it: the server keeps the copy from before
+that session began saving (`.prev`) and a deleted copy for 30 days, for a hand restore
+(Addendum A, as built). A wallet that changes how it signs, or is lost, locks its saved
+copy for good: the console's export files stay the real backup. The server is still
+the root of trust: it serves the page's code.
+
+**Decisions for sign-off.** Approved by Ivan on 2026-09-19 as listed, with 18 and 19
+changed by him. Each is one named constant or line to change back.
+
+Account (backend/src/tp/account.js, vaultStore.js; frontend/src/dapp/account/):
+1. The session cookie is `__Host-tp_session; Path=/`, not `Path=/api/tp/account`: the `__Host-` prefix requires `Path=/`, and that prefix is what stops the same-site console hosts from tossing a cookie at the dApp.
+2. Saves are ordered by an integer `rev`, not by `updatedAt` (two saves in one millisecond cannot collide).
+3. A public `keyId` (HKDF of the same signature) replaces the spec's AES "check" value: the server refuses a write under another key without being able to decrypt anything.
+4. The sign-in message expires with its nonce (5 min); the 24 h is the cookie's. The server builds the message; the page signs only a byte-identical rebuild of it.
+5. The server canonicalises signatures (high-s, v 0/1) instead of `ethers.verifyMessage`, which refuses them.
+6. Deleting the saved copy signs that account out on EVERY device (the page then offers Connect).
+7. The account API answers on the dApp host only; the console host answers 404.
+8. The unlock message is SIWE-shaped with a fixed nonce (above). Irreversible after the first save.
+9. Lock and Disconnect also take the account's wallets and their %-left marks out of the tab, after a last save; otherwise "locked" would still sign.
+10. Delete saved copy sits behind a typed DELETE; it is the only way out of a copy made under another key.
+11. The routes are the server's: `POST /api/tp/account/nonce` (answer `{nonce, message, issuedAt, expirationTime}`), `POST /login`, `POST /logout`, `GET /me`, `GET/PUT/DELETE /vault`. backend/src/tp/accountContract.json pins them for both sides.
+
+Positions and wallets (frontend/src/dapp/ui/):
+12. One positions book: the book the %-left bars draw from is the one the encrypted copy saves, its four record fields unchanged. A wallet a device first sees before its account copy has arrived (a new device, a page opened before its unlock) takes the copy's start and the higher of the two marks, so every device shows the same bar.
+13. The high-water mark resets when a wallet is seen empty and then holding again: a new position starts at 100 % (C above said a pure high-water mark).
+14. Positions and the pair ledger stay on the device only with "Remember on this device" (their entries can be linked to the wallets), and in the account whenever it is unlocked. After a passphrase vault moves into the account, the pair ledger (unconverted pair proceeds) is memory-only again: the proceeds stay in the wallets, but a reload no longer offers Convert for them.
+15. A row's own 25 / 50 / 100 sells that wallet whether or not it is ticked; a row whose wallet still needs its approval stays off until it is ticked (ticking arms it).
+16. Every 20 s the listed rows are re-read; once a minute the same read also looks at up to 100 imported wallets that are not listed, and one that bought since is listed, ticked and armed, as Refresh would do, with a toast.
+17. The rows' value is shown in ETH and in USD (a token-quoted pair through the pair to ETH rate).
+
+Token header (backend/src/tp/tokenInfo.js, logo.js, safeFetch.js, cid.js; frontend/src/dapp/ui/TokenHeader.jsx):
+18. Logos over 3 MiB become identicons; `TP_LOGO_MAX_BYTES` sets the cap, at most 5 MiB. (Ivan's change: the plan proposed 1 MiB, which turned about 15 % of real pons logos into identicons.)
+19. Logos on non-IPFS https hosts (about 21 %) are FETCHED, through an SSRF-safe GET (backend/src/tp/safeFetch.js): https only, port 443 only, no userinfo, a DNS name (no IP literal); the name is resolved and every address it resolves to must be public (loopback, private, link-local, CGNAT, multicast, unspecified, reserved, IPv4-mapped and other IPv4-carrying IPv6 forms, ULA and the cloud metadata addresses are refused); the connection goes to the vetted address (the lookup is pinned: no second one) with the name as SNI and Host; at most 2 redirects, each hop vetted again; 5 s in all; the same size cap and magic-byte rule (PNG, JPEG, GIF or WebP, never SVG). They are cached like IPFS logos but never immutable: a day, on the server and in browsers. (Ivan's change: the plan proposed identicons for them.)
+20. The first logo gateway is ponsfamily's own, undocumented worker; its 451 (moderated) is final. Filebase and Pinata follow; `TP_LOGO_GATEWAYS` changes the list.
+21. Pool liquidity is the quote side only (a v1 position is not full-range, so doubling the quote side would be a wrong number).
+22. v1 tokens say "launched before 2026-08-12" instead of a looked-up launch time (a whole-chain getLogs is refused or throttled).
+23. Where the page's own maths covers a figure (curve progress, a graduated pool's liquidity), the live mark wins over the server's figures.
+
+**Also built** (from the whole-plan review's fixes; each follows from the decisions above and is one clearly marked spot to change):
+- A save under another key is refused with no override (there is no `rekey`); starting over is Delete. A list's `.prev` keeps the copy from before the latest session began saving, however often that session saves. A Delete keeps the deleted list, still encrypted, for `TP_VAULT_KEEP_DELETED_DAYS` (30) days, the first deletion only, for a hand restore (README "Take-profit dApp").
+- Every vault disk call is async and writes go one at a time (the store's write lane): a save never stalls a sell on the one pm2 process.
+- The wallet list merges as an add-wins set with no clock in it: a removal on another device takes out only the imports it had seen, so a skewed clock can never drop a key from a live tab.
+- Saves are paced (a 5 s debounce, at most one scheduled save per 10 s, never later than 30 s) to stay well under the server's 30 writes a minute per account; a 429's Retry-After is honoured, and `rate_limited` / `unavailable` are retried.
+- A wallet removed by another device, or by Lock / Disconnect, leaves the table at once through `session.removeRows`; one with a sell in flight keeps counting until it settles. The session is never reset from the sync.
+- Lock, Disconnect and Switch first wait (up to 60 s, new sells paused, with Keep unlocked) for what the tab still has to sign, and ask before stranding pair proceeds; the teardown runs every step even when one fails, and a failure is shown, not swallowed.
+- `GET /token` waits for the mark alone (it is the sell click's fallback); the header's info may arrive on the page's re-read.
+- A dag-pb logo (not hash-checked against its CID) is cached a day, not a year; only a raw CID's bytes are immutable.
+- One social host table on both sides; `discordapp.com` links are sent as `discord.com`.
+
+Before announcing the account (a check, not a decision): with each of MetaMask, Rabby,
+OKX and the Coinbase extension, on the real host, does it sign the same message the same
+way twice, sign a Chain ID 4663 sign-in without that chain added, and inject under
+`script-src 'self'`? A wallet that fails any of these is refused safely: the passphrase
+vault remains.
