@@ -25,6 +25,7 @@ import WalletTable from './WalletTable.jsx';
 import ImportDialog, { VaultBar } from './ImportDialog.jsx';
 import AccountBar from './AccountBar.jsx';
 import { useStore } from './useStore.js';
+import { leaveAccountTab } from './leaveAccount.js';
 import Toasts from './Toasts.jsx';
 import './dapp.css';
 
@@ -435,40 +436,50 @@ export default function App() {
   );
 
   /**
-   * Lock or disconnect. The account's wallets leave the tab, after the last
-   * changes are saved (or the visitor accepts that they are not). Wallets of a
+   * Lock or disconnect: the account's wallets leave the tab. ui/leaveAccount.js
+   * holds the order and why (save, stop the sync, lock, then keys / rows /
+   * count / positions, each step even if one before it throws). Wallets of a
    * tab that was never unlocked are the visitor's own import: they stay. The
    * sync's stop() tells the positions book to stop saving ('account:locked').
+   * Resolves true only when the tab was emptied cleanly; never rejects.
    */
   const leaveAccount = useCallback(
     async (how) => {
-      const wasOpen = account.get().status === 'unlocked';
-      const s = syncRef.current;
-      if (s) {
-        const r = await s.flush();
-        if (!r.ok && !window.confirm(`Your latest changes are not saved to your account (${r.error || 'not saved'}). Continue? The wallets leave this tab.`)) {
-          return false;
-        }
-        s.stop();
-        syncRef.current = null;
-      }
-      if (how === 'disconnect') await account.disconnect();
-      else await account.lock();
-      if (wasOpen) {
-        clearWallets();
-        // The %-left bars' starting sizes (ui/positions.js, Task 34; absent before it)
-        // name these wallets too: they go with them. The account copy keeps its own.
-        if (realDeps.positions) realDeps.positions.clear();
-        syncOwnAddrs();
+      const out = await leaveAccountTab(how, {
+        account,
+        getSync: () => syncRef.current,
+        dropSync: (s) => {
+          if (syncRef.current === s) syncRef.current = null;
+        },
+        confirm: (text) => window.confirm(text),
+        clearWallets,
         // Every row goes — through removeRows, not the session's reset: a sell
         // still in flight keeps counting until it settles, so unlocking again at
         // once never offers those tokens a second time.
-        const session = sessionRef.current;
-        if (session) session.removeRows(session.view().rows.map((r) => r.address));
+        dropRows: () => {
+          const session = sessionRef.current;
+          if (session) session.removeRows(session.view().rows.map((r) => r.address));
+        },
+        syncOwnAddrs,
+        // The %-left bars' starting sizes (ui/positions.js, Task 34; absent before it)
+        // name these wallets too: they go with them. The account copy keeps its own.
+        forgetPositions: () => {
+          if (realDeps.positions) realDeps.positions.clear();
+        },
+      });
+      if (out.errors.length) {
+        const what = how === 'disconnect' ? 'Disconnect' : 'Lock';
+        toast(
+          out.left
+            ? `${what} done, but this tab did not finish clearing (${errText(out.errors[0])}). Reload the page.`
+            : `${what} stopped: ${errText(out.errors[0])}. Nothing was removed.`,
+          'error'
+        );
+        return false;
       }
-      return true;
+      return out.left;
     },
-    [account, syncOwnAddrs]
+    [account, syncOwnAddrs, toast]
   );
 
   const onAccountAction = useCallback(
