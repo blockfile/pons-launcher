@@ -408,6 +408,10 @@ function createAccountRouter({
     const { sessions, store } = context();
     const session = sessions.verify(token);
     // A vault DELETE revokes every session of its address issued up to that moment.
+    // This reads the revocations as they stand NOW; a DELETE still queued in the
+    // store's write lane has not set one yet, so the store checks again inside the
+    // lane (it is given this session's issuedAt) and answers 401 there. Only this
+    // check clears the cookie — the next request from that session reaches here.
     if (!session || session.issuedAt <= (await store.notBefore(session.address))) {
       res.clearCookie(COOKIE_NAME, COOKIE_OPTIONS);
       return next(noSession());
@@ -521,7 +525,7 @@ function createAccountRouter({
       if (!Number.isSafeInteger(body.baseRev) || body.baseRev < 0) {
         throw new TpError('bad_request', 'baseRev must be the rev you read');
       }
-      const out = await context().store.remove(req.tpSession.address, body.baseRev);
+      const out = await context().store.remove(req.tpSession.address, body.baseRev, { writer: req.tpSession.issuedAt });
       res.clearCookie(COOKIE_NAME, COOKIE_OPTIONS);
       res.json(out);
     })

@@ -436,7 +436,11 @@ list is kept for `TP_VAULT_KEEP_DELETED_DAYS` (30) days under
 `backend/data/tp-accounts/deleted/<address>.<ms>/`, at most two per address in that
 window: the first deletion (never replaced, so a stolen session deleting again
 cannot flush it) and the latest (each new deletion replaces it, so a list made after
-the first deletion is kept by its own). Every list also keeps, as
+the first deletion is kept by its own). `deleted/` has its own share of the disk
+budget (`TP_VAULT_MAX_DELETED_BYTES`, a quarter of the total), so tombstones never
+make a live visitor's save answer 507; when that share is full, expired copies are
+erased first and then the oldest copy that can be spared — an address's latest
+before anyone's first — and the delete itself is never refused. Every list also keeps, as
 `vaults/<address>.json.prev`, the copy from before its latest sign-in session
 started saving, so writes by a stolen session can be undone too, and a deleted
 copy holds that `.prev` beside the list. They are the same ciphertext files, so a
@@ -456,6 +460,10 @@ cp vaults/<address>.json.prev vaults/<address>.json
 chmod 600 vaults/<address>.json
 pm2 restart pons-launcher                             # the store counts its files at start
 ```
+
+The same goes for pruning `deleted/` by hand: the store tallies the directory only
+when it opens, so `pm2 restart pons-launcher` after the `rm` is what makes the freed
+bytes count.
 
 **Local end-to-end check** (an Anvil fork of chain 4663, throwaway wallets, nothing
 touches the real chain): `cd frontend && npm run build`, then

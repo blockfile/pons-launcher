@@ -37,10 +37,23 @@
 //   deleted/0x<40 lower hex>.<ms>/       a deleted list: the same two files, as they
 //                                        were, copied in whole (<ms> = deletion time;
 //                                        at most two per address, first and latest)
-//   revoked.json                         per address, when its sessions were revoked
+//   revoked.log                          one appended line per revocation, last wins
+//   revoked.json                         the compacted snapshot the log is replayed over
 // Paths are built only from a validated lower-case address. Every write is tmp +
 // fsync + rename (retried on Windows' transient EPERM/EBUSY) + a best-effort
 // directory fsync; a deleted/ entry is built under a .tmp name and renamed in whole.
+//
+// A REVOCATION IS AN O(1) WRITE. revoked.log takes ONE ~60-byte line per DELETE
+// (open 'a' + write + fsync), so the cost of a DELETE does not grow with the number of
+// addresses that deleted before it. SIWE identities are free, and a no-op DELETE
+// (nothing stored) still signs the address out, so rewriting the whole map each time
+// was quadratic: at 10 logins/min/IP one attacker parked ~14k revocations a day and
+// every later DELETE stringified all of them ON THE EVENT LOOP (measured: 132 ms at
+// 144k entries, against 1.4 ms for the largest PUT the design allows). The log is
+// compacted into revoked.json — the pruned map, written whole — only when it passes
+// TP_VAULT_REVOKED_LOG_MAX_BYTES (1 MiB, ~17k lines), and the snapshot is written
+// before the log is unlinked, so a crash between the two only replays what the
+// snapshot already holds.
 //
 // NEVER ON THE EVENT LOOP. This store runs in the one pm2 process that also answers
 // /api/tp/broadcast, where latency is the only thing that counts (spec). Every disk
@@ -48,11 +61,11 @@
 // retries synchronously, so a vault save never stalls a sell click.
 //
 // ONE WRITE AT A TIME: the write lane. put(), remove() (and with remove the
-// revoked.json write) and the erasing of expired deleted copies run one after
+// revocation write) and the erasing of expired deleted copies run one after
 // another on a single promise chain: each reads the current record, compares its rev
 // and writes, and the next starts only when it has finished. That keeps the rev
 // check atomic, as a per-address lock would; being store-wide it also keeps the
-// global caps exact and revoked.json whole with no reservation bookkeeping, and it
+// global caps exact and the revocation file whole with no reservation bookkeeping, and it
 // keeps at most ONE libuv threadpool thread busy with vault I/O, so the other three
 // stay free for the DNS lookups and file reads the rest of the server needs. Saves
 // are background work (the page debounces them), so one at a time costs nothing a
@@ -70,8 +83,18 @@
 // TP_VAULT_MAX_ACCOUNTS vaults (5000) and TP_VAULT_MAX_TOTAL_BYTES on disk across
 // every vault, .prev and kept deleted copy (512 MiB): SIWE identities cost nothing
 // to make, so without global caps the disk could be filled. Tallied once when the
-// store opens (on its first use), then kept incrementally. A DELETE is never refused
-// for space: its deleted copy replaces the files it removes.
+// store opens (on its first use), then kept incrementally.
+//
+// TOMBSTONES HAVE THEIR OWN BUDGET. The total splits in two: deleted/ may hold
+// TP_VAULT_MAX_DELETED_BYTES (a quarter of the total, 64 MiB), and LIVE vaults and
+// their .prev files have the rest. A live save is therefore never refused for room
+// another address's deleted copies are holding — before the split, ~768 free
+// identities that each created, saved and deleted a max-size list parked the whole
+// 512 MiB for TP_VAULT_KEEP_DELETED_DAYS and every later save answered 507. A DELETE
+// is still never refused for space: when its copy does not fit, expired copies are
+// erased first and then the oldest copies that can be spared — an address's LATEST
+// copy before anyone's FIRST, so the copy a victim can never replace is the last
+// thing to go.
 
 const crypto = require('node:crypto');
 const fs = require('node:fs');
@@ -98,6 +121,8 @@ const REVOCATION_KEEP_MS = DAY_MS + 60_000;
 const RENAME_RETRY_CODES = new Set(['EPERM', 'EBUSY', 'EACCES']);
 // Writes waiting in (or running on) the lane before the next one is refused.
 const MAX_PENDING_WRITES = 64;
+// revoked.log is compacted into revoked.json past this (~17k lines).
+const REVOKED_LOG_MAX_BYTES = 1024 * 1024;
 
 const posInt = (v, d) => {
   const n = Number(v);
@@ -109,11 +134,17 @@ const days = (v, d) => {
   return Number.isSafeInteger(n) && n >= 0 && n <= 3650 ? n : d;
 };
 
+const MAX_TOTAL_BYTES = posInt(process.env.TP_VAULT_MAX_TOTAL_BYTES, 536870912);
+// Of the total, what deleted/ may hold; the live vaults have the rest.
+const deletedShare = (total) => Math.floor(total / 4);
+
 const VAULT_LIMITS = Object.freeze({
   maxBytes: posInt(process.env.TP_VAULT_MAX_BYTES, 262144),
   maxAccounts: posInt(process.env.TP_VAULT_MAX_ACCOUNTS, 5000),
-  maxTotalBytes: posInt(process.env.TP_VAULT_MAX_TOTAL_BYTES, 536870912),
+  maxTotalBytes: MAX_TOTAL_BYTES,
+  maxDeletedBytes: posInt(process.env.TP_VAULT_MAX_DELETED_BYTES, deletedShare(MAX_TOTAL_BYTES)),
   keepDeletedMs: days(process.env.TP_VAULT_KEEP_DELETED_DAYS, 30) * DAY_MS,
+  revokedLogMaxBytes: posInt(process.env.TP_VAULT_REVOKED_LOG_MAX_BYTES, REVOKED_LOG_MAX_BYTES),
 });
 
 const noop = () => {};
@@ -253,24 +284,40 @@ async function guarded(what, fn) {
  *     beforeCreate() runs inside the lane, only for a write that is about to CREATE a
  *     vault, after every check has passed; it may throw (a TpError) to refuse it,
  *     and then nothing is written
- * remove(address, baseRev)      -> {deleted}: keeps a deleted copy (as the latest of at
- *                                  most two), revokes every session of `address`
+ * remove(address, baseRev, {writer}) -> {deleted}: keeps a deleted copy (as the latest of
+ *                                  at most two), revokes every session of `address`
  * notBefore(address)            -> ms: sessions issued at or before it are revoked (0 = none)
  * deletedCopies(address)        -> [{deletedAt, dir}] of the kept deleted copies, oldest
  *                                  first (none: [])
- * stats()                       -> {accounts, totalBytes, deleted}
- * limits                        -> {maxBytes, maxAccounts, maxTotalBytes, keepDeletedMs} in force
+ * stats()                       -> {accounts, totalBytes, liveBytes, deletedBytes, deleted}
+ * limits                        -> the caps in force
+ *
+ * put() and remove() also refuse, inside the lane, a write whose session was revoked
+ * while it waited: `requireSession` can only read the revocations as they stood when
+ * the request arrived, and the lane is store-wide and FIFO, so any write admitted
+ * while a DELETE was still QUEUED would otherwise run after it under a session that
+ * DELETE has revoked (401 no_session; the cookie is cleared by the next request's
+ * requireSession, which is the only place that holds the response).
  */
 function createVaultStore({ dir, limits = {}, now = Date.now, maxPending = MAX_PENDING_WRITES } = {}) {
   if (!dir) throw new TypeError('createVaultStore: dir is required');
   const lim = { ...VAULT_LIMITS, ...limits };
+  // A caller that narrows the total without saying what deleted/ may have gets the
+  // same share of it that the defaults give.
+  if (limits.maxDeletedBytes === undefined && limits.maxTotalBytes !== undefined) {
+    lim.maxDeletedBytes = deletedShare(lim.maxTotalBytes);
+  }
+  const liveBudget = Math.max(0, lim.maxTotalBytes - lim.maxDeletedBytes);
   const root = path.resolve(dir);
   const vaultDir = path.join(root, 'vaults');
   const deletedDir = path.join(root, 'deleted');
   const revokedFile = path.join(root, 'revoked.json');
+  const revokedLog = path.join(root, 'revoked.log');
 
   let accounts = 0;
-  let totalBytes = 0;
+  let liveBytes = 0; // vaults/ (every .json and .json.prev)
+  let deletedBytes = 0; // deleted/ (the kept copies)
+  let revokedLogBytes = 0;
   const revoked = new Map(); // lower address -> ms
   const deleted = new Map(); // deleted/ dir name -> {address, deletedAt, bytes}
   let nextPurgeAt = Infinity;
@@ -282,7 +329,8 @@ function createVaultStore({ dir, limits = {}, now = Date.now, maxPending = MAX_P
     await fsp.mkdir(vaultDir, { recursive: true, mode: 0o700 });
     await fsp.mkdir(deletedDir, { recursive: true, mode: 0o700 });
     let n = 0;
-    let bytes = 0;
+    let live = 0;
+    let gone = 0;
     for (const ent of await fsp.readdir(vaultDir, { withFileTypes: true })) {
       const p = path.join(vaultDir, ent.name);
       if (ent.name.endsWith('.tmp')) {
@@ -290,7 +338,7 @@ function createVaultStore({ dir, limits = {}, now = Date.now, maxPending = MAX_P
         continue;
       }
       if (!ent.isFile() || !VAULT_FILE_RE.test(ent.name)) continue;
-      bytes += (await fsp.stat(p)).size;
+      live += (await fsp.stat(p)).size;
       if (ent.name.endsWith('.json')) n += 1;
     }
     const kept = new Map();
@@ -304,12 +352,16 @@ function createVaultStore({ dir, limits = {}, now = Date.now, maxPending = MAX_P
       if (!m || !ent.isDirectory()) continue;
       const size = await dirBytes(p);
       kept.set(ent.name, { address: m[1], deletedAt: Number(m[2]), bytes: size });
-      bytes += size;
+      gone += size;
     }
     for (const name of await fsp.readdir(root)) {
       if (name.startsWith('revoked.json.') && name.endsWith('.tmp')) await fsp.unlink(path.join(root, name)).catch(noop);
     }
+    // The compacted snapshot first, then the log replayed over it (last line wins).
     const loaded = new Map();
+    const takeEntry = (a, t) => {
+      if (LOWER_ADDRESS_RE.test(a) && Number.isSafeInteger(t) && t > 0) loaded.set(a, t);
+    };
     const rawRevoked = await readIfExists(revokedFile);
     if (rawRevoked) {
       let parsed = null;
@@ -319,14 +371,28 @@ function createVaultStore({ dir, limits = {}, now = Date.now, maxPending = MAX_P
         parsed = null;
       }
       if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
-        for (const [a, t] of Object.entries(parsed)) {
-          if (LOWER_ADDRESS_RE.test(a) && Number.isSafeInteger(t) && t > 0) loaded.set(a, t);
+        for (const [a, t] of Object.entries(parsed)) takeEntry(a, t);
+      }
+    }
+    const rawLog = await readIfExists(revokedLog);
+    revokedLogBytes = rawLog ? rawLog.length : 0;
+    if (rawLog) {
+      for (const line of rawLog.toString('utf8').split('\n')) {
+        if (!line) continue;
+        let entry = null;
+        try {
+          entry = JSON.parse(line);
+        } catch (_err) {
+          continue; // a torn last line: the rest of the log still counts
         }
+        if (entry && typeof entry === 'object') takeEntry(entry.a, entry.t);
       }
     }
     accounts = n;
-    totalBytes = bytes;
+    liveBytes = live;
+    deletedBytes = gone;
     for (const [a, t] of loaded) revoked.set(a, t);
+    pruneRevoked();
     for (const [name, d] of kept) deleted.set(name, d);
     await purgeExpired();
   }
@@ -346,7 +412,7 @@ function createVaultStore({ dir, limits = {}, now = Date.now, maxPending = MAX_P
     const d = deleted.get(name);
     await fsp.rm(path.join(deletedDir, name), { recursive: true, force: true });
     deleted.delete(name);
-    totalBytes -= d.bytes;
+    deletedBytes -= d.bytes;
   }
 
   /** Erase every kept deleted copy older than keepDeletedMs (all of them at 0). */
@@ -441,12 +507,27 @@ function createVaultStore({ dir, limits = {}, now = Date.now, maxPending = MAX_P
     return r ? { rev: r.rev, updatedAt: r.updatedAt, keyId: r.keyId, bytes: Buffer.byteLength(r.ct, 'base64') } : null;
   }
 
+  /**
+   * A session that a DELETE revoked while this write waited in the lane. Read straight
+   * from the map, not through notBefore(): that ages a revocation out after
+   * REVOCATION_KEEP_MS, and here stricter is right (pruneRevoked keeps the map bounded
+   * on the same schedule, so nothing grows).
+   */
+  function refuseRevoked(a, writer) {
+    if (writer <= (revoked.get(a) || 0)) throw new TpError('no_session', 'not signed in', 401);
+  }
+
+  function requireWriter(what, writer) {
+    if (!Number.isSafeInteger(writer) || writer <= 0) {
+      throw new TypeError(`vaultStore.${what}: writer must be the session issue time (ms)`);
+    }
+  }
+
   async function put(address, input, { writer, beforeCreate } = {}) {
     const a = lower(address);
-    if (!Number.isSafeInteger(writer) || writer <= 0) {
-      throw new TypeError('vaultStore.put: writer must be the session issue time (ms)');
-    }
+    requireWriter('put', writer);
     return inLane('write', async () => {
+      refuseRevoked(a, writer);
       if (now() >= nextPurgeAt) await purgeExpired();
       const { file, raw: oldRaw, record: old } = await current(a);
       const rev = old ? old.rev : 0;
@@ -473,29 +554,54 @@ function createVaultStore({ dir, limits = {}, now = Date.now, maxPending = MAX_P
       let delta = raw.length - (old ? oldRaw.length : 0);
       if (rotate) delta += oldRaw.length - oldPrevSize;
       if (!old && accounts >= lim.maxAccounts) throw storeFull();
-      if (delta > 0 && totalBytes + delta > lim.maxTotalBytes) {
-        await purgeExpired();
-        if (totalBytes + delta > lim.maxTotalBytes) throw storeFull();
-      }
+      // Only what is LIVE is charged here: another address's deleted copies have their
+      // own budget and can never refuse this save.
+      if (delta > 0 && liveBytes + delta > liveBudget) throw storeFull();
       if (!old && beforeCreate) beforeCreate();
       // Each tally update follows the write it accounts for: a failure between the two
       // writes leaves the files and the tally consistent.
       if (rotate) {
         await writeFileAtomic(prevFile, oldRaw);
-        totalBytes += oldRaw.length - oldPrevSize;
+        liveBytes += oldRaw.length - oldPrevSize;
       }
       await writeFileAtomic(file, raw);
-      totalBytes += raw.length - (old ? oldRaw.length : 0);
+      liveBytes += raw.length - (old ? oldRaw.length : 0);
       if (!old) accounts += 1;
       return { rev: record.rev, updatedAt: record.updatedAt, created: !old };
     });
   }
 
-  // Runs inside the lane only (remove), so two revocations never race for the file.
-  async function persistRevoked() {
+  /** Forget revocations older than any session that could still be live. */
+  function pruneRevoked() {
     const t = now();
     for (const [a, at] of revoked) if (at < t - REVOCATION_KEEP_MS) revoked.delete(a);
-    await writeFileAtomic(revokedFile, JSON.stringify(Object.fromEntries(revoked)));
+  }
+
+  /**
+   * Runs inside the lane only (remove), so two revocations never race for the file.
+   * ONE appended line, whatever the size of the map: see the header. The whole map is
+   * written only when the log has grown past its cap, and the snapshot lands before
+   * the log goes, so a crash in between replays lines the snapshot already holds.
+   */
+  async function persistRevoked(a, t) {
+    const line = `${JSON.stringify({ a, t })}\n`;
+    if (revokedLogBytes + line.length > lim.revokedLogMaxBytes) {
+      pruneRevoked();
+      await writeFileAtomic(revokedFile, JSON.stringify(Object.fromEntries(revoked)));
+      await fsp.unlink(revokedLog).catch(noop);
+      revokedLogBytes = 0;
+      return;
+    }
+    const fresh = revokedLogBytes === 0;
+    const fh = await fsp.open(revokedLog, 'a', 0o600);
+    try {
+      await fh.writeFile(line);
+      await fh.sync();
+    } finally {
+      await fh.close();
+    }
+    revokedLogBytes += line.length;
+    if (fresh) await fsyncDir(root);
   }
 
   /** The kept deleted copies of `a`, oldest first. */
@@ -506,10 +612,50 @@ function createVaultStore({ dir, limits = {}, now = Date.now, maxPending = MAX_P
   }
 
   /**
+   * Room in the deleted budget for `bytes`, so a DELETE is never refused for space:
+   * expired copies first, then the oldest copies that can be spared. An address's
+   * LATEST copy goes before anyone's FIRST, because the first is the one nothing
+   * replaces — the copy a victim of a stolen session still has. A copy larger than
+   * the whole budget is kept anyway (one over is better than losing the list).
+   */
+  async function makeDeletedRoom(bytes) {
+    if (deletedBytes + bytes <= lim.maxDeletedBytes) return;
+    await purgeExpired();
+    if (deletedBytes + bytes <= lim.maxDeletedBytes) return;
+    const byAddress = new Map();
+    for (const [name, d] of deleted) {
+      const mine = byAddress.get(d.address) || [];
+      mine.push({ name, ...d });
+      byAddress.set(d.address, mine);
+    }
+    const order = [];
+    for (const mine of byAddress.values()) {
+      mine.sort((x, y) => x.deletedAt - y.deletedAt);
+      for (const d of mine.slice(1)) order.push({ name: d.name, deletedAt: d.deletedAt, spare: 0 });
+      order.push({ name: mine[0].name, deletedAt: mine[0].deletedAt, spare: 1 });
+    }
+    order.sort((x, y) => x.spare - y.spare || x.deletedAt - y.deletedAt);
+    let erased = 0;
+    let freed = 0;
+    for (const d of order) {
+      if (deletedBytes + bytes <= lim.maxDeletedBytes) break;
+      freed += deleted.get(d.name).bytes;
+      await eraseKept(d.name);
+      erased += 1;
+    }
+    if (erased) {
+      await fsyncDir(deletedDir);
+      // No address: this line is for the operator's disk, not for tracing a visitor.
+      console.error(`[tp] vault store: deleted/ is full — erased ${erased} kept copy(ies), ${freed} bytes`);
+    }
+  }
+
+  /**
    * Copy the list and its .prev into deleted/<a>.<ms>/, in whole (built under a .tmp
    * name). Two deletions of one address in one millisecond get <ms> and <ms + 1>.
    */
   async function keepDeleted(a, curRaw, prevRaw) {
+    await makeDeletedRoom((curRaw ? curRaw.length : 0) + (prevRaw ? prevRaw.length : 0));
     let deletedAt = now();
     while (deleted.has(`${a}.${deletedAt}`)) deletedAt += 1;
     const name = `${a}.${deletedAt}`;
@@ -526,19 +672,22 @@ function createVaultStore({ dir, limits = {}, now = Date.now, maxPending = MAX_P
     await fsyncDir(deletedDir);
     const bytes = (curRaw ? curRaw.length : 0) + (prevRaw ? prevRaw.length : 0);
     deleted.set(name, { address: a, deletedAt, bytes });
-    totalBytes += bytes;
+    deletedBytes += bytes;
     nextPurgeAt = Math.min(nextPurgeAt, deletedAt + lim.keepDeletedMs);
   }
 
-  async function remove(address, baseRev) {
+  async function remove(address, baseRev, { writer } = {}) {
     const a = lower(address);
+    requireWriter('remove', writer);
     return inLane('delete', async () => {
+      refuseRevoked(a, writer);
       const { file, raw: oldRaw, record: old } = await current(a);
       const rev = old ? old.rev : 0;
       if (baseRev !== rev) throw conflict(rev);
       // Revoke first: if that cannot be written, nothing is deleted.
-      revoked.set(a, now());
-      await persistRevoked();
+      const at = now();
+      revoked.set(a, at);
+      await persistRevoked(a, at);
       await purgeExpired();
       const prevFile = `${file}.prev`;
       const prevRaw = await readIfExists(prevFile);
@@ -558,11 +707,11 @@ function createVaultStore({ dir, limits = {}, now = Date.now, maxPending = MAX_P
       }
       if (prevRaw) {
         await fsp.unlink(prevFile);
-        totalBytes -= prevRaw.length;
+        liveBytes -= prevRaw.length;
       }
       if (old) {
         await fsp.unlink(file);
-        totalBytes -= oldRaw.length;
+        liveBytes -= oldRaw.length;
         accounts -= 1;
       }
       await fsyncDir(vaultDir);
@@ -586,7 +735,7 @@ function createVaultStore({ dir, limits = {}, now = Date.now, maxPending = MAX_P
 
   async function stats() {
     await guarded('open', ready);
-    return { accounts, totalBytes, deleted: deleted.size };
+    return { accounts, totalBytes: liveBytes + deletedBytes, liveBytes, deletedBytes, deleted: deleted.size };
   }
 
   return { get, meta, put, remove, notBefore, deletedCopies, stats, limits: Object.freeze(lim) };
@@ -600,4 +749,5 @@ module.exports = {
   VAULT_LIMITS,
   ENVELOPE_VERSION,
   MAX_PENDING_WRITES,
+  REVOKED_LOG_MAX_BYTES,
 };

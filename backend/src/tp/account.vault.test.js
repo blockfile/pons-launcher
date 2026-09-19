@@ -232,6 +232,50 @@ test('DELETE: rev-checked; keeps a deleted copy, clears the cookie and revokes e
   }
 });
 
+test('a PUT that slipped past requireSession while the DELETE was still queued is refused 401', async (t) => {
+  const app = await startApp();
+  try {
+    const w = Wallet.createRandom();
+    const cookie = await login(app.server, w);
+    const a = w.address.toLowerCase();
+    assert.equal((await put(app.server, cookie, envelope(0))).json.rev, 1);
+
+    // An unrelated account's save holds the store's write lane, exactly as any other
+    // visitor's save does on a live box.
+    const real = fs.promises.rename;
+    let release;
+    const gate = new Promise((resolve) => {
+      release = resolve;
+    });
+    t.mock.method(fs.promises, 'rename', async (from, to) => {
+      await gate;
+      return real(from, to);
+    });
+    const otherCookie = await login(app.server, Wallet.createRandom());
+    const busy = put(app.server, otherCookie, envelope(0));
+    await new Promise((r) => setTimeout(r, 50));
+
+    app.clock.t += 1000;
+    const del = call(app.server, 'DELETE', '/api/tp/account/vault', { body: { baseRev: 1 }, cookie });
+    await new Promise((r) => setTimeout(r, 50));
+    // The thief's requireSession runs in the window where the DELETE has not reached
+    // the front of the lane, so it still passes; the store must refuse it anyway.
+    const stolen = put(app.server, cookie, envelope(0, { keyId: KEY_B }));
+    await new Promise((r) => setTimeout(r, 50));
+    release();
+
+    assert.equal((await busy).status, 200);
+    assert.deepEqual((await del).json, { deleted: true });
+    const thief = await stolen;
+    assert.equal(thief.status, 401, JSON.stringify(thief.json));
+    assert.equal(thief.json.code, 'no_session');
+    assert.ok(!fs.existsSync(path.join(app.dir, 'vaults', `${a}.json`)), 'the list did not come back under the thief key');
+    t.mock.restoreAll();
+  } finally {
+    await app.close();
+  }
+});
+
 test('a list saved after a Delete is kept by its own Delete: one phished sign-in deleting it loses neither list', async () => {
   const app = await startApp();
   try {
