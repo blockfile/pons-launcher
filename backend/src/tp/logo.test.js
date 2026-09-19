@@ -306,6 +306,86 @@ test('at most `concurrency` gateway requests are in flight at once', async () =>
   assert.equal(peak, 2);
 });
 
+// ── one visitor cannot own the lane (the wait budget and the per-caller cap) ──
+
+/** A gateway that answers nothing until its own timeout aborts it (it holds its slot). */
+const hangUntilAbort = (init) =>
+  new Promise((_resolve, reject) => {
+    init.signal.addEventListener('abort', () => reject(new Error('aborted')));
+  });
+
+/** A store whose gateways hang, except for one CID gw-a answers at once. */
+function hangingStore(over = {}) {
+  const img = png();
+  const cid = rawCidOf(img);
+  const good = 'https://gw-a.test/ipfs/' + cid;
+  const hang = async (url, init) => (url === good ? new Response(img, { status: 200 }) : hangUntilAbort(init));
+  return { store: store({ fetch: hang, concurrency: 1, waitBudgetMs: 50, ...over }), img, cid };
+}
+
+test('a caller that waits past the budget is shed, and the shed answer is not remembered as a miss', async () => {
+  const { store: s, img, cid } = hangingStore();
+  const dead = Array.from({ length: 3 }, () => rawCidOf(png()));
+  const hogging = dead.map((c) => s.getLogo(c)); // each holds the one slot for ever
+  await new Promise((r) => setTimeout(r, 10));
+  const shed = await s.getLogo(cid);
+  assert.equal(shed.ok, false);
+  assert.equal(shed.shed, true, 'shed, not a verdict on the logo');
+  assert.equal(shed.permanent, false);
+
+  // Nothing was remembered: once the lane frees up the same CID is fetched for real.
+  const free = store({ fetch: fakeFetch({ ['https://gw-a.test/ipfs/' + cid]: async () => new Response(img, { status: 200 }) }) });
+  assert.equal((await free.getLogo(cid)).ok, true);
+  const again = await s.getLogo(cid);
+  assert.ok(again.shed === true || again.ok === true, 'no 10-minute miss was parked for it');
+  hogging.length = 0;
+});
+
+test('the wait budget spans every gateway hop, not one', async () => {
+  const cid = rawCidOf(png());
+  let hops = 0;
+  const hang = async (_url, init) => {
+    hops += 1;
+    return hangUntilAbort(init);
+  };
+  // Its own gateway timeout (1 s) outlasts the budget, so the second gateway is not
+  // even tried: the budget covers the whole request, not one hop of it.
+  const s = store({ fetch: hang, concurrency: 3, waitBudgetMs: 40 });
+  const r = await s.getLogo(cid);
+  assert.equal(r.ok, false);
+  assert.equal(r.shed, true);
+  assert.equal(hops, 1, 'the budget ran out before the next gateway');
+});
+
+test('one visitor cannot hold every slot: a second caller still gets one', async () => {
+  const { store: s, cid } = hangingStore({ concurrency: 3, perCaller: 2, waitBudgetMs: 5_000 });
+  const mine = Array.from({ length: 3 }, () => rawCidOf(png())).map((c) => s.getLogo(c, { by: '1.1.1.1' }));
+  await new Promise((r) => setTimeout(r, 10));
+  const theirs = await s.getLogo(cid, { by: '2.2.2.2' });
+  assert.equal(theirs.ok, true, 'the other visitor was served');
+  const third = await s.getLogo(rawCidOf(png()), { by: '1.1.1.1' });
+  assert.equal(third.shed, true, 'and the first visitor was held to its two');
+  mine.length = 0;
+});
+
+test('callers that join a fetch already in flight are free: they pay no per-caller slot', async () => {
+  const img = png();
+  const cid = rawCidOf(img);
+  let release;
+  const gate = new Promise((r) => {
+    release = r;
+  });
+  const fetch = async () => {
+    await gate;
+    return new Response(img, { status: 200 });
+  };
+  const s = store({ fetch, concurrency: 3, perCaller: 1, waitBudgetMs: 5_000 });
+  const many = [s.getLogo(cid, { by: '1.1.1.1' }), s.getLogo(cid, { by: '1.1.1.1' }), s.getLogo(cid, { by: '1.1.1.1' })];
+  await new Promise((r) => setTimeout(r, 10));
+  release();
+  for (const r of await Promise.all(many)) assert.equal(r.ok, true);
+});
+
 // ── how long bytes are trusted ───────────────────────────────────────────────
 
 test('Cache-Control: immutable only for bytes that hash to their CID; unverified bytes a day', () => {

@@ -16,7 +16,13 @@
 //   curve.phantomQuote()      the curve's virtual quote reserve (v2)
 //   curve.launchSupply()      tokens on the curve at launch (v2)
 // A graduated token's curve is its venue.formerCurve. A slot that fails (a revert) is
-// a null field and IS cached (deterministic); a request that fails is not cached.
+// a null field and IS cached (deterministic). A REQUEST that fails caches nothing —
+// but it is remembered for INFO_RETRY_MS on the PEEK path, the one the stream's stats
+// frames drive: every frame re-peeks, frames are scheduled per open stream on every
+// trade, mark and 15 s ping, and provider.js retries a read four times, so without a
+// cooldown one struggling node turned into an unbounded retry storm on the same
+// 12-slot read lane a sell click's quote uses. readTokenInfo (GET /token, GET /logo:
+// per-IP rate-limited and user-initiated) is NOT held back: it asks again at once.
 //
 // v1 has no launch-time getter (token.launchBlock() is an L1 block number) and v1 is
 // dead: its last launch was at 1786563753 (block 34,788,618, 2026-08-12). A v1 token
@@ -61,6 +67,9 @@ const MAX_CACHE = 5000;
 const MAX_DESCRIPTION = 1000;
 const MAX_SOCIAL = 200;
 const POOL_TTL_MS = 15_000;
+// How long peekInfo stays quiet after a request-level failure. The data is immutable,
+// so there is no freshness cost to waiting.
+const INFO_RETRY_MS = 60_000;
 const LF = 10;
 const LOGO_PATH = '/api/tp/logo/';
 
@@ -73,6 +82,7 @@ const erc20Iface = new Interface(C.ABI.ERC20);
 const cache = new Map(); // token (lower-case) -> TokenInfo (frozen)
 const inflight = new Map(); // token -> Promise<TokenInfo>
 const pools = new Map(); // v1 token -> { at, value, pending, failedAt }
+const infoFailed = new Map(); // token (lower-case) -> ms of the last request-level failure
 
 function providerOf(deps) {
   return deps.provider || providers.tpReadProvider();
@@ -289,11 +299,19 @@ function readTokenInfo(venue, deps = {}) {
   if (hit) return Promise.resolve(hit);
   if (inflight.has(key)) return inflight.get(key);
   const pending = readFresh(venue, deps)
-    .then((info) => {
-      if (!cache.has(key) && cache.size >= MAX_CACHE) cache.delete(cache.keys().next().value);
-      cache.set(key, info);
-      return info;
-    })
+    .then(
+      (info) => {
+        if (!cache.has(key) && cache.size >= MAX_CACHE) cache.delete(cache.keys().next().value);
+        cache.set(key, info);
+        infoFailed.delete(key); // one landed read opens the peek path again
+        return info;
+      },
+      (err) => {
+        if (infoFailed.size >= MAX_CACHE) infoFailed.delete(infoFailed.keys().next().value);
+        infoFailed.set(key, (deps.now || Date.now)());
+        throw err;
+      }
+    )
     .finally(() => inflight.delete(key));
   inflight.set(key, pending);
   return pending;
@@ -308,12 +326,15 @@ function cachedInfo(token) {
  * The cached TokenInfo at once; on a miss, null after starting (or joining) the
  * single-flight read in the background, whose answer a LATER call gets. Never waits,
  * never throws. For the latency paths: GET /token (also the sell click's stale-mark
- * fallback) and the stream's stats.
+ * fallback) and the stream's stats. A request-level failure is remembered, and no new
+ * read is started until INFO_RETRY_MS has passed — the header says why.
  */
 function peekInfo(venue, deps = {}) {
   if (!venue || !venue.token || !venue.kind) return null;
   const hit = cachedInfo(venue.token);
   if (hit) return hit;
+  const failedAt = infoFailed.get(lc(venue.token));
+  if (failedAt !== undefined && (deps.now || Date.now)() - failedAt < INFO_RETRY_MS) return null;
   readTokenInfo(venue, deps).catch(() => {});
   return null;
 }
@@ -455,6 +476,7 @@ function _clearCache() {
   cache.clear();
   inflight.clear();
   pools.clear();
+  infoFailed.clear();
 }
 
 module.exports = {
@@ -472,5 +494,6 @@ module.exports = {
   SOCIAL_HOSTS,
   V1_LAST_LAUNCH_TS,
   POOL_TTL_MS,
+  INFO_RETRY_MS,
   _clearCache,
 };

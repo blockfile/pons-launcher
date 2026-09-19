@@ -120,6 +120,64 @@ test('a read that fails rejects and is not cached; the next load reads again', a
   assert.equal(info.launchedAt, 1789821655);
 });
 
+test('a request-level failure on the PEEK path is not retried until the cooldown passes', async () => {
+  T._clearCache();
+  const chain = v2Chain();
+  let fail = true;
+  let reads = 0;
+  const real = chain.provider.call;
+  chain.provider.call = async (tx) => {
+    reads += 1;
+    if (fail) throw new Error('rpc timeout');
+    return real(tx);
+  };
+  let now = 1_000;
+  const deps = { provider: chain.provider, now: () => now };
+  const ix = {
+    venue: curveVenue,
+    mark: null,
+    stats: () => ({ at: 100, since: 0, price: 1, change: {}, volume: {}, complete: {} }),
+  };
+  // The stream schedules a stats frame after every trade, mark and 15 s ping, on every
+  // open stream: one failed read must not turn into one read per frame for ever.
+  for (let i = 0; i < 5; i++) {
+    T.streamStats(ix, deps);
+    await new Promise((r) => setImmediate(r));
+  }
+  assert.equal(T.cachedInfo(TOKEN), null);
+  assert.equal(reads, 1, 'one attempt, then the cooldown');
+
+  now += T.INFO_RETRY_MS - 1;
+  T.streamStats(ix, deps);
+  await new Promise((r) => setImmediate(r));
+  assert.equal(reads, 1, 'still inside the cooldown');
+
+  now += 1;
+  fail = false;
+  T.streamStats(ix, deps);
+  await new Promise((r) => setImmediate(r));
+  assert.equal(reads, 2, 'one more attempt once it passes');
+  assert.ok(T.cachedInfo(TOKEN), 'and the answer lands');
+  // A read that lands clears the cooldown for good: later frames serve the cache.
+  T.streamStats(ix, deps);
+  assert.equal(reads, 2);
+});
+
+test('GET /token keeps its retry-on-demand: readTokenInfo is not held back by the peek cooldown', async () => {
+  T._clearCache();
+  const chain = v2Chain();
+  let fail = true;
+  const real = chain.provider.call;
+  chain.provider.call = async (tx) => {
+    if (fail) throw new Error('rpc timeout');
+    return real(tx);
+  };
+  const deps = { provider: chain.provider, now: () => 1_000 };
+  await assert.rejects(T.readTokenInfo(curveVenue, deps), /rpc timeout/);
+  fail = false;
+  assert.equal((await T.readTokenInfo(curveVenue, deps)).launchedAt, 1789821655, 'asked again at once');
+});
+
 test('a graduated token reads its launch constants from its former curve', async () => {
   T._clearCache();
   const chain = v2Chain();

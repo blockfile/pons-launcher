@@ -43,6 +43,24 @@
 // a 451 never. One fetch per CID at a time and at most TP_LOGO_CONCURRENCY (default 3)
 // gateway requests in flight process-wide.
 //
+// NOBODY WAITS FOR EVER, AND NOBODY OWNS THE LANE. Those 3 slots are process-wide and
+// a dead CID holds one for the full 4 s + 4 s + 10 s of gateway attempts, so one
+// visitor spending their whole read budget on distinct dead CIDs (120/min) used to
+// outrun the lane (~0.17 CIDs/s) and every other visitor's logo queued behind it with
+// no deadline at all — every timer in this file started only once a slot was granted.
+// Now:
+//   - a request carries a WAIT BUDGET (TP_LOGO_WAIT_MS, 15 s) measured from ARRIVAL and
+//     spanning every gateway hop, since fetchCid takes a fresh slot per gateway;
+//   - at most TP_LOGO_PER_CALLER (2) fetches per caller key (the route passes the
+//     client IP) may be in flight, so one visitor cannot hold all 3 slots. A caller
+//     that JOINS a fetch already in flight pays nothing: it is not more work;
+//   - at most MAX_WAITING callers queue for a slot; past that the next is shed at once.
+// A shed request answers {ok: false, permanent: false, shed: true} and is NEVER
+// remembered as a miss — otherwise queue pressure would park a perfectly good logo for
+// TP_LOGO_RETRY_MS, which is worse than the wait it avoids. GET /logo answers it 404
+// with no-store, exactly as it answers a gateway failure, and the page draws its
+// identicon until the next try.
+//
 // Node's global fetch (undici): no new dependency. Requiring this module starts nothing.
 
 const crypto = require('node:crypto');
@@ -56,7 +74,21 @@ const DEFAULT_GATEWAYS = Object.freeze([
 ]);
 const MIB = 1024 * 1024;
 // Each overridable by its TP_LOGO_* variable (backend/.env.example).
-const DEFAULTS = Object.freeze({ maxBytes: 3 * MIB, cacheBytes: 64 * MIB, retryMs: 10 * 60_000, concurrency: 3 });
+const DEFAULTS = Object.freeze({
+  maxBytes: 3 * MIB,
+  cacheBytes: 64 * MIB,
+  retryMs: 10 * 60_000,
+  concurrency: 3,
+  // Under nginx's 60 s proxy_read_timeout, and over the 18 s a full round of gateway
+  // attempts takes, so a request that is being SERVED is never cut short (and its
+  // failure is still remembered for retryMs); only real queueing runs it out.
+  waitBudgetMs: 25_000,
+  perCaller: 2,
+});
+// Callers queued for a slot before the next is shed at once.
+const MAX_WAITING = 64;
+// What a shed request answers: not a verdict on the logo, so it is never cached.
+const SHED = Object.freeze({ ok: false, permanent: false, reason: 'busy', shed: true });
 const MAX_BYTES_CEILING = 5 * MIB; // pons' own uploader cap: no reason to ever allow more
 const MAX_MISSES = 10_000;
 const DEFAULT_TIMEOUT_MS = 4000;
@@ -122,19 +154,57 @@ function sniffImage(buf) {
   return null;
 }
 
-/** At most `max` calls of fn in flight; the rest wait in arrival order. */
-function createLimiter(max) {
+/**
+ * At most `max` calls of fn in flight; the rest wait in arrival order, each no longer
+ * than its own `deadline` (a wall-clock ms, from the caller's ARRIVAL). A caller that
+ * gives up, or that meets a full queue, gets SHED back instead of running `fn`.
+ */
+function createLimiter(max, { maxWaiting = MAX_WAITING, now = () => Date.now(), setTimeout: st = setTimeout, clearTimeout: ct = clearTimeout } = {}) {
   let active = 0;
-  const queue = [];
-  return async function run(fn) {
-    if (active >= max) await new Promise((resolve) => queue.push(resolve));
-    else active += 1;
+  const queue = []; // {done, resolve}: a waiter that gave up stays until it is skipped
+
+  function release() {
+    while (queue.length) {
+      const w = queue.shift();
+      if (w.done) continue; // gave up: the slot it would have taken is still free
+      w.done = true;
+      w.resolve(true); // the slot passes straight to it, so `active` does not move
+      return;
+    }
+    active -= 1;
+  }
+
+  function take(deadline) {
+    if (active < max) {
+      active += 1;
+      return Promise.resolve(true);
+    }
+    if (queue.length >= maxWaiting) return Promise.resolve(false);
+    const ms = deadline == null ? Infinity : deadline - now();
+    if (!(ms > 0)) return Promise.resolve(false);
+    return new Promise((resolve) => {
+      const w = { done: false, resolve: null };
+      const timer = Number.isFinite(ms)
+        ? st(() => {
+            if (w.done) return;
+            w.done = true;
+            resolve(false);
+          }, ms)
+        : null;
+      w.resolve = (v) => {
+        if (timer) ct(timer);
+        resolve(v);
+      };
+      queue.push(w);
+    });
+  }
+
+  return async function run(fn, { deadline = null } = {}) {
+    if (!(await take(deadline))) return SHED;
     try {
       return await fn();
     } finally {
-      const next = queue.shift();
-      if (next) next();
-      else active -= 1;
+      release();
     }
   };
 }
@@ -176,17 +246,20 @@ function createLogoStore(overrides = {}) {
     cacheBytes: posInt(env.TP_LOGO_CACHE_BYTES, DEFAULTS.cacheBytes),
     retryMs: posInt(env.TP_LOGO_RETRY_MS, DEFAULTS.retryMs),
     concurrency: posInt(env.TP_LOGO_CONCURRENCY, DEFAULTS.concurrency),
+    waitBudgetMs: posInt(env.TP_LOGO_WAIT_MS, DEFAULTS.waitBudgetMs),
+    perCaller: posInt(env.TP_LOGO_PER_CALLER, DEFAULTS.perCaller),
     ...overrides,
   };
   const fromEnv = parseGateways(env.TP_LOGO_GATEWAYS);
   const gateways = deps.gateways || (fromEnv.length ? fromEnv : parseGateways(DEFAULT_GATEWAYS.join(',')));
-  const limit = createLimiter(deps.concurrency);
+  const limit = createLimiter(deps.concurrency, { now: deps.now, setTimeout: deps.setTimeout, clearTimeout: deps.clearTimeout });
 
   // Keyed by the CID, or by 'https:' + the URL for a logo on an https host.
   const hits = new Map(); // key -> {bytes, type, verified, expires}, oldest first
   let held = 0;
   const misses = new Map(); // key -> {until, permanent, reason}
   const inflight = new Map(); // key -> Promise
+  const busyPerCaller = new Map(); // caller key -> fetches of its own in flight
 
   function remember(cid, entry) {
     if (entry.bytes.length > deps.cacheBytes) return;
@@ -244,10 +317,13 @@ function createLogoStore(overrides = {}) {
     }
   }
 
-  async function fetchCid(parsed) {
+  /** Every gateway in turn, inside ONE wait budget: a slot per gateway, but not a queue each. */
+  async function fetchCid(parsed, deadline) {
     let reason = 'no_gateway';
     for (const gw of gateways) {
-      const r = await limit(() => fromGateway(gw, parsed));
+      if (deps.now() >= deadline) return SHED;
+      const r = await limit(() => fromGateway(gw, parsed), { deadline });
+      if (r === SHED) return SHED;
       if (r.ok) return r;
       reason = r.reason;
       if (r.final) return { ok: false, permanent: true, reason };
@@ -260,7 +336,7 @@ function createLogoStore(overrides = {}) {
    * a verified answer for good, an unverified one for UNVERIFIED_TTL_MS, a failure for
    * retryMs (a permanent one for good).
    */
-  function cached(key, load) {
+  function cached(key, load, by) {
     const hit = hits.get(key);
     if (hit) {
       hits.delete(key);
@@ -274,9 +350,16 @@ function createLogoStore(overrides = {}) {
     if (miss && miss.until > deps.now()) {
       return Promise.resolve({ ok: false, permanent: miss.permanent, reason: miss.reason });
     }
+    // Joining a fetch already in flight is free: it is not more work for anyone.
     if (inflight.has(key)) return inflight.get(key);
+    const mine = by == null ? 0 : busyPerCaller.get(by) || 0;
+    if (mine >= deps.perCaller) return Promise.resolve(SHED);
+    if (by != null) busyPerCaller.set(by, mine + 1);
     const pending = load()
       .then((r) => {
+        // A shed request never answered the question, so nothing is remembered for it:
+        // queue pressure must not park a good logo for retryMs.
+        if (r === SHED || r.shed) return SHED;
         if (r.ok) {
           misses.delete(key);
           const expires = r.verified ? Infinity : deps.now() + UNVERIFIED_TTL_MS;
@@ -286,7 +369,13 @@ function createLogoStore(overrides = {}) {
         rememberMiss(key, r);
         return r;
       })
-      .finally(() => inflight.delete(key));
+      .finally(() => {
+        inflight.delete(key);
+        if (by == null) return;
+        const n = (busyPerCaller.get(by) || 1) - 1;
+        if (n > 0) busyPerCaller.set(by, n);
+        else busyPerCaller.delete(by);
+      });
     inflight.set(key, pending);
     return pending;
   }
@@ -296,10 +385,11 @@ function createLogoStore(overrides = {}) {
    * `verified`: the bytes hash to the CID (a raw CID), so they may be cached for good.
    * `permanent`: there will never be an image for this CID (a bad CID, a 451).
    */
-  function getLogo(cidText) {
+  function getLogo(cidText, { by = null } = {}) {
     const parsed = parseCid(cidText);
     if (!parsed) return Promise.resolve({ ok: false, permanent: true, reason: 'bad_cid' });
-    return cached(parsed.cid, () => fetchCid(parsed));
+    const deadline = deps.now() + deps.waitBudgetMs;
+    return cached(parsed.cid, () => fetchCid(parsed, deadline), by);
   }
 
   /** One attempt at an https host's logo through safeFetch: {ok, bytes, type, verified: false} or {reason}. */
@@ -316,10 +406,11 @@ function createLogoStore(overrides = {}) {
    * (safeFetch.js): {ok: true, bytes, type, verified: false} or {ok: false, permanent, reason}.
    * Never verified: held for UNVERIFIED_TTL_MS and served for a day, like dag-pb bytes.
    */
-  function getHttpsLogo(url) {
+  function getHttpsLogo(url, { by = null } = {}) {
     const vetted = safeFetch.vetUrl(url);
     if (!vetted) return Promise.resolve({ ok: false, permanent: true, reason: 'bad_url' });
-    return cached(`https:${vetted.href}`, () => limit(() => fromHttpsHost(vetted.href)));
+    const deadline = deps.now() + deps.waitBudgetMs;
+    return cached(`https:${vetted.href}`, () => limit(() => fromHttpsHost(vetted.href), { deadline }), by);
   }
 
   return { getLogo, getHttpsLogo, gateways, heldBytes: () => held };
@@ -327,14 +418,14 @@ function createLogoStore(overrides = {}) {
 
 let store = null; // built on first use, so requiring this module reads nothing
 
-function getLogo(cid) {
+function getLogo(cid, options) {
   if (!store) store = createLogoStore();
-  return store.getLogo(cid);
+  return store.getLogo(cid, options);
 }
 
-function getHttpsLogo(url) {
+function getHttpsLogo(url, options) {
   if (!store) store = createLogoStore();
-  return store.getHttpsLogo(url);
+  return store.getHttpsLogo(url, options);
 }
 
 module.exports = {
@@ -345,6 +436,8 @@ module.exports = {
   sniffImage,
   DEFAULT_GATEWAYS,
   DEFAULTS,
+  MAX_WAITING,
+  SHED,
   LOGO_HEADERS,
   CACHE_HIT,
   CACHE_HIT_UNVERIFIED,

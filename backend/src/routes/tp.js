@@ -14,7 +14,7 @@
 
 const express = require('express');
 const { TpError, sendError } = require('../tp/errors');
-const { LIMITS, rateLimit, readCost } = require('../tp/limits');
+const { LIMITS, rateLimit, readCost, clientIp } = require('../tp/limits');
 // Called through the module objects (venue.resolveVenue, never destructured) so
 // routes/tp.reads.test.js can stub them per test.
 const venue = require('../tp/venue');
@@ -94,8 +94,17 @@ router.get(
     const info = await tokenInfo.readTokenInfo(v);
     const source = info && info.logo ? info.logo : null;
     let got = { ok: false, permanent: true, reason: 'no_logo' };
-    if (source && source.cid) got = await logo.getLogo(source.cid);
-    else if (source && source.url) got = await logo.getHttpsLogo(source.url);
+    // The caller key holds one visitor to a couple of fetches at a time, so a page of
+    // dead CIDs cannot own every slot; a request that waits past the budget comes back
+    // shed (404, no-store) rather than queueing behind them with no deadline.
+    const by = { by: clientIp(req) };
+    let gone = false;
+    req.on('close', () => {
+      gone = true;
+    });
+    if (source && source.cid) got = await logo.getLogo(source.cid, by);
+    else if (source && source.url) got = await logo.getHttpsLogo(source.url, by);
+    if (gone || res.writableEnded) return undefined; // the visitor left: nothing to send
     res.set(logo.LOGO_HEADERS);
     if (!got.ok) {
       res.set('Cache-Control', got.permanent ? logo.CACHE_NONE_FINAL : logo.CACHE_NONE_RETRY);
