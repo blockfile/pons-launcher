@@ -147,21 +147,41 @@ test("the account's positions arrive over the hub, merge, and every change after
   off();
 });
 
-test('a merge keeps the later position; the same position keeps the higher mark', () => {
+test("a first sighting knows no start: the account's record wins it; the same start keeps the higher mark; a newer position wins", () => {
   const hub = createHub();
   const { b } = book();
   b.connect(hub);
-  b.observe(T, [row(A, 100)]); // startedAt 1000 here
-  hub.emit('account:positions', { positions: { [T]: { [A]: { hwm: '900', seenAt: 500, startedAt: 400 } } } });
-  assert.equal(b.forToken(T)[A].hwm, '100', 'the older position on another device loses');
-  hub.emit('account:positions', { positions: { [T]: { [A]: { hwm: '150', seenAt: 1_000, startedAt: 1_000 } } } });
-  assert.equal(b.forToken(T)[A].hwm, '150', 'same start: the higher mark');
+  b.observe(T, [row(A, 250)]); // first seen already holding: when that position started is not known
+  assert.equal(b.forToken(T)[A].startedAt, 0);
+  hub.emit('account:positions', { positions: { [T]: { [A]: { hwm: '1000', seenAt: 500, startedAt: 400 } } } });
+  assert.equal(b.forToken(T)[A].hwm, '1000', 'the account knows when this position started');
+  assert.equal(leftOf(row(A, 250), b.forToken(T)[A]).left, 0.25, 'the bar reads 25 %, not 100 %');
+  hub.emit('account:positions', { positions: { [T]: { [A]: { hwm: '1200', seenAt: 600, startedAt: 400 } } } });
+  assert.equal(b.forToken(T)[A].hwm, '1200', 'same start: the higher mark');
+  hub.emit('account:positions', { positions: { [T]: { [A]: { hwm: '900', seenAt: 700, startedAt: 400 } } } });
+  assert.equal(b.forToken(T)[A].hwm, '1200', 'a lower mark of the same position changes nothing');
   hub.emit('account:positions', { positions: { [T]: { [A]: { hwm: '20', seenAt: 3_000, startedAt: 3_000, empty: true } } } });
   assert.equal(b.forToken(T)[A].hwm, '20', 'a newer position wins');
   assert.equal(b.forToken(T)[A].empty, true);
   // The plain {hwm, seenAt} shape: it started when it was last seen.
   hub.emit('account:positions', { positions: { [T]: { [B]: { hwm: '70', seenAt: 4_000 } } } });
   assert.deepEqual(b.forToken(T)[B], { hwm: '70', seenAt: 4_000, startedAt: 4_000 });
+});
+
+test('two first sightings of one position keep the higher mark; a position seen to start (empty, then holding) beats both', () => {
+  const hub = createHub();
+  const { b, clock } = book();
+  b.connect(hub);
+  b.observe(T, [row(A, 750)]);
+  hub.emit('account:positions', { positions: { [T]: { [A]: { hwm: '1000', seenAt: 1, startedAt: 0 } } } });
+  assert.equal(b.forToken(T)[A].hwm, '1000', 'the other device saw it earlier, at 1000');
+  clock.t = 2_000;
+  b.observe(T, [row(A, 0)]);
+  clock.t = 3_000;
+  b.observe(T, [row(A, 400)]); // bought again after it was seen empty: a new position, dated
+  assert.deepEqual(b.forToken(T)[A], { hwm: '400', seenAt: 3_000, startedAt: 3_000 });
+  hub.emit('account:positions', { positions: { [T]: { [A]: { hwm: '1000', seenAt: 1, startedAt: 0 } } } });
+  assert.equal(b.forToken(T)[A].hwm, '400', 'the old position never comes back');
 });
 
 test('malformed account positions are ignored, never thrown', () => {

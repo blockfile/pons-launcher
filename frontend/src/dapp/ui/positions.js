@@ -10,7 +10,12 @@
  * A record: {hwm, seenAt, startedAt, empty?}
  *   hwm        base units, a decimal string
  *   seenAt     ms, the last time the page saw the wallet (orders the prune)
- *   startedAt  ms, when this position started (a merge keeps the later one)
+ *   startedAt  ms, when this position started (a merge keeps the later one);
+ *              0 = not known: the wallet was already holding when this page
+ *              first saw it. A first sighting must never beat a record that
+ *              knows its start (the account's, another device's), or a tab
+ *              that first saw a wallet at 25 % would reset its bar to 100 %
+ *              everywhere (Task 37)
  *   empty      true when the last balance seen was 0: the next non-zero
  *              balance starts a new position
  *
@@ -314,7 +319,8 @@ export function createPositionBook({ storage = null, hash, now = () => Date.now(
       }
       if (!rec) {
         if (held > 0n) {
-          memPut(tk, w, { hwm: held.toString(), seenAt: t, startedAt: t });
+          // First seen already holding: when this position started is not known.
+          memPut(tk, w, { hwm: held.toString(), seenAt: t, startedAt: 0 });
           dirty = true;
         }
       } else if (held === 0n) {
