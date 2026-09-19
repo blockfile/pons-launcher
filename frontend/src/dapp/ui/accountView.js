@@ -19,6 +19,24 @@ const STEP_TEXT = {
   deleting: 'Deleting the saved copy…',
 };
 
+/**
+ * Is the account SAVING right now? What Import asks before it takes the passphrase
+ * option away and promises "Saved to your account automatically".
+ *
+ * Only three codes ever reach state 'blocked'; every other failure parks the sync in
+ * state 'error', and 'no_session' (the session cookie of a tab left open past 24 h) is
+ * not even retryable, so nothing will save until the visitor signs in again —
+ * meanwhile acct.status stays 'unlocked', because account.js only learns the cookie
+ * died on resume or an explicit action. Anything but a healthy sync therefore counts
+ * as NOT saving: the cost of being wrong that way is a second copy on this device,
+ * which the strip's move-form merges back; the cost of being wrong the other way is
+ * freshly imported keys that nothing ever stored.
+ */
+export function accountSaving(acct, sync) {
+  if (!acct || acct.status !== 'unlocked' || !sync) return false;
+  return sync.state !== 'blocked' && sync.state !== 'error';
+}
+
 function syncText(sync) {
   if (!sync) return '';
   switch (sync.state) {

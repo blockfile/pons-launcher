@@ -16,11 +16,15 @@ import { errText } from './format.js';
  * says so, with the count. It never replaces a saved copy this tab has not
  * unlocked (another tab's save, or one kept after Clear): that is refused.
  *
- * With the account unlocked (accountSaves) the import is saved to the account's
- * encrypted copy on its own (account/vaultSync.js follows walletStore), so the
- * passphrase option is not offered: one saved copy, not two.
+ * With the account unlocked AND ITS SYNC HEALTHY (accountSaves) the import is saved
+ * to the account's encrypted copy on its own (account/vaultSync.js follows
+ * walletStore), so the passphrase option is not offered: one saved copy, not two.
+ * When the sync is parked on a failure instead — a session cookie that died in a tab
+ * left open past 24 hours does not retry — accountSaves is false, `accountTrouble`
+ * says why, and the checkbox comes back: this dialog must never promise a save
+ * nothing is going to make, least of all as fresh keys enter the tab.
  */
-export default function ImportDialog({ vault = 'none', walletCount = 0, accountSaves = false, onClose, onImported }) {
+export default function ImportDialog({ vault = 'none', walletCount = 0, accountSaves = false, accountTrouble = '', onClose, onImported }) {
   const vaultLocked = vault === 'locked';
   const textRef = useRef(null);
   const fileRef = useRef(null);
@@ -106,7 +110,7 @@ export default function ImportDialog({ vault = 'none', walletCount = 0, accountS
       pass = '';
       clearFields();
       setRejects(bad);
-      onImported({ added, duplicates, rejected: bad.length, saved, saveError });
+      onImported({ added, duplicates, rejected: bad.length, saved, saveError, accountSaves });
       if (saveError) setError(`Imported for this tab only — not saved on this device: ${saveError}`);
       else if (!bad.length) onClose();
     } catch (e) {
@@ -158,10 +162,17 @@ export default function ImportDialog({ vault = 'none', walletCount = 0, accountS
               Saved to your account automatically, encrypted in this browser before it is sent.
             </p>
           ) : (
-            <label className="check">
-              <input type="checkbox" checked={remember} disabled={vaultLocked} onChange={(e) => setRemember(e.target.checked)} />
-              Remember on this device — every wallet in this tab ({walletCount} already here, plus these), encrypted with a passphrase
-            </label>
+            <>
+              {accountTrouble && (
+                <p className="refusal" data-testid="import-account-trouble">
+                  Your account is not saving right now: {accountTrouble} — keep a copy on this device.
+                </p>
+              )}
+              <label className="check">
+                <input type="checkbox" checked={remember} disabled={vaultLocked} onChange={(e) => setRemember(e.target.checked)} />
+                Remember on this device — every wallet in this tab ({walletCount} already here, plus these), encrypted with a passphrase
+              </label>
+            </>
           )}
           {vaultLocked && !accountSaves && <p className="hint">Unlock the wallets saved on this device first — saving now would replace them.</p>}
           {remember && !vaultLocked && !accountSaves && (

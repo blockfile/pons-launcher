@@ -489,7 +489,10 @@ export function createVaultSync({
     if (timer !== null) clearT(timer);
     const t = now();
     if (dueBy === null) dueBy = t + MAX_WAIT_MS;
-    if (rev !== null && status.state !== 'saving') report({ state: 'pending' });
+    // Never over a parked failure: the strip would read "saving…" for the whole
+    // debounce at exactly the moment new keys arrive, which is when the visitor most
+    // needs to see that the account is NOT saving.
+    if (rev !== null && status.state !== 'saving' && status.state !== 'error') report({ state: 'pending' });
     timer = setT(
       () => {
         timer = null;

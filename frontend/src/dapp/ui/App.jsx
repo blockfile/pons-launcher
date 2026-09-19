@@ -26,6 +26,7 @@ import WalletTable from './WalletTable.jsx';
 import ImportDialog, { VaultBar } from './ImportDialog.jsx';
 import AccountBar from './AccountBar.jsx';
 import { leaveWarning, leavingText, pausedReason, waitForQuiet, waitingText } from './leaveGate.js';
+import { accountSaving } from './accountView.js';
 import { useStore } from './useStore.js';
 import { leaveAccountTab } from './leaveAccount.js';
 import Toasts from './Toasts.jsx';
@@ -84,6 +85,8 @@ export default function App() {
   const discovered = useStore(discovery);
   const syncRef = useRef(null);
   const [sync, setSync] = useState(null);
+  // An import the account promised to save, still waiting for that save to land.
+  const importSaveRef = useRef(false);
   const [syncGen, setSyncGen] = useState(0); // +1 restarts the sync for the same key
   // A Lock / Disconnect / Switch waiting for what the tab still has to sign
   // (leaveWhenQuiet): {how, text, final} for the strip, and the ticket that
@@ -363,8 +366,11 @@ export default function App() {
   }, [account, book, syncOwnAddrs, toast]);
 
   const onImported = useCallback(
-    ({ added, duplicates, rejected, saved = 0, saveError = '' }) => {
+    ({ added, duplicates, rejected, saved = 0, saveError = '', accountSaves = false }) => {
       const list = syncOwnAddrs();
+      // The dialog said the account would save these: watch that it does, and say so
+      // in the same words as the strip if it does not.
+      importSaveRef.current = accountSaves;
       if (saved > 0) setVault('unlocked');
       const dup = duplicates ? `, ${duplicates} already here` : '';
       const bad = rejected ? `, ${rejected} rows refused` : '';
@@ -374,6 +380,17 @@ export default function App() {
     },
     [loadInto, syncOwnAddrs, toast]
   );
+
+  // An import the dialog promised the account would save: if that save then fails,
+  // the toast says so, since the green "N wallets added" says nothing about it.
+  useEffect(() => {
+    if (!importSaveRef.current || !sync) return;
+    if (sync.state === 'saved') importSaveRef.current = false;
+    else if (sync.state === 'error' || sync.state === 'blocked') {
+      importSaveRef.current = false;
+      toast(`not saved to your account: ${sync.error}`, 'error');
+    }
+  }, [sync, toast]);
 
   // Another tab of this page saved, replaced or deleted the vault.
   useEffect(() => {
@@ -746,7 +763,14 @@ export default function App() {
             </a>
           </footer>
           {importOpen && (
-            <ImportDialog vault={vault} walletCount={walletCount} accountSaves={acct.status === 'unlocked' && !!sync && sync.state !== 'blocked'} onClose={closeImport} onImported={onImported} />
+            <ImportDialog
+              vault={vault}
+              walletCount={walletCount}
+              accountSaves={accountSaving(acct, sync)}
+              accountTrouble={acct.status === 'unlocked' && sync && !accountSaving(acct, sync) ? sync.error : ''}
+              onClose={closeImport}
+              onImported={onImported}
+            />
           )}
           <Toasts hub={hub} />
         </div>

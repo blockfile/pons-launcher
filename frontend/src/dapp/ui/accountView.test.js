@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { accountView } from './accountView.js';
+import { accountView, accountSaving } from './accountView.js';
 
 const A = '0x1111111111111111111111111111111111111111';
 const B = '0x2222222222222222222222222222222222222222';
@@ -100,4 +100,26 @@ test('without a leave the strip is exactly as before', () => {
   const acct = { ...base, status: 'unlocked', address: A, walletAddress: A };
   assert.deepEqual(accountView({ acct, sync: { state: 'saved' }, leaving: null }), accountView({ acct, sync: { state: 'saved' } }));
   assert.deepEqual(ids(accountView({ acct, sync: { state: 'saved' }, leaving: null })), ['lock', 'disconnect', 'delete']);
+});
+
+// ── is the account actually saving? (what Import asks before it hides the checkbox) ──
+test('accountSaving: only an unlocked account whose sync is healthy counts as saving', () => {
+  const unlocked = { ...base, status: 'unlocked', address: A };
+  assert.equal(accountSaving(unlocked, { state: 'saved', rev: 3, error: '', code: '' }), true);
+  assert.equal(accountSaving(unlocked, { state: 'saving', rev: 3, error: '', code: '' }), true);
+  assert.equal(accountSaving(unlocked, { state: 'pending', rev: 3, error: '', code: '' }), true);
+  assert.equal(accountSaving(unlocked, { state: 'loading', rev: 0, error: '', code: '' }), true, 'a new account is still opening, not broken');
+  assert.equal(accountSaving(unlocked, null), false);
+  assert.equal(accountSaving({ ...base, status: 'locked', address: A }, { state: 'saved' }), false);
+
+  // The case the import dialog promised a save it could not make: the session cookie
+  // died in an open tab, so the PUT got 401 and the sync parked. It is not retryable,
+  // so nothing will save; acct.status stays 'unlocked' until the next resume.
+  assert.equal(accountSaving(unlocked, { state: 'error', code: 'no_session', error: 'Your sign-in expired' }), false);
+  // Every other unhealthy state too, retryable ones included: a second copy on this
+  // device costs little, and the move-form merges it back.
+  for (const code of ['network', 'rate_limited', 'too_large', 'unavailable'])
+    assert.equal(accountSaving(unlocked, { state: 'error', code, error: 'x' }), false, code);
+  for (const code of ['key_mismatch', 'undecryptable', 'unreadable'])
+    assert.equal(accountSaving(unlocked, { state: 'blocked', code, error: 'x' }), false, code);
 });

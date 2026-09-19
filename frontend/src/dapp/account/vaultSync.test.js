@@ -525,6 +525,23 @@ test('a network failure retries with backoff; a 401 waits for retry() after a ne
   assert.equal(acct.server.vaults.get(acct.owner.toLowerCase()).rev, 3);
 });
 
+test('a parked failure is not painted over with "saving…" by the next change', async () => {
+  const acct = await account();
+  const d = device(acct);
+  await d.sync.load();
+  await d.sync.flush();
+  acct.server.expireSession();
+  d.keys.add(fresh(1));
+  assert.equal((await d.sync.flush()).code, 'no_session');
+  assert.equal(d.last().state, 'error');
+  // More keys arrive (an import). The strip must keep saying the account is NOT
+  // saving: nothing is scheduled and nothing will save until a new sign-in.
+  d.keys.add(fresh(40));
+  await new Promise((r) => setImmediate(r));
+  assert.equal(d.last().state, 'error', 'still the failure, not "saving…"');
+  assert.equal(d.last().code, 'no_session');
+});
+
 test('saves are paced: at most one scheduled save per MIN_SAVE_GAP_MS, and a steady stream of changes still saves by MAX_WAIT_MS', async () => {
   const acct = await account();
   const clock = fakeClock(1000);
