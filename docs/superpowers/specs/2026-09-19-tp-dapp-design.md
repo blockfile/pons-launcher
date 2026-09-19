@@ -250,6 +250,15 @@ nothing sits between a click and the network call.
   throwaway wallets buy a real pons curve token and a graduated one; the dApp served
   by a backend pointed at the fork; Playwright imports the wallets, loads, sells 25 %,
   50 % and 100 %; balances and ETH received checked on-chain.
+- **v2 account, a real browser against the real backend** (no chain): the built page
+  served by `server.js` behind a recording tap on `http://127.0.0.1:3199`, with
+  `TP_SIWE_ORIGIN` and a scratch `TP_ACCOUNTS_DIR`; Playwright connects an injected
+  EIP-6963 wallet, signs in, unlocks (twice), imports, reloads with no signature,
+  locks, unlocks, signs in on a second device, disconnects, and is refused with a
+  wallet that signs differently each time. The tap checks what the browser sent
+  (Origin, Sec-Fetch-Site, no Referer, the `__Host-` cookie, exact bodies); no body,
+  stored file or log line holds a key or the unlock signature; the stored copy opens
+  to exactly the imported wallets (`backend/scripts/tp-account-browser.js`).
 - **Size budget:** the dApp's first load (without the lazy three.js chunk) stays under
   250 KB gzipped.
 

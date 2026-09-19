@@ -476,6 +476,18 @@ serving the fork block's state within minutes, so a run that has to read much ne
 state late can fail on the fork's side ("historical state ... is not available" in
 `anvil.log`, kept with `-- --keep`): run it again.
 
+**The account in a real browser** (no chain, no fork): `cd frontend && npm run build`,
+then `cd backend && npm run tp:account-browser`. It serves the built page from the
+real backend on `http://127.0.0.1:3199` (`TP_SIWE_ORIGIN` set to that origin,
+`TP_ACCOUNTS_DIR` in its scratch dir) behind a recording tap, and holds a throwaway
+wallet for the page (`HOLD signer`). A browser then connects, signs in, unlocks,
+imports, reloads, locks, unlocks, signs in on a second device and disconnects (the
+Playwright steps are in the v2 plan, Task 41). When you create the STOP file it
+names, it checks what the browser sent (Origin, Sec-Fetch-Site, the `__Host-`
+cookie, the exact bodies), that no request, stored file or log line holds a key or
+the unlock signature, and that the stored copy opens to exactly the imported
+wallets. Its judge is tested offline: `cd backend && node --test scripts/lib/tpWireAudit.test.js`.
+
 ## Verified on-chain
 
 Checked against the live contracts on 2026-07-25, not assumed:
