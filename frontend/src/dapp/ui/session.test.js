@@ -1879,3 +1879,70 @@ test("a periodic read keeps a row's landed status and tops up a wallet whose bal
   assert.equal(rows.get(B).tokens, '4000000');
   assert.deepEqual(h.log.broadcast.at(-1), [`raw|${B}|9|approve`], 'B tops up its approval (spec decision 6)');
 });
+
+// ── the periodic read also finds imported wallets that bought after the load ──
+
+/** Advance the page clock by `ms` in 20 s steps, ticking after each, as the page's 1 s timer would. */
+async function tickFor(h, ms) {
+  for (let left = ms; left > 0; left -= 20_000) {
+    h.advance(Math.min(20_000, left));
+    h.s.tick();
+    await flush();
+  }
+}
+
+test('once a minute the periodic read also looks at the imported wallets not listed: one that bought is listed, ticked and armed', async () => {
+  const h = harness({
+    venue: { ...CURVE, symbol: 'PONS' },
+    states: [wallet(A, { tokenBalance: '1000000', allowance: '5000000' }), wallet(C, { tokenBalance: '0', nonce: 4 })],
+  });
+  await h.s.loadWallets([A, C]);
+  assert.deepEqual(h.s.view().rows.map((r) => r.address), [A], 'C held nothing at the load');
+  h.byAddr.get(C).tokenBalance = '2000000'; // C buys while the page is open
+  await tickFor(h, 40_000);
+  assert.deepEqual(h.log.wallets.slice(-2), [[A], [A]], 'every 20 s: the listed rows only');
+  await tickFor(h, 20_000);
+  assert.deepEqual(h.log.wallets.at(-1), [A, C], '60 s after the load: the wallets not listed ride along');
+  const rows = h.s.view().rows;
+  assert.deepEqual(rows.map((r) => r.address), [A, C]);
+  assert.equal(rows[1].ticked, true, 'ticked, as a load lists it');
+  assert.equal(rows[1].tokens, '2000000');
+  assert.deepEqual(h.log.broadcast.at(-1), [`raw|${C}|4|approve`], 'and armed, at its own nonce');
+  assert.ok(h.toasts.some((t) => t.message === '1 imported wallet now holds PONS: listed and ticked'));
+  await tickFor(h, 20_000);
+  assert.deepEqual(h.log.wallets.at(-1), [A, C], 'listed now: read every 20 s with the others');
+});
+
+test('a wallet that still holds nothing stays unlisted and costs one look a minute; a load resets the minute', async () => {
+  const h = harness({ venue: CURVE, states: [wallet(A, { tokenBalance: '1000000', allowance: '5000000' }), wallet(C, { tokenBalance: '0' })] });
+  await h.s.loadWallets([A, C]);
+  await tickFor(h, 60_000);
+  assert.deepEqual(h.log.wallets.at(-1), [A, C]);
+  assert.deepEqual(h.s.view().rows.map((r) => r.address), [A], 'still nothing: not listed');
+  assert.equal(h.toasts.length, 0);
+  await tickFor(h, 40_000);
+  assert.deepEqual(h.log.wallets.slice(-2), [[A], [A]]);
+  await h.s.loadWallets([A, C]); // Refresh: a full read of every imported wallet
+  const reads = h.log.wallets.length;
+  await tickFor(h, 40_000);
+  assert.deepEqual(h.log.wallets.slice(reads), [[A], [A]], 'the minute starts again after a load');
+});
+
+test('with no row listed at all, the look still runs once a minute; at most 100 wallets a round, taken in turn', async () => {
+  const many = Array.from({ length: 150 }, (_, i) => wallet(nth(i)));
+  const h = harness({ venue: CURVE, states: many });
+  await h.s.loadWallets(many.map((w) => w.address));
+  assert.equal(h.s.view().rows.length, 0, 'nobody holds the token');
+  const reads = h.log.wallets.length;
+  await tickFor(h, 40_000);
+  assert.equal(h.log.wallets.length, reads, 'nothing listed and no look due: no read');
+  await tickFor(h, 20_000);
+  const first = h.log.wallets.at(-1);
+  assert.equal(first.length, 100);
+  assert.deepEqual(first, many.slice(0, 100).map((w) => w.address));
+  h.byAddr.get(nth(120)).tokenBalance = '7';
+  await tickFor(h, 60_000);
+  const second = h.log.wallets.at(-1);
+  assert.deepEqual(second, [...many.slice(100), ...many.slice(0, 50)].map((w) => w.address), 'the next round starts where the last stopped');
+  assert.deepEqual(h.s.view().rows.map((r) => r.address), [nth(120)]);
+});

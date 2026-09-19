@@ -91,6 +91,12 @@ const LANDED_SETTLE_MS = 10_000;
 // the wait, up to BALANCE_BACKOFF_MAX_MS; a read that succeeds resets it.
 const BALANCE_EVERY_MS = 20_000;
 const BALANCE_BACKOFF_MAX_MS = 300_000;
+// ...and once a minute that same read also carries the IMPORTED wallets that are
+// not listed (they held nothing at the last load), at most DISCOVER_MAX of them
+// per round, taken in turn: one that bought since is listed, ticked and armed —
+// what Refresh does, without the click. At most 5 more read tokens a minute.
+const DISCOVER_EVERY_MS = 60_000;
+const DISCOVER_MAX = 100;
 // planArm's per-wallet reasons (chain/plan.js SKIP.NO_GAS / SKIP.UNREAD, Task 10).
 const ARM_NO_GAS = SKIP.NO_GAS;
 const ARM_UNREAD = SKIP.UNREAD;
@@ -161,6 +167,9 @@ export function createSession({
   let balanceAt = deps.now();
   let balanceWaitMs = BALANCE_EVERY_MS;
   let balancing = false;
+  // ...and its once-a-minute look at the imported wallets not listed
+  let discoverAt = deps.now();
+  let discoverFrom = 0;
 
   const now = () => deps.now();
   const nowSec = () => Math.floor((deps.now() + clockOffsetMs) / 1000);
@@ -491,6 +500,56 @@ export function createSession({
     return keep;
   }
 
+  /**
+   * A row for a wallet the table does not list yet, from a fresh read of it — or
+   * null when it holds nothing (and no earlier visit's pair proceeds): the table
+   * lists holders only. Ticked, like every row a load lists. Shared by a load and
+   * the periodic read's look at the imported wallets not listed.
+   */
+  function listRow(ws, legs) {
+    const key = lower(ws.address);
+    let bal = 0n;
+    try {
+      bal = BigInt(ws.tokenBalance ?? 0);
+    } catch {
+      bal = 0n;
+    }
+    // Proceeds an earlier visit left in the pair token, checked against this read.
+    const carried = legs ? carriedFrom(ws) : 0n;
+    if (bal <= 0n && carried <= 0n) return null; // the table lists holders (and unconverted proceeds) only
+    const w = {
+      key,
+      address: ws.address,
+      ticked: true,
+      status: 'idle',
+      detail: '',
+      hash: null,
+      inflight: 0n,
+      optimistic: 0n,
+      ops: 0,
+      sendSeq: 0,
+      armTried: false,
+      needsArm: null,
+      gasShort: null,
+      armError: null,
+      landedAt: 0,
+      state: ws,
+    };
+    W.set(key, w);
+    order.push(key);
+    nonces.seed(ws.address, Number(ws.nonce) || 0);
+    if (legs) {
+      const p = pair(key);
+      // The automatic leg leaves the whole balance alone — the visitor's own pair
+      // tokens AND the carried proceeds, which only a Convert click swaps.
+      p.carried = carried;
+      if (ws.pairBalance !== undefined && ws.pairBalance !== null) p.baseline = BigInt(ws.pairBalance);
+    }
+    applyState(w, ws, { exact: true });
+    if (legs && carried > 0n) persistPair(key); // re-dated, at this read's nonce
+    return w;
+  }
+
   async function loadWallets(addresses) {
     const keys = [...new Set((addresses || []).map(lower))].filter((k) => ADDRESS.test(k));
     if (!keys.length) {
@@ -505,51 +564,15 @@ export function createSession({
       throw e;
     }
     balanceAt = now(); // a load is a fresh read: the periodic one waits its full interval
+    discoverAt = now(); // and so does its look at the wallets not listed
     const legs = isPairLeg();
     for (const ws of states) {
       const key = lower(ws && ws.address);
       if (!ADDRESS.test(key)) continue;
       let w = W.get(key);
       if (!w) {
-        let bal = 0n;
-        try {
-          bal = BigInt(ws.tokenBalance ?? 0);
-        } catch {
-          bal = 0n;
-        }
-        // Proceeds an earlier visit left in the pair token, checked against this read.
-        const carried = legs ? carriedFrom(ws) : 0n;
-        if (bal <= 0n && carried <= 0n) continue; // the table lists holders (and unconverted proceeds) only
-        w = {
-          key,
-          address: ws.address,
-          ticked: true,
-          status: 'idle',
-          detail: '',
-          hash: null,
-          inflight: 0n,
-          optimistic: 0n,
-          ops: 0,
-          sendSeq: 0,
-          armTried: false,
-          needsArm: null,
-          gasShort: null,
-          armError: null,
-          landedAt: 0,
-          state: ws,
-        };
-        W.set(key, w);
-        order.push(key);
-        nonces.seed(ws.address, Number(ws.nonce) || 0);
-        if (legs) {
-          const p = pair(key);
-          // The automatic leg leaves the whole balance alone — the visitor's own pair
-          // tokens AND the carried proceeds, which only a Convert click swaps.
-          p.carried = carried;
-          if (ws.pairBalance !== undefined && ws.pairBalance !== null) p.baseline = BigInt(ws.pairBalance);
-        }
-        applyState(w, ws, { exact: true });
-        if (legs && carried > 0n) persistPair(key); // re-dated, at this read's nonce
+        w = listRow(ws, legs);
+        if (!w) continue;
       } else {
         // Loaded again before its sells settled (removeRows): listed again, with
         // those sells still in flight — never its chain balance as sellable.
@@ -1711,6 +1734,16 @@ export function createSession({
     emit();
   }
 
+  /** The imported wallets not listed, at most DISCOVER_MAX, in turn from where the last round stopped. */
+  function unlistedBatch() {
+    const all = [...new Set((deps.store.addresses() || []).map(lower))].filter((k) => ADDRESS.test(k) && !W.has(k));
+    if (!all.length) return [];
+    const start = discoverFrom % all.length;
+    const batch = [...all.slice(start), ...all.slice(0, start)].slice(0, DISCOVER_MAX);
+    discoverFrom = start + batch.length;
+    return batch;
+  }
+
   /**
    * The live holdings' periodic read (spec addendum C): ONE /wallets of the
    * listed rows. A row's balance is taken exactly (a buy raises it) only when
@@ -1719,26 +1752,49 @@ export function createSession({
    * just took; otherwise it can only lower it (applyState). Statuses at rest
    * (idle / ready / skipped) are re-judged; landed, failed, sent and arming are
    * left alone. A wallet whose balance grew past its allowance is topped up by
-   * arm() (spec decision 6) — never one that already tried this load. Rows not
-   * listed (an imported wallet that bought since) are Refresh's job.
+   * arm() (spec decision 6) — never one that already tried this load.
+   *
+   * Once every DISCOVER_EVERY_MS the same read also carries the imported
+   * wallets that are NOT listed (they held nothing at the last load), at most
+   * DISCOVER_MAX of them, taken in turn: one that holds the token now is listed,
+   * ticked and armed exactly as a load lists it (listRow), with a toast saying
+   * so. So a wallet that buys while the page is open appears without Refresh.
    * @returns {Promise<boolean>} whether a read landed
    */
   async function refreshBalances() {
     if (disposed || balancing || venueMoving) return false;
     const keys = order.filter((k) => W.has(k));
-    if (!keys.length) return false;
+    const unlisted = now() - discoverAt >= DISCOVER_EVERY_MS ? unlistedBatch() : [];
+    if (!keys.length && !unlisted.length) return false;
     balancing = true;
     balanceAt = now();
+    if (unlisted.length) discoverAt = now();
     try {
-      const states = await readStates(keys);
+      const states = await readStates([...keys, ...unlisted]);
+      const looked = new Set(unlisted);
+      const legs = isPairLeg();
+      let found = 0;
       for (const ws of states) {
-        const w = W.get(lower(ws && ws.address));
-        if (!w) continue;
+        const key = lower(ws && ws.address);
+        const w = W.get(key);
+        if (!w) {
+          // An imported wallet read because it is not listed: listed now if it holds.
+          const fresh = looked.has(key) ? listRow(ws, legs) : null;
+          if (fresh) {
+            found += 1;
+            rest(fresh);
+          }
+          continue;
+        }
         const quiet = w.ops === 0 && w.inflight === 0n && now() - w.landedAt > LANDED_SETTLE_MS;
         applyState(w, ws, { exact: quiet });
         if (w.ops === 0 && (w.status === 'idle' || w.status === 'ready' || w.status === 'skipped')) rest(w);
       }
       balanceWaitMs = BALANCE_EVERY_MS;
+      if (found) {
+        const what = venue.symbol || 'this token';
+        say(`${found} imported wallet${found === 1 ? ' now holds' : 's now hold'} ${what}: listed and ticked`);
+      }
       emit();
       await arm();
       return true;
