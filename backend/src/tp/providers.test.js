@@ -7,16 +7,50 @@ const { JsonRpcProvider } = require('ethers');
 
 const config = require('../config');
 const shared = require('../evm/provider');
-const { tpSendProvider, tpReadProvider, tpChartProvider, _resetChartProvider, _resetTpProviders } = require('./providers');
+const { tpSendProvider, tpReadProvider, tpReceiptProvider, tpChartProvider, _resetChartProvider, _resetTpProviders } = require('./providers');
 
 test.afterEach(() => {
   delete process.env.TP_CHART_RPC_URL;
   delete process.env.TP_CHART_RPC_TIMEOUT_MS;
   delete process.env.TP_READ_RPC_URL;
   delete process.env.TP_READ_CONCURRENCY;
+  delete process.env.TP_RECEIPT_CONCURRENCY;
   _resetChartProvider();
   _resetTpProviders();
 });
+
+/**
+ * A local JSON-RPC stub. answer(payload) -> {result} | {error} | a Promise of one; every
+ * request is counted in flight while its answer is pending.
+ */
+async function rpcStub(answer) {
+  const state = { active: new Map(), peak: new Map() };
+  const stub = http.createServer((req, res) => {
+    let body = '';
+    req.setEncoding('utf8');
+    req.on('data', (c) => {
+      body += c;
+    });
+    req.on('end', async () => {
+      const p = JSON.parse(body);
+      const m = p.method;
+      state.active.set(m, (state.active.get(m) || 0) + 1);
+      state.peak.set(m, Math.max(state.peak.get(m) || 0, state.active.get(m)));
+      const out = await answer(p);
+      state.active.set(m, state.active.get(m) - 1);
+      res.setHeader('content-type', 'application/json');
+      res.end(JSON.stringify({ jsonrpc: '2.0', id: p.id, ...out }));
+    });
+  });
+  await new Promise((resolve) => stub.listen(0, '127.0.0.1', resolve));
+  state.url = `http://127.0.0.1:${stub.address().port}/`;
+  state.close = async () => {
+    _resetTpProviders();
+    stub.closeAllConnections();
+    await new Promise((resolve) => stub.close(resolve));
+  };
+  return state;
+}
 
 // The public page's load must never reach the console's keep-alive pool: a launch's
 // bundle broadcasts queue FIFO in that agent behind whatever else holds its sockets.
@@ -78,6 +112,66 @@ test('every dApp read waits for one of TP_READ_CONCURRENCY process-wide slots (l
     _resetTpProviders();
     stub.closeAllConnections();
     await new Promise((resolve) => stub.close(resolve));
+  }
+});
+
+// review round 3 (F6): a 100-wallet click's receipt polls (every 250 ms, up to
+// TP_WATCH_MAX hashes) must never be what another visitor's click quote waits behind.
+test('receipt polls have a lane of their own: a read never queues behind them (local stub, no network)', async () => {
+  const held = [];
+  const stub = await rpcStub((p) => {
+    if (p.method === 'eth_getTransactionReceipt') return new Promise((resolve) => held.push(() => resolve({ result: null })));
+    return { result: '0x1' };
+  });
+  try {
+    process.env.TP_READ_RPC_URL = stub.url;
+    process.env.TP_READ_CONCURRENCY = '2';
+    process.env.TP_RECEIPT_CONCURRENCY = '2';
+    const receipts = tpReceiptProvider();
+    assert.notEqual(receipts, tpReadProvider(), 'not the read provider');
+    assert.notEqual(receipts, tpSendProvider());
+    assert.equal(tpReceiptProvider(), receipts, 'one per process');
+    assert.ok(receipts instanceof shared.RetryJsonRpcProvider);
+    assert.notEqual(receipts._getConnection().getUrlFunc, tpReadProvider()._getConnection().getUrlFunc, 'its own socket pool');
+    const polls = Array.from({ length: 10 }, (_, i) => receipts.send('eth_getTransactionReceipt', ['0x' + String(i).repeat(64)]));
+    while (held.length < 2) await new Promise((r) => setTimeout(r, 5));
+    const t0 = Date.now();
+    const quick = await tpReadProvider().send('eth_getBalance', ['0x' + '1'.repeat(40), 'latest']);
+    assert.equal(quick, '0x1');
+    assert.ok(Date.now() - t0 < 1000, 'the read did not wait for the receipt polls');
+    assert.equal(stub.peak.get('eth_getTransactionReceipt'), 2, 'receipt polls take at most TP_RECEIPT_CONCURRENCY slots');
+    while (held.length) {
+      held.shift()();
+      await new Promise((r) => setTimeout(r, 5));
+    }
+    await Promise.all(polls);
+  } finally {
+    for (const f of held) f();
+    await stub.close();
+  }
+});
+
+test('a read waiting out a retry backoff gives its slot back (local stub, no network)', async () => {
+  let refusedOnce = false;
+  const stub = await rpcStub((p) => {
+    if (p.method === 'eth_getBalance' && !refusedOnce) {
+      refusedOnce = true;
+      return { error: { code: -32603, message: 'internal error' } }; // transient: retried after 300 ms
+    }
+    return { result: '0x2' };
+  });
+  try {
+    process.env.TP_READ_RPC_URL = stub.url;
+    process.env.TP_READ_CONCURRENCY = '1';
+    const rpc = tpReadProvider();
+    const order = [];
+    const first = rpc.send('eth_getBalance', ['0x' + '2'.repeat(40), 'latest']).then(() => order.push('retried read'));
+    await new Promise((r) => setTimeout(r, 50));
+    const second = rpc.send('eth_blockNumber', []).then(() => order.push('other read'));
+    await Promise.all([first, second]);
+    assert.deepEqual(order, ['other read', 'retried read'], 'the one slot served another read during the backoff');
+  } finally {
+    await stub.close();
   }
 });
 

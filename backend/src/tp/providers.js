@@ -1,6 +1,6 @@
 'use strict';
 
-// The dApp's three RPC handles. NONE of them is the console's shared provider.
+// The dApp's four RPC handles. NONE of them is the console's shared provider.
 //
 //   tpSendProvider()  — broadcasts. The same RetryJsonRpcProvider class as the console
 //                       (evm/provider.js: a rate-limited broadcast is re-sent, nothing
@@ -12,13 +12,21 @@
 //                       one IP's 40 x /wallets burst), and a late bundle lands in a worse
 //                       snipe-tax tier.
 //   tpReadProvider()  — every public read: wallets, marks, fees, quotes, the venue
-//                       lookups (also those a stream open and a bad_tx re-check make) and
-//                       the receipt polls. Its own pool (TP_READ_MAX_SOCKETS, default 12)
-//                       and a PROCESS-WIDE cap on reads in flight (TP_READ_CONCURRENCY,
+//                       lookups (also those a stream open and a bad_tx re-check make).
+//                       Its own pool (TP_READ_MAX_SOCKETS, default 12) and a
+//                       PROCESS-WIDE cap on requests in flight (TP_READ_CONCURRENCY,
 //                       default 12), applied inside the provider so no call site can
-//                       forget it. Per-IP limits keep visitors fair to each other; only
-//                       this cap bounds a load spread over many addresses.
-//                       TP_READ_RPC_URL points it at another endpoint (default RPC_URL).
+//                       forget it. The cap is taken per HTTP attempt, so a read waiting
+//                       out a retry backoff holds no slot. Per-IP limits keep visitors
+//                       fair to each other; only this cap bounds a load spread over many
+//                       addresses. TP_READ_RPC_URL points it at another endpoint
+//                       (default RPC_URL).
+//   tpReceiptProvider() — the receipt polls ONLY (broadcast.watchReceipts): a 100-wallet
+//                       click polls 100 hashes every 250 ms, and another visitor's click
+//                       quote must never queue behind them. Same endpoint as the reads,
+//                       its own small pool and cap (TP_RECEIPT_MAX_SOCKETS and
+//                       TP_RECEIPT_CONCURRENCY, default 4 each): a slow receipt lane
+//                       costs a receipt latency, never a click.
 //   tpChartProvider() — a SEPARATE JsonRpcProvider for the trade indexer ONLY. Its own
 //                       FetchRequest, its own keep-alive socket pool and its own timeout,
 //                       so a backfill of 10k-block getLogs windows can never hold a socket
@@ -67,33 +75,31 @@ function createLimiter(max) {
   };
 }
 
-/** A RetryJsonRpcProvider whose every JSON-RPC request first takes a limiter slot. */
-class LimitedProvider extends shared.RetryJsonRpcProvider {
-  async _send(payload) {
-    const limit = this._tpLimit;
-    return limit ? limit(() => super._send(payload)) : super._send(payload);
-  }
-}
-
 function agentFor(url, maxSockets) {
   const options = { keepAlive: true, keepAliveMsecs: 10000, maxSockets, maxFreeSockets: Math.min(maxSockets, 16) };
   return /^https:/i.test(url) ? new https.Agent(options) : new http.Agent(options);
 }
 
+/**
+ * A RetryJsonRpcProvider on its own socket pool. `limit`: every HTTP request first
+ * takes one of its slots — per ATTEMPT (the getUrlFunc), so the retry policy's backoff
+ * sleeps (RetryJsonRpcProvider, FetchRequest's 429 throttle) hold none.
+ */
 function ownProvider(url, { maxSockets, timeoutMs, limit = null }) {
   const request = new FetchRequest(url);
   request.timeout = timeoutMs;
   const agent = agentFor(url, maxSockets);
-  request.getUrlFunc = FetchRequest.createGetUrlFunc({ agent });
+  const getUrl = FetchRequest.createGetUrlFunc({ agent });
+  request.getUrlFunc = limit ? (req, signal) => limit(() => getUrl(req, signal)) : getUrl;
   // staticNetwork: no eth_chainId round trip; batchMaxCount 1: some RH nodes mishandle
   // batch arrays (evm/provider.js).
-  const provider = new LimitedProvider(request, CHAIN_ID, { staticNetwork: true, batchMaxCount: 1 });
-  provider._tpLimit = limit;
+  const provider = new shared.RetryJsonRpcProvider(request, CHAIN_ID, { staticNetwork: true, batchMaxCount: 1 });
   return { provider, agent };
 }
 
 let send = null;
 let read = null;
+let receipt = null;
 
 function tpSendProvider() {
   if (!send) {
@@ -115,6 +121,17 @@ function tpReadProvider() {
     });
   }
   return read.provider;
+}
+
+function tpReceiptProvider() {
+  if (!receipt) {
+    receipt = ownProvider(process.env.TP_READ_RPC_URL || config.rpcUrl, {
+      maxSockets: posInt(process.env.TP_RECEIPT_MAX_SOCKETS, 4),
+      timeoutMs: posInt(process.env.TP_READ_RPC_TIMEOUT_MS, 20000),
+      limit: createLimiter(posInt(process.env.TP_RECEIPT_CONCURRENCY, 4)),
+    });
+  }
+  return receipt.provider;
 }
 
 let chartProvider = null;
@@ -143,15 +160,24 @@ function _resetChartProvider() {
   chartAgent = null;
 }
 
-/** Tests only: drop the cached read and send providers and their socket pools. */
+/** Tests only: drop the cached read, receipt and send providers and their socket pools. */
 function _resetTpProviders() {
-  for (const p of [read, send]) {
+  for (const p of [read, receipt, send]) {
     if (!p) continue;
     p.provider.destroy();
     p.agent.destroy();
   }
   read = null;
+  receipt = null;
   send = null;
 }
 
-module.exports = { tpSendProvider, tpReadProvider, tpChartProvider, createLimiter, _resetChartProvider, _resetTpProviders };
+module.exports = {
+  tpSendProvider,
+  tpReadProvider,
+  tpReceiptProvider,
+  tpChartProvider,
+  createLimiter,
+  _resetChartProvider,
+  _resetTpProviders,
+};

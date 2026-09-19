@@ -63,7 +63,11 @@ function fakeIndexer() {
 
 const saved = { ...venueMod };
 const savedIx = { acquire: indexerMod.acquire, release: indexerMod.release };
-const savedProv = { tpSendProvider: providersMod.tpSendProvider, tpReadProvider: providersMod.tpReadProvider };
+const savedProv = {
+  tpSendProvider: providersMod.tpSendProvider,
+  tpReadProvider: providersMod.tpReadProvider,
+  tpReceiptProvider: providersMod.tpReceiptProvider,
+};
 let server;
 let origin;
 let api;
@@ -76,6 +80,7 @@ test.before(async () => {
   indexerMod.release = () => {};
   providersMod.tpSendProvider = () => chain;
   providersMod.tpReadProvider = () => chain;
+  providersMod.tpReceiptProvider = () => chain; // the receipt polls
   const app = express();
   app.use(express.json({ limit: '1mb' }));
   app.use('/api/tp', router);

@@ -548,30 +548,26 @@ test('watchReceipts: a well-formed sid tags every receipt; a malformed one tags 
 });
 
 // ── receipt polls are reads, capped process-wide (review: tp reads share the console pool) ──
-test('watchReceipts polls on the READ provider by default, never the send one', async () => {
+test('watchReceipts polls on the RECEIPT provider by default — never the read lane quotes use, never the send one', async () => {
   const providers = require('./providers');
-  const saved = { read: providers.tpReadProvider, send: providers.tpSendProvider };
+  const saved = { read: providers.tpReadProvider, send: providers.tpSendProvider, receipt: providers.tpReceiptProvider };
   const used = [];
-  providers.tpReadProvider = () => ({
+  const fake = (name, receipt) => () => ({
     async getTransactionReceipt() {
-      used.push('read');
-      return { from: '0x' + 'cd'.repeat(20), status: 1, blockNumber: 3, gasUsed: 21000n };
+      used.push(name);
+      return receipt;
     },
   });
-  providers.tpSendProvider = () => ({
-    async getTransactionReceipt() {
-      used.push('send');
-      return null;
-    },
-  });
+  providers.tpReceiptProvider = fake('receipt', { from: '0x' + 'cd'.repeat(20), status: 1, blockNumber: 3, gasUsed: 21000n });
+  providers.tpReadProvider = fake('read', null);
+  providers.tpSendProvider = fake('send', null);
   try {
     const left = await watchReceipts(TOKEN, ['0x' + 'a7'.repeat(32)], { pollMs: 1, timeoutMs: 100 });
     assert.deepEqual(left, []);
   } finally {
-    providers.tpReadProvider = saved.read;
-    providers.tpSendProvider = saved.send;
+    Object.assign(providers, { tpReadProvider: saved.read, tpSendProvider: saved.send, tpReceiptProvider: saved.receipt });
   }
-  assert.deepEqual(used, ['read']);
+  assert.deepEqual(used, ['receipt']);
 });
 
 test('watchReceipts watches at most maxWatched hashes across ALL calls; the rest are left to the page sweep', async () => {

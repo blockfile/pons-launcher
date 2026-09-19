@@ -605,8 +605,9 @@ let watchedNow = 0;
  * receiptBus as it lands. Fire-and-forget for the route; the returned promise
  * (resolving to the hashes that never landed) exists for tests.
  *
- * The polls are READS (tpReadProvider: its own socket pool and the process-wide read
- * cap), and at most TP_WATCH_MAX hashes are watched at once across ALL calls. A hash
+ * The polls run on tpReceiptProvider: a lane of their own (socket pool and process-wide
+ * cap), so a 100-wallet click's polls never queue another visitor's click quote or
+ * wallet read. At most TP_WATCH_MAX hashes are watched at once across ALL calls. A hash
  * over the cap is simply not watched: the page settles it from its wallet's nonce and
  * balance (its missed-receipt sweep), so dropping it costs latency, never a wrong row.
  *
@@ -615,7 +616,7 @@ let watchedNow = 0;
  * @param {{provider?: object, pollMs?: number, timeoutMs?: number, sid?: string, maxWatched?: number}} [deps]
  */
 function watchReceipts(token, hashes, deps = {}) {
-  const rpc = deps.provider || providers.tpReadProvider();
+  const rpc = deps.provider || providers.tpReceiptProvider();
   const pollMs = deps.pollMs ?? RECEIPT_POLL_MS;
   const timeoutMs = deps.timeoutMs ?? RECEIPT_TIMEOUT_MS;
   const cap = deps.maxWatched ?? MAX_WATCHED;
