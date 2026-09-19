@@ -49,7 +49,19 @@ function StatusCell({ row }) {
 }
 
 function LeftBar({ row, rec }) {
-  const { left, flight } = leftOf(row, rec);
+  const { left, flight, known } = leftOf(row, rec);
+  // A balance this read could not fetch is unknown, not zero: an empty track reads as
+  // "this wallet is done", which is exactly the wrong thing to tell someone watching a
+  // take-profit run. The next read (20 s) fills it in.
+  if (!known) {
+    const label = 'balance not read — the next read fills this in';
+    return (
+      <span className="leftbar" title={label}>
+        <span className="lb-track lb-unknown" role="img" aria-label={label} />
+        <span className="lb-num">&mdash;</span>
+      </span>
+    );
+  }
   const held = left * 100;
   const selling = flight * 100;
   const label = selling > 0 ? `${fmtPct(held, 1)} of the position left, ${fmtPct(selling, 1)} selling` : `${fmtPct(held, 1)} of the position left`;

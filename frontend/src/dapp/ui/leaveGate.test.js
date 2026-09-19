@@ -2,21 +2,26 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { LEAVE_WAIT_MS, inFlight, leaveWarning, leavingText, normalizeWork, pausedReason, waitForQuiet, waitingText } from './leaveGate.js';
 
-const QUIET = { clicks: 0, sending: 0, legs: 0, owed: 0, owedAmount: '0', retryInMs: null, symbol: 'AMZN', decimals: 18 };
+const QUIET = { clicks: 0, sending: 0, legs: 0, owed: 0, owedAmount: '0', stranded: 0, strandedAmount: '0', retryInMs: null, symbol: 'AMZN', decimals: 18 };
 const E18 = '000000000000000000';
 
 test('normalizeWork: missing, negative or garbage fields read as nothing pending', () => {
-  assert.deepEqual(normalizeWork(null), { clicks: 0, sending: 0, legs: 0, owed: 0, owedAmount: '0', retryInMs: null, symbol: null, decimals: 18 });
-  assert.deepEqual(normalizeWork({ clicks: -1, sending: 1.5, legs: 'x', owed: 2, owedAmount: 'lots', retryInMs: -5, symbol: '', decimals: 6 }), {
-    clicks: 0,
-    sending: 0,
-    legs: 0,
-    owed: 2,
-    owedAmount: '0',
-    retryInMs: null,
-    symbol: null,
-    decimals: 6,
-  });
+  assert.deepEqual(normalizeWork(null), { clicks: 0, sending: 0, legs: 0, owed: 0, owedAmount: '0', stranded: 0, strandedAmount: '0', retryInMs: null, symbol: null, decimals: 18 });
+  assert.deepEqual(
+    normalizeWork({ clicks: -1, sending: 1.5, legs: 'x', owed: 2, owedAmount: 'lots', stranded: -2, strandedAmount: {}, retryInMs: -5, symbol: '', decimals: 6 }),
+    {
+      clicks: 0,
+      sending: 0,
+      legs: 0,
+      owed: 2,
+      owedAmount: '0',
+      stranded: 0,
+      strandedAmount: '0',
+      retryInMs: null,
+      symbol: null,
+      decimals: 6,
+    }
+  );
 });
 
 test('inFlight: a click being signed, a wallet still sending or a swap to send holds the leave; owed proceeds alone do not', () => {
@@ -157,4 +162,31 @@ test('waitForQuiet: gives up after the timeout and never sleeps past it', async 
   });
   assert.equal(out, 'timeout');
   assert.deepEqual(naps, [300, 300, 300, 100]);
+});
+
+test('proceeds held by a wallet another device removed are named as stranded, never as retrying', () => {
+  // queuePair, flushPairs and convertPair all refuse a leaving key, so the retry the
+  // owed line promises would never run for it — and the row goes as soon as its last
+  // transaction settles.
+  const work = { ...QUIET, stranded: 1, strandedAmount: (500n * 10n ** 18n).toString() };
+  const text = leaveWarning('lock', work);
+  assert.match(text, /1 wallet removed on another device holds 500 AMZN/);
+  assert.doesNotMatch(text, /retries on its own/);
+  // Side by side with a wallet that IS retrying, and with one still sending.
+  const both = { ...work, owed: 1, owedAmount: (2n * 10n ** 18n).toString(), retryInMs: 12_000, sending: 1 };
+  const t2 = leaveWarning('lock', both);
+  assert.match(t2, /1 wallet still sending/);
+  assert.match(t2, /2 AMZN from sells this page has not turned into ETH yet/);
+  assert.match(t2, /500 AMZN this page can no longer swap/);
+});
+
+test('a wallet that is BOTH sending and holding refused proceeds is counted in both lines', () => {
+  // pendingWork used to classify each wallet with one else-if chain, so a wallet with
+  // a transaction in flight never reached the owed tally: with every owed wallet also
+  // sending, the confirmation named no amount at all before the keys left the tab.
+  const work = { ...QUIET, sending: 1, owed: 1, owedAmount: (500n * 10n ** 18n).toString(), retryInMs: 12_000 };
+  const text = leaveWarning('lock', work);
+  assert.match(text, /1 wallet still sending/);
+  assert.match(text, /1 wallet holds 500 AMZN from sells this page has not turned into ETH yet/);
+  assert.match(text, /retries on its own in 12 s/);
 });

@@ -47,31 +47,56 @@ const SOCIAL = Object.freeze({
 
 /**
  * The token's info, normalised: the one GET /token/:ca brought (App's
- * tokenFacts.info), or — when that was null — ONE re-read INFO_RETRY_MS later.
+ * tokenFacts.info), or — when that was null — a re-read, backing off, until it
+ * lands or INFO_TRIES is out.
+ *
+ * More than one try matters since the server stopped awaiting readTokenInfo: info
+ * null is now the NORMAL answer on a token's first load (the multicall is still in
+ * flight behind the 12-slot read lane, up to a 20 s RPC timeout), not a failure. One
+ * try that also came back null used to leave `known` false with the dep array
+ * unchanged, so React never ran the effect again: no logo, no description and an
+ * em dash for the bonding curve for the rest of the session on that token, even
+ * though the server had the answer a second later.
  */
+const INFO_TRIES = 5;
+
 function useTokenInfo(token, initial) {
   const [state, setState] = useState(() => ({ info: initial ? normalizeInfo(initial) : null, error: '' }));
+  const [attempt, setAttempt] = useState(0);
   const known = state.info !== null;
   useEffect(() => {
-    if (known) return undefined;
+    setAttempt(0);
+  }, [token]);
+  useEffect(() => {
+    if (known || attempt >= INFO_TRIES) return undefined;
     let dead = false;
+    const last = attempt + 1 >= INFO_TRIES;
     const timer = setTimeout(() => {
       api.getToken(token).then(
         (res) => {
           if (dead) return;
           if (res && res.info) setState({ info: normalizeInfo(res.info), error: '' });
-          else setState({ info: null, error: 'the server could not read it' });
+          else {
+            // Only the last try is a failure the header says out loud; before that the
+            // read is simply not back yet.
+            setState({ info: null, error: last ? 'the server could not read it' : '' });
+            setAttempt((n) => n + 1);
+          }
         },
         (e) => {
-          if (!dead) setState({ info: null, error: errText(e) });
+          if (dead) return;
+          setState({ info: null, error: last ? errText(e) : '' });
+          setAttempt((n) => n + 1);
         }
       );
-    }, INFO_RETRY_MS);
+      // The delay grows with the attempt, so a busy read lane is not asked five times
+      // in as many seconds: 5 s, 10 s, 20 s, 40 s.
+    }, INFO_RETRY_MS * 2 ** attempt);
     return () => {
       dead = true;
       clearTimeout(timer);
     };
-  }, [token, known]);
+  }, [token, known, attempt]);
   return state;
 }
 

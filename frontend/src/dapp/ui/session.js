@@ -1396,7 +1396,10 @@ export function createSession({
       const ok = new Set(plan.filter((p) => p && p.reason === SKIP.NO_QUOTE).map((p) => lower(p.address)));
       return list.filter((w) => ok.has(w.key));
     } catch {
-      return list.filter(canSell);
+      // canSellOne, not canSell: `list` is already whatever the caller chose, and a
+      // row's own 25/50/100 sells whether or not the row is ticked (spec decision 15).
+      // The chips pre-filter to ticked wallets, so this is a no-op for them.
+      return list.filter(canSellOne);
     }
   }
 
@@ -1415,30 +1418,58 @@ export function createSession({
    *            impact, no route, a read behind): `owedAmount` is their proceeds
    *            still in the pair token (base units), `retryInMs` the time to the
    *            first retry — which needs the key
+   *   stranded token-quoted venue: the same proceeds held by a wallet ANOTHER
+   *            device removed (`leaving`): queuePair, flushPairs and convertPair
+   *            all refuse it, so its retry will never run and the row goes as
+   *            soon as its last transaction settles. `strandedAmount` is what it
+   *            holds
+   * `legs` and `sending` are what the tab is DOING; `owed` is what it still owes.
+   * A wallet can be both — a sell in flight and proceeds from an earlier refused
+   * leg — so the counts are taken side by side, not in one else-if chain: the
+   * amount about to be stranded must be named whatever else that wallet is doing.
    * An ETH-quoted venue's sells in flight need nothing more from the keys: their
    * receipts settle the rows whether the keys are here or not. Counts only —
    * never an address.
    * @returns {{clicks: number, sending: number, legs: number, owed: number,
-   *   owedAmount: string, retryInMs: number|null, symbol: string|null, decimals: number}}
+   *   owedAmount: string, stranded: number, strandedAmount: string,
+   *   retryInMs: number|null, symbol: string|null, decimals: number}}
    */
   function pendingWork() {
-    const out = { clicks, sending: 0, legs: 0, owed: 0, owedAmount: '0', retryInMs: null, symbol: null, decimals: qDec() };
+    const out = {
+      clicks,
+      sending: 0,
+      legs: 0,
+      owed: 0,
+      owedAmount: '0',
+      stranded: 0,
+      strandedAmount: '0',
+      retryInMs: null,
+      symbol: null,
+      decimals: qDec(),
+    };
     if (!isPairLeg()) return out;
     out.symbol = pairSym();
     const t = now();
     let owedAmount = 0n;
+    let strandedAmount = 0n;
     for (const [k, w] of W) {
       const p = pairs.get(k);
-      if (p && (p.running || pairQueue.has(k))) out.legs += 1;
+      const inLeg = Boolean(p && (p.running || pairQueue.has(k)));
+      if (inLeg) out.legs += 1;
       else if (w.ops > 0) out.sending += 1;
-      else if (p && pendingOf(p) > 0n) {
-        out.owed += 1;
-        owedAmount += pendingOf(p);
-        const wait = Math.max(0, p.retryAt - t);
-        if (out.retryInMs === null || wait < out.retryInMs) out.retryInMs = wait;
+      if (inLeg || !p || pendingOf(p) <= 0n) continue;
+      if (leaving.has(k)) {
+        out.stranded += 1;
+        strandedAmount += pendingOf(p);
+        continue; // no retry is ever queued for it: never counted as owed
       }
+      out.owed += 1;
+      owedAmount += pendingOf(p);
+      const wait = Math.max(0, p.retryAt - t);
+      if (out.retryInMs === null || wait < out.retryInMs) out.retryInMs = wait;
     }
     out.owedAmount = owedAmount.toString();
+    out.strandedAmount = strandedAmount.toString();
     return out;
   }
 

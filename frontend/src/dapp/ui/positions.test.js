@@ -33,7 +33,7 @@ test('a wallet first seen holding starts at 100 %: its held + in-flight tokens a
   b.observe(T, [row(A, 750, { inflight: '250' })]);
   const rec = b.forToken(T)[A];
   assert.equal(rec.hwm, '1000');
-  assert.deepEqual(leftOf(row(A, 750, { inflight: '250' }), rec), { left: 0.75, flight: 0.25, hwm: '1000' });
+  assert.deepEqual(leftOf(row(A, 750, { inflight: '250' }), rec), { left: 0.75, flight: 0.25, hwm: '1000', known: true });
 });
 
 test('sells lower the bar and never the mark: 25 % then 50 % of the rest leaves 37.5 %', () => {
@@ -74,10 +74,21 @@ test('a balance the server could not read is never observed', () => {
 });
 
 test('leftOf: no record is 100 % of what the row holds; a row above its mark is 100 %; nothing held is 0', () => {
-  assert.deepEqual(leftOf(row(A, 40), null), { left: 1, flight: 0, hwm: '40' });
-  assert.deepEqual(leftOf(row(A, 40, { inflight: '10' }), { hwm: '20', seenAt: 1, startedAt: 1 }), { left: 0.8, flight: 0.2, hwm: '50' });
-  assert.deepEqual(leftOf(row(A, 0), null), { left: 0, flight: 0, hwm: '0' });
-  assert.deepEqual(leftOf(row(A, 'x'), { hwm: 'nope' }), { left: 0, flight: 0, hwm: '0' });
+  assert.deepEqual(leftOf(row(A, 40), null), { left: 1, flight: 0, hwm: '40', known: true });
+  assert.deepEqual(leftOf(row(A, 40, { inflight: '10' }), { hwm: '20', seenAt: 1, startedAt: 1 }), { left: 0.8, flight: 0.2, hwm: '50', known: true });
+  assert.deepEqual(leftOf(row(A, 0), null), { left: 0, flight: 0, hwm: '0', known: true });
+  assert.deepEqual(leftOf(row(A, 'x'), { hwm: 'nope' }), { left: 0, flight: 0, hwm: '0', known: true });
+});
+
+test('a balance that could not be read is UNKNOWN, never 0 % of the position', () => {
+  const rec = { hwm: '1000', seenAt: 1, startedAt: 1 };
+  // applyState turns an unread tokenBalance into 0n and flags the row; the book
+  // already refuses to observe such a row, and the bar must refuse to draw it as an
+  // emptied wallet for the 20 s until the next read (or the five minutes a 429 costs).
+  const unread = { ...row(A, 0), balanceKnown: false };
+  assert.deepEqual(leftOf(unread, rec), { left: 0, flight: 0, hwm: '1000', known: false });
+  assert.equal(leftOf({ ...row(A, 750), balanceKnown: false }, rec).known, false);
+  assert.equal(leftOf({ ...row(A, 750), balanceKnown: true }, rec).known, true);
 });
 
 test('on the device only with Remember: hashed ids, no address or token in storage, back after a reload', () => {
@@ -239,15 +250,22 @@ test('ethPerQuoteOf: 1 for ETH-quoted; a token pair goes through its USD price; 
 });
 
 test('mergePositions: the rule Task 29 merges a 409 with — later position, then higher mark; junk dropped; 20 tokens', () => {
-  const mine = { [T]: { [A]: { hwm: '100', seenAt: 5, startedAt: 5 }, [B]: { hwm: '7', seenAt: 1, startedAt: 1 } } };
+  const later = 9_000_000; // a genuinely new position, not the same one detected twice
+  const mine = { [T]: { [A]: { hwm: '100', seenAt: later, startedAt: later }, [B]: { hwm: '7', seenAt: 1, startedAt: 1 } } };
   const theirs = {
     [T.toUpperCase().replace('0X', '0x')]: { [A]: { hwm: '900', seenAt: 2, startedAt: 2 }, [B]: { hwm: '9', seenAt: 1, startedAt: 1 } },
     [T2]: { [A]: { hwm: '-1', seenAt: 1, startedAt: 1 } },
     bad: 'x',
   };
   assert.deepEqual(mergePositions(mine, theirs), {
-    [T]: { [A]: { hwm: '100', seenAt: 5, startedAt: 5 }, [B]: { hwm: '9', seenAt: 1, startedAt: 1 } },
+    [T]: { [A]: { hwm: '100', seenAt: later, startedAt: later }, [B]: { hwm: '9', seenAt: 1, startedAt: 1 } },
   });
+  // Two devices that each saw the SAME empty -> holding transition, 20 s apart: the
+  // later sighting's start, but never the smaller of the two marks.
+  const desktop = { [T]: { [A]: { hwm: '1000000', seenAt: 100, startedAt: 100 } } };
+  const phone = { [T]: { [A]: { hwm: '600000', seenAt: 120, startedAt: 120 } } };
+  assert.deepEqual(mergePositions(desktop, phone)[T][A], { hwm: '1000000', seenAt: 120, startedAt: 120 });
+  assert.deepEqual(mergePositions(phone, desktop)[T][A], { hwm: '1000000', seenAt: 120, startedAt: 120 });
   const many = {};
   for (let i = 0; i <= MAX_POSITION_TOKENS; i += 1) many[tokenN(i)] = { [A]: { hwm: '1', seenAt: i, startedAt: i } };
   const merged = mergePositions(many, null);

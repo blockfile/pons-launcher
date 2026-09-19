@@ -1359,6 +1359,13 @@ td.left-cell {
   background: var(--dim);
 }
 
+/* A balance this read could not fetch: hatched in the rule's own grey, so it reads
+   as "not known" and never as the empty track that means sold out. Not amber, not
+   vermilion: nothing is wrong and nothing is spending. */
+.lb-unknown {
+  background: repeating-linear-gradient(-45deg, var(--rule) 0 3px, transparent 3px 6px);
+}
+
 .lb-flight {
   flex: none;
   height: 100%;

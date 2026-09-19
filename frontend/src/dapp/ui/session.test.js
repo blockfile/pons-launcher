@@ -58,7 +58,7 @@ function memoryLedger() {
 /** What the ledger says a wallet is owed (0 when nothing). */
 const owedIn = (ledger, addr) => (ledger.get(PAIR, addr) || { owed: 0n }).owed;
 
-function harness({ venue, states, planSellCalls = [], real = false, live = true, pairLedger = null, fees: feesOver = {}, onVenue, hidden = () => false }) {
+function harness({ venue, states, planSellCalls = [], real = false, live = true, pairLedger = null, fees: feesOver = {}, onVenue, hidden = () => false, dryRunThrows = false }) {
   const byAddr = new Map(states.map((s) => [s.address.toLowerCase(), s]));
   const log = { wallets: [], broadcast: [], quote: [], ahead: [], pair: [], token: 0 };
   const toasts = [];
@@ -99,6 +99,9 @@ function harness({ venue, states, planSellCalls = [], real = false, live = true,
       .map((w) => ({ address: w.address, txs: [{ to: v.token, data: 'approve', value: 0n, nonce: nonces.next(w.address) }] }));
   }
   function planSell({ venue: v, mark, wallets, pct, slippageBps, quotes, nonces }) {
+    // `dryRunThrows`: only sellable()'s no-quote dry run throws (a malformed venue or
+    // fees shape reaching checkSpenders / feeFields), never the real plan.
+    if (dryRunThrows && Array.isArray(quotes) && quotes.length === 0) throw new TypeError('bad fees shape');
     planSellCalls.push({ wallets: wallets.map((w) => ({ ...w })), pct, quotes, mark });
     return wallets.map((w) => {
       const bal = BigInt(w.tokenBalance);
@@ -1574,7 +1577,7 @@ test("a remote removal keeps the other wallets' owed pair legs; the removed wall
 });
 
 // ── leaving the account (Task 32): what the tab must still sign before Lock / Disconnect / Switch take the keys ──
-const NOTHING_LEFT = { clicks: 0, sending: 0, legs: 0, owed: 0, owedAmount: '0', retryInMs: null, symbol: 'AMZN', decimals: 18 };
+const NOTHING_LEFT = { clicks: 0, sending: 0, legs: 0, owed: 0, owedAmount: '0', stranded: 0, strandedAmount: '0', retryInMs: null, symbol: 'AMZN', decimals: 18 };
 
 test('pendingWork follows a token-quoted sell: in flight, then its swap queued and sent, then nothing', async () => {
   const h = harness({ venue: AMZN_CURVE, states: [wallet(A, { tokenBalance: '1000000', allowance: '1000000', nonce: 0, pairBalance: '0' })] });
@@ -1611,6 +1614,53 @@ test('pendingWork: a swap refused for price impact is owed (its proceeds, when i
   assert.deepEqual(h.s.pendingWork(), { ...NOTHING_LEFT, owed: 1, owedAmount: '1000', retryInMs: 15_000 });
   h.advance(10_000);
   assert.equal(h.s.pendingWork().retryInMs, 5_000);
+});
+
+test('pendingWork: a wallet BOTH sending and owed is counted in both, so the amount is never dropped', async () => {
+  const h = harness({ venue: AMZN_CURVE, states: [wallet(A, { tokenBalance: '2000000', allowance: '2000000', nonce: 0, pairBalance: '0' })] });
+  h.api.postPairQuote = async (pairToken, amount) => {
+    h.log.pair.push(amount);
+    return { amountOut: String(BigInt(amount) * 2n), path: 'route', fees: [], impactBps: 1400, ok: false, reason: 'too deep' };
+  };
+  await h.s.loadWallets([A]);
+  await h.s.sell(50); // 1,000,000 sold: its swap is refused, 1000 AMZN sits in the wallet
+  Object.assign(h.byAddr.get(A), { nonce: 1, tokenBalance: '1000000', pairBalance: '1000' });
+  h.s.onReceipt({ hash: hashOfSell(A, 0, 1000000), status: 'landed', block: 30, gasUsed: '1' });
+  await h.runTimers();
+  assert.deepEqual(h.s.pendingWork(), { ...NOTHING_LEFT, owed: 1, owedAmount: '1000', retryInMs: 15_000 });
+  // A second sell from the SAME wallet: it is now sending AND still holding the
+  // proceeds of the first. The confirmation must still name the 1000 AMZN.
+  await h.s.sell(100);
+  const work = h.s.pendingWork();
+  assert.equal(work.sending, 1);
+  assert.equal(work.owed, 1, 'the wallet in flight is still owed');
+  assert.equal(work.owedAmount, '1000');
+  assert.equal(work.retryInMs !== null, true);
+});
+
+test('pendingWork: proceeds of a wallet another device removed are stranded, never owed with a retry', async () => {
+  const h = harness({ venue: AMZN_CURVE, states: [wallet(A, { tokenBalance: '2000000', allowance: '2000000', nonce: 0, pairBalance: '0' })] });
+  h.api.postPairQuote = async (pairToken, amount) => {
+    h.log.pair.push(amount);
+    return { amountOut: String(BigInt(amount) * 2n), path: 'route', fees: [], impactBps: 1400, ok: false, reason: 'too deep' };
+  };
+  await h.s.loadWallets([A]);
+  await h.s.sell(50);
+  Object.assign(h.byAddr.get(A), { nonce: 1, tokenBalance: '1000000', pairBalance: '1000' });
+  h.s.onReceipt({ hash: hashOfSell(A, 0, 1000000), status: 'landed', block: 30, gasUsed: '1' });
+  await h.runTimers();
+  assert.equal(h.s.pendingWork().owed, 1);
+  // A second sell is in flight, and another device removes A: the row is deferred
+  // into `leaving`. queuePair, flushPairs and convertPair all refuse a leaving key,
+  // so the retry the owed line promises would never run for it.
+  await h.s.sell(100);
+  assert.deepEqual(h.s.removeRows([A]), { removed: 0, deferred: 1 });
+  const work = h.s.pendingWork();
+  assert.equal(work.owed, 0, 'no retry is promised for a wallet this tab may not sign for');
+  assert.equal(work.retryInMs, null);
+  assert.equal(work.stranded, 1);
+  assert.equal(work.strandedAmount, '1000');
+  assert.equal(work.sending, 1, 'its sell still settles on chain');
 });
 
 test('pendingWork on an ETH-quoted venue: a sell in flight needs nothing more from the keys', async () => {
@@ -1689,6 +1739,24 @@ test("a row's own sell (walletIds) sells that one wallet only, ticked or not, th
   // The chips still sell the ticked wallets only.
   await h.s.sell(25);
   assert.deepEqual(h.log.broadcast.at(-1), [`raw|${A}|3|sell:250000`]);
+});
+
+test("a row's own sell still works when sellable()'s dry run throws: the fallback keeps the row's rule", async () => {
+  // A pool venue: sellable() is what builds the quote request, so if its dry run throws
+  // the fallback decides who is quoted. It must not fall back to the CHIPS' rule
+  // (ticked only), or the same click would sell from a ticked row and silently sell
+  // nothing from an unticked one.
+  const h = harness({
+    venue: POOL,
+    dryRunThrows: true,
+    states: [wallet(A, { tokenBalance: '1000000', allowance: '1000000', nonce: 0 })],
+  });
+  await h.s.loadWallets([A]);
+  h.s.setTicked(A, false);
+  const out = await h.s.sell(100, { walletIds: [A] });
+  assert.equal(out.sent, 1, out.reason || '');
+  assert.deepEqual(h.log.quote.at(-1), [{ address: A, amount: '1000000' }], 'the unticked row was still quoted');
+  assert.equal(h.s.view().rows[0].ticked, false, 'and it is still not ticked');
 });
 
 test('a row sell of a wallet that holds nothing, or is not listed, is refused and sends nothing', async () => {

@@ -33,23 +33,27 @@ const whole = (v) => (Number.isSafeInteger(v) && v > 0 ? v : 0);
  * session.pendingWork()'s answer with every field checked, or all zeros for
  * null (no token open: nothing to wait for).
  * @returns {{clicks: number, sending: number, legs: number, owed: number,
- *   owedAmount: string, retryInMs: number|null, symbol: string|null, decimals: number}}
+ *   owedAmount: string, stranded: number, strandedAmount: string,
+ *   retryInMs: number|null, symbol: string|null, decimals: number}}
  */
 export function normalizeWork(work) {
   const w = work && typeof work === 'object' ? work : {};
-  let owedAmount = '0';
-  try {
-    const v = BigInt(w.owedAmount ?? 0);
-    if (v > 0n) owedAmount = v.toString();
-  } catch {
-    owedAmount = '0';
-  }
+  const amount = (v) => {
+    try {
+      const n = BigInt(v ?? 0);
+      return n > 0n ? n.toString() : '0';
+    } catch {
+      return '0';
+    }
+  };
   return {
     clicks: whole(w.clicks),
     sending: whole(w.sending),
     legs: whole(w.legs),
     owed: whole(w.owed),
-    owedAmount,
+    owedAmount: amount(w.owedAmount),
+    stranded: whole(w.stranded),
+    strandedAmount: amount(w.strandedAmount),
     retryInMs: Number.isFinite(w.retryInMs) && w.retryInMs >= 0 ? w.retryInMs : null,
     symbol: typeof w.symbol === 'string' && w.symbol ? w.symbol : null,
     decimals: Number.isSafeInteger(w.decimals) && w.decimals >= 0 ? w.decimals : 18,
@@ -93,7 +97,10 @@ export function waitingText(how, work, msLeft) {
  * strands nothing:
  *   - still in flight after the wait (a sell not mined, a swap not sent);
  *   - proceeds a refused swap left in the pair token (session `owed`): it
- *     retries on its own, but only while the key is in this tab.
+ *     retries on its own, but only while the key is in this tab;
+ *   - proceeds held by a wallet another device removed (session `stranded`):
+ *     this tab may not sign for it at all, so it is named as stranded rather
+ *     than as retrying.
  * `persisted`: the pair ledger is kept on this device (a passphrase vault
  * exists, ui/deps.js), so a later visit still lists the proceeds for Convert.
  * @param {'lock'|'disconnect'|'switch'} how
@@ -112,6 +119,13 @@ export function leaveWarning(how, work, { persisted = false, waitedMs = LEAVE_WA
     if (w.retryInMs !== null) when = w.retryInMs < 1000 ? ' now' : ` in ${Math.ceil(w.retryInMs / 1000)} s`;
     lines.push(
       `${count(w.owed, 'wallet')} ${w.owed === 1 ? 'holds' : 'hold'} ${fmtUnits(w.owedAmount, w.decimals, 4)} ${sym} from sells this page has not turned into ETH yet: the swap was refused and retries on its own${when}.`
+    );
+  }
+  if (w.stranded) {
+    // Removed on another device: this tab may not sign for it at all, so there is no
+    // retry to promise — and the row goes as soon as its last transaction settles.
+    lines.push(
+      `${count(w.stranded, 'wallet')} removed on another device ${w.stranded === 1 ? 'holds' : 'hold'} ${fmtUnits(w.strandedAmount, w.decimals, 4)} ${sym} this page can no longer swap: sell it from that ${sym} yourself.`
     );
   }
   if (!lines.length) return null;

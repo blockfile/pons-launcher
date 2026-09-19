@@ -80,17 +80,42 @@ function cleanRec(r) {
   return out;
 }
 
+// Two starts this close are one position seen twice, not two positions: three of the
+// table's ~20 s balance polls, so two devices (or a device and a phone) that each see
+// the same empty -> holding transition land inside it.
+const SAME_START_MS = 60_000;
+
 const sameRec = (a, b) => !!a && !!b && a.hwm === b.hwm && a.seenAt === b.seenAt && a.startedAt === b.startedAt && !!a.empty === !!b.empty;
 
-/** Two copies of one (token, wallet): the later position; the same position keeps the higher mark, then the later sighting. */
+/**
+ * Two copies of one (token, wallet). `startedAt` is when a tab first SAW the wallet
+ * holding — a detection time, not an identity — so two devices polling on their own
+ * clocks date one empty -> holding transition differently. Inside SAME_START_MS they
+ * are the same position: keep the later start (the copy's start, spec decision 12)
+ * but never the smaller of the two marks, or a %-left bar reads 100% for a wallet
+ * that has already sold part of the position, and that wrong mark is then saved back
+ * to the blob for every device (observe() only ever raises a mark on MORE tokens,
+ * which never happens once a wallet is selling down). Further apart it is a new
+ * position and does reset the mark, and a record marked `empty` — a recorded END —
+ * never lends its mark forward.
+ */
 function pick(a, b) {
   if (!a) return b;
   if (!b) return a;
-  if (a.startedAt !== b.startedAt) return a.startedAt > b.startedAt ? a : b;
+  const sa = a.startedAt;
+  const sb = b.startedAt;
   const ha = BigInt(a.hwm);
   const hb = BigInt(b.hwm);
-  if (ha !== hb) return ha > hb ? a : b;
-  return a.seenAt >= b.seenAt ? a : b;
+  // Both must KNOW when their position started: a first sighting stands in seenAt (or
+  // 0) for a start it never saw, and those must keep losing to a dated one outright.
+  const sameStart = sa > 0 && sb > 0 && a.startedAt !== undefined && b.startedAt !== undefined && Math.abs(sa - sb) <= SAME_START_MS;
+  let win = a;
+  if (sa !== sb) win = sa > sb ? a : b;
+  else if (ha !== hb) win = ha > hb ? a : b;
+  else return a.seenAt >= b.seenAt ? a : b;
+  const lose = win === a ? b : a;
+  if (!sameStart || win.empty || lose.empty) return win;
+  return BigInt(lose.hwm) > BigInt(win.hwm) ? { ...win, hwm: lose.hwm } : win;
 }
 
 /** The latest seenAt among a token's records (the prune's order). */
@@ -141,16 +166,25 @@ export function mergePositions(a, b) {
  * With no record, or a row holding more than its record, the row's own held +
  * in-flight tokens are the 100 %; a record marked empty is a position that has
  * ended (the row, holding again, starts a new one).
- * @returns {{left: number, flight: number, hwm: string}}
+ *
+ * `known` is false when the row's balance could not be READ (state.js: an unread
+ * field is null, never 0 — applyState has already turned it into 0n and flagged the
+ * row). The bar must then draw nothing rather than 0 %, which is how this page says
+ * "sold out": one failed slot of a 100-wallet multicall would otherwise tell a
+ * visitor watching a take-profit run that the wallet was done. observe() already
+ * refuses to record such a row as a position ending.
+ * @returns {{left: number, flight: number, hwm: string, known: boolean}}
  */
 export function leftOf(row, rec) {
+  const known = !(row && row.balanceKnown === false);
   const held = big(row && row.tokens);
   const flight = big(row && row.inflight);
   const total = held + flight;
   let hwm = rec && !rec.empty && typeof rec.hwm === 'string' && DECIMAL.test(rec.hwm) ? BigInt(rec.hwm) : 0n;
-  if (total > hwm) hwm = total;
-  if (hwm === 0n) return { left: 0, flight: 0, hwm: '0' };
-  return { left: ratio(held, hwm), flight: ratio(flight, hwm), hwm: hwm.toString() };
+  if (known && total > hwm) hwm = total;
+  if (hwm === 0n) return { left: 0, flight: 0, hwm: '0', known };
+  if (!known) return { left: 0, flight: 0, hwm: hwm.toString(), known };
+  return { left: ratio(held, hwm), flight: ratio(flight, hwm), hwm: hwm.toString(), known };
 }
 
 /**

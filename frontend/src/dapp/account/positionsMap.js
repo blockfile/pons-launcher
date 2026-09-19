@@ -27,6 +27,9 @@ const KNOWN = ['empty', 'hwm', 'seenAt', 'startedAt'];
 const lower = (a) => String(a).toLowerCase();
 const isMap = (o) => !!o && typeof o === 'object' && !Array.isArray(o);
 const startOf = (r) => (r.startedAt === undefined ? r.seenAt : r.startedAt);
+// ui/positions.js keeps its own copy of this: two starts this close are one position
+// seen twice by two devices, not two positions.
+const SAME_START_MS = 60_000;
 
 function plainValue(v) {
   if (typeof v === 'string') return v.length <= MAX_TEXT;
@@ -48,16 +51,35 @@ function cleanRecord(r) {
 }
 
 /** The book's rule for two records of one (token, wallet); `a` wins a full tie. */
+/*
+ * `startedAt` is when a tab first SAW the wallet
+ * holding — a detection time, not an identity — so two devices polling on their own
+ * clocks date one empty -> holding transition differently. Inside SAME_START_MS they
+ * are the same position: keep the later start (the copy's start, spec decision 12)
+ * but never the smaller of the two marks, or a %-left bar reads 100% for a wallet
+ * that has already sold part of the position, and that wrong mark is then saved back
+ * to the blob for every device (observe() only ever raises a mark on MORE tokens,
+ * which never happens once a wallet is selling down). Further apart it is a new
+ * position and does reset the mark, and a record marked `empty` — a recorded END —
+ * never lends its mark forward.
+ */
 function pick(a, b) {
   if (!a) return b;
   if (!b) return a;
   const sa = startOf(a);
   const sb = startOf(b);
-  if (sa !== sb) return sa > sb ? a : b;
   const ha = BigInt(a.hwm);
   const hb = BigInt(b.hwm);
-  if (ha !== hb) return ha > hb ? a : b;
-  return a.seenAt >= b.seenAt ? a : b;
+  // Both must KNOW when their position started: a first sighting stands in seenAt (or
+  // 0) for a start it never saw, and those must keep losing to a dated one outright.
+  const sameStart = sa > 0 && sb > 0 && a.startedAt !== undefined && b.startedAt !== undefined && Math.abs(sa - sb) <= SAME_START_MS;
+  let win = a;
+  if (sa !== sb) win = sa > sb ? a : b;
+  else if (ha !== hb) win = ha > hb ? a : b;
+  else return a.seenAt >= b.seenAt ? a : b;
+  const lose = win === a ? b : a;
+  if (!sameStart || win.empty || lose.empty) return win;
+  return BigInt(lose.hwm) > BigInt(win.hwm) ? { ...win, hwm: lose.hwm } : win;
 }
 
 function lastSeen(group) {

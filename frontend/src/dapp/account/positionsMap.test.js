@@ -11,15 +11,34 @@ const tokenN = (i) => addr(0x5000 + i);
 
 test("the book's rule: the later position, then the higher mark; junk dropped", () => {
   // The same cases as ui/positions.js mergePositions (Task 34): both sides must agree.
-  const mine = { [T]: { [A]: { hwm: '100', seenAt: 5, startedAt: 5 }, [B]: { hwm: '7', seenAt: 1, startedAt: 1 } } };
+  const later = 9_000_000; // a genuinely new position, not the same one detected twice
+  const mine = { [T]: { [A]: { hwm: '100', seenAt: later, startedAt: later }, [B]: { hwm: '7', seenAt: 1, startedAt: 1 } } };
   const theirs = {
     [T.toUpperCase().replace('0X', '0x')]: { [A]: { hwm: '900', seenAt: 2, startedAt: 2 }, [B]: { hwm: '9', seenAt: 1, startedAt: 1 } },
     [T2]: { [A]: { hwm: '-1', seenAt: 1, startedAt: 1 } },
     bad: 'x',
   };
   assert.deepEqual(mergePositionMaps(mine, theirs), {
-    [T]: { [A]: { hwm: '100', seenAt: 5, startedAt: 5 }, [B]: { hwm: '9', seenAt: 1, startedAt: 1 } },
+    [T]: { [A]: { hwm: '100', seenAt: later, startedAt: later }, [B]: { hwm: '9', seenAt: 1, startedAt: 1 } },
   });
+});
+
+test('two devices that each SEE the same empty -> holding transition keep the higher mark', () => {
+  // startedAt is when THIS tab first saw the wallet holding, not an identity: two
+  // devices on their own 20 s polls date one transition differently. The later record
+  // must not throw away the mark the earlier observer had, or the %-left bar reads
+  // 100% for a wallet that has already sold part of the position.
+  const desktop = { [T]: { [A]: { hwm: '1000000', seenAt: 100, startedAt: 100 } } };
+  const phone = { [T]: { [A]: { hwm: '600000', seenAt: 120, startedAt: 120 } } };
+  for (const merged of [mergePositionMaps(desktop, phone), mergePositionMaps(phone, desktop)]) {
+    assert.deepEqual(merged[T][A], { hwm: '1000000', seenAt: 120, startedAt: 120 });
+  }
+  // A start far enough apart is a NEW position and does reset the mark.
+  const rebought = { [T]: { [A]: { hwm: '600000', seenAt: 9_000_000, startedAt: 9_000_000 } } };
+  assert.equal(mergePositionMaps(desktop, rebought)[T][A].hwm, '600000');
+  // And a recorded END of a position never lends its mark forward.
+  const ended = { [T]: { [A]: { hwm: '1000000', seenAt: 100, startedAt: 100, empty: true } } };
+  assert.equal(mergePositionMaps(ended, phone)[T][A].hwm, '600000');
 });
 
 test('a new position beats an older one; the same start keeps the higher mark, then the later sighting', () => {
