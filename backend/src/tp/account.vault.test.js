@@ -123,7 +123,7 @@ test('create, read, update: rev counts up; /me carries the vault meta; answers a
   }
 });
 
-test('a stale baseRev is 409 conflict {rev}; another keyId is 409 key_mismatch unless rekey', async () => {
+test('a stale baseRev is 409 conflict {rev}; another keyId is 409 key_mismatch with no override (rekey is refused)', async () => {
   const app = await startApp();
   try {
     const cookie = await login(app.server, Wallet.createRandom());
@@ -140,8 +140,32 @@ test('a stale baseRev is 409 conflict {rev}; another keyId is 409 key_mismatch u
     assert.equal(other.status, 409);
     assert.equal(other.json.code, 'key_mismatch');
     const rekey = await put(app.server, cookie, envelope(2, { keyId: KEY_B, rekey: true }));
-    assert.equal(rekey.status, 200);
-    assert.equal(rekey.json.rev, 3);
+    assert.equal(rekey.status, 400, 'there is no rekey field');
+    assert.equal(rekey.json.code, 'bad_request');
+    const read = await call(app.server, 'GET', '/api/tp/account/vault', { cookie });
+    assert.equal(read.json.vault.rev, 2);
+    assert.equal(read.json.vault.keyId, KEY_A, 'nothing changed');
+  } finally {
+    await app.close();
+  }
+});
+
+test('a second session writing garbage under the public keyId cannot push the owner copy out of .prev', async () => {
+  const app = await startApp();
+  try {
+    const w = Wallet.createRandom();
+    const owner = await login(app.server, w);
+    const mine = envelope(0);
+    await put(app.server, owner, mine);
+    // Another session of the same address (a phished login signature): it reads the
+    // keyId from /me and overwrites, again and again.
+    app.clock.t += 1000;
+    const thief = await login(app.server, w);
+    const { keyId } = (await call(app.server, 'GET', '/api/tp/account/me', { cookie: thief })).json.vault;
+    for (let rev = 1; rev <= 4; rev++) assert.equal((await put(app.server, thief, envelope(rev, { keyId }))).status, 200);
+    const file = path.join(app.dir, 'vaults', `${w.address.toLowerCase()}.json`);
+    assert.equal(JSON.parse(fs.readFileSync(`${file}.prev`, 'utf8')).ct, mine.ct, 'the owner copy is still in .prev');
+    assert.equal(JSON.parse(fs.readFileSync(file, 'utf8')).rev, 5);
   } finally {
     await app.close();
   }
@@ -166,13 +190,14 @@ test('each session reaches its own address only: the body cannot name another va
   }
 });
 
-test('DELETE: rev-checked; removes the vault, clears the cookie and revokes every session of the address', async () => {
+test('DELETE: rev-checked; keeps a deleted copy, clears the cookie and revokes every session of the address', async () => {
   const app = await startApp();
   try {
     const w = Wallet.createRandom();
     const here = await login(app.server, w);
     const elsewhere = await login(app.server, w);
-    await put(app.server, here, envelope(0));
+    const saved = envelope(0);
+    await put(app.server, here, saved);
     const stale = await call(app.server, 'DELETE', '/api/tp/account/vault', { body: { baseRev: 0 }, cookie: here });
     assert.equal(stale.status, 409);
     assert.equal(stale.json.rev, 1);
@@ -188,9 +213,41 @@ test('DELETE: rev-checked; removes the vault, clears the cookie and revokes ever
       const r = await call(app.server, 'GET', '/api/tp/account/vault', { cookie });
       assert.equal(r.status, 401, 'a session issued before the delete is revoked');
     }
+    // The deleted list is kept, whole, for the operator's hand restore.
+    const a = w.address.toLowerCase();
+    const kept = fs.readdirSync(path.join(app.dir, 'deleted'));
+    assert.deepEqual(kept, [`${a}.${T0 + 1000}`]);
+    assert.equal(JSON.parse(fs.readFileSync(path.join(app.dir, 'deleted', kept[0], `${a}.json`), 'utf8')).ct, saved.ct);
+    assert.ok(!fs.existsSync(path.join(app.dir, 'vaults', `${a}.json`)));
+
+    // Starting over: a new sign-in, then a list under a new key.
     app.clock.t += 1;
     const fresh = await login(app.server, w);
     assert.deepEqual((await call(app.server, 'GET', '/api/tp/account/vault', { cookie: fresh })).json, { vault: null });
+    const again = await put(app.server, fresh, envelope(0, { keyId: KEY_B }));
+    assert.equal(again.status, 200);
+    assert.equal(again.json.rev, 1);
+  } finally {
+    await app.close();
+  }
+});
+
+test('DELETE with nothing stored still signs the address out: 200 {deleted: false}, cookie cleared, every session revoked', async () => {
+  const app = await startApp();
+  try {
+    const w = Wallet.createRandom();
+    const here = await login(app.server, w);
+    const elsewhere = await login(app.server, w);
+    app.clock.t += 1000;
+    const del = await call(app.server, 'DELETE', '/api/tp/account/vault', { body: { baseRev: 0 }, cookie: here });
+    assert.equal(del.status, 200);
+    assert.deepEqual(del.json, { deleted: false });
+    assert.ok(del.headers['set-cookie'].some((l) => l.startsWith(`${COOKIE_NAME}=;`)), 'cookie cleared');
+    for (const cookie of [here, elsewhere]) {
+      const r = await call(app.server, 'GET', '/api/tp/account/me', { cookie });
+      assert.equal(r.status, 401, 'a session issued before the delete is revoked');
+      assert.equal(r.json.code, 'no_session');
+    }
   } finally {
     await app.close();
   }

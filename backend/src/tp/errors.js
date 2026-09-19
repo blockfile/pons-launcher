@@ -27,7 +27,7 @@ const CODES = Object.freeze([
   'challenge_expired', // a login after its 5-minute challenge ran out
   'bad_signature', // a login signature that does not recover to the challenge's address
   'conflict', // a vault write whose baseRev is not the stored rev (answer carries `rev`)
-  'key_mismatch', // a vault write under a different keyId, without rekey
+  'key_mismatch', // a vault write under a different keyId (no override: DELETE starts over)
   'too_large', // a vault ciphertext over TP_VAULT_MAX_BYTES
   'store_full', // the account store's global caps are reached
 ]);

@@ -38,8 +38,11 @@
 // address's ciphertext blob, never another's — the address comes from the session,
 // never from the body. Writes pay a per-IP and a per-ADDRESS bucket; a write that
 // CREATES a vault also pays TP_ACCOUNT_CREATES_PER_HOUR per IP (identities are free
-// to make, disk is not). A DELETE revokes every session of the address, this one
-// included. The store never touches the disk synchronously (this process also
+// to make, disk is not). A write under another keyId is refused with no override;
+// starting over is a DELETE, which keeps the deleted copy for the operator
+// (TP_VAULT_KEEP_DELETED_DAYS) and revokes every session of the address, this one
+// included. Each write names its session (issuedAt) so the store's .prev keeps the
+// copy from before that session began writing. The store never touches the disk synchronously (this process also
 // answers /api/tp/broadcast), so the vault routes and requireSession are async.
 //
 // NOTHING AT REQUIRE TIME TOUCHES THE DISK OR THROWS. This router is mounted by
@@ -476,7 +479,7 @@ function createAccountRouter({
     })
   );
 
-  // {baseRev, kv, keyId, iv, ct, rekey?} -> {rev, updatedAt}
+  // {baseRev, kv, keyId, iv, ct} -> {rev, updatedAt}
   router.put(
     '/vault',
     writeIpLimit,
@@ -487,6 +490,7 @@ function createAccountRouter({
       const input = validatePut(req.body, { maxBytes: store.limits.maxBytes });
       const ip = clientIp(req);
       const out = await store.put(req.tpSession.address, input, {
+        writer: req.tpSession.issuedAt,
         // Called inside the store's write lane, only when this write is about to
         // CREATE a vault (every other check passed): an update, or a baseRev 0 that
         // meets an existing vault (409 conflict), pays nothing. The slot is taken
@@ -504,7 +508,8 @@ function createAccountRouter({
     })
   );
 
-  // {baseRev} -> {deleted}. Ends every session of this address, this one included.
+  // {baseRev} -> {deleted}. Keeps the deleted copy for a hand restore, and ends every
+  // session of this address, this one included (also when nothing was stored).
   router.delete(
     '/vault',
     writeIpLimit,

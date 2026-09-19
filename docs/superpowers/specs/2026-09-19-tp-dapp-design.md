@@ -333,6 +333,16 @@ Signed off by the operator with the v2 plan, before the first real save.
   stops the sibling hosts from tossing a cookie); concurrency is on an integer `rev`, not
   `updatedAt`; a public `keyId` (HKDF of the same signature) replaces the AES "check"
   value; and the unlock message is ASCII, without the em dash.
+- **A saved list can be damaged, not destroyed.** Anyone holding a session for an
+  address (a phished sign-in signature included) can overwrite or delete its list, so:
+  a save under another key is refused with no override, and starting over is Delete;
+  the list's `.prev` keeps the copy from before the latest session began saving,
+  however many times that session saves; a Delete keeps the deleted list, still
+  encrypted, for 30 days (`TP_VAULT_KEEP_DELETED_DAYS`; only the first deletion in that
+  window) so the operator can restore it by hand, and it signs the address out
+  everywhere. Do not tidy these away: they are the recovery path. Two phished sign-ins,
+  one after the other, can still push the owner's copy out of `.prev`; a Delete cannot
+  lose it.
 
 ## B. Choosing wallets
 

@@ -340,8 +340,9 @@ one click. Design: `docs/superpowers/specs/2026-09-19-tp-dapp-design.md`.
 - **The account** (connect a wallet, sign in, saved wallets synced ENCRYPTED; spec
   Addendum v2 A) keeps its state in `backend/data/tp-accounts/`: `vaults/` (one
   ciphertext file per signed-in address, which this server cannot decrypt),
-  `session.key` (signs the session cookies; deleting it signs everyone out) and
-  `revoked.json`. **Back that directory up with the droplet**, e.g.
+  `deleted/` (deleted lists kept 30 days for a hand restore), `session.key` (signs
+  the session cookies; deleting it signs everyone out) and `revoked.json`. **Back
+  that directory up with the droplet**, e.g.
   `tar czf ~/tp-accounts.$(date +%F).tgz -C backend/data tp-accounts`: losing
   `vaults/` loses every visitor's synced list (their own key exports stay the real
   backup). Optional settings, all in `backend/.env.example`: `TP_ACCOUNTS_DIR`,
@@ -402,6 +403,27 @@ sudo diff "$SITE" deploy/nginx-rhbond.conf     # only the account location and i
 sudo cp deploy/nginx-rhbond.conf "$SITE"
 sudo nginx -t && sudo systemctl reload nginx
 curl -s https://dapp.rhbond.xyz/api/tp/account/me    # {"error":...,"code":"no_session"}
+```
+
+**Restoring a visitor's saved list** (they ask you; nothing else can). A deleted
+list is kept for `TP_VAULT_KEEP_DELETED_DAYS` (30) days under
+`backend/data/tp-accounts/deleted/<address>.<ms>/`: only the first deletion of an
+address in that window, so a stolen session deleting again cannot flush it. Every
+list also keeps, as `vaults/<address>.json.prev`, the copy from before its latest
+sign-in session started saving, so writes by a stolen session can be undone too.
+They are the same ciphertext files, so a restore is a copy (addresses in lower
+case); the visitor then signs in and unlocks with the same wallet as before:
+
+```bash
+cd backend/data/tp-accounts
+# EITHER a deleted list (if they started over since, move their new list aside first):
+ls deleted/ | grep <address>                          # -> <address>.<ms>
+cp deleted/<address>.<ms>/<address>.json vaults/
+# OR a list a stolen session overwrote:
+cp vaults/<address>.json.prev vaults/<address>.json
+# then, either way:
+chmod 600 vaults/<address>.json
+pm2 restart pons-launcher                             # the store counts its files at start
 ```
 
 **Local end-to-end check** (an Anvil fork of chain 4663, throwaway wallets, nothing

@@ -275,6 +275,7 @@ test('backend/.env.example documents the account settings, at the defaults the c
     '# TP_VAULT_MAX_BYTES=262144',
     '# TP_VAULT_MAX_ACCOUNTS=5000',
     '# TP_VAULT_MAX_TOTAL_BYTES=536870912',
+    '# TP_VAULT_KEEP_DELETED_DAYS=30',
     '# TP_ACCOUNT_NONCES_PER_MIN=10',
     '# TP_ACCOUNT_LOGINS_PER_MIN=10',
     '# TP_ACCOUNT_READS_PER_MIN=60',
@@ -302,6 +303,19 @@ test('README covers the dApp account: the nginx re-copy, the backups, the settin
     'curl -s https://dapp.rhbond.xyz/api/tp/account/me',
     '`TP_ACCOUNTS_DIR`',
     '`TP_SIWE_ORIGIN`',
+  ]) {
+    assert.ok(text.includes(s), `README is missing: ${s}`);
+  }
+});
+
+test('README: a deleted or overwritten saved list can be restored by hand', () => {
+  const text = fs.readFileSync(README, 'utf8');
+  for (const s of [
+    '`deleted/`',
+    'TP_VAULT_KEEP_DELETED_DAYS',
+    'cp deleted/<address>.<ms>/<address>.json vaults/',
+    'cp vaults/<address>.json.prev vaults/<address>.json',
+    'chmod 600 vaults/<address>.json',
   ]) {
     assert.ok(text.includes(s), `README is missing: ${s}`);
   }
