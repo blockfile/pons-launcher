@@ -58,7 +58,7 @@ function memoryLedger() {
 /** What the ledger says a wallet is owed (0 when nothing). */
 const owedIn = (ledger, addr) => (ledger.get(PAIR, addr) || { owed: 0n }).owed;
 
-function harness({ venue, states, planSellCalls = [], real = false, live = true, pairLedger = null, fees: feesOver = {}, onVenue }) {
+function harness({ venue, states, planSellCalls = [], real = false, live = true, pairLedger = null, fees: feesOver = {}, onVenue, hidden = () => false }) {
   const byAddr = new Map(states.map((s) => [s.address.toLowerCase(), s]));
   const log = { wallets: [], broadcast: [], quote: [], ahead: [], pair: [], token: 0 };
   const toasts = [];
@@ -134,7 +134,7 @@ function harness({ venue, states, planSellCalls = [], real = false, live = true,
     },
     clearTimeout: () => {},
     sleep: () => Promise.resolve(),
-    isHidden: () => false,
+    isHidden: hidden,
     pairLedger,
   };
   const views = [];
@@ -415,6 +415,7 @@ test('the view carries addresses, balances and statuses only', async () => {
   const v = h.views.at(-1);
   assert.deepEqual(Object.keys(v.rows[0]).sort(), [
     'address',
+    'balanceKnown',
     'canConvert',
     'canSell',
     'canSellOne',
@@ -422,6 +423,7 @@ test('the view carries addresses, balances and statuses only', async () => {
     'ethBalance',
     'gasShort',
     'hash',
+    'inflight',
     'needsArm',
     'pairPending',
     'status',
@@ -1166,7 +1168,8 @@ test('a pair read that lags its nonce never lowers what is owed: the leg waits a
 });
 
 test('a shortfall that holds across reads for a minute is believed: the leg stops waiting and swaps nothing', async () => {
-  const h = harness({ venue: AMZN_CURVE, states: [wallet(A, { tokenBalance: '1000000', allowance: '1000000', nonce: 0, pairBalance: '100' })] });
+  // Hidden: the periodic balance read (Task 34) stays out of this test's read count.
+  const h = harness({ venue: AMZN_CURVE, hidden: () => true, states: [wallet(A, { tokenBalance: '1000000', allowance: '1000000', nonce: 0, pairBalance: '100' })] });
   await h.s.loadWallets([A]);
   await h.s.sell(50);
   // The proceeds left the wallet some other way: every read shows the 100 alone.
@@ -1772,4 +1775,107 @@ test('invertTicked flips every row, and a wallet it newly ticks arms', async () 
     ]
   );
   assert.equal(h.log.broadcast.length, 1, 'A needs no approval');
+});
+
+// ── Task 34: live holdings — the view's in-flight tokens, the periodic balance read ──
+
+test('each row carries its tokens in flight and whether its balance was read', async () => {
+  const h = harness({ venue: CURVE, states: [wallet(A, { tokenBalance: '1000000', allowance: '1000000', nonce: 0 })] });
+  await h.s.loadWallets([A]);
+  assert.equal(h.s.view().rows[0].inflight, '0');
+  assert.equal(h.s.view().rows[0].balanceKnown, true);
+  await h.s.sell(25);
+  const r = h.s.view().rows[0];
+  assert.equal(r.tokens, '750000');
+  assert.equal(r.inflight, '250000');
+  h.byAddr.get(A).tokenBalance = null; // a slot the server could not read
+  await h.s.loadWallets([A]);
+  assert.equal(h.s.view().rows[0].balanceKnown, false);
+});
+
+test('while a token is open the listed wallets are re-read every 20 s: a buy shows up', async () => {
+  const h = harness({ venue: CURVE, states: [wallet(A, { tokenBalance: '1000000', allowance: '5000000' }), wallet(C, { tokenBalance: '0' })] });
+  await h.s.loadWallets([A, C]);
+  const reads = h.log.wallets.length;
+  h.advance(19_000);
+  h.s.tick();
+  await flush();
+  assert.equal(h.log.wallets.length, reads, 'not yet');
+  h.byAddr.get(A).tokenBalance = '3000000';
+  h.advance(1_000);
+  h.s.tick();
+  await flush();
+  assert.equal(h.log.wallets.length, reads + 1);
+  assert.deepEqual(h.log.wallets.at(-1), [A], 'the listed rows only (C holds nothing, it is not listed)');
+  assert.equal(h.s.view().rows[0].tokens, '3000000');
+  h.advance(5_000);
+  h.s.tick();
+  await flush();
+  assert.equal(h.log.wallets.length, reads + 1, 'the next read waits another 20 s');
+});
+
+test('the periodic read never hands back tokens a sell in flight, or one that just landed, took', async () => {
+  const h = harness({ venue: CURVE, states: [wallet(A, { tokenBalance: '1000000', allowance: '1000000', nonce: 0 })] });
+  await h.s.loadWallets([A]);
+  await h.s.sell(50); // the chain still reads 1,000,000
+  h.advance(20_000);
+  h.s.tick();
+  await flush();
+  assert.equal(h.s.view().rows[0].tokens, '500000');
+  assert.equal(h.s.view().rows[0].inflight, '500000');
+  h.advance(15_000);
+  h.s.onReceipt({ hash: hashOfSell(A, 0, 500000), status: 'landed', block: 11, gasUsed: '1' });
+  h.advance(5_000); // a node a block behind still reads 1,000,000
+  h.s.tick();
+  await flush();
+  assert.equal(h.s.view().rows[0].tokens, '500000');
+  assert.equal(h.s.view().rows[0].inflight, '0');
+});
+
+test('a refused periodic read waits twice as long before the next; a hidden page reads nothing', async () => {
+  let hidden = false;
+  const h = harness({ venue: CURVE, hidden: () => hidden, states: [wallet(A, { tokenBalance: '1000000', allowance: '1000000' })] });
+  await h.s.loadWallets([A]);
+  const real = h.api.postWallets;
+  h.api.postWallets = async () => {
+    throw new Error('too many requests', { cause: { code: 'rate_limited', status: 429 } });
+  };
+  h.advance(20_000);
+  h.s.tick();
+  await flush();
+  h.api.postWallets = real;
+  const reads = h.log.wallets.length;
+  h.advance(20_000);
+  h.s.tick();
+  await flush();
+  assert.equal(h.log.wallets.length, reads, 'backing off: 40 s now');
+  h.advance(20_000);
+  h.s.tick();
+  await flush();
+  assert.equal(h.log.wallets.length, reads + 1);
+  hidden = true;
+  h.advance(60_000);
+  h.s.tick();
+  await flush();
+  assert.equal(h.log.wallets.length, reads + 1, 'a hidden page reads nothing');
+});
+
+test("a periodic read keeps a row's landed status and tops up a wallet whose balance grew past its allowance", async () => {
+  const h = harness({
+    venue: CURVE,
+    states: [wallet(A, { tokenBalance: '1000000', allowance: '1000000', nonce: 0 }), wallet(B, { tokenBalance: '1000000', allowance: '1000000', nonce: 9 })],
+  });
+  await h.s.loadWallets([A, B]);
+  await h.s.sell(50, { walletIds: [A] });
+  Object.assign(h.byAddr.get(A), { tokenBalance: '500000', nonce: 1 });
+  h.s.onReceipt({ hash: hashOfSell(A, 0, 500000), status: 'landed', block: 11, gasUsed: '1' });
+  h.byAddr.get(B).tokenBalance = '4000000'; // B bought more: its allowance is short now
+  h.advance(20_000);
+  h.s.tick();
+  await flush();
+  const rows = new Map(h.s.view().rows.map((r) => [r.address, r]));
+  assert.equal(rows.get(A).status, 'landed');
+  assert.equal(rows.get(A).tokens, '500000');
+  assert.equal(rows.get(B).tokens, '4000000');
+  assert.deepEqual(h.log.broadcast.at(-1), [`raw|${B}|9|approve`], 'B tops up its approval (spec decision 6)');
 });

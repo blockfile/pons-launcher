@@ -84,6 +84,13 @@ const MARK_LAG_MS = 1_500;
 // its last landed sell (a read served a block behind would hand the sold
 // tokens back).
 const LANDED_SETTLE_MS = 10_000;
+// The live holdings (spec addendum C): while the page is visible, the listed
+// rows are re-read this often — ONE /wallets per 100 rows, which the server
+// charges 1 read token per 20 addresses (limits.readCost): 100 rows = 5 of the
+// 120 a minute, 15 a minute at 20 s. A refused read (a 429, the network) doubles
+// the wait, up to BALANCE_BACKOFF_MAX_MS; a read that succeeds resets it.
+const BALANCE_EVERY_MS = 20_000;
+const BALANCE_BACKOFF_MAX_MS = 300_000;
 // planArm's per-wallet reasons (chain/plan.js SKIP.NO_GAS / SKIP.UNREAD, Task 10).
 const ARM_NO_GAS = SKIP.NO_GAS;
 const ARM_UNREAD = SKIP.UNREAD;
@@ -150,6 +157,10 @@ export function createSession({
   // the chain's clock: deadlines and Permit2 expiries never trust the PC clock
   let clockOffsetMs = 0;
   let clockWarned = false;
+  // the periodic balance read (refreshBalances)
+  let balanceAt = deps.now();
+  let balanceWaitMs = BALANCE_EVERY_MS;
+  let balancing = false;
 
   const now = () => deps.now();
   const nowSec = () => Math.floor((deps.now() + clockOffsetMs) / 1000);
@@ -247,6 +258,10 @@ export function createSession({
           address: w.address,
           ticked: w.ticked,
           tokens: w.optimistic.toString(),
+          // this tab's sells of the wallet still in flight (the %-left bar's striped part)
+          inflight: w.inflight.toString(),
+          // false when the server could not read the token balance: tokens then says 0, which is not "empty"
+          balanceKnown: w.state.tokenBalance !== null && w.state.tokenBalance !== undefined,
           ethBalance: String(w.state.ethBalance ?? '0'),
           status: w.status,
           detail: w.detail,
@@ -489,6 +504,7 @@ export function createSession({
       if (e && e.cause && e.cause.code === 'venue_changed') return; // applyVenue reloads
       throw e;
     }
+    balanceAt = now(); // a load is a fresh read: the periodic one waits its full interval
     const legs = isPairLeg();
     for (const ws of states) {
       const key = lower(ws && ws.address);
@@ -1695,9 +1711,50 @@ export function createSession({
     emit();
   }
 
+  /**
+   * The live holdings' periodic read (spec addendum C): ONE /wallets of the
+   * listed rows. A row's balance is taken exactly (a buy raises it) only when
+   * nothing of the wallet is in flight and no sell of it landed within
+   * LANDED_SETTLE_MS — a read a block behind must never hand back tokens a sell
+   * just took; otherwise it can only lower it (applyState). Statuses at rest
+   * (idle / ready / skipped) are re-judged; landed, failed, sent and arming are
+   * left alone. A wallet whose balance grew past its allowance is topped up by
+   * arm() (spec decision 6) — never one that already tried this load. Rows not
+   * listed (an imported wallet that bought since) are Refresh's job.
+   * @returns {Promise<boolean>} whether a read landed
+   */
+  async function refreshBalances() {
+    if (disposed || balancing || venueMoving) return false;
+    const keys = order.filter((k) => W.has(k));
+    if (!keys.length) return false;
+    balancing = true;
+    balanceAt = now();
+    try {
+      const states = await readStates(keys);
+      for (const ws of states) {
+        const w = W.get(lower(ws && ws.address));
+        if (!w) continue;
+        const quiet = w.ops === 0 && w.inflight === 0n && now() - w.landedAt > LANDED_SETTLE_MS;
+        applyState(w, ws, { exact: quiet });
+        if (w.ops === 0 && (w.status === 'idle' || w.status === 'ready' || w.status === 'skipped')) rest(w);
+      }
+      balanceWaitMs = BALANCE_EVERY_MS;
+      emit();
+      await arm();
+      return true;
+    } catch (e) {
+      // A graduation found by this read reloads the wallets itself (applyVenue).
+      if (!(e && e.cause && e.cause.code === 'venue_changed')) balanceWaitMs = Math.min(balanceWaitMs * 2, BALANCE_BACKOFF_MAX_MS);
+      return false;
+    } finally {
+      balancing = false;
+    }
+  }
+
   function tick() {
     if (disposed) return;
     ticks += 1;
+    if (!deps.isHidden() && !balancing && now() - balanceAt >= balanceWaitMs) refreshBalances();
     if (isPool() && !deps.isHidden() && (!cache || now() - cache.at >= PREVIEW_REFRESH_MS)) refreshQuotes();
     if (ticks % 5 === 0) {
       sweep();
@@ -1895,6 +1952,7 @@ export function createSession({
     tick,
     sweep,
     refreshQuotes,
+    refreshBalances,
     view,
     get venue() {
       return venue;

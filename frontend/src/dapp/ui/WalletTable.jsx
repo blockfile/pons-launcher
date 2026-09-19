@@ -1,8 +1,10 @@
 import { memo } from 'react';
 import { m } from 'framer-motion';
 import { LuExternalLink, LuKeyRound, LuRefreshCw, LuTrash2 } from 'react-icons/lu';
-import { addressUrl, fmtPct, fmtPrice, fmtUnits, pctOfSupply, quoteSymbol, shortAddr, toNumber, txUrl } from './format.js';
+import { addressUrl, fmtPct, fmtPrice, fmtUnits, fmtUsd, pctOfSupply, shortAddr, txUrl } from './format.js';
 import { ROW_SELL_PCTS, rowSellBlocked } from './sellMath.js';
+import { leftOf, rowValue } from './positions.js';
+import { useLiveMark } from './useLiveMark.js';
 
 /**
  * The wallets holding the open token. Rows come from session.view(): address,
@@ -17,6 +19,13 @@ import { ROW_SELL_PCTS, rowSellBlocked } from './sellMath.js';
  *   .amber  Retry approvals — the panel's ONE amber object, shown only when
  *           an approval failed
  * All / None / Invert and the tick boxes move no money: quiet grey.
+ *
+ * LIVE HOLDINGS (spec addendum C): tokens, value in ETH and USD, % of supply
+ * and the %-left bar re-render with the price at most once a second
+ * (useLiveMark) — this table only, never App or the sell panel. The bar's grey
+ * part is what the wallet holds of its position (positions.js high-water
+ * mark); the striped vermilion part is this tab's sells of it still in flight
+ * (vermilion = live, the money law).
  */
 function StatusCell({ row }) {
   return (
@@ -36,6 +45,22 @@ function StatusCell({ row }) {
         </a>
       )}
     </m.span>
+  );
+}
+
+function LeftBar({ row, rec }) {
+  const { left, flight } = leftOf(row, rec);
+  const held = left * 100;
+  const selling = flight * 100;
+  const label = selling > 0 ? `${fmtPct(held, 1)} of the position left, ${fmtPct(selling, 1)} selling` : `${fmtPct(held, 1)} of the position left`;
+  return (
+    <span className="leftbar" title={label}>
+      <span className="lb-track" role="img" aria-label={label}>
+        <span className="lb-held" style={{ width: `${held}%` }} />
+        {selling > 0 && <span className="lb-flight" style={{ width: `${selling}%` }} />}
+      </span>
+      <span className="lb-num">{fmtPct(held, 1)}</span>
+    </span>
   );
 }
 
@@ -61,10 +86,33 @@ function RowSell({ row, fees, onSellOne }) {
   );
 }
 
-function WalletTable({ view, venue, fees, getMark, walletCount, onTick, onTickAll, onInvert, onSellOne, onRefresh, onRetryArm, onConvert, onImport, onClear, refreshing }) {
-  const mark = getMark();
+function WalletTable({
+  view,
+  venue,
+  fees,
+  hub,
+  getMark,
+  quoteUsd,
+  ethPerQuote,
+  positions,
+  walletCount,
+  onTick,
+  onTickAll,
+  onInvert,
+  onSellOne,
+  onRefresh,
+  onRetryArm,
+  onConvert,
+  onImport,
+  onClear,
+  refreshing,
+}) {
+  const mark = useLiveMark(hub, getMark);
   const price = mark && Number.isFinite(mark.price) ? mark.price : null;
-  const sym = quoteSymbol(venue);
+  const usdPerQuote = quoteUsd && Number.isFinite(quoteUsd.usd) ? quoteUsd.usd : null;
+  const noPrice = price === null ? 'no price yet' : '';
+  const noEth = noPrice || (ethPerQuote === null ? (quoteUsd && quoteUsd.reason) || `no ${venue.pairSymbol || 'pair'} → ETH price` : '');
+  const noUsd = noPrice || (usdPerQuote === null ? (quoteUsd && quoteUsd.reason) || 'no USD price' : '');
   const tickedN = view.rows.filter((r) => r.ticked).length;
   const allTicked = view.rows.length > 0 && tickedN === view.rows.length;
   const someTicked = tickedN > 0 && !allTicked;
@@ -136,17 +184,19 @@ function WalletTable({ view, venue, fees, getMark, walletCount, onTick, onTickAl
                   </label>
                 </th>
                 <th>Wallet</th>
+                <th>Left</th>
                 <th>Sell %</th>
                 <th className="num">Tokens</th>
+                <th className="num">Value (ETH)</th>
+                <th className="num">Value (USD)</th>
                 <th className="num">% supply</th>
-                <th className="num">Value ({sym})</th>
                 <th className="num">ETH for gas</th>
                 <th>Status</th>
               </tr>
             </thead>
             <tbody>
               {view.rows.map((r) => {
-                const value = price === null ? null : toNumber(r.tokens, venue.decimals) * price;
+                const value = rowValue({ tokens: r.tokens, decimals: venue.decimals, price, ethPerQuote, usdPerQuote });
                 return (
                   <tr key={r.address} className={r.ticked ? '' : 'is-off'} data-testid="wallet-row">
                     <td className="tick">
@@ -159,12 +209,20 @@ function WalletTable({ view, venue, fees, getMark, walletCount, onTick, onTickAl
                         {shortAddr(r.address)}
                       </a>
                     </td>
+                    <td className="left-cell">
+                      <LeftBar row={r} rec={positions ? positions[r.address.toLowerCase()] : null} />
+                    </td>
                     <td className="rowsell-cell">
                       <RowSell row={r} fees={fees} onSellOne={onSellOne} />
                     </td>
                     <td className="num">{fmtUnits(r.tokens, venue.decimals, 2)}</td>
+                    <td className="num" title={value.eth === null ? noEth : ''}>
+                      {value.eth === null ? '—' : fmtPrice(value.eth)}
+                    </td>
+                    <td className="num" title={value.usd === null ? noUsd : ''}>
+                      {fmtUsd(value.usd)}
+                    </td>
                     <td className="num">{fmtPct(pctOfSupply(r.tokens, venue.totalSupply), 3)}</td>
-                    <td className="num">{value === null ? '—' : fmtPrice(value)}</td>
                     <td className={`num${r.gasShort ? ' is-short' : ''}`} title={r.gasShort || ''}>
                       {fmtUnits(r.ethBalance, 18, 5)}
                     </td>

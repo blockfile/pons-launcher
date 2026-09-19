@@ -12,6 +12,7 @@ import { USDG } from '../chain/constants.js';
 import { createHub } from './hub.js';
 import { createSession } from './session.js';
 import { createFeed } from './feed.js';
+import { ethPerQuoteOf } from './positions.js';
 import { realDeps } from './deps.js';
 import { loadPresets, loadSlippage, savePresets, saveSlippage, slippageToBps } from './prefs.js';
 import { stageOf, summarizeSkips } from './sellMath.js';
@@ -109,6 +110,21 @@ export default function App() {
 
   const toast = useCallback((message, kind = 'info') => hub.emit('toast', { message, kind }), [hub]);
   const getMark = useCallback(() => markRef.current, []);
+
+  // The %-left bars' starting sizes (positions.js): kept on this device with
+  // Remember, and in the encrypted account while Task 29 has it unlocked — the
+  // book hears the account over the hub ('account:positions', 'account:locked')
+  // and hands its changes back ('positions:save').
+  const book = realDeps.positions;
+  const [positionsRev, setPositionsRev] = useState(0);
+  useEffect(() => book.connect(hub), [book, hub]);
+  useEffect(() => book.subscribe(() => setPositionsRev((n) => n + 1)), [book]);
+  useEffect(() => {
+    if (token) book.observe(token, view.rows);
+  }, [book, token, view]);
+  // positionsRev is the book's change counter: a new object for WalletTable on every change.
+  // Named positionsForToken, not positions: a per-token map must never shadow a book.
+  const positionsForToken = useMemo(() => (token ? book.forToken(token) : {}), [book, token, positionsRev]);
 
   const syncOwnAddrs = useCallback(() => {
     const list = storedAddresses();
@@ -224,6 +240,8 @@ export default function App() {
   // USDG: 1. Any other pair (AMZN…): a 1-unit pair->ETH quote x ETH/USD. When
   // any input is missing the figure is absent with a reason — never a guess.
   const ethUsd = fees && Number(fees.ethUsd) > 0 ? Number(fees.ethUsd) : null;
+  // ETH per quote unit for the rows' ETH value: 1 when ETH-quoted, else through quoteUsd (below).
+  const ethPerQuote = ethPerQuoteOf(venue, quoteUsd, ethUsd);
   const pairToken = venue ? venue.pairToken : null;
   const nativeQuote = venue ? venue.nativeQuote : true;
   const pairDecimals = venue ? venue.pairDecimals : 18;
@@ -326,6 +344,7 @@ export default function App() {
     if (!window.confirm(ask)) return;
     clearWallets();
     realDeps.pairLedger.clear(); // what the page remembered about these wallets goes with them
+    book.clear(); // and so do their positions (the account's copy stays until its own delete)
     syncOwnAddrs();
     if (sessionRef.current) sessionRef.current.reset();
     if (!safeHasVault()) return;
@@ -338,7 +357,7 @@ export default function App() {
       setVault('locked');
       toast('The encrypted copy stays on this device — Forget deletes it', 'info');
     }
-  }, [account, syncOwnAddrs, toast]);
+  }, [account, book, syncOwnAddrs, toast]);
 
   const onImported = useCallback(
     ({ added, duplicates, rejected, saved = 0, saveError = '' }) => {
@@ -382,9 +401,10 @@ export default function App() {
     if (!window.confirm('Delete the encrypted wallets saved on this device? Keys not kept elsewhere are lost.')) return;
     wipeVault();
     realDeps.pairLedger.clear(); // its entries can be linked to the wallets: they go too
+    book.clear(); // so can the positions
     setVault('none');
     toast('Saved wallets deleted from this device', 'ok');
-  }, [toast]);
+  }, [book, toast]);
 
   // ── the account ─────────────────────────────────────────────────────────────
   useEffect(() => {
@@ -674,6 +694,10 @@ export default function App() {
                       view={view}
                       venue={venue}
                       getMark={getMark}
+                      hub={hub}
+                      quoteUsd={quoteUsd}
+                      ethPerQuote={ethPerQuote}
+                      positions={positionsForToken}
                       walletCount={walletCount}
                       onTick={onTick}
                       onTickAll={onTickAll}

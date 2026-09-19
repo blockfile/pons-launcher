@@ -1329,3 +1329,61 @@ td.rowsell-cell {
     min-width: 6ch;
   }
 }
+
+/* ── live holdings (addendum C, Task 34) ─────────────────────────────────────
+   The %-left bar: a hairline track, the held part in neutral grey, the part
+   this tab is selling right now striped vermilion (live: the money law), the
+   rest empty. Square, no motion. */
+td.left-cell {
+  width: 1%;
+}
+
+.leftbar {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--s2);
+}
+
+.lb-track {
+  display: flex;
+  width: 72px;
+  height: 8px;
+  overflow: hidden;
+  background: var(--rule-soft);
+  border: 1px solid var(--rule);
+}
+
+.lb-held {
+  flex: none;
+  height: 100%;
+  background: var(--dim);
+}
+
+.lb-flight {
+  flex: none;
+  height: 100%;
+  background: repeating-linear-gradient(-45deg, var(--vermilion) 0 3px, transparent 3px 6px);
+}
+
+.lb-num {
+  min-width: 6ch;
+  text-align: right;
+  font: var(--t-small) var(--mono);
+  font-variant-numeric: tabular-nums;
+  color: var(--dim);
+}
+
+tr.is-off .lb-held {
+  background: var(--dimmer);
+}
+
+/* Phone: the bar narrows so a row's own sell buttons sit on the first screen. */
+@media (max-width: 640px) {
+  .lb-track {
+    width: 44px;
+  }
+
+  .lb-num {
+    min-width: 5ch;
+  }
+}

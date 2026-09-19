@@ -12,6 +12,7 @@ import { approveTx, pairToEthTx } from '../chain/build.js';
 import { NonceBook } from '../chain/nonces.js';
 import { SWAP_ROUTER02 } from '../chain/constants.js';
 import { createPairLedger } from './pairLedger.js';
+import { createPositionBook } from './positions.js';
 
 function localStore() {
   try {
@@ -42,4 +43,8 @@ export const realDeps = {
   // a visitor who chose to remember wallets on this device (its entries can be
   // linked to the wallets: see pairLedger.js). App wipes it on Clear and Forget.
   pairLedger: createPairLedger({ storage: localStore(), hash: id, persist: hasVault }),
+  // Each wallet's starting size per token, for the %-left bar (positions.js): the
+  // same device rule as pairLedger — on the device only with Remember; App
+  // connects it to the account over the hub and wipes it on Clear and Forget.
+  positions: createPositionBook({ storage: localStore(), hash: id, persist: hasVault }),
 };
