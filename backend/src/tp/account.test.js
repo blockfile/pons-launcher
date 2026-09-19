@@ -529,6 +529,59 @@ test('an unwritable accounts dir answers 503 on login, and nothing below it is c
   }
 });
 
+// ── the contract both sides test (accountContract.json) ──────────────────────
+// frontend/src/dapp/account/contract.test.js walks the SAME scenario through the
+// page's fake server and its real api.js: a route or a field renamed on one side
+// only fails a test on the other.
+test('the router answers the shared account contract, step by step (accountContract.json)', async () => {
+  const CONTRACT = require('./accountContract.json');
+  const app = await startApp();
+  try {
+    const w = Wallet.createRandom();
+    const keyId = `0x${crypto.randomBytes(16).toString('hex')}`;
+    const envelope = (baseRev) => ({ baseRev, kv: 1, keyId, iv: crypto.randomBytes(12).toString('base64'), ct: crypto.randomBytes(64).toString('base64') });
+    let cookie = null;
+    let challenge = null;
+    for (const [i, step] of CONTRACT.scenario.entries()) {
+      const route = CONTRACT.routes[step.route];
+      const where = `step ${i + 1}: ${route.method} ${route.path}`;
+      let body;
+      if (step.route === 'nonce') body = { address: w.address };
+      else if (step.route === 'login') body = { nonce: challenge.nonce, signature: await w.signMessage(challenge.message) };
+      else if (step.route === 'vaultPut') body = envelope(step.baseRev);
+      else if (step.route === 'vaultDelete') body = { baseRev: step.baseRev };
+      else if (route.body) body = {};
+      if (body !== undefined) assert.deepEqual(Object.keys(body).sort(), route.body, `${where}: the body the contract names`);
+      const text = body === undefined ? undefined : JSON.stringify(body);
+      const headers = route.method === 'GET' ? { 'sec-fetch-site': 'same-origin' } : { ...PAGE, 'content-length': String(Buffer.byteLength(text)) };
+      const r = await call(app.server, route.method, CONTRACT.base + route.path, { body: text, headers, cookie });
+      assert.equal(r.status, step.status, `${where}: ${JSON.stringify(r.json)}`);
+      if (step.code) {
+        assert.equal(r.json.code, step.code, where);
+        assert.deepEqual(Object.keys(r.json).sort(), step.code === 'conflict' ? CONTRACT.conflictKeys : CONTRACT.refusalKeys, where);
+        if (step.rev !== undefined) assert.equal(r.json.rev, step.rev, where);
+        continue;
+      }
+      if (route.answer === null) {
+        assert.equal(r.json, null, `${where}: no body`);
+        continue;
+      }
+      assert.deepEqual(Object.keys(r.json).sort(), route.answer, `${where}: the answer's fields`);
+      if (step.rev !== undefined) assert.equal(r.json.rev, step.rev, where);
+      if (step.vault === null) assert.equal(r.json.vault, null, where);
+      if (step.vault === 'meta') assert.deepEqual(Object.keys(r.json.vault).sort(), CONTRACT.vaultMeta, where);
+      if (step.vault === 'record') assert.deepEqual(Object.keys(r.json.vault).sort(), CONTRACT.vaultRecord, where);
+      if (step.route === 'nonce') challenge = r.json;
+      if (step.route === 'login') {
+        cookie = sessionCookieFrom(r);
+        assert.ok(cookie && cookie.startsWith(`${CONTRACT.cookie}=`), `${where}: the session cookie`);
+      }
+    }
+  } finally {
+    await app.close();
+  }
+});
+
 test('an unknown account path → 404 from the account router itself', async () => {
   const app = await startApp();
   try {

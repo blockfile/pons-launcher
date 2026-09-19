@@ -1,0 +1,32 @@
+{
+  "about": "The /api/tp/account contract, ONE copy for both sides of the tp tab. backend/src/tp/account.test.js drives the real router through `scenario`; frontend/src/dapp/account/contract.test.js drives the test fake (fakeServer.js) and the real client (api.js) through the same steps. A route renamed on one side only fails a test on the other. Change this file only together with both.",
+  "base": "/api/tp/account",
+  "cookie": "__Host-tp_session",
+  "routes": {
+    "nonce": { "method": "POST", "path": "/nonce", "body": ["address"], "answer": ["expirationTime", "issuedAt", "message", "nonce"] },
+    "login": { "method": "POST", "path": "/login", "body": ["nonce", "signature"], "answer": ["address", "expiresAt"] },
+    "me": { "method": "GET", "path": "/me", "body": null, "answer": ["address", "expiresAt", "vault"] },
+    "vaultGet": { "method": "GET", "path": "/vault", "body": null, "answer": ["vault"] },
+    "vaultPut": { "method": "PUT", "path": "/vault", "body": ["baseRev", "ct", "iv", "keyId", "kv"], "answer": ["rev", "updatedAt"] },
+    "vaultDelete": { "method": "DELETE", "path": "/vault", "body": ["baseRev"], "answer": ["deleted"] },
+    "logout": { "method": "POST", "path": "/logout", "body": [], "answer": null }
+  },
+  "vaultMeta": ["bytes", "keyId", "rev", "updatedAt"],
+  "vaultRecord": ["ct", "iv", "keyId", "kv", "rev", "updatedAt", "v"],
+  "refusalKeys": ["code", "error"],
+  "conflictKeys": ["code", "error", "rev"],
+  "scenario": [
+    { "route": "me", "status": 401, "code": "no_session" },
+    { "route": "nonce", "status": 200 },
+    { "route": "login", "status": 200 },
+    { "route": "me", "status": 200, "vault": null },
+    { "route": "vaultGet", "status": 200, "vault": null },
+    { "route": "vaultPut", "baseRev": 0, "status": 200, "rev": 1 },
+    { "route": "me", "status": 200, "vault": "meta" },
+    { "route": "vaultGet", "status": 200, "vault": "record" },
+    { "route": "vaultPut", "baseRev": 0, "status": 409, "code": "conflict", "rev": 1 },
+    { "route": "vaultDelete", "baseRev": 1, "status": 200 },
+    { "route": "me", "status": 401, "code": "no_session" },
+    { "route": "logout", "status": 204 }
+  ]
+}
