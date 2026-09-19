@@ -304,6 +304,20 @@ function cachedInfo(token) {
   return cache.get(lc(token)) || null;
 }
 
+/**
+ * The cached TokenInfo at once; on a miss, null after starting (or joining) the
+ * single-flight read in the background, whose answer a LATER call gets. Never waits,
+ * never throws. For the latency paths: GET /token (also the sell click's stale-mark
+ * fallback) and the stream's stats.
+ */
+function peekInfo(venue, deps = {}) {
+  if (!venue || !venue.token || !venue.kind) return null;
+  const hit = cachedInfo(venue.token);
+  if (hit) return hit;
+  readTokenInfo(venue, deps).catch(() => {});
+  return null;
+}
+
 // ── the live figures ─────────────────────────────────────────────────────────
 
 async function readPoolBalances(venue, deps) {
@@ -350,12 +364,18 @@ function poolBalances(venue, deps = {}) {
   return pending;
 }
 
+/** The last known v1 pool reserves, or null — never a read. */
+function cachedPoolBalances(venue) {
+  if (!venue || venue.kind !== 'v1' || !venue.token) return null;
+  const memo = pools.get(lc(venue.token));
+  return memo ? memo.value : null;
+}
+
 /** The last known v1 pool reserves (or null) at once; refreshes them in the background when stale. */
 function peekPoolBalances(venue, deps = {}) {
   if (!venue || venue.kind !== 'v1') return null;
   poolBalances(venue, deps).catch(() => {});
-  const memo = pools.get(lc(venue.token));
-  return memo ? memo.value : null;
+  return cachedPoolBalances(venue);
 }
 
 /**
@@ -417,14 +437,13 @@ function launchRef(venue, info) {
 /**
  * The stream's 'stats' payload for one indexer: its CandleRing stats (change and volume
  * per window) plus the figures from its current mark. null for an indexer that cannot
- * report stats. Never reads the chain on the caller's path: the TokenInfo comes from the
- * cache (a miss starts the read for the next call) and a v1 pool from its memo.
+ * report stats. Never reads the chain on the caller's path: the TokenInfo comes from
+ * peekInfo (a miss starts the read for a later call) and a v1 pool from its memo.
  */
 function streamStats(indexer, deps = {}) {
   if (!indexer || typeof indexer.stats !== 'function' || !indexer.venue) return null;
   const venue = indexer.venue;
-  const info = cachedInfo(venue.token);
-  if (!info) readTokenInfo(venue, deps).catch(() => {});
+  const info = peekInfo(venue, deps);
   const s = indexer.stats(launchRef(venue, info));
   if (!s) return null;
   const pool = venue.kind === 'v1' ? peekPoolBalances(venue, deps) : null;
@@ -441,10 +460,12 @@ function _clearCache() {
 module.exports = {
   readTokenInfo,
   cachedInfo,
+  peekInfo,
   figures,
   launchRef,
   poolBalances,
   peekPoolBalances,
+  cachedPoolBalances,
   streamStats,
   normaliseSocials,
   cleanDescription,

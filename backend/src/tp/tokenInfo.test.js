@@ -192,6 +192,32 @@ test('readTokenInfo refuses anything but a resolved venue', async () => {
   await assert.rejects(T.readTokenInfo({ token: TOKEN }), (err) => err.code === 'bad_request');
 });
 
+test('peekInfo: the cached info at once; a miss starts ONE background read and answers null', async () => {
+  T._clearCache();
+  const chain = v2Chain();
+  const deps = { provider: chain.provider };
+  assert.equal(T.peekInfo(curveVenue, deps), null, 'nothing cached yet: null at once');
+  assert.equal(T.peekInfo(curveVenue, deps), null, 'still in flight: joined, not read again');
+  assert.equal(chain.count('aggregate3'), 1);
+  await new Promise((r) => setImmediate(r));
+  const info = T.peekInfo(curveVenue, deps);
+  assert.equal(info.launchedAt, 1789821655);
+  assert.equal(info, T.cachedInfo(TOKEN));
+  assert.equal(chain.count('aggregate3'), 1, 'a hit reads nothing');
+  assert.equal(T.peekInfo(null), null);
+  assert.equal(T.peekInfo({ token: TOKEN }), null, 'not a resolved venue: nothing is started');
+
+  T._clearCache();
+  const failing = {
+    call: async () => {
+      throw new Error('rpc timeout');
+    },
+  };
+  assert.equal(T.peekInfo(curveVenue, { provider: failing }), null, 'a read that fails never throws here');
+  await new Promise((r) => setImmediate(r));
+  assert.equal(T.cachedInfo(TOKEN), null, 'and caches nothing');
+});
+
 // ── strings ──────────────────────────────────────────────────────────────────
 
 const ch = (n) => String.fromCodePoint(n);
@@ -334,20 +360,28 @@ test('poolBalances (v1): the pool WETH and token balances, memoised 15 s with on
   assert.equal(await T.poolBalances(curveVenue, deps), null, 'only a v1 venue has pool balances');
 });
 
-test('peekPoolBalances answers the last value at once and refreshes it in the background when stale', async () => {
+test('peekPoolBalances answers the last value at once and refreshes it in the background when stale; cachedPoolBalances never reads', async () => {
   T._clearCache();
   const { chain, balances } = v1PoolChain();
   let now = 1_000;
   const deps = { provider: chain.provider, now: () => now };
+  assert.equal(T.cachedPoolBalances(v1Venue), null);
+  assert.equal(chain.count('aggregate3'), 0, 'cachedPoolBalances starts nothing');
   assert.equal(T.peekPoolBalances(v1Venue, deps), null, 'nothing known yet');
   await new Promise((r) => setImmediate(r));
   assert.equal(T.peekPoolBalances(v1Venue, deps).quote, (5096n * 10n ** 14n).toString());
+  assert.equal(T.cachedPoolBalances(v1Venue), T.peekPoolBalances(v1Venue, deps));
   balances.weth = 9n;
   now += T.POOL_TTL_MS;
+  assert.equal(T.cachedPoolBalances(v1Venue).quote, (5096n * 10n ** 14n).toString(), 'stale: a cached read refreshes nothing');
+  assert.equal(chain.count('aggregate3'), 1);
   assert.equal(T.peekPoolBalances(v1Venue, deps).quote, (5096n * 10n ** 14n).toString(), 'stale, answered at once');
   await new Promise((r) => setImmediate(r));
   assert.equal(T.peekPoolBalances(v1Venue, deps).quote, '9');
+  assert.equal(chain.count('aggregate3'), 2);
   assert.equal(T.peekPoolBalances(curveVenue, deps), null);
+  assert.equal(T.cachedPoolBalances(curveVenue), null);
+  assert.equal(T.cachedPoolBalances(null), null);
 });
 
 // ── streamStats ──────────────────────────────────────────────────────────────

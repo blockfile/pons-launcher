@@ -47,25 +47,35 @@ const broadcastLimit = rateLimit({
 const wrap = (fn) => (req, res, next) => Promise.resolve().then(() => fn(req, res, next)).catch(next);
 
 // ── routes ───────────────────────────────────────────────────────────────────
-// {venue, mark, info, figures}. Everything but the venue is best effort, read side by
-// side: a venue whose price will not read answers mark: null, a token whose info will
-// not read info: null — nothing, rather than a wrong number. info is the token header's
-// static half (tokenInfo.readTokenInfo, cached forever); figures its live half from
-// this mark (curve progress, pool liquidity), which the stream's 'stats' then updates.
+// {venue, mark, info, figures}. The venue and the mark are v1's: the mark is best effort
+// (a price that will not read is mark: null — nothing, rather than a wrong number), and
+// after the venue it is ALL this route waits for. The route is also the sell click's
+// stale-mark fallback (the page's ui/session.js sell -> api.getToken), so the header's
+// reads never ride on it: the token info (tokenInfo.js, cached forever) and a v1 pool's
+// balances (memoised 15 s) are started, or joined, beside the mark read, and go out only
+// as far as they have answered when the mark does. A token's first load usually has its
+// info (one multicall against the mark's two round trips); when not, info is null and
+// the header's one re-read finds it cached. figures is the header's live half from this
+// mark (curve progress, pool liquidity), which the stream's 'stats' keeps current.
 router.get(
   '/token/:ca',
   readLimit,
   wrap(async (req, res) => {
     const v = await venue.resolveVenue(req.params.ca);
-    const quiet = (what) => (err) => {
-      console.warn(`[tp] ${what} unavailable for ${v.token}: ${err && err.message}`);
-      return null;
-    };
-    const [mark, info, pool] = await Promise.all([
-      Promise.resolve().then(() => state.readMark(v)).catch(quiet('mark')),
-      Promise.resolve().then(() => tokenInfo.readTokenInfo(v)).catch(quiet('info')),
-      Promise.resolve().then(() => tokenInfo.poolBalances(v)).catch(quiet('pool balances')),
-    ]);
+    // The mark read starts first, so the read provider's queue (providers.js) serves it
+    // ahead of the header's reads when every slot is busy.
+    const marking = (async () => state.readMark(v))();
+    tokenInfo.peekInfo(v); // starts or joins the info read; never waited for
+    tokenInfo.peekPoolBalances(v); // v1 only; the same
+    let mark = null;
+    try {
+      mark = await marking;
+    } catch (err) {
+      console.warn(`[tp] mark unavailable for ${v.token}: ${err.message}`);
+    }
+    // Whatever of them has answered by now; neither call reads the chain.
+    const info = tokenInfo.cachedInfo(v.token);
+    const pool = tokenInfo.cachedPoolBalances(v);
     res.json({ venue: v, mark, info, figures: tokenInfo.figures(v, mark, info, pool) });
   })
 );
