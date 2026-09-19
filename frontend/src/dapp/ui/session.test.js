@@ -1384,3 +1384,43 @@ test("the page's own sends on another token keep an earlier entry valid", async 
   await h2.s.loadWallets([A]);
   assert.equal(h2.s.view().rows[0].pairPending, '1000');
 });
+
+// ── a batch refused for impact is split, not retried whole forever (review round 3: F7) ──
+test('a pair batch refused for price impact is split: what passes converts now, the rest shortly after', async () => {
+  const states = Array.from({ length: 4 }, (_, i) => wallet(nth(i), { tokenBalance: '1000000', allowance: '1000000', nonce: 0, pairBalance: '0' }));
+  states.push(wallet(nth(9), { tokenBalance: '5000000', allowance: '5000000', nonce: 0, pairBalance: '0' }));
+  const h = harness({ venue: AMZN_CURVE, states });
+  // A thin AMZN route: anything over 2,000 AMZN moves it past the 10 % guard.
+  h.api.postPairQuote = async (pairToken, amount) => {
+    h.log.pair.push(amount);
+    const deep = BigInt(amount) > 2000n;
+    return { amountOut: String(BigInt(amount) * 2n), path: 'route', fees: [], impactBps: deep ? 1400 : 50, ok: !deep, reason: deep ? 'too deep' : null };
+  };
+  await h.s.loadWallets(states.map((s) => s.address));
+  await h.s.sell(100);
+  for (const s of states) Object.assign(s, { nonce: 1, tokenBalance: '0', pairBalance: String(BigInt(s === states[4] ? 5000 : 1000)) });
+  for (const s of states) h.s.onReceipt({ hash: hashOfSell(s.address, 0, s === states[4] ? 5000000 : 1000000), status: 'landed', block: 9, gasUsed: '1' });
+  await h.runTimers();
+  const approvals = () =>
+    h.log.broadcast
+      .slice(1)
+      .flat()
+      .filter((raw) => raw.includes('|approve:'))
+      .map((raw) => raw.split('|')[1]);
+  assert.equal(h.log.pair[0], '9000', 'the whole batch first');
+  assert.equal(approvals().length, 2, 'the half that passes converts at once');
+
+  for (let s = 0; s < 30; s += 5) {
+    h.advance(5_000);
+    for (let i = 0; i < 5; i += 1) h.s.tick();
+    await h.runTimers();
+  }
+  const done = approvals();
+  assert.equal(done.length, 4, 'every wallet that passes on its own is converted');
+  assert.equal(new Set(done).size, 4);
+  assert.ok(!done.includes(states[4].address.toLowerCase()), 'the one leg too deep even alone stays');
+  assert.equal(h.log.pair.filter((a) => a === '9000').length, 1, 'the refused batch is never quoted whole again');
+  const big = h.s.view().rows.find((r) => r.address === states[4].address);
+  assert.equal(big.pairPending, '5000');
+  assert.match(big.detail, /price impact/);
+});

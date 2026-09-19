@@ -65,6 +65,11 @@ const PAIR_BACKOFF_MAX_MS = 600_000;
 // for this long is believed (the proceeds left another way, or a leg of ours
 // landed unseen) — never one read.
 const SHORT_TRUST_MS = 60_000;
+// A pair batch the route refuses for price impact is halved (smallest legs
+// first) at most this many times per flush; the legs set aside are re-batched
+// after PAIR_SPLIT_MS, once the part that passed has moved the route.
+const MAX_PAIR_SPLITS = 4;
+const PAIR_SPLIT_MS = 5_000;
 // The preview's quote cache (pools): refreshed this often while visible, and
 // trusted this long. It never sizes a floor.
 const PREVIEW_REFRESH_MS = 5_000;
@@ -1050,6 +1055,14 @@ export function createSession({
     if (w && w.ops === 0) setRow(w, 'failed', why);
   }
 
+  /** A leg set aside from a batch the route refused whole: re-batched after PAIR_SPLIT_MS (the tick), keeping its click. */
+  function deferPair(l) {
+    const p = pair(l.key);
+    p.running = false;
+    p.manual = l.manual;
+    p.retryAt = now() + PAIR_SPLIT_MS;
+  }
+
   /**
    * Queue a wallet's pair leg for the next batch.
    *   manual  the visitor pressed Convert: no backoff wait, and an earlier visit's proceeds go too
@@ -1186,40 +1199,59 @@ export function createSession({
       return;
     }
 
-    const S = legs.reduce((a, l) => a + l.amount, 0n);
-    const aMin = legs.reduce((a, l) => min(a, l.amount), legs[0].amount);
-    let q;
-    let qRest = null;
-    try {
-      [q, qRest] = await Promise.all([
-        deps.api.postPairQuote(venue.pairToken, S.toString()),
-        legs.length > 1 ? deps.api.postPairQuote(venue.pairToken, (S - aMin).toString()) : Promise.resolve(null),
-      ]);
-    } catch (e) {
-      for (const l of legs) refusePair(l.key, `${pairSym()} → ETH not sent: ${errText(e)} — retrying`);
-      emit();
-      return;
-    }
     // The route's impact guard, pinned here as in chain/plan.js planPairLeg
     // (MAX_ROUTE_IMPACT_BPS): the QuoterV2 saturates on an oversized input, so
     // minOut alone cannot see a drained pool (memory v3-token-quoted-route).
-    const tooDeep = !!q && Number(q.impactBps) > MAX_ROUTE_IMPACT_BPS;
+    // It judges the whole batch: a batch it refuses may pass in smaller pieces
+    // (each wallet alone often does), so it is halved — smallest legs first —
+    // and what passes converts now; the rest are re-batched shortly, never
+    // quoted whole again. Only a leg too deep on its own waits out the backoff.
+    let batch = [...legs].sort((a, b) => (a.amount === b.amount ? 0 : a.amount < b.amount ? -1 : 1));
+    let S;
+    let aMin;
+    let q;
+    let qRest = null;
+    let tooDeep = false;
+    for (let split = 0; ; split += 1) {
+      S = batch.reduce((a, l) => a + l.amount, 0n);
+      aMin = batch[0].amount;
+      try {
+        [q, qRest] = await Promise.all([
+          deps.api.postPairQuote(venue.pairToken, S.toString()),
+          batch.length > 1 ? deps.api.postPairQuote(venue.pairToken, (S - aMin).toString()) : Promise.resolve(null),
+        ]);
+      } catch (e) {
+        for (const l of batch) refusePair(l.key, `${pairSym()} → ETH not sent: ${errText(e)} — retrying`);
+        emit();
+        return;
+      }
+      tooDeep = !!q && Number(q.impactBps) > MAX_ROUTE_IMPACT_BPS;
+      if (!tooDeep || batch.length === 1 || split >= MAX_PAIR_SPLITS) break;
+      let n = 0;
+      let part = 0n;
+      while (n < batch.length - 1 && part + batch[n].amount <= S / 2n) {
+        part += batch[n].amount;
+        n += 1;
+      }
+      for (const l of batch.slice(Math.max(n, 1))) deferPair(l);
+      batch = batch.slice(0, Math.max(n, 1));
+    }
     const full = q && q.ok === true && !tooDeep ? BigInt(q.amountOut ?? 0) : 0n;
     let tail = full;
-    if (legs.length > 1) {
+    if (batch.length > 1) {
       const rest = qRest ? BigInt(qRest.amountOut ?? 0) : 0n;
       tail = rest > 0n ? sub(full, rest) : 0n;
     }
     if (full <= 0n || tail <= 0n) {
       const why = tooDeep ? `price impact over ${MAX_ROUTE_IMPACT_BPS / 100}%` : (q && q.reason) || 'no route to ETH';
-      for (const l of legs) refusePair(l.key, `${pairSym()} kept in the wallet — ${why}; retrying later`);
+      for (const l of batch) refusePair(l.key, `${pairSym()} kept in the wallet — ${why}; retrying later`);
       emit();
       return;
     }
     const raws = [];
     const metas = [];
     await withLock(async () => {
-      for (const l of legs) {
+      for (const l of batch) {
         const w = W.get(l.key);
         const worst = (l.amount * tail) / aMin;
         const minOut = (worst * BigInt(10_000 - slippageBps)) / 10_000n;
@@ -1586,7 +1618,7 @@ export function createSession({
       // passed. An earlier visit's (carried) never are: only a click converts them.
       if (isPairLeg()) {
         const t = now();
-        for (const [k, p] of pairs) if (!p.running && pendingOf(p) > 0n && t >= p.retryAt) queuePair(k);
+        for (const [k, p] of pairs) if (!p.running && (pendingOf(p) > 0n || (p.manual && p.carried > 0n)) && t >= p.retryAt) queuePair(k);
       }
     }
     const t = now();
