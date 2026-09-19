@@ -382,6 +382,17 @@ curl -sN --max-time 5 'https://dapp.rhbond.xyz/api/tp/stream?token=<a pons CA>&i
 **Later updates:** `git pull && npm ci && npm run build && pm2 restart pons-launcher`.
 nginx needs touching again only if `deploy/nginx-rhbond.conf` changed.
 
+**Local end-to-end check** (an Anvil fork of chain 4663, throwaway wallets, nothing
+touches the real chain): `cd frontend && npm run build`, then
+`cd backend && npm run tp:smoke`. See `backend/scripts/tp-fork-smoke.js`.
+`npm run tp:smoke -- --size-only` checks only the 250 KB first-load budget (no fork);
+`-- --hold` keeps the fork and the server up for a browser run and checks that run's
+sells on-chain when you create the STOP file it names; `-- --pair` adds a
+token-quoted curve and its pair -> ETH leg. The public RPC the fork reads from stops
+serving the fork block's state within minutes, so a run that has to read much new
+state late can fail on the fork's side ("historical state ... is not available" in
+`anvil.log`, kept with `-- --keep`): run it again.
+
 ## Verified on-chain
 
 Checked against the live contracts on 2026-07-25, not assumed:

@@ -23,7 +23,8 @@
     "pairs": "node scripts/pairs.js",
     "tick-race": "node scripts/tick-race.js",
     "deploy": "node scripts/deploy-contract.js",
-    "rescue": "node scripts/rescue-distributor.js"
+    "rescue": "node scripts/rescue-distributor.js",
+    "tp:smoke": "node scripts/tp-fork-smoke.js"
   },
   "engines": {
     "node": ">=20"
