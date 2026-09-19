@@ -4,7 +4,7 @@ const test = require('node:test');
 const assert = require('node:assert/strict');
 const { AbiCoder, zeroPadValue } = require('ethers');
 
-const { createRegistry, liveFilters } = require('./indexer');
+const { createRegistry, createLimiter, liveFilters } = require('./indexer');
 const { TOPICS, POOL_MANAGER } = require('./constants');
 const { TpError } = require('./errors');
 
@@ -280,7 +280,7 @@ test('the last hour loads first: four sequential 10k windows, newest first', asy
   s.reg.stopAll();
 });
 
-test('the rest of 24 h fills one window per poll, contiguous, and is announced', async () => {
+test('the rest of 24 h fills one window per 400 ms, contiguous, and is announced', async () => {
   const s = setup({ head: 1_000_000 });
   s.chain.logs.push(curveLog('buy', 200_000));
   const ix = s.reg.acquire(curveVenue);
@@ -301,6 +301,100 @@ test('the rest of 24 h fills one window per poll, contiguous, and is announced',
   assert.ok(seen.status.some((x) => x.historySeconds === 86400));
   assert.equal(ix.bars(1, 5)[0].time, s.chain.tsOf(200_000));
   s.reg.stopAll();
+});
+
+// Measured on the chain's public RPC (2026-09-19): ONE 10k-block history window of a
+// busy graduated pool (311 swaps) took 88-119 s, 70 s of it in 290 sequential getBlock
+// timestamp reads (the trades spanned ~290 distinct seconds, so bisection saved
+// little). History windows beyond `olderThan` answer only after `ms` of fake time here.
+function slowHistory(s, { olderThan, ms }) {
+  const inner = s.chain.getLogs.bind(s.chain);
+  s.chain.getLogs = async (f) => {
+    if (f.toBlock < olderThan) await new Promise((resolve) => s.clock.setTimeout(resolve, ms));
+    return inner(f);
+  };
+}
+
+test('a slow 24 h history window never holds up the live poll', async () => {
+  const s = setup({ head: 1_000_000 });
+  const ix = s.reg.acquire(curveVenue);
+  const seen = watch(ix);
+  slowHistory(s, { olderThan: 964_001, ms: 120_000 }); // every window older than the hour
+  await s.clock.advance(0);
+  assert.ok(seen.status.some((x) => x.historySeconds === 3600), 'the hour is in');
+  await s.clock.advance(400); // the 24 h fill is now inside a 2-minute window
+
+  s.chain.logs.push(curveLog('buy', 1_000_004));
+  s.chain.head = 1_000_005;
+  await s.clock.advance(400);
+  assert.deepEqual(seen.trades.flat().map((t) => t.block), [1_000_004], 'charted within one poll');
+  s.chain.logs.push(curveLog('sell', 1_000_009));
+  s.chain.head = 1_000_010;
+  await s.clock.advance(400);
+  assert.deepEqual(seen.trades.flat().map((t) => t.block), [1_000_004, 1_000_009], 'and at every poll after');
+  s.reg.stopAll();
+});
+
+test('live trades flow while the first hour is still loading; the hour follows as history', async () => {
+  const s = setup({ head: 1_000_000 });
+  const ix = s.reg.acquire(curveVenue);
+  const seen = watch(ix);
+  slowHistory(s, { olderThan: 1_000_001, ms: 90_000 }); // every history window: 90 s
+  await s.clock.advance(0);
+  assert.equal(seen.status.at(-1).state, 'backfilling');
+
+  s.chain.logs.push(curveLog('buy', 1_000_003));
+  s.chain.head = 1_000_004;
+  await s.clock.advance(400);
+  assert.deepEqual(seen.trades.flat().map((t) => t.block), [1_000_003], 'a live trade does not wait for the hour');
+  assert.equal(seen.status.at(-1).state, 'backfilling', 'the hour is still loading');
+
+  s.chain.logs.push(curveLog('sell', 995_000));
+  await s.clock.advance(4 * 90_000);
+  assert.ok(seen.status.some((x) => x.historySeconds === 3600), 'the hour is announced when it is in');
+  assert.deepEqual(ix.recentTrades(10).map((t) => t.block), [995_000, 1_000_003]);
+  assert.equal(seen.trades.flat().length, 1, 'history is never emitted as live trades');
+  s.reg.stopAll();
+});
+
+test('the chart limiter serves live calls first and never gives history its last slot', async () => {
+  const limit = createLimiter(2);
+  const open = [];
+  const job = (name) => () => new Promise((resolve) => open.push({ name, resolve }));
+  const finish = (name) => open.splice(open.findIndex((j) => j.name === name), 1)[0].resolve();
+  const settle = () => new Promise((resolve) => setImmediate(resolve));
+  const names = () => open.map((j) => j.name);
+
+  limit(job('h1'));
+  limit(job('h2'));
+  limit(job('h3'));
+  await settle();
+  assert.deepEqual(names(), ['h1'], 'history leaves one of the two slots free');
+  const l1 = limit(job('l1'), { urgent: true });
+  await settle();
+  assert.deepEqual(names(), ['h1', 'l1'], 'a live call starts at once');
+  limit(job('l2'), { urgent: true });
+  await settle();
+  assert.deepEqual(names(), ['h1', 'l1'], 'two slots, both busy');
+  finish('h1');
+  await settle();
+  assert.deepEqual(names(), ['l1', 'l2'], 'the freed slot goes to the waiting live call, not to history');
+  finish('l1');
+  finish('l2');
+  await settle();
+  assert.deepEqual(names(), ['h2']);
+  finish('h2');
+  await settle();
+  finish('h3');
+  await settle();
+  assert.equal(open.length, 0);
+  await l1;
+
+  const one = createLimiter(1);
+  one(job('solo'));
+  await settle();
+  assert.deepEqual(names(), ['solo'], 'with a single slot, history still runs');
+  finish('solo');
 });
 
 // ── live ─────────────────────────────────────────────────────────────────────────
@@ -372,6 +466,7 @@ test('RPC errors: catching_up with backoff, then live again without losing the t
   const ix = s.reg.acquire(curveVenue);
   const seen = watch(ix);
   await s.clock.advance(0);
+  await s.clock.advance(400); // the history loop's last window (head 40,000 is under a day): the failures below are the live poll's
   s.chain.logs.push(curveLog('buy', 40_004));
   s.chain.head = 40_005;
   s.chain.failNext = 2;
@@ -441,6 +536,7 @@ test('a rate limit or a timeout is not split: it backs off as before', async () 
   const ix = s.reg.acquire(curveVenue);
   const seen = watch(ix);
   await s.clock.advance(0);
+  await s.clock.advance(400); // the history loop's last window: from here only live polls read
   const before = s.chain.calls('getLogs').length;
   s.chain.head = 40_005;
   const inner = s.chain.getLogs.bind(s.chain);
@@ -541,10 +637,11 @@ test('with the WSS live, quiet polls relax to 2 s and a pushed log is read at on
   const s = setup({ wss });
   const ix = s.reg.acquire(curveVenue);
   const seen = watch(ix);
-  await s.clock.advance(0); // the hour, then the rest of the day (head 40,000 is under a day)
+  await s.clock.advance(0); // the first live tick; the hour loads on the history loop
   assert.equal(wss.started, 1, 'the probe starts with the first indexer');
   assert.deepEqual(wss.watched(), liveFilters(curveVenue), 'its live filter is watched');
-  await s.clock.advance(400); // the tick after the 24 h fill: from here the socket pace
+  // The live poll keeps the socket's 2 s safety pace from its first tick; the 24 h fill
+  // (its last window at 400 ms) runs on its own loop and pace.
 
   s.chain.head = 40_020;
   await s.clock.advance(1_999);

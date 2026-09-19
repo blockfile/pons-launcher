@@ -7,13 +7,21 @@
 //   (evm/v2/holdings.js:76-79) — and chart traffic must never queue in front of a
 //   sell. Every chart RPC in the process also passes one small limiter shared by all
 //   indexers (TP_CHART_CONCURRENCY, default 2), and one getBlockNumber per 200 ms
-//   serves every indexer.
+//   serves every indexer. The limiter serves LIVE calls first and never lets history
+//   take its last slot, so a live poll never waits on a backfill's RPCs.
+// - Two loops per indexer, each with at most one chart RPC in flight: the live poll
+//   and the history backfill. The live poll never waits on history: one 10k-block
+//   window of a busy pool took 88-119 s on the public RPC (measured 2026-09-19: 311
+//   swaps, 290 sequential getBlock timestamp reads), and live trades — a visitor's
+//   own sells — must reach the chart within a poll, not after it.
 // - Backfill: the last hour first, in sequential 10,000-block windows (QuickNode
 //   refuses wider eth_getLogs — evm/v2/holdings.js:98-108), newest window first,
-//   back to back. Then live polling starts and the rest of 24 h is filled one window
-//   per poll in the background. Blocks are ~10 per second, so 1 h ≈ 36,000 blocks.
-// - Live: getLogs from lastBlock+1 every 400 ms; trades are emitted in batches at
-//   most every 200 ms, each batch followed by a fresh mark (state.readMark).
+//   back to back; then the rest of 24 h, one window per 400 ms. Blocks are ~10 per
+//   second, so 1 h ≈ 36,000 blocks. History is silent: it reaches the browser in the
+//   snapshot the stream re-sends when historySeconds grows (stream.js).
+// - Live: getLogs from lastBlock+1 every 400 ms, from the first tick (it does not wait
+//   for the hour); trades are emitted in batches at most every 200 ms, each batch
+//   followed by a fresh mark (state.readMark).
 // - Timestamps: the public RPC returns blockTimestamp 0x0 in logs (measured), so a
 //   trade block's time comes from getBlock through a shared LRU. Block timestamps
 //   never decrease and are whole seconds (~10 blocks share each), so a run of blocks
@@ -29,7 +37,8 @@
 //   this token wakes the poll at once (at most one woken tick per 200 ms) and the
 //   quiet safety poll relaxes to 2 s; a pushed block the HTTP node has not served yet
 //   is re-read every 200 ms for up to 2 s. getLogs stays the only data path. The 24 h
-//   fill keeps the 400 ms pace; the socket going down puts every indexer back on it.
+//   fill keeps its own 400 ms pace; the socket going down puts every live poll back on
+//   400 ms.
 
 const { EventEmitter } = require('events');
 const { TOPICS, POOL_MANAGER } = require('./constants');
@@ -90,25 +99,34 @@ function historyFilters(venue) {
   return out;
 }
 
+/**
+ * The process-wide cap on chart RPCs, with two lanes. `limit(fn, { urgent: true })`
+ * (the live polls, the head) starts before any waiting history call, and history may
+ * hold at most max - 1 slots when max > 1: the last slot is kept for a live call, so a
+ * live poll never waits on a backfill's RPCs, only on other live ones.
+ */
 function createLimiter(max) {
   let active = 0;
-  const queue = [];
-  const pump = () => {
-    while (active < max && queue.length) {
-      const job = queue.shift();
-      active += 1;
-      Promise.resolve()
-        .then(job.fn)
-        .then(job.resolve, job.reject)
-        .finally(() => {
-          active -= 1;
-          pump();
-        });
-    }
+  const urgent = [];
+  const history = [];
+  const run = (job) => {
+    active += 1;
+    Promise.resolve()
+      .then(job.fn)
+      .then(job.resolve, job.reject)
+      .finally(() => {
+        active -= 1;
+        pump();
+      });
   };
-  return (fn) =>
+  const pump = () => {
+    while (active < max && urgent.length) run(urgent.shift());
+    const historyMax = max > 1 ? max - 1 : max;
+    while (active < historyMax && history.length) run(history.shift());
+  };
+  return (fn, { urgent: isUrgent = false } = {}) =>
     new Promise((resolve, reject) => {
-      queue.push({ fn, resolve, reject });
+      (isUrgent ? urgent : history).push({ fn, resolve, reject });
       pump();
     });
 }
@@ -149,6 +167,10 @@ class Indexer extends EventEmitter {
     this._history = 0;
     this._migrating = false;
     this._timer = null;
+    this._histTimer = null; // the history loop's own timer (see _histTick)
+    this._histErrors = 0;
+    this._histErr = '';
+    this._liveErr = '';
     this._flushTimer = null;
     this._stopped = false;
     this._cursor = null; // last block the live filter has read
@@ -240,8 +262,10 @@ class Indexer extends EventEmitter {
     this._stopped = true;
     const { clearTimeout } = this._ctx.deps;
     if (this._timer) clearTimeout(this._timer);
+    if (this._histTimer) clearTimeout(this._histTimer);
     if (this._flushTimer) clearTimeout(this._flushTimer);
     this._timer = null;
+    this._histTimer = null;
     this._flushTimer = null;
     this._pending = [];
     if (this._unwatch) this._unwatch();
@@ -249,7 +273,7 @@ class Indexer extends EventEmitter {
     this.removeAllListeners();
   }
 
-  // ── the loop: exactly one chart RPC in flight per indexer ──────────────────
+  // ── the loops: the live poll and the history backfill, one chart RPC each ──
 
   _schedule(ms) {
     this._timerDueAt = this._ctx.deps.now() + ms;
@@ -260,45 +284,72 @@ class Indexer extends EventEmitter {
     }, ms);
   }
 
+  /** The live loop: poll, phase check. It never waits on the history loop. */
   async _tick() {
     if (this._stopped) return;
     this._ticking = true;
     this._lastTickAt = this._ctx.deps.now();
     let delay = this._ctx.wsLive() ? WS_POLL_MS : POLL_MS;
     try {
-      if (this._cursor === null) await this._init();
-      if (this._histLow > this._hourFloor) {
-        // The first hour goes back to back: the chart waits on it.
-        await this._historyWindow(this._hourFloor);
-        if (this._histLow <= this._hourFloor) {
-          this._history = 3600;
-          this._requestMark();
-        }
-        delay = 0;
-      } else {
-        await this._poll();
-        if (!this._stopped && this._histLow > this._dayFloor) {
-          await this._historyWindow(this._dayFloor);
-          if (this._histLow <= this._dayFloor) this._history = 86400;
-          delay = POLL_MS; // the 24 h fill keeps its pace while a socket is live
-        }
-        if (!this._stopped) await this._maybeCheckPhase();
+      if (this._cursor === null) {
+        await this._init();
+        this._scheduleHistory(0);
       }
+      await this._poll();
+      if (!this._stopped) await this._maybeCheckPhase();
       // A pushed block this node has not served yet: look again shortly.
       if (this._wantBlock > this._cursor && this._ctx.deps.now() < this._wantUntil) {
         delay = Math.min(delay, WAKE_GAP_MS);
       }
       this._errors = 0;
-      this._setHealthy();
     } catch (err) {
       this._errors += 1;
+      this._liveErr = errText(err);
       delay = Math.min(POLL_MS * 2 ** this._errors, MAX_BACKOFF_MS);
-      this._setStatus('catching_up', errText(err));
     }
+    this._refreshStatus();
     this._ticking = false;
     // One batch per tick at most: a catch-up across several windows is one 'trades'.
     if (this._pending.length) this._scheduleFlush();
     if (!this._stopped) this._schedule(delay);
+  }
+
+  _scheduleHistory(ms) {
+    if (this._stopped || this._histTimer) return;
+    this._histTimer = this._ctx.deps.setTimeout(() => {
+      this._histTimer = null;
+      this._histTick();
+    }, ms);
+  }
+
+  /**
+   * The history loop: the first hour back to back, then the rest of 24 h one window
+   * per 400 ms, each window read on the history lane of the limiter. It ends once the
+   * day is in; an RPC error backs off here without touching the live poll's pace.
+   */
+  async _histTick() {
+    if (this._stopped || this._histLow <= this._dayFloor) return;
+    let delay;
+    try {
+      const inHour = this._histLow > this._hourFloor;
+      await this._historyWindow(inHour ? this._hourFloor : this._dayFloor);
+      if (this._stopped) return;
+      if (inHour && this._histLow <= this._hourFloor) {
+        this._history = 3600;
+        this._requestMark();
+      }
+      if (this._histLow <= this._dayFloor) this._history = 86400;
+      // The chart waits on the first hour: its windows go back to back.
+      delay = this._histLow > this._hourFloor ? 0 : POLL_MS;
+      this._histErrors = 0;
+    } catch (err) {
+      if (this._stopped) return;
+      this._histErrors += 1;
+      this._histErr = errText(err);
+      delay = Math.min(POLL_MS * 2 ** this._histErrors, MAX_BACKOFF_MS);
+    }
+    this._refreshStatus();
+    if (this._histLow > this._dayFloor) this._scheduleHistory(delay);
   }
 
   async _init() {
@@ -318,7 +369,7 @@ class Indexer extends EventEmitter {
     while (!this._stopped && head > this._cursor) {
       const from = this._cursor + 1;
       const to = Math.min(head, this._cursor + LOG_WINDOW);
-      const trades = await this._scan(from, to, liveFilters(this.venue));
+      const trades = await this._scan(from, to, liveFilters(this.venue), true);
       this._cursor = to;
       if (trades.length) this._ingest(trades, true);
     }
@@ -327,7 +378,7 @@ class Indexer extends EventEmitter {
   async _historyWindow(floor) {
     const to = this._histLow - 1;
     const from = Math.max(floor, to - LOG_WINDOW + 1);
-    const trades = await this._scan(from, to, historyFilters(this.venue));
+    const trades = await this._scan(from, to, historyFilters(this.venue), false);
     this._histLow = from;
     if (trades.length) this._ingest(trades, false);
   }
@@ -342,24 +393,26 @@ class Indexer extends EventEmitter {
    * order. A rate limit or a timeout is not split — more calls would not help — and
    * propagates to the tick's backoff as before.
    */
-  async _logs(f, fromBlock, toBlock) {
+  async _logs(f, fromBlock, toBlock, urgent) {
     const { limit } = this._ctx;
     const provider = this._ctx.provider();
     try {
-      return (await limit(() => provider.getLogs({ address: f.address, topics: f.topics, fromBlock, toBlock }))) || [];
+      const read = () => provider.getLogs({ address: f.address, topics: f.topics, fromBlock, toBlock });
+      return (await limit(read, { urgent })) || [];
     } catch (err) {
       if (this._stopped || toBlock - fromBlock + 1 <= MIN_SPLIT_BLOCKS || NOT_A_RANGE_ERROR.test(errText(err))) throw err;
       const mid = fromBlock + Math.floor((toBlock - fromBlock) / 2);
-      const low = await this._logs(f, fromBlock, mid);
-      const high = await this._logs(f, mid + 1, toBlock);
+      const low = await this._logs(f, fromBlock, mid, urgent);
+      const high = await this._logs(f, mid + 1, toBlock, urgent);
       return low.concat(high);
     }
   }
 
-  async _scan(fromBlock, toBlock, filters) {
+  /** `urgent`: a live poll's reads, which the limiter serves ahead of history. */
+  async _scan(fromBlock, toBlock, filters, urgent) {
     const found = new Map();
     for (const f of filters) {
-      const logs = await this._logs(f, fromBlock, toBlock);
+      const logs = await this._logs(f, fromBlock, toBlock, urgent);
       for (const log of logs) {
         const t = decodeLog(log, this.venue);
         if (!t) continue;
@@ -371,14 +424,14 @@ class Indexer extends EventEmitter {
     if (!trades.length) return trades;
     const blocks = [...new Set(trades.filter((t) => !t.ts).map((t) => t.block))].sort((a, b) => a - b);
     if (blocks.length) {
-      const times = await this._blockTimes(blocks);
+      const times = await this._blockTimes(blocks, urgent);
       for (const t of trades) if (!t.ts) t.ts = times.get(t.block);
     }
     return trades.sort(byChainOrder);
   }
 
   /** Timestamps for sorted, unique block numbers: LRU first, then bisection. */
-  async _blockTimes(blocks) {
+  async _blockTimes(blocks, urgent) {
     const { tsCache } = this._ctx;
     const out = new Map();
     const missing = [];
@@ -390,7 +443,7 @@ class Indexer extends EventEmitter {
     if (!missing.length) return out;
     const ts = new Array(missing.length);
     const fetchAt = async (k) => {
-      ts[k] = await this._fetchBlockTime(missing[k]);
+      ts[k] = await this._fetchBlockTime(missing[k], urgent);
     };
     const last = missing.length - 1;
     await fetchAt(0);
@@ -414,8 +467,8 @@ class Indexer extends EventEmitter {
     return out;
   }
 
-  async _fetchBlockTime(n) {
-    const block = await this._ctx.limit(() => this._ctx.provider().getBlock(n));
+  async _fetchBlockTime(n, urgent) {
+    const block = await this._ctx.limit(() => this._ctx.provider().getBlock(n), { urgent });
     const ts = block ? Number(block.timestamp) : NaN;
     if (!Number.isSafeInteger(ts) || ts <= 0) throw new Error(`no timestamp for block ${n}`);
     return ts;
@@ -520,6 +573,17 @@ class Indexer extends EventEmitter {
     this._requestMark();
   }
 
+  /**
+   * One status for both loops: 'catching_up' while either is backing off (the live
+   * poll's error first — that is what the chart is missing), else the healthy state. A
+   * success in one loop never masks the other's error, so the status does not flap.
+   */
+  _refreshStatus() {
+    if (this._errors > 0) return this._setStatus('catching_up', this._liveErr);
+    if (this._histErrors > 0) return this._setStatus('catching_up', this._histErr);
+    return this._setHealthy();
+  }
+
   _setHealthy() {
     if (this._migrating) return this._setStatus('migrating', 'the curve is moving to its pool');
     if (this._history < 3600) return this._setStatus('backfilling', 'loading the last hour');
@@ -571,7 +635,7 @@ function createRegistry(overrides = {}) {
   ctx.head = () => {
     if (deps.now() - headAt < HEAD_TTL_MS) return Promise.resolve(headValue);
     if (!headInflight) {
-      headInflight = ctx.limit(() => ctx.provider().getBlockNumber()).then(
+      headInflight = ctx.limit(() => ctx.provider().getBlockNumber(), { urgent: true }).then(
         (n) => {
           headValue = Number(n);
           headAt = deps.now();
@@ -671,6 +735,7 @@ module.exports = {
   release: (token) => registry.release(token),
   activeCount: () => registry.activeCount(),
   createRegistry,
+  createLimiter,
   Indexer,
   liveFilters,
   historyFilters,
