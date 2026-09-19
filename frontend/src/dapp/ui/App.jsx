@@ -7,6 +7,7 @@ import { VAULT_KEY, hasVault, wipeVault } from '../keys/vault.js';
 import { USDG } from '../chain/constants.js';
 import { createHub } from './hub.js';
 import { createSession } from './session.js';
+import { createFeed } from './feed.js';
 import { realDeps } from './deps.js';
 import { loadPresets, loadSlippage, savePresets, saveSlippage, slippageToBps } from './prefs.js';
 import { stageOf, summarizeSkips } from './sellMath.js';
@@ -26,11 +27,6 @@ const EmptyScene = lazy(() => import('./EmptyScene.jsx'));
 
 const EMPTY_VIEW = { rows: [], totals: { tokens: '0', ticked: 0, sellable: 0, arming: 0, failedArm: 0, convertible: 0 } };
 const FEES_EVERY_MS = 15_000;
-// While no stream is live (refused, reconnecting, a shared NAT's 429), the mark
-// and the venue are polled instead: a curve floor is never priced from a mark
-// frozen at page load, and a graduation is still followed.
-const MARK_POLL_MS = 3_000;
-const OFFLINE_STATUS = { state: 'reconnecting', detail: 'live data paused — the price refreshes every 3 s' };
 
 function safeHasVault() {
   try {
@@ -53,10 +49,23 @@ export default function App() {
   const hub = useMemo(() => createHub(), []);
   const own = useRef({ txs: new Set(), addrs: new Set() });
   const sessionRef = useRef(null);
-  const streamsRef = useRef([]);
-  const streamLiveRef = useRef(false);
-  const tfRef = useRef(1);
   const markRef = useRef(null);
+  const followRef = useRef(() => {});
+  // The open token's streams, liveness and offline poll (feed.js): events reach
+  // the session of THAT token only, and a switch never inherits a live stream.
+  const feedRef = useRef(null);
+  if (feedRef.current === null) {
+    feedRef.current = createFeed({
+      api,
+      hub,
+      getSession: () => sessionRef.current,
+      setMark: (m) => {
+        markRef.current = m;
+      },
+      followVenue: (v) => followRef.current(v),
+    });
+  }
+  const feed = feedRef.current;
   const [venue, setVenue] = useState(null);
   const [opening, setOpening] = useState(false);
   const [tokenError, setTokenError] = useState('');
@@ -121,7 +130,7 @@ export default function App() {
           onVenue: setVenue, // a graduation the session followed (stream, /wallets, poll)
         });
         sessionRef.current = s;
-        s.setLive(streamLiveRef.current); // the same token re-opened keeps its live stream
+        s.setLive(feed.isLive(v.token)); // the same token re-opened keeps its live stream; another token never does
         s.start();
         setFees(f);
         setVenue(v);
@@ -133,7 +142,7 @@ export default function App() {
         setOpening(false);
       }
     },
-    [closeSession, hub, loadInto, slippage, syncOwnAddrs]
+    [closeSession, feed, hub, loadInto, slippage, syncOwnAddrs]
   );
 
   const closeToken = useCallback(() => {
@@ -153,124 +162,20 @@ export default function App() {
     [toast]
   );
 
-  const setStreamLive = useCallback(
-    (on) => {
-      if (streamLiveRef.current === on) return;
-      streamLiveRef.current = on;
-      if (sessionRef.current) sessionRef.current.setLive(on);
-      if (!on) hub.emit('status', OFFLINE_STATUS);
-    },
-    [hub]
-  );
+  followRef.current = followVenue;
 
-  // Close every stream when the token changes or the page unmounts.
+  // The token's live feed (feed.js): its streams (make-before-break across a
+  // timeframe switch), its liveness and the offline mark/venue poll. A token
+  // switch closes the old token's feed before the new one opens.
   useEffect(() => {
     if (!token) return undefined;
-    return () => {
-      for (const s of streamsRef.current) s.close();
-      streamsRef.current = [];
-      streamLiveRef.current = false;
-    };
-  }, [token]);
+    feed.open(token);
+    return () => feed.close();
+  }, [feed, token]);
 
-  // One stream per (token, timeframe). Make-before-break: the old stream keeps
-  // feeding the page until the new one's snapshot arrives, so a timeframe
-  // switch opens no gap in which a receipt could be missed. Only the live
-  // stream and the NEWEST pending one exist: a pending stream for a timeframe
-  // the visitor has already left is closed, never promoted.
   useEffect(() => {
-    if (!token) return;
-    tfRef.current = tf;
-    for (const other of streamsRef.current) if (!other.live) other.close();
-    streamsRef.current = streamsRef.current.filter((e) => e.live);
-    const entry = { close: () => {}, live: false, interval: tf };
-    entry.close = api.openStream(token, tf, (name, data) => {
-      const session = sessionRef.current;
-      if (name === 'receipt') {
-        if (session) session.onReceipt(data); // any stream; the session drops duplicates
-        return;
-      }
-      if (name === 'snapshot') {
-        if (!entry.live) {
-          if (tfRef.current !== entry.interval) return; // a timeframe already left
-          entry.live = true;
-          for (const other of streamsRef.current) if (other !== entry) other.close();
-          streamsRef.current = [entry];
-        } else if (session) {
-          session.onReconnect(); // an auto-reconnect: settle what the gap swallowed
-        }
-        setStreamLive(true);
-      }
-      if (!entry.live) {
-        // The first stream of the token is refused or retrying: say so on the chart.
-        const down = name === 'stream:retry' || name === 'stream:error';
-        if (down && !streamLiveRef.current && tfRef.current === entry.interval) hub.emit('status', OFFLINE_STATUS);
-        return;
-      }
-      switch (name) {
-        case 'snapshot':
-          if (data && data.mark) {
-            markRef.current = data.mark;
-            if (session) session.onMark(data.mark);
-          }
-          if (data && data.venue) followVenue(data.venue); // a graduation while the stream was away
-          hub.emit('snapshot', data);
-          break;
-        case 'mark':
-          markRef.current = data;
-          if (session) session.onMark(data);
-          hub.emit('mark', data);
-          break;
-        case 'phase':
-          if (data) followVenue(data);
-          hub.emit('phase', data);
-          break;
-        case 'stream:retry':
-        case 'stream:error':
-          setStreamLive(false);
-          break;
-        case 'trades':
-          if (session) session.onTrades(data); // a mark older than these trades is behind the curve
-          hub.emit('trades', data);
-          break;
-        case 'bar':
-          hub.emit('bar', data);
-          break;
-        case 'status':
-          hub.emit('status', data);
-          break;
-        default:
-          break;
-      }
-    });
-    streamsRef.current.push(entry);
-  }, [token, tf, hub, followVenue, setStreamLive]);
-
-  // No live stream: poll the mark and the venue so the session never prices a
-  // curve floor from a frozen mark and still follows a graduation.
-  useEffect(() => {
-    if (!token) return undefined;
-    let dead = false;
-    const id = setInterval(async () => {
-      if (streamLiveRef.current) return;
-      try {
-        const { venue: v, mark } = await api.getToken(token);
-        if (dead) return;
-        if (mark) {
-          markRef.current = mark;
-          if (sessionRef.current) sessionRef.current.onMark(mark);
-          hub.emit('mark', mark);
-        }
-        followVenue(v);
-      } catch {
-        // the next poll (or the stream coming back) catches up
-      }
-    }, MARK_POLL_MS);
-    return () => {
-      dead = true;
-      clearInterval(id);
-    };
-  }, [token, hub, followVenue]);
+    if (token) feed.setTimeframe(tf);
+  }, [feed, token, tf]);
 
   // Gas price (and the backend's ETH/USD) stay warm: the click path never fetches them.
   useEffect(() => {

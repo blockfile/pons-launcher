@@ -14,6 +14,20 @@ export const TIMEFRAMES = Object.freeze([
 
 const MONTHS = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
 
+/**
+ * Whether a stream snapshot is for the timeframe on screen. One of a timeframe
+ * the visitor has already left never paints (its live bars would all be dropped
+ * against the shown interval). A snapshot that names no interval is the shown one.
+ */
+export function snapshotFits(d, interval) {
+  return !!d && (d.interval === undefined || Number(d.interval) === Number(interval));
+}
+
+/** Whether a live bar update belongs to the timeframe on screen. */
+export function barFits(d, interval) {
+  return !!d && !!d.bar && Number(d.interval) === Number(interval);
+}
+
 export function alignTime(ts, interval) {
   return Math.floor(Number(ts) / interval) * interval;
 }

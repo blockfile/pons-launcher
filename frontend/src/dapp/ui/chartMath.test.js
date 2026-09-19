@@ -1,6 +1,8 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import {
+  snapshotFits,
+  barFits,
   TIMEFRAMES,
   alignTime,
   cleanBars,
@@ -162,4 +164,16 @@ test('tick and crosshair labels (UTC in this test)', () => {
   assert.equal(tickLabel(t, 0), '2026');
   assert.equal(tickLabel('2026-09-19', 0), null);
   assert.equal(crosshairTime(t), '19 Sep 07:05:09');
+});
+
+test('a snapshot or bar of a timeframe the visitor already left never paints', () => {
+  assert.equal(snapshotFits({ interval: 60, bars: [] }, 60), true);
+  assert.equal(snapshotFits({ interval: '60', bars: [] }, 60), true);
+  assert.equal(snapshotFits({ interval: 15, bars: [] }, 60), false, 'the timeframe left behind');
+  assert.equal(snapshotFits({ bars: [] }, 60), true, 'a snapshot that names no interval is the shown one');
+  assert.equal(snapshotFits(null, 60), false);
+  assert.equal(barFits({ interval: 1, bar: { time: 1 } }, 1), true);
+  assert.equal(barFits({ interval: 15, bar: { time: 1 } }, 1), false);
+  assert.equal(barFits({ bar: { time: 1 } }, 1), false, 'a bar must name its interval');
+  assert.equal(barFits({ interval: 1 }, 1), false);
 });

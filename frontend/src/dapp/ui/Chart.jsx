@@ -11,6 +11,8 @@ import {
   mergeOlderBar,
   minMoveFor,
   ownMarkers,
+  barFits,
+  snapshotFits,
   tickLabel,
   tradeId,
   upsertBar,
@@ -169,9 +171,8 @@ function Chart({ hub, venue, interval, onInterval, quoteUsd, own }) {
 
     const offs = [
       hub.on('snapshot', (d) => {
-        // A snapshot of a timeframe the visitor has already left never paints
-        // (its live bars would all be dropped against intervalRef below).
-        if (!d || (d.interval !== undefined && Number(d.interval) !== intervalRef.current)) return;
+        // A snapshot of a timeframe the visitor has already left never paints.
+        if (!snapshotFits(d, intervalRef.current)) return;
         queueRef.current.clear();
         rawRef.current = cleanBars(d.bars);
         recentRef.current = Array.isArray(d.trades) ? d.trades.slice(-RECENT) : [];
@@ -182,7 +183,7 @@ function Chart({ hub, venue, interval, onInterval, quoteUsd, own }) {
         chart.timeScale().scrollToRealTime();
       }),
       hub.on('bar', (d) => {
-        if (!d || !d.bar || Number(d.interval) !== intervalRef.current) return;
+        if (!barFits(d, intervalRef.current)) return;
         queueRef.current.set(d.bar.time, d.bar);
         schedule();
       }),
