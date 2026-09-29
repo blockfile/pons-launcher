@@ -25,7 +25,8 @@
     "deploy": "node scripts/deploy-contract.js",
     "rescue": "node scripts/rescue-distributor.js",
     "tp:smoke": "node scripts/tp-fork-smoke.js",
-    "tp:account-browser": "node scripts/tp-account-browser.js"
+    "tp:account-browser": "node scripts/tp-account-browser.js",
+    "inclusion": "node scripts/inclusion.js"
   },
   "engines": {
     "node": ">=20"
