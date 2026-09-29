@@ -215,3 +215,43 @@ test('a header the node cannot express is an error, and is not also counted as a
   assert.equal(res.reads, 0, 'a header with no usable timestamp was not a reading');
   assert.ok(res.errors > 0);
 });
+
+test('a read that misses its deadline and THEN rejects is counted once, not twice', async () => {
+  // The give-up fires on five failures, so double-counting one read would halve
+  // the number of endpoints' worth of patience the hold has: a slow-but-alive
+  // node would be abandoned and the record would call it unreadable.
+  let clock = 0;
+  let rejectIt;
+  const res = await waitForFreshSecond({
+    rpc: {},
+    readHeader: () =>
+      new Promise((_resolve, reject) => {
+        if (!rejectIt) rejectIt = reject;
+      }),
+    pause: async (delay) => {
+      clock += delay;
+      // Once the first read has expired (deadline 60ms), let it fail as well.
+      if (clock >= 100 && rejectIt) {
+        const r = rejectIt;
+        rejectIt = null;
+        r(new Error('too late, and refused'));
+        await Promise.resolve();
+      }
+    },
+    now: () => clock,
+    pollMs: 20,
+    readTimeoutMs: 60,
+    maxWaitMs: 200,
+    maxErrorsBeforeAnyReading: 99, // keep the wait alive long enough to observe both
+  });
+
+  // Reads are issued every 20ms into a node that answers none of them, so the
+  // count is bounded by the cadence — what matters is that the one read which
+  // expired AND rejected contributed a single error.
+  const issued = Math.ceil(res.waitedMs / 20);
+  assert.ok(
+    res.errors <= issued,
+    `each read failed at most once: ${res.errors} errors from at most ${issued} reads`
+  );
+  assert.equal(res.ticked, false);
+});

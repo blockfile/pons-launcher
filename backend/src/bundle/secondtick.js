@@ -55,8 +55,8 @@ const MAX_ERRORS_BEFORE_ANY_READING = 5;
  *
  * NOT provider.getBlock('latest'). AbstractProvider caches a read by tag for
  * cacheTimeout (250ms by default, and this project does not override it), so a
- * 20ms cadence through it would really be a 250ms cadence: every poll for a",
- * quarter of a second after the tick would answer from the pre-tick header, and",
+ * 20ms cadence through it would really be a 250ms cadence: every poll for a
+ * quarter of a second after the tick would answer from the pre-tick header, and
  * the launch would go out a block later than it needed to — measured at block
  * #2.9 of the second through the cache against #2.0 without it. provider.js:128
  * documents the same trap for warmPool, and :134 established this way out of it.
@@ -111,13 +111,15 @@ async function waitForFreshSecond(deps = {}) {
   const pollMs = deps.pollMs;
   const maxWaitMs = deps.maxWaitMs;
   const maxInFlight = deps.maxInFlight ?? MAX_IN_FLIGHT;
-  // Three cadences: long enough that a healthy read is never abandoned, short
-  // enough that five of them fit inside the budget.
-  // A read older than this frees its slot and counts as a failure. It is sized
-  // against the BUDGET, not the cadence: a box whose round trip is 250ms (a laptop
-  // over the internet, not the droplet) would expire every read of a 100ms deadline
-  // and the hold would quietly stop working. A third of the budget leaves room for
-  // three rounds, and five expiries still give up in well under the ceiling.
+  // A read older than this frees its slot and counts as a failure. Sized against
+  // the BUDGET, not the cadence: five poll intervals is 100ms, and from a box with
+  // a 285ms round trip (a laptop over the internet, not the droplet) that expired
+  // EVERY read — measured, three runs, reads 0, errors 5, the hold silently off. A
+  // third of the ceiling is 500ms here, which no healthy read misses.
+  //
+  // The give-up is not five deadlines long: four reads fill the slots at once, so
+  // the fifth error arrives on the second round of expiries — 2 x readTimeoutMs,
+  // 1000ms of the 1500ms ceiling (measured). Bounded, and it fails open.
   const readTimeoutMs = deps.readTimeoutMs ?? Math.min(600, Math.max(150, Math.round(maxWaitMs / 3)));
 
   let reads = 0;

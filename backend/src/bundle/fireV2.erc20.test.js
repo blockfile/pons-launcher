@@ -661,7 +661,9 @@ test('the hold runs before the approve burst, not between the approves and the l
         return rpc.broadcastTransaction(raw);
       },
     },
-    ...deps({ launchOnFreshSecond: true, asyncPairedLaunch: true }),
+    // The stub below stands in for the wait itself, so the flag is not what is
+    // under test here — the ORDER is.
+    ...deps({ asyncPairedLaunch: true }),
     waitForFreshSecond: async () => {
       seen.push('TICK');
       return { ticked: true, reason: 'ticked', waitedMs: 310, fromSecond: 100, toSecond: 101 };
@@ -674,7 +676,7 @@ test('the hold runs before the approve burst, not between the approves and the l
   assert.ok(launchAt > 0, 'the launch still goes out after the hold');
   // Every approve sits between the tick and the launch — the documented cost.
   const approves = seen.filter((x) => String(x).includes('APPROVE'));
-  assert.equal(approves.length, 3, `expected the dev approve and both wallets', got ${approves.join(', ')}`);
+  assert.equal(approves.length, 3, `expected the dev approve and both wallets, got ${approves.join(', ')}`);
   for (const a of approves) {
     assert.ok(seen.indexOf(a) < launchAt, `${a} must precede the launch`);
   }
