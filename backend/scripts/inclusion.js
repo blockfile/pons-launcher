@@ -34,6 +34,7 @@ const { formatEther, parseUnits, Wallet } = require('ethers');
 const config = require('../src/config');
 const { provider } = require('../src/evm/provider');
 const { keystoreFor } = require('../src/wallets/keystore');
+const { maskRpcUrl } = require('../src/evm/rpcurl');
 const { monotonic, ms, summary } = require('../src/evm/timing');
 
 function arg(name, fallback) {
@@ -120,8 +121,19 @@ async function main() {
   console.log(`balance  ${formatEther(balance)} ETH   nonce ${latest} (pending ${pending})`);
   console.log(`sends    ${sends} per endpoint, 21000 gas each, self-transfer of 0 ETH`);
   console.log(`cost     ~${formatEther(BigInt(sends * targets.length) * 21000n * maxFee)} ETH in total\n`);
-  for (const [name, url] of targets) console.log(`  ${name.padEnd(22)} ${url.replace(/\/\/[^/]*@/, '//')}`);
+  // maskRpcUrl, not the URL: a QuickNode token lives in the PATH, and this line
+  // printed it whole into a terminal that was then pasted into a chat (2026-09-29).
+  for (const [name, url] of targets) console.log(`  ${name.padEnd(22)} ${maskRpcUrl(url)}`);
 
+  const cost = BigInt(sends * targets.length) * 21000n * maxFee;
+  if (balance < cost) {
+    console.error(
+      `
+this wallet holds ${formatEther(balance)} ETH and the run needs about ${formatEther(cost)} ETH — ` +
+        'pick a wallet with more, or lower --sends'
+    );
+    process.exit(1);
+  }
   if (pending !== latest) {
     console.error(`\nthis wallet has ${pending - latest} transaction(s) in flight — pick an idle one`);
     process.exit(1);
@@ -131,7 +143,8 @@ async function main() {
     return;
   }
 
-  const signer = new Wallet(ks.exportKey(entry.id));
+  // exportKey returns { address, privateKey } — the key alone is what signs.
+  const signer = new Wallet(ks.exportKey(entry.id).privateKey);
   let nonce = latest;
   const results = [];
 
