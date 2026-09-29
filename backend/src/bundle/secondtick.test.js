@@ -3,7 +3,7 @@
 const test = require('node:test');
 const assert = require('node:assert');
 
-const { waitForFreshSecond, MAX_IN_FLIGHT } = require('./secondtick');
+const { waitForFreshSecond, readLatestHeader, MAX_IN_FLIGHT } = require('./secondtick');
 
 // A chain whose header timestamp is whatever the script says at that read.
 // Reads answer after `rttMs` of fake time, so the cadence and the round trip
@@ -101,6 +101,9 @@ test('polls overlap but never pile up: in-flight reads are capped', async () => 
     },
     now: () => clock,
     pollMs: 10,
+    // Past its deadline a read stops counting against the cap (it is not coming
+    // back in time to matter), so the cap is measured with the reads still live.
+    readTimeoutMs: 10000,
     maxWaitMs: 200,
   });
 
@@ -129,4 +132,86 @@ test('a node answering nothing gives up after a few reads, not after the whole b
   assert.equal(res.reason, 'unreadable');
   assert.ok(res.waitedMs < 1000, `gave up after ${res.waitedMs}ms`);
   assert.ok(res.errors >= 3, `errors counted: ${res.errors}`);
+});
+
+test('the header read goes straight to the node, past ethers\' 250ms cache', async () => {
+  // getBlock('latest') is served from AbstractProvider's per-tag cache for
+  // 250ms (cacheTimeout), which would turn a 20ms cadence into a 250ms one and
+  // land the launch a block later. The read has to be the raw call.
+  const calls = [];
+  const rpc = {
+    send: async (method, params) => {
+      calls.push([method, ...params]);
+      return { timestamp: '0x6aae82d7' };
+    },
+    getBlock: async () => {
+      throw new Error('getBlock must not be used: it is cached');
+    },
+  };
+  const header = await readLatestHeader(rpc);
+
+  assert.deepEqual(calls, [['eth_getBlockByNumber', 'latest', false]]);
+  assert.equal(header.timestamp, 0x6aae82d7);
+});
+
+test('a timestamp that goes backwards never counts as a tick', async () => {
+  // A load-balanced endpoint can answer from replicas that straddle a second
+  // boundary (provider.js documents this chain's RPC as exactly that). Seeing
+  // 101, then a lagging 100, then 101 again is the same second twice — not a
+  // tick — and launching there would put the launch at an arbitrary point in
+  // the second while the record claimed the hold worked.
+  const chain = fakeChain([101, 100, 101, 100, 101]);
+  const res = await run(chain, { maxWaitMs: 200 });
+
+  assert.equal(res.ticked, false, 'the baseline must never ratchet down');
+  assert.equal(res.reason, 'timeout');
+  assert.equal(res.fromSecond, 101);
+});
+
+test('a read that does not answer in time counts as an error, so the early exit can fire', async () => {
+  // The provider retries a read four times with backoff before it ever rejects
+  // (~1.8s), which is past the whole budget: without its own deadline every
+  // read would still be outstanding when the wait gave up, and the "gives up
+  // after a few unanswered reads" promise would be empty.
+  let clock = 0;
+  const res = await waitForFreshSecond({
+    rpc: {},
+    readHeader: () => new Promise(() => {}),
+    pause: async (delay) => {
+      clock += delay;
+    },
+    now: () => clock,
+    pollMs: 20,
+    readTimeoutMs: 60,
+    maxWaitMs: 5000,
+  });
+
+  assert.equal(res.ticked, false);
+  assert.equal(res.reason, 'unreadable');
+  assert.ok(res.errors >= 5, `expected the timed-out reads to be counted, got ${res.errors}`);
+  assert.ok(res.waitedMs < 2000, `gave up after ${res.waitedMs}ms`);
+});
+
+test('the wait never sleeps past its own budget', async () => {
+  // A misconfigured cadence must not become a longer hold than the ceiling.
+  const chain = fakeChain([100]);
+  const res = await run(chain, { pollMs: 5000, maxWaitMs: 300 });
+
+  assert.ok(res.waitedMs <= 400, `waited ${res.waitedMs}ms against a 300ms ceiling`);
+  assert.equal(res.ticked, false);
+});
+
+test('a header the node cannot express is an error, and is not also counted as a read', async () => {
+  const chain = fakeChain([100]);
+  const res = await waitForFreshSecond({
+    rpc: {},
+    readHeader: async () => ({ timestamp: 'not a number' }),
+    pause: chain.pause,
+    now: chain.now,
+    pollMs: 20,
+    maxWaitMs: 200,
+  });
+
+  assert.equal(res.reads, 0, 'a header with no usable timestamp was not a reading');
+  assert.ok(res.errors > 0);
 });

@@ -356,6 +356,16 @@ async function fireV2(plan, deps = {}) {
   // bundle/secondtick.js. It is bounded (config.launchFreshSecondMaxWaitMs),
   // it never throws, and a failure to observe the tick launches anyway — a
   // launch at a worse moment beats a launch that never goes out.
+  //
+  // WHAT STILL SITS BETWEEN THE TICK AND THE LAUNCH. On the NATIVE path,
+  // nothing: the next thing on the wire is the launch. On the PAIRED path the
+  // approve burst below goes first — one concurrent round trip, ~33ms on
+  // QuickNode and ~280ms on the public endpoint, so up to ~3 blocks of the tier
+  // the hold just bought. That is deliberate: moving the hold below the approves
+  // would widen the approve-to-launch telegraph window from ~0 to up to a full
+  // second, and an approve naming the curve is the loudest possible warning that
+  // a launch is coming. The trade is a known cost on the paired path, paid to
+  // keep that window shut.
   const freshSecondWait = deps.waitForFreshSecond || secondtick.waitForFreshSecond;
   let freshSecond;
   try {

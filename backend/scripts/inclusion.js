@@ -16,7 +16,7 @@
 //
 //   npm run inclusion -- --address 0xYourWallet          10 sends per endpoint
 //   npm run inclusion -- --address 0x… --sends 20        more samples
-//   npm run inclusion -- --address 0x… --only quicknode  one endpoint
+//   npm run inclusion -- --address 0x… --only configured  one endpoint
 //   npm run inclusion -- --address 0x… --dry             print the plan, send nothing
 //
 // THIS SPENDS GAS. Each send is a 21,000-gas self-transfer: at 0.02 gwei that
@@ -80,10 +80,13 @@ async function sendRaw(url, raw) {
   return json.result;
 }
 
+// NOT provider.getTransactionReceipt: AbstractProvider caches a null receipt by
+// tag for 250ms, which would put a 250ms floor under the very measurement this
+// script exists to make (bundle/secondtick.js documents the same trap).
 async function waitForInclusion(hash, deadlineMs = 30000) {
   const started = monotonic();
   for (;;) {
-    const receipt = await provider.getTransactionReceipt(hash).catch(() => null);
+    const receipt = await provider.send('eth_getTransactionReceipt', [hash]).catch(() => null);
     if (receipt) return receipt;
     if (monotonic() - started > deadlineMs) return null;
     await new Promise((r) => setTimeout(r, 25));
@@ -96,7 +99,7 @@ async function main() {
   const dry = flag('dry');
 
   if (!address) {
-    console.error('usage: npm run inclusion -- --address 0xYourWallet [--sends 10] [--only quicknode] [--dry]');
+    console.error('usage: npm run inclusion -- --address 0xYourWallet [--sends 10] [--only configured] [--dry]');
     process.exit(1);
   }
   const ks = keystoreFor(arg('user', 'default'));
@@ -154,7 +157,10 @@ async function main() {
         hash = await sendRaw(url, raw);
       } catch (err) {
         failed += 1;
-        nonce -= 1; // nothing was accepted, so the nonce is still free
+        // Nothing was accepted, so the nonce is still free. If the node DID take it
+        // and only the answer was lost, the nonce is reused and one send replaces
+        // the other — both are 0-value self-transfers, so nothing is at stake.
+        nonce -= 1;
         console.log(`  ${name}: send ${i + 1} refused — ${err.message.slice(0, 120)}`);
         continue;
       }

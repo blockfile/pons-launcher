@@ -642,3 +642,42 @@ test('a paired launch that did not confirm says gas only, not stranded', async (
   assert.ok(res.buys.every((b) => b.boughtNothing));
   assert.ok(res.buys.every((b) => b.strandSuspected === undefined));
 });
+
+// ── the fresh-second hold, on the paired path ───────────────────────────────
+// The hold runs before EVERYTHING, approves included. That ordering is the
+// trade fireV2's comment names: the approve burst costs a round trip out of the
+// tier the hold just bought, and it is paid to keep the approve-to-launch
+// telegraph window shut.
+
+test('the hold runs before the approve burst, not between the approves and the launch', async () => {
+  const order = [];
+  const rpc = fakeProvider({ order });
+  const seen = [];
+  const res = await fireV2(plan, {
+    provider: {
+      ...rpc,
+      async broadcastTransaction(raw) {
+        seen.push(raw);
+        return rpc.broadcastTransaction(raw);
+      },
+    },
+    ...deps({ launchOnFreshSecond: true, asyncPairedLaunch: true }),
+    waitForFreshSecond: async () => {
+      seen.push('TICK');
+      return { ticked: true, reason: 'ticked', waitedMs: 310, fromSecond: 100, toSecond: 101 };
+    },
+  });
+
+  assert.equal(seen[0], 'TICK', `the hold is first, got ${seen.slice(0, 3).join(', ')}`);
+  // The launch carries the salt-pinned raw, the approves their own labels.
+  const launchAt = seen.indexOf(LAUNCH_RAW);
+  assert.ok(launchAt > 0, 'the launch still goes out after the hold');
+  // Every approve sits between the tick and the launch — the documented cost.
+  const approves = seen.filter((x) => String(x).includes('APPROVE'));
+  assert.equal(approves.length, 3, `expected the dev approve and both wallets', got ${approves.join(', ')}`);
+  for (const a of approves) {
+    assert.ok(seen.indexOf(a) < launchAt, `${a} must precede the launch`);
+  }
+  assert.equal(res.freshSecond.ticked, true);
+  assert.equal(res.freshSecond.waitedMs, 310);
+});

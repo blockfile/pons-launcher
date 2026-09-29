@@ -51,12 +51,22 @@ const MAX_IN_FLIGHT = 4;
 // clock keeps asking until the budget runs out — there the tick is still coming.
 const MAX_ERRORS_BEFORE_ANY_READING = 5;
 
-/** Read the latest header's timestamp, in whole seconds. */
+/** Read the latest header's timestamp, in whole seconds.
+ *
+ * NOT provider.getBlock('latest'). AbstractProvider caches a read by tag for
+ * cacheTimeout (250ms by default, and this project does not override it), so a
+ * 20ms cadence through it would really be a 250ms cadence: every poll for a",
+ * quarter of a second after the tick would answer from the pre-tick header, and",
+ * the launch would go out a block later than it needed to — measured at block
+ * #2.9 of the second through the cache against #2.0 without it. provider.js:128
+ * documents the same trap for warmPool, and :134 established this way out of it.
+ */
 async function readLatestHeader(rpc) {
-  const block = await rpc.getBlock('latest');
+  const block = await rpc.send('eth_getBlockByNumber', ['latest', false]);
   if (!block || block.timestamp === undefined || block.timestamp === null) {
     throw new Error('the node returned no latest block');
   }
+  // The raw call answers in hex; Number() takes either form.
   return { timestamp: Number(block.timestamp) };
 }
 
@@ -101,6 +111,14 @@ async function waitForFreshSecond(deps = {}) {
   const pollMs = deps.pollMs;
   const maxWaitMs = deps.maxWaitMs;
   const maxInFlight = deps.maxInFlight ?? MAX_IN_FLIGHT;
+  // Three cadences: long enough that a healthy read is never abandoned, short
+  // enough that five of them fit inside the budget.
+  // A read older than this frees its slot and counts as a failure. It is sized
+  // against the BUDGET, not the cadence: a box whose round trip is 250ms (a laptop
+  // over the internet, not the droplet) would expire every read of a 100ms deadline
+  // and the hold would quietly stop working. A third of the budget leaves room for
+  // three rounds, and five expiries still give up in well under the ceiling.
+  const readTimeoutMs = deps.readTimeoutMs ?? Math.min(600, Math.max(150, Math.round(maxWaitMs / 3)));
 
   let reads = 0;
   let errors = 0;
@@ -111,6 +129,9 @@ async function waitForFreshSecond(deps = {}) {
   let fromSecond = null;
   let toSecond = null;
   const rtts = [];
+
+  // Reads that have neither answered nor expired yet.
+  const outstanding = new Set();
 
   let resolveTick;
   const ticked = new Promise((r) => {
@@ -126,27 +147,60 @@ async function waitForFreshSecond(deps = {}) {
     }
     inFlight += 1;
     const at = now();
+    // EVERY READ GETS ITS OWN DEADLINE, kept on the same clock as the budget so a
+    // test can drive both. RetryJsonRpcProvider retries a read four times with
+    // 300/600/900ms backoff before it ever rejects (provider.js:78-80), so a
+    // refusing endpoint would not produce its first error until ~1.8s — past this
+    // whole budget. Without a deadline the "gives up after a few unanswered reads"
+    // exit could never fire, and a black-hole endpoint would hold the launch for
+    // the full ceiling.
+    //
+    // EXPIRY FREES THE SLOT, IT DOES NOT DISCARD THE ANSWER. A read past its
+    // deadline stops holding one of the four so the cadence can keep going, and
+    // counts as an error so the give-up can fire — but if it does come back, its
+    // header is still a reading of the chain's clock and is used. A slow endpoint
+    // therefore still reaches the tick; only a silent one gives up.
+    const entry = {
+      at,
+      expired: false,
+      expire: () => {
+        if (entry.expired) return;
+        entry.expired = true;
+        outstanding.delete(entry);
+        inFlight -= 1;
+        errors += 1;
+      },
+    };
+    const release = () => {
+      if (entry.expired) return;
+      entry.expired = true;
+      outstanding.delete(entry);
+      inFlight -= 1;
+    };
+    outstanding.add(entry);
     readHeader(rpc).then(
       (header) => {
-        inFlight -= 1;
-        reads += 1;
-        rtts.push(now() - at);
+        release();
         if (done) return;
-        const second = Number(header.timestamp);
+        const second = Number(header && header.timestamp);
         if (!Number.isFinite(second)) {
           errors += 1;
           return;
         }
+        reads += 1;
+        rtts.push(now() - at);
         if (fromSecond === null) {
           fromSecond = second;
           return;
         }
-        // A chain whose timestamp went BACKWARDS is not a second we can trust
-        // to be fresh; take the lower value as the new baseline and keep asking.
-        if (second < fromSecond) {
-          fromSecond = second;
-          return;
-        }
+        // THE BASELINE ONLY EVER RISES. This RPC is load-balanced across
+        // heterogeneous nodes (provider.js:29-31), so two answers can straddle a
+        // second boundary: 101, then a lagging replica's 100, then 101 again. A
+        // baseline that followed the lower value would read that as a tick and
+        // launch in the middle of a second while the record claimed the hold
+        // worked. An older answer is dropped instead — the newest second any
+        // replica has seen is the second the chain is in.
+        if (second < fromSecond) return;
         if (second > fromSecond) {
           toSecond = second;
           done = true;
@@ -154,19 +208,33 @@ async function waitForFreshSecond(deps = {}) {
         }
       },
       () => {
-        inFlight -= 1;
-        errors += 1;
+        // A read that already expired has been counted once; do not count it twice.
+        const wasExpired = entry.expired;
+        release();
+        if (!wasExpired) errors += 1;
       }
     );
   };
 
   const maxBlindErrors = deps.maxErrorsBeforeAnyReading ?? MAX_ERRORS_BEFORE_ANY_READING;
+  const sweep = () => {
+    for (const entry of [...outstanding]) {
+      if (now() - entry.at >= readTimeoutMs) entry.expire();
+    }
+  };
   while (!done && now() - started < maxWaitMs) {
-    if (fromSecond === null && errors >= maxBlindErrors && inFlight === 0) break;
+    sweep();
+    // Five failures with the clock still unread: the reads still outstanding are
+    // already past their deadline, so waiting out the rest of the budget would
+    // hold the launch to learn nothing.
+    if (fromSecond === null && errors >= maxBlindErrors) break;
     issue();
     // Race the cadence against the tick so the wait ends on the answer, not on
     // the next interval boundary.
-    await Promise.race([pause(pollMs), ticked]);
+    // Never sleep past the ceiling: the cadence is a setting, the budget is a
+    // promise to the launch waiting behind this.
+    const left = maxWaitMs - (now() - started);
+    await Promise.race([pause(Math.max(0, Math.min(pollMs, left))), ticked]);
   }
 
   const waitedMs = now() - started;
