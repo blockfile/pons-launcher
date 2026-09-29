@@ -71,6 +71,7 @@ const { provider, warmPool } = require('../evm/provider');
 const { rpcMessage } = require('../evm/errors');
 const v2factory = require('../evm/v2/factory');
 const { waitForReceipt } = require('../evm/receipt');
+const secondtick = require('./secondtick');
 
 // A last, HARD-CAPPED re-check that the launch still simulates, run at fire time
 // to catch chain state that drifted between preflight and now. It is one
@@ -347,6 +348,25 @@ async function fireV2(plan, deps = {}) {
         );
       }
     }
+  }
+
+  // ── HOLD FOR A FRESH SECOND ───────────────────────────────────────────────
+  // The last thing before anything is broadcast, and the only thing that can
+  // still decide how wide the 99% tier is behind this launch: see
+  // bundle/secondtick.js. It is bounded (config.launchFreshSecondMaxWaitMs),
+  // it never throws, and a failure to observe the tick launches anyway — a
+  // launch at a worse moment beats a launch that never goes out.
+  const freshSecondWait = deps.waitForFreshSecond || secondtick.waitForFreshSecond;
+  let freshSecond;
+  try {
+    freshSecond = await freshSecondWait({
+      rpc,
+      enabled: deps.launchOnFreshSecond ?? config.launchOnFreshSecond,
+      pollMs: deps.freshSecondPollMs ?? config.launchFreshSecondPollMs,
+      maxWaitMs: deps.freshSecondMaxWaitMs ?? config.launchFreshSecondMaxWaitMs,
+    });
+  } catch (err) {
+    freshSecond = { ticked: false, reason: 'error', waitedMs: 0, error: rpcMessage(err) };
   }
 
   const t0 = Date.now();
@@ -699,6 +719,9 @@ async function fireV2(plan, deps = {}) {
     // (paired only — always false for native), and when it finally came back.
     // launchAckMs - sentMs is the round trip this change stopped paying for.
     launchAsync: asyncLaunch,
+    // Where in the wall-clock second this launch went out from, which is what
+    // decides how many blocks of 99% tax sit behind it (bundle/secondtick.js).
+    freshSecond,
     ...(launchAckMs != null ? { launchAckMs } : {}),
     ...(mismatch ? { mismatch } : {}),
     ...(strand ? { strand } : {}),

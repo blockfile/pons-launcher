@@ -158,6 +158,20 @@ const config = {
   // binds depends entirely on the round trip from the box this runs on:
   // `npm run latency` measures it and says which.
   launchBlockPollMs: num(process.env.LAUNCH_BLOCK_POLL_MS, 25),
+
+  // A v2 launch is held until a wall-clock second has just begun, because the
+  // opening snipe tax steps on seconds: the 99% tier behind the launch is ~9
+  // blocks wide when the launch lands in the first block of a second and EMPTY
+  // when it lands in the last (Tomachi, 2026-09-29: three outsiders took 3.06%
+  // of supply in the 6.18% tier before the bundle). See bundle/secondtick.js.
+  // Costs up to one second before a launch and nothing else; false launches at
+  // whatever moment the press happens to fall on.
+  launchOnFreshSecond: bool(process.env.LAUNCH_ON_FRESH_SECOND, true),
+  // How often to read the latest header while waiting, and the hard ceiling on
+  // the wait. A second is ~10 blocks, so 1500ms always covers one tick with
+  // room for a slow answer; past it the launch goes out unheld.
+  launchFreshSecondPollMs: num(process.env.LAUNCH_FRESH_SECOND_POLL_MS, 20),
+  launchFreshSecondMaxWaitMs: num(process.env.LAUNCH_FRESH_SECOND_MAX_WAIT_MS, 1500),
   launchBlockWaitMs: num(process.env.LAUNCH_BLOCK_WAIT_MS, 90000),
 
   keystorePassphrase: process.env.KEYSTORE_PASSPHRASE || null,

@@ -129,6 +129,10 @@ function fakeProvider({ order = [], failApprove = null, failLaunch = false } = {
 
 const deps = (over = {}) => ({
   dryRun: false,
+  // Held off here for the same reason as in fireV2.test.js: these tests time
+  // the launch against the buys, and the fresh-second hold is tested on its
+  // own in secondtick.test.js.
+  launchOnFreshSecond: false,
   warmPool: async () => {},
   parseLaunch: () => ({ token: TOKEN, curve: CURVE, pairToken: USDG }),
   waitForReceipt: async () => ({ status: 1, blockNumber: 10, logs: [] }),

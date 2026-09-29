@@ -42,6 +42,10 @@ function fakeProvider({ launchStatus = 1, block = 10, order = [] } = {}) {
 
 const deps = (over = {}) => ({
   dryRun: false,
+  // The fresh-second hold has its own tests (secondtick.test.js) and three
+  // below; everything else here is about ordering, so it is held off rather
+  // than paying the wait against a fake provider that has no getBlock.
+  launchOnFreshSecond: false,
   warmPool: async () => {},
   parseLaunch: () => ({ token: TOKEN, curve: CURVE, pairToken: plan.pairToken }),
   ...over,
@@ -332,4 +336,62 @@ test('a native bundle in the launch block reports the +0/+1 landing, not an over
   assert.equal(res.overtake, undefined);
   assert.equal(res.withinOneBlock, 2);
   assert.ok(res.buys.every((b) => b.vsLaunch === 'behind'));
+});
+
+// ── the fresh-second wait ───────────────────────────────────────────────────
+// The launch must be held until a wall-clock second has just begun, so the 99%
+// tier behind it is blocks wide rather than empty. It is the LAST thing before
+// the broadcast and it never gates the buys.
+
+test('the launch waits for a fresh second, and waits before it broadcasts', async () => {
+  const rpc = fakeProvider();
+  const seen = [];
+  const res = await fireV2(plan, {
+    provider: {
+      ...rpc,
+      async broadcastTransaction(raw) {
+        seen.push(`send:${raw}`);
+        return { hash: `hash:${raw}` };
+      },
+    },
+    ...deps(),
+    waitForFreshSecond: async () => {
+      seen.push('wait');
+      return { ticked: true, reason: 'ticked', waitedMs: 240, fromSecond: 100, toSecond: 101 };
+    },
+  });
+
+  assert.equal(seen[0], 'wait', `the wait runs first, got ${seen.join(', ')}`);
+  assert.equal(seen[1], 'send:LAUNCH');
+  assert.equal(res.freshSecond.ticked, true);
+  assert.equal(res.freshSecond.waitedMs, 240);
+});
+
+test('a wait that never sees the tick still launches, and says so', async () => {
+  const rpc = fakeProvider();
+  const res = await fireV2(plan, {
+    provider: rpc,
+    ...deps(),
+    waitForFreshSecond: async () => ({ ticked: false, reason: 'unreadable', waitedMs: 1500 }),
+  });
+
+  assert.equal(res.launch.hash, 'hash:LAUNCH');
+  assert.equal(res.freshSecond.ticked, false);
+  assert.equal(res.freshSecond.reason, 'unreadable');
+});
+
+test('the wait cannot break a launch: one that throws is reported, not raised', async () => {
+  const rpc = fakeProvider();
+  const res = await fireV2(plan, {
+    provider: rpc,
+    ...deps(),
+    waitForFreshSecond: async () => {
+      throw new Error('clock read exploded');
+    },
+  });
+
+  assert.equal(res.launch.hash, 'hash:LAUNCH');
+  assert.equal(res.freshSecond.ticked, false);
+  assert.equal(res.freshSecond.reason, 'error');
+  assert.match(res.freshSecond.error, /clock read exploded/);
 });
