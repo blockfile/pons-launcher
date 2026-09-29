@@ -163,7 +163,12 @@ this wallet holds ${formatEther(balance)} ETH and the run needs about ${formatEt
         chainId: Number(config.chainId),
         type: 2,
       });
-      const blockBefore = await provider.getBlockNumber();
+      // Raw, not provider.getBlockNumber(): that answer is cached by tag for 250ms
+      // (the same trap as bundle/secondtick.js), which on a 100ms chain makes the
+      // "before" height up to 2.5 blocks stale and inflates every gap below by that
+      // much. The 2026-09-29 run reported +3/+4 blocks against a 193ms median, which
+      // is ~2 blocks: the difference was this read, not the chain.
+      const blockBefore = Number(await provider.send('eth_blockNumber', []));
       const at = monotonic();
       let hash;
       try {
