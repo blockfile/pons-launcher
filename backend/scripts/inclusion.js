@@ -209,9 +209,16 @@ this wallet holds ${formatEther(balance)} ETH and the run needs about ${formatEt
   console.log(
     '\nWHAT IT MEANS. The launcher awaits its launch acknowledgement and then fires the\n' +
       'bundle, so the endpoint that puts a transaction in a block soonest is the one a\n' +
-      'launch should use. A median of +0 or +1 blocks is as good as this chain gets; +2\n' +
-      'or worse is a whole tax tier when the launch lands late in a second, which is what\n' +
-      'LAUNCH_ON_FRESH_SECOND is there to stop being decisive.'
+      'launch should use.\n\n' +
+      'ENDPOINTS WITHIN A FEW ms OF EACH OTHER means the wait is not the endpoint: it is\n' +
+      'this box to the sequencer plus the sequencer to a block, and no RPC choice changes\n' +
+      'it. That was the 2026-09-29 reading from the droplet — 193.1 / 192.3 / 193.9ms\n' +
+      'median across QuickNode, the sequencer and the public RPC, about two blocks. What\n' +
+      'is left to move it is a box closer to the sequencer, not an RPC_URL edit.\n\n' +
+      'ONE ENDPOINT CLEARLY AHEAD means point RPC_URL at it before the next launch.\n\n' +
+      'Either way the tax tier is the lever that does not depend on winning the race:\n' +
+      'LAUNCH_ON_FRESH_SECOND decides how many blocks of 99% sit behind the launch, and\n' +
+      'that is what makes a sniper who does beat you pay 99% for it.'
   );
 }
 
