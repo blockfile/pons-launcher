@@ -17,6 +17,7 @@
 //   npm run inclusion -- --address 0xYourWallet          10 sends per endpoint
 //   npm run inclusion -- --address 0x… --sends 20        more samples
 //   npm run inclusion -- --address 0x… --only configured  one endpoint
+//   npm run inclusion -- --address 0x… --dual             one path against two
 //   npm run inclusion -- --address 0x… --dry             print the plan, send nothing
 //
 // THIS SPENDS GAS. Each send is a 21,000-gas self-transfer: at 0.02 gwei that
@@ -29,12 +30,13 @@
 // wallet whose pending nonce is ahead of its latest (something of yours is
 // already in flight there).
 
-const { formatEther, parseUnits, Wallet } = require('ethers');
+const { formatEther, keccak256, parseUnits, Wallet } = require('ethers');
 
 const config = require('../src/config');
 const { provider } = require('../src/evm/provider');
 const { keystoreFor } = require('../src/wallets/keystore');
 const { maskRpcUrl } = require('../src/evm/rpcurl');
+const { raceSend } = require('../src/evm/sendrace');
 const { monotonic, ms, summary } = require('../src/evm/timing');
 
 function arg(name, fallback) {
@@ -98,9 +100,10 @@ async function main() {
   const address = arg('address', null);
   const sends = Math.max(1, num('sends', 10));
   const dry = flag('dry');
+  const dual = flag('dual');
 
   if (!address) {
-    console.error('usage: npm run inclusion -- --address 0xYourWallet [--sends 10] [--only configured] [--dry]');
+    console.error('usage: npm run inclusion -- --address 0xYourWallet [--sends 10] [--only configured] [--dual] [--dry]');
     process.exit(1);
   }
   const ks = keystoreFor(arg('user', 'default'));
@@ -148,7 +151,23 @@ this wallet holds ${formatEther(balance)} ETH and the run needs about ${formatEt
   let nonce = latest;
   const results = [];
 
-  for (const [name, url] of targets) {
+  // --dual measures the QUESTION, not the endpoints: is the same signed transaction
+  // sequenced sooner when it is handed to two paths at once? Both arms lead with the
+  // configured endpoint, so the comparison is "that path alone" against "that path
+  // plus a spare", and the arms alternate send by send so a busy stretch cannot land
+  // on one arm and flatter it.
+  const arms = dual
+    ? [
+        { name: `${targets[0][0]} alone`, urls: [targets[0][1]] },
+        {
+          name: `${targets[0][0]} + ${targets[1] ? targets[1][0] : '(nothing)'}`,
+          urls: targets.slice(0, 2).map((t) => t[1]),
+        },
+      ]
+    : targets.map(([name, url]) => ({ name, urls: [url] }));
+
+  for (const arm of arms) {
+    const { name, urls } = arm;
     const inclusionMs = [];
     const blockGaps = [];
     let failed = 0;
@@ -172,7 +191,19 @@ this wallet holds ${formatEther(balance)} ETH and the run needs about ${formatEt
       const at = monotonic();
       let hash;
       try {
-        hash = await sendRaw(url, raw);
+        if (urls.length === 1) {
+          hash = await sendRaw(urls[0], raw);
+        } else {
+          // The SAME signed bytes down every path, so the same hash: the sequencer
+          // takes whichever arrives first and answers the other "already known".
+          const race = await raceSend(
+            raw,
+            urls.map((u) => ({ name: u, send: (r) => sendRaw(u, r) }))
+          );
+          // A race every path answered as a duplicate still went out — the hash of
+          // the signed bytes names it either way.
+          hash = race.hash || keccak256(raw);
+        }
       } catch (err) {
         failed += 1;
         // Nothing was accepted, so the nonce is still free. If the node DID take it
@@ -194,7 +225,7 @@ this wallet holds ${formatEther(balance)} ETH and the run needs about ${formatEt
     results.push({ name, inclusionMs, blockGaps, failed });
   }
 
-  console.log('\ntime from send to the transaction being IN a block');
+  console.log(`\ntime from send to the transaction being IN a block${dual ? ' — one path against two' : ''}`);
   for (const r of results) {
     const t = summary(r.inclusionMs);
     const gaps = r.blockGaps.slice().sort((a, b) => a - b);
@@ -203,6 +234,21 @@ this wallet holds ${formatEther(balance)} ETH and the run needs about ${formatEt
       `  ${r.name.padEnd(22)} median ${String(ms(t.median ?? 0)).padStart(7)}ms  p95 ${String(ms(t.p95 ?? 0)).padStart(7)}ms` +
         `  blocks +${median === null ? '?' : median} (min +${gaps[0] ?? '?'}, max +${gaps[gaps.length - 1] ?? '?'})` +
         (r.failed ? `  failed ${r.failed}` : '')
+    );
+  }
+
+  if (dual && results.length === 2 && results[0].inclusionMs.length && results[1].inclusionMs.length) {
+    const one = summary(results[0].inclusionMs);
+    const two = summary(results[1].inclusionMs);
+    const cut = (a, b) => (a && b ? `${(((a - b) / a) * 100).toFixed(0)}%` : '?');
+    console.log(
+      `\nTWO PATHS AGAINST ONE: median ${ms(one.median)}ms -> ${ms(two.median)}ms (${cut(one.median, two.median)} off), ` +
+        `p95 ${ms(one.p95)}ms -> ${ms(two.p95)}ms (${cut(one.p95, two.p95)} off).\n` +
+        'The TAIL is what this is for. A bundle buy that lands past ~10 blocks is outside\n' +
+        'the 99% snipe-tax window, which is the protection the whole bundle rests on: on\n' +
+        'Tomachi (2026-09-29) three of 33 buys landed at +11/+12. A p95 worth having is\n' +
+        'what would put the launch burst on evm/sendrace. No cut means the two paths share\n' +
+        'a queue upstream, and the launch code stays exactly as it is.'
     );
   }
 
