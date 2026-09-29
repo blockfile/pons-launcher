@@ -26,7 +26,8 @@
     "rescue": "node scripts/rescue-distributor.js",
     "tp:smoke": "node scripts/tp-fork-smoke.js",
     "tp:account-browser": "node scripts/tp-account-browser.js",
-    "inclusion": "node scripts/inclusion.js"
+    "inclusion": "node scripts/inclusion.js",
+    "wallets": "node scripts/wallets.js"
   },
   "engines": {
     "node": ">=20"

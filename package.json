@@ -24,7 +24,8 @@
     "latency": "npm run latency --workspace backend --",
     "burst": "npm run burst --workspace backend --",
     "pairs": "npm run pairs --workspace backend --",
-    "inclusion": "npm run inclusion --workspace backend --"
+    "inclusion": "npm run inclusion --workspace backend --",
+    "wallets": "npm run wallets --workspace backend --"
   },
   "engines": {
     "node": ">=20"
